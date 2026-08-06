@@ -9,7 +9,7 @@ import threading
 
 from mcp.server.mcpserver import MCPServer
 
-from placeroot import budget, cache, divisions, overture, release, simplify
+from placeroot import budget, cache, divisions, mapview, overture, release, simplify
 from placeroot import geocode as geocoding
 
 logger = logging.getLogger(__name__)
@@ -243,6 +243,22 @@ def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
         return simplify.simplify_geometry(geojson, max_tokens)
     except simplify.InvalidGeometry as e:
         return {"error": "invalid_geometry", "detail": e.detail}
+
+@mcp.tool()
+def render_map(result: dict | list, title: str | None = None, inline: bool = False) -> dict:
+    """Render find_places/summarize_area JSON (or caller-supplied GeoJSON) as a map.
+
+    Writes ONE self-contained HTML file — inline CSS/JS, vector markers with
+    labels and click popups, a scale bar, attribution, no CDN, no tile
+    server, no API key, zero network requests when opened — to
+    PLACEROOT_ARTIFACT_DIR (default: alongside the tile cache directory).
+    The file itself is the artifact; this tool's response stays small on
+    purpose. Returns {"path", "bytes", "features_rendered"}. Pass
+    inline=true to also get the HTML back in the response when it's small
+    enough to be worth it.
+    """
+    return mapview.write_artifact(result, title=title, inline=inline)
+
 
 
 def _warm_start() -> None:
