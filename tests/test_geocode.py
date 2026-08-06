@@ -267,3 +267,97 @@ def test_subtype_rank_proxy_outranks_hierarchy_and_region_when_no_population():
     assert len(results) == 2
     assert results[0]["type"] == "locality"
     assert results[1]["type"] == "neighborhood"
+
+
+# --- #53: name-variant normalization (St./Saint, diacritics, ...) --------
+
+
+def test_abbreviated_query_finds_expanded_canonical_name():
+    # Fixture canonical name is "Saint Louis"; the literal query "St. Louis"
+    # doesn't ILIKE-match it at all, so this only passes if the
+    # abbreviation-variant retry actually ran.
+    results = geocode.geocode("St. Louis", limit=5)
+    assert results
+    assert results[0]["name"] == "Saint Louis"
+    assert results[0]["admin_context"] == ["United States", "Missouri"]
+
+
+def test_abbreviated_query_without_period_also_matches():
+    results = geocode.geocode("St Louis", limit=5)
+    assert results
+    assert results[0]["name"] == "Saint Louis"
+
+
+def test_diacritic_query_finds_accented_canonical_name():
+    # Fixture canonical name is "São Paulo"; plain-ASCII "Sao Paulo" doesn't
+    # ILIKE-match it, so this only passes if the diacritic-folded retry ran.
+    results = geocode.geocode("Sao Paulo", limit=5)
+    assert results
+    assert results[0]["name"] == "São Paulo"
+
+
+def test_diacritic_query_is_reversible():
+    # The accented spelling also has to find itself (sanity check that
+    # _match_tier's own diacritic folding doesn't only work one way).
+    results = geocode.geocode("São Paulo", limit=5)
+    assert results
+    assert results[0]["name"] == "São Paulo"
+
+
+def test_literal_exact_match_skips_variant_retry_entirely():
+    # "Saint Louis" is itself an exact literal match — the second pass
+    # should never even run (nothing to prove here beyond: it still finds
+    # the row via the plain literal path, same as any other exact query).
+    results = geocode.geocode("Saint Louis", limit=5)
+    assert results[0]["name"] == "Saint Louis"
+
+
+def test_variant_sourced_row_ranks_below_literal_only_as_a_last_resort_tie():
+    # White-box: literal-vs-variant is _rank_key's *last* tiebreak (#53) —
+    # it only decides when every #47 signal (population, subtype, hierarchy
+    # depth, region population) is otherwise tied.
+    region_population: dict[str, int] = {}
+    literal_row = {
+        "id": "z-literal", "name": "Example", "subtype": "locality",
+        "region": None, "population": None, "admin_context": [],
+    }
+    variant_row = {
+        "id": "a-variant", "name": "Example", "subtype": "locality",
+        "region": None, "population": None, "admin_context": [], "_variant": True,
+    }
+    rows = [variant_row, literal_row]
+    rows.sort(key=lambda r: geocode._rank_key(r, "Example", region_population))
+    assert rows[0]["id"] == literal_row["id"]
+    assert rows[1]["id"] == variant_row["id"]
+
+
+def test_variant_sourced_row_still_wins_on_real_prominence():
+    # The literal-over-variant tiebreak must NOT override a genuine
+    # population/prominence signal — a variant match for a real, populous
+    # place has to beat a literal match against an unrelated, unpopulated
+    # namesake (this is exactly the real-world "St. Louis" shape: a tiny
+    # literally-named village vs. the famous city found only via variant).
+    region_population: dict[str, int] = {}
+    literal_row = {
+        "id": "z-tiny-village", "name": "Example", "subtype": "locality",
+        "region": None, "population": None, "admin_context": [],
+    }
+    variant_row = {
+        "id": "a-famous-city", "name": "Example", "subtype": "locality",
+        "region": None, "population": 1_000_000, "admin_context": [], "_variant": True,
+    }
+    rows = [literal_row, variant_row]
+    rows.sort(key=lambda r: geocode._rank_key(r, "Example", region_population))
+    assert rows[0]["id"] == variant_row["id"]
+    assert rows[1]["id"] == literal_row["id"]
+
+
+def test_abbreviation_variant_queries_are_bidirectional_and_leading_only():
+    assert "Saint Louis" in geocode._abbreviation_variant_queries("St. Louis")
+    assert "St." in geocode._abbreviation_variant_queries("Saint")
+    assert "Fort Worth" in geocode._abbreviation_variant_queries("Ft. Worth")
+    assert "N. Hollywood" in geocode._abbreviation_variant_queries("North Hollywood")
+    # Cardinal expansion only applies to the leading token.
+    assert not any(
+        "West" in v for v in geocode._abbreviation_variant_queries("Fort W")
+    )

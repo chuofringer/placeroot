@@ -303,6 +303,40 @@ def geocode(query: str, limit: int = 5) -> dict:
 
 
 @mcp.tool()
+def resolve_place(
+    query: str,
+    near_lat: float | None = None,
+    near_lon: float | None = None,
+    limit: int = 3,
+) -> dict:
+    """Free-text place reference -> ranked, typed GERS ids to hold onto.
+
+    Turns something like "the Whole Foods on Lamar" or "Travis County" into
+    stable Overture ids: merges geocode()'s division matches (locality,
+    region, county, country, ...) with a name-filtered find_places search
+    (a business or POI), bbox-limited to near_lat/near_lon if given, else to
+    the ~20km vicinity of the top division match. Pass near_lat/near_lon
+    whenever you have a rough location for the query — it narrows and
+    speeds up the places half of the search.
+
+    Returns {"results": [{"id" (GERS), "kind": "division" | "place",
+    "name", "lat", "lon", "match": "exact" | "prefix" | "substring", plus
+    "admin_context" for a division or "category" for a place}, ...]},
+    ranked by match tier then prominence, budgeted like every other tool.
+    An unresolvable query returns {"results": []} — not an error. Returns a
+    structured {"error": ...} instead of raising if the remote scan fails
+    or the places dataset is missing columns this tool depends on.
+    """
+    try:
+        rows = geocoding.resolve_place(query, near_lat, near_lon, limit)
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    return budget.apply_budget({"results": rows}, "results")
+
+
+@mcp.tool()
 def reverse_geocode(lat: float, lon: float) -> dict:
     """Point -> nearest address (street/number/postcode) and its containing division chain.
 
