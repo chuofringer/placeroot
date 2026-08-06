@@ -30,7 +30,7 @@ from functools import lru_cache
 
 import duckdb
 
-from placeroot import budget, cache, release
+from placeroot import budget, cache, overture, release
 
 logger = logging.getLogger(__name__)
 
@@ -201,8 +201,12 @@ def _from_source(bbox: tuple[float, float, float, float]) -> str:
     upstream = _upstream_glob()
     if cache.enabled():
         try:
+            # overture._new_connection as the background-fetch factory: the
+            # tile COPY only needs httpfs, and reusing it avoids a third
+            # connection-configuration site in this module.
             paths = cache.local_paths_for_query(
-                _conn(), release.resolve_release(), THEME, bbox, upstream
+                _conn(), release.resolve_release(), THEME, bbox, upstream,
+                overture._new_connection,
             )
         except duckdb.Error as e:
             raise UpstreamUnavailable(str(e)) from e
