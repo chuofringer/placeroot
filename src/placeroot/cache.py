@@ -31,13 +31,57 @@ two queries that both miss the same tile only trigger one fetch. Tests and
 the startup warm-start want deterministic, synchronous behavior instead —
 set PLACEROOT_CACHE_SYNC to materialize missing tiles inline, on the
 caller's own connection, before returning.
+
+Schema fingerprinting (issue #63): a tile materialized under one column
+layout (an older code version, or a fixture with a different schema during
+dev) must never be read back once upstream's schema has moved on — a
+column that used to exist and got selected into the tile might not exist
+in a later query's SELECT list, or vice versa. So every tile lives under
+`<cache_dir>/<release>/<theme>/<fingerprint>/tile_Y_X.parquet`, where
+`fingerprint` is the first 12 hex chars of sha256 over the *sorted* column
+names of the upstream dataset (probed via db.probe_schema, which is
+lru_cached — the probe itself is a `LIMIT 0` metadata-only read, cheap
+enough to redo per query). Two schemas with the same columns in a
+different order hash identically (sorted first) since column order isn't
+what breaks a SELECT *; two schemas differing by even one column name hash
+differently and land in separate directories, so a query against the new
+schema can never read an old-schema tile (or vice versa) — see
+resolve_fingerprint().
+
+Old-layout tiles (materialized before this change, sitting directly under
+`<theme>/`) and any other-fingerprint directories are deliberately left
+alone rather than actively migrated or deleted: they're inert (nothing
+ever constructs a path back into them once the resolved fingerprint moves
+on) and they still get walked by evict_if_needed()'s rglob, so they age
+out of the size cap exactly like any other cold tile. Actively migrating
+would mean rewriting files under a lock for no behavioral benefit — a
+stale tile that's simply never looked at again is just as effectively
+"invalidated" as one that's been deleted, and self-cleans for free.
+
+The one subtlety is what happens when upstream is unreachable (issue #5's
+cache-as-fallback promise: a query should still answer from whatever's
+cached even if S3 is down). db.probe_schema() returns None on failure, so
+resolve_fingerprint() can't compute a *current* fingerprint — but the
+whole point of cache-as-fallback is answering without contacting upstream
+at all. In that case it falls back to the most-recently-used existing
+fingerprint directory for that release/theme, on the theory that whatever
+fingerprint dir has tiles in it corresponds to *some* schema that
+materialized successfully before, and it's the most likely one still to be
+relevant. This means an offline query can, in principle, be served tiles
+keyed under a fingerprint that's no longer upstream's current schema — but
+that's strictly better than the alternative (no cache-as-fallback at all
+when offline), and it only ever happens when upstream can't be reached to
+tell us any different.
 """
 
+import hashlib
 import logging
 import math
 import os
 import threading
 from pathlib import Path
+
+from placeroot import db
 
 logger = logging.getLogger(__name__)
 
@@ -109,20 +153,85 @@ def tiles_for_bbox(
     return list(dict.fromkeys(tiles))
 
 
-def tile_path(release: str, theme: str, tile: tuple[int, int]) -> Path:
+def schema_fingerprint(upstream_glob: str) -> str | None:
+    """First 12 hex chars of sha256 over upstream_glob's sorted column names.
+
+    None if the schema probe itself failed (upstream unreachable) — see
+    resolve_fingerprint() for how callers handle that.
+    """
+    cols = db.probe_schema(upstream_glob)
+    if cols is None:
+        return None
+    return hashlib.sha256(",".join(sorted(cols)).encode()).hexdigest()[:12]
+
+
+def _fingerprint_dirs(release: str, theme: str) -> list[Path]:
+    d = cache_dir() / release / theme
+    if not d.exists():
+        return []
+    return [p for p in d.iterdir() if p.is_dir()]
+
+
+def resolve_fingerprint(release: str, theme: str, upstream_glob: str) -> str | None:
+    """The schema fingerprint to read/write release/theme tiles under.
+
+    The common case: probe upstream_glob's current schema and return its
+    fingerprint. If upstream can't be reached (schema_fingerprint returns
+    None), fall back to the most-recently-used existing fingerprint
+    directory for this release/theme — see the module docstring's
+    "Schema fingerprinting" section for why that's the right offline
+    behavior. Returns None only when upstream is unreachable AND there's no
+    existing fingerprint directory to fall back to either — nothing to key
+    a tile under, nothing cached to serve; callers should treat this the
+    same as any other upstream-unavailable case.
+    """
+    fp = schema_fingerprint(upstream_glob)
+    if fp is not None:
+        return fp
+    dirs = _fingerprint_dirs(release, theme)
+    if not dirs:
+        return None
+    newest = max(dirs, key=lambda p: p.stat().st_mtime)
+    return newest.name
+
+
+def tile_path(release: str, theme: str, fingerprint: str, tile: tuple[int, int]) -> Path:
     tx, ty = tile
-    return cache_dir() / release / theme / f"tile_{ty}_{tx}.parquet"
+    return cache_dir() / release / theme / fingerprint / f"tile_{ty}_{tx}.parquet"
 
 
-def ensure_tile(con, release: str, theme: str, tile: tuple[int, int], upstream_glob: str) -> Path:
+def ensure_tile(
+    con,
+    release: str,
+    theme: str,
+    tile: tuple[int, int],
+    upstream_glob: str,
+    fingerprint: str | None = None,
+) -> Path:
     """Local parquet path for `tile`, materializing it from upstream if needed.
+
+    fingerprint defaults to None, meaning "resolve it from upstream_glob via
+    resolve_fingerprint()" — callers that already resolved a fingerprint for
+    this query (local_paths_for_query, the background materializer) pass it
+    explicitly so every tile touched by the same query lands under the same
+    fingerprint dir even if upstream's schema were to change mid-query.
 
     Raises whatever exception the upstream COPY raises if the tile isn't
     already cached and the fetch fails — callers that want cache-as-fallback
     behavior should check tile_path(...).exists() first and only call this
     when they're prepared to hit upstream.
     """
-    path = tile_path(release, theme, tile)
+    if fingerprint is None:
+        fingerprint = resolve_fingerprint(release, theme, upstream_glob)
+        if fingerprint is None:
+            # Upstream unreachable and nothing cached yet under any
+            # fingerprint for this release/theme: there's no local tile to
+            # fall back to, so let the COPY below run and raise upstream's
+            # real error rather than inventing a fingerprint for a tile
+            # that's about to fail to materialize anyway.
+            fingerprint = "unreachable"
+
+    path = tile_path(release, theme, fingerprint, tile)
     if path.exists():
         os.utime(path, None)  # bump mtime: this tile is recently used
         return path
@@ -145,15 +254,23 @@ def ensure_tile(con, release: str, theme: str, tile: tuple[int, int], upstream_g
     return path
 
 
-def cached_tile_paths(release: str, theme: str) -> list[Path]:
-    """Every tile parquet already materialized locally for release/theme.
+def cached_tile_paths(release: str, theme: str, upstream_glob: str) -> list[Path]:
+    """Every tile parquet already materialized locally for release/theme's
+    *currently resolved* schema fingerprint.
 
     Used by a GERS-id lookup (issue #41): before touching upstream at all,
     check whatever tiles the local cache already has on disk — cheap, since
-    they're small local files. Returns [] if caching hasn't touched this
-    release/theme yet (directory doesn't exist), never raises.
+    they're small local files. upstream_glob is needed (issue #63) to
+    resolve which fingerprint directory is current — without it this could
+    silently return stale-schema tiles. Returns [] if caching hasn't
+    touched this release/theme/fingerprint yet, or if upstream is
+    unreachable and no fingerprint directory exists to fall back to; never
+    raises.
     """
-    d = cache_dir() / release / theme
+    fingerprint = resolve_fingerprint(release, theme, upstream_glob)
+    if fingerprint is None:
+        return []
+    d = cache_dir() / release / theme / fingerprint
     if not d.exists():
         return []
     return sorted(d.glob("*.parquet"))
@@ -180,15 +297,26 @@ def evict_if_needed() -> None:
 
 
 def _materialize_in_background(
-    release: str, theme: str, tile: tuple[int, int], upstream_glob: str, new_connection
+    release: str,
+    theme: str,
+    tile: tuple[int, int],
+    upstream_glob: str,
+    fingerprint: str,
+    new_connection,
 ) -> None:
     """Fetch `tile` on a daemon thread with its own connection, deduped by _inflight.
+
+    fingerprint is resolved once by the caller (local_paths_for_query) and
+    threaded through here and into ensure_tile so the in-flight dedup key
+    (and the tile's eventual path) can't disagree with what the triggering
+    query resolved, even if upstream's schema were to change between the
+    two — see the module docstring's "Schema fingerprinting" section.
 
     Never raises to the caller — a failed background fetch is logged and
     just leaves the tile uncached for next time (the calling query already
     got its answer from upstream directly).
     """
-    key = (release, theme, tile)
+    key = (release, theme, fingerprint, tile)
     with _inflight_lock:
         if key in _inflight:
             return
@@ -196,7 +324,7 @@ def _materialize_in_background(
 
     def _run():
         try:
-            ensure_tile(new_connection(), release, theme, tile, upstream_glob)
+            ensure_tile(new_connection(), release, theme, tile, upstream_glob, fingerprint)
         except Exception as e:  # noqa: BLE001 - background fetch must never surface
             logger.warning("Background tile materialization failed for %s: %s", key, e)
         finally:
@@ -216,10 +344,18 @@ def local_paths_for_query(
 ) -> list[str] | None:
     """Local cached parquet paths covering bbox, or None to fall back to upstream.
 
-    Returns None if caching is disabled. If every touched tile is already
-    cached, returns their paths without touching upstream at all — this is
-    what lets queries keep answering from cache when upstream later goes
-    down (issue #5's cache-as-fallback path).
+    Returns None if caching is disabled. Resolves the current schema
+    fingerprint for release/theme first (issue #63 — see resolve_fingerprint
+    and the module docstring's "Schema fingerprinting" section); if that
+    fails (upstream unreachable and no existing fingerprint dir to fall
+    back to for this release/theme), also returns None — there's nothing
+    local to serve and nothing to key a new tile under, so the caller falls
+    back to upstream and hits the same unreachable error there.
+
+    If every touched tile is already cached under the resolved fingerprint,
+    returns their paths without touching upstream at all — this is what
+    lets queries keep answering from cache when upstream later goes down
+    (issue #5's cache-as-fallback path).
 
     If any touched tile is missing, this does NOT block materializing it
     (a tile COPY costs seconds — issue #31): under PLACEROOT_CACHE_SYNC it
@@ -232,11 +368,14 @@ def local_paths_for_query(
     """
     if not enabled():
         return None
+    fingerprint = resolve_fingerprint(release, theme, upstream_glob)
+    if fingerprint is None:
+        return None
     tiles = tiles_for_bbox(*bbox)
 
     cached, missing = [], []
     for t in tiles:
-        path = tile_path(release, theme, t)
+        path = tile_path(release, theme, fingerprint, t)
         if path.exists():
             os.utime(path, None)  # bump mtime: this tile is recently used
             cached.append(path)
@@ -248,11 +387,11 @@ def local_paths_for_query(
 
     if sync_mode():
         for t in missing:
-            cached.append(ensure_tile(con, release, theme, t, upstream_glob))
+            cached.append(ensure_tile(con, release, theme, t, upstream_glob, fingerprint))
         return [str(p) for p in cached]
 
     for t in missing:
-        _materialize_in_background(release, theme, t, upstream_glob, new_connection)
+        _materialize_in_background(release, theme, t, upstream_glob, fingerprint, new_connection)
     return None
 
 
