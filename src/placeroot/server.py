@@ -101,7 +101,11 @@ def _warm_start() -> None:
 
 def main() -> None:
     active_release = release.resolve_release()
-    mcp.instructions = f"{BASE_INSTRUCTIONS} Backed by Overture Maps release {active_release}."
+    # MCPServer.instructions is a read-only property over the low-level
+    # server, which is what the initialize response actually reads from.
+    mcp._lowlevel_server.instructions = (
+        f"{BASE_INSTRUCTIONS} Backed by Overture Maps release {active_release}."
+    )
     _warm_start()
     mcp.run()
 
