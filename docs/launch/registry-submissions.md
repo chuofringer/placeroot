@@ -25,6 +25,18 @@ One-line entry, their `- [Name](url) - description` format, under a
 - [PlaceRoot](https://github.com/chuofringer/placeroot) - Keyless MCP server answering spatial questions from Overture Maps open data (GeoParquet via DuckDB), with token-budgeted responses instead of raw GeoJSON dumps.
 ```
 
+## sparkgeo/geo-mcp-servers (curated geospatial tracker, added 2026-08-06)
+
+PR against https://github.com/sparkgeo/geo-mcp-servers — their categorized
+list (77 servers as of Aug 2026); PlaceRoot belongs in "Spatial Databases &
+Analytics" (currently 3 entries, incl. the dormant srivinod1 Overture
+server) or a "Places / Geocoding" category if they split one out. Their
+row format:
+
+```markdown
+| [PlaceRoot](https://github.com/chuofringer/placeroot) | Keyless spatial answers from Overture Maps GeoParquet (DuckDB, no ETL): places, geocoding, admin lookup, buildings, isochrones on its own routing graph — every response token-budgeted, GERS ids throughout. | Python | MIT |
+```
+
 ## mcpservers.org
 
 - **Name:** PlaceRoot

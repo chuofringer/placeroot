@@ -12,10 +12,12 @@ form, with no API key and no vendor platform.
 |---|---|---|
 | Google Maps grounding (Gemini-native + Maps Grounding Lite hosted MCP, GA Oct–Dec 2025) | Keyed + billed ($14–25/1K prompts), no-caching/no-training terms, Google-data-only | Keyless, open data you may store, cache, and train on |
 | Mapbox / TomTom / Esri / CARTO / HERE / Precisely MCP servers | Funnels into paid platforms (API keys, metered) | Open data, keyless |
-| srivinod1/overture-mcp-server (the one near-clone) | Same architecture (DuckDB over Overture S3, keyless), but 4★, dormant since Mar 2026, pinned to a stale release; budgets tool *schemas*, not answers | Maintained, honest geometry, token-budgeted *responses*, current release |
+| srivinod1/overture-mcp-server (the one near-clone) | Same architecture (DuckDB over Overture S3, keyless), but 4★, dormant since Mar 2026, pinned six releases stale; budgets tool *schemas*, not answers; punts geocoding/routing/display to other MCPs | Maintained, honest geometry, token-budgeted *responses*, current release |
+| New Overture adjacents (thatapicompany/overture-maps-mcp, Jul 2026; soapboxbuild/overture-mcp, Jun 2026) | Keyed wrappers over hosted APIs or buildings-only slices; 0★ each; thatapicompany claims "token-efficient summaries" qualitatively, no budgets, no GERS in responses beyond soapboxbuild's buildings lookups | Keyless, full theme coverage, measured budgets, GERS everywhere |
 | gis-mcp and GIS-function servers (176★, active) | Raw computation toolboxes (geometry ops, data out) | Answers, not data |
-| OSM MCP servers (largest 215★, abandoned >1yr; no successor over 30★) | Overpass/Nominatim wrappers: rate limits, usage policies, stale data | Overture GeoParquet direct: operating status, confidence, brands |
-| geowire (multi-provider gateway, launched 2026-07-18) | BYOK vendor-API aggregator; "keyless" floor is rate-limited Nominatim; 0★ as of 2026-08-05 | Truly keyless at scale; Overture-native |
+| OSM MCP servers (largest 215★, abandoned >1yr; no *active* successor over 30★ — wiseman/osm-mcp has 86★ but is equally dead since Mar 2025) | Overpass/Nominatim wrappers: rate limits, usage policies, stale data | Overture GeoParquet direct: operating status, confidence, brands |
+| geowire (multi-provider gateway, launched 2026-07-18) | BYOK vendor-API aggregator; "keyless" floor is rate-limited Nominatim/OSRM (incl. a keyless OSRM isochrone); 0★ as of 2026-08-06 | Truly keyless at scale; Overture-native; own routing graph |
+| Camino AI (getcamino.ai) | Pure-play "location intelligence for agents" startup with a native MCP server — but API-keyed, metered, "17x cheaper than Google Places" as the pitch | Keyless and free; open data you may store and train on |
 | ORATOR (Overture's experimental knowledge-graph MCP, built by Wherobots) | Regional prototype (SF Bay Area) on proprietary Wherobots/Iceberg infra, explicitly a proof-of-concept | Keyless, self-hostable, global today |
 | GeoLibre / GeoAgent (opengeos) | An app for humans / a Strands-based agent that drives GIS software; no MCP layer, no Overture focus | Plumbing for agents (and a future GeoLibre bridge) |
 
@@ -35,6 +37,25 @@ near-dormant. OpenAI and Anthropic have picked no maps partner — Claude's conn
 directory lists only TomTom; the "default maps tool" slot in both ecosystems is open.
 Category traction ceiling remains low (Mapbox official: 350★; only geo-MCP story with
 real HN traction: 105 points).
+
+Re-verification sweep 2026-08-06 (three-track: open-source registry sweep, commercial
+vendor survey, claim-by-claim check): **all ten claims of the 2026-08-05 study stand.**
+The registry search for "overture" is still empty; the near-clone is still dormant
+(last commit 2026-02-28); nobody ships numeric token budgets, GERS ids in responses,
+keyless global isochrones, or self-contained offline map artifacts. The token-payload
+pain point gained a second corporate validator: HERE's "Location Reasoning" (announced
+May 2026) is an entire enterprise product marketed on reducing token usage. New since
+the study, all adjacent rather than head-on: thatapicompany/overture-maps-mcp
+(2026-07-16, keyed wrapper over a hosted API, 0★ — first competitor to even gesture at
+token efficiency), capan/isochrone (registered to the official MCP registry
+**2026-08-06**, keyless own-graph isochrones — but Berlin-only, pedestrian-only, one
+tool), and sparkgeo/geo-mcp-servers (2026-08-02, 36★) — a curated tracker of 77
+geospatial MCP servers whose only Overture entry is the dormant near-clone. The
+sparkgeo tracker is both a listing target and the best ongoing competitive radar for
+this category. Discoverability hazard: "Overture" searches are polluted by an
+unrelated 629★ coding-agent tool of the same name (SixHq/Overture). The `placeroot`
+name remained unclaimed on PyPI, npm, and GitHub as of 2026-08-06 — re-verified, but
+verification is not a reservation; only #16's publishes are.
 
 ## Design rules
 
@@ -89,7 +110,8 @@ Full triage on the [project board](https://github.com/users/chuofringer/projects
       ourselves (#15). A GeoLibre bridge is an additional output target and a community
       relationship, not a dependency; engage opengeos early either way.
 - [x] placeroot.dev landing page built (#28) — deploy awaits DNS/Pages setup (yours)
-- [x] Listing entries drafted for all 7 registries (docs/launch/registry-submissions.md);
+- [x] Listing entries drafted for all 8 registries (docs/launch/registry-submissions.md,
+      incl. the sparkgeo/geo-mcp-servers curated tracker found 2026-08-06);
       submission itself is owner-side, gated on #16's publishes
 - [x] Show HN text + community outreach notes drafted (docs/launch/); posting is owner-side
 - [x] "Why agents are bad at maps" essay drafted (docs/launch/), Mapbox/Geoawesome cited
@@ -135,11 +157,16 @@ buildings/transportation themes; team features; white-label for agent platforms.
 4. **Upstream Overture changes layout, schedule, or access** → release discovery with a
    pinned fallback (#4), a schema probe that degrades per-tool rather than failing all
    (#5), a local cache that answers offline (#8), and eventually our own mirror (#20).
-5. **The near-clone revives, or someone wraps existing pieces** — srivinod1's
-   overture-mcp-server has our architecture (dormant, 4★), and the DuckDB `overture`
-   community extension (geocode, place readers, category normalization) is one wrapper
-   away from being an MCP server. Moat is execution: maintenance, honest geometry,
-   token-budgeted answers, GERS ids (#22), current releases.
+5. **The near-clone revives, or someone wraps existing pieces** — *escalating on a
+   weeks timescale, not months*. srivinod1's overture-mcp-server has our architecture
+   (dormant, 4★), and the DuckDB `overture` community extension (geocode, place
+   readers, category normalization) is one wrapper away from being an MCP server.
+   Two adjacents appeared within three weeks of the 2026-08-05 study and one more
+   the day after (thatapicompany 2026-07-16, capan/isochrone registered 2026-08-06);
+   none is head-on yet, but each occupies a fragment of our combination. Moat is
+   execution: maintenance, honest geometry, token-budgeted answers, GERS ids (#22),
+   current releases — and shipping #16 before the empty "overture" registry search
+   fills. Standing radar: watch sparkgeo/geo-mcp-servers for new entrants.
 6. **Foursquare ships keyless agent tooling on FSQ OS Places** — license permits it;
    today their MCP server is API-keyed and near-dormant, and FSQ open data flows into
    Overture, strengthening our substrate. Monitor.
