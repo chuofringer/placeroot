@@ -17,7 +17,17 @@ import threading
 
 from mcp.server.mcpserver import MCPServer
 
-from placeroot import budget, cache, divisions, mapview, overture, release, routing, simplify
+from placeroot import (
+    budget,
+    buildings,
+    cache,
+    divisions,
+    mapview,
+    overture,
+    release,
+    routing,
+    simplify,
+)
 from placeroot import geocode as geocoding
 
 logger = logging.getLogger(__name__)
@@ -47,6 +57,13 @@ def _schema_error(e: overture.SchemaDegraded) -> dict:
 
 def _with_degraded_fields(result: dict) -> dict:
     degraded = overture.degraded_fields()
+    if degraded:
+        result["degraded_fields"] = degraded
+    return result
+
+
+def _with_buildings_degraded_fields(result: dict) -> dict:
+    degraded = buildings.degraded_fields()
     if degraded:
         result["degraded_fields"] = degraded
     return result
@@ -211,6 +228,60 @@ def admin_lookup(lat: float, lon: float) -> dict:
     except overture.SchemaDegraded as e:
         return _schema_error(e)
     return budget.apply_budget(result, "chain")
+
+
+@mcp.tool()
+def summarize_buildings(
+    lat: float, lon: float, radius_m: float = buildings.DEFAULT_SUMMARIZE_RADIUS_M
+) -> dict:
+    """Summarize building footprints in an area: count, footprint area, height/floor coverage, mix.
+
+    From Overture's buildings theme (issue #23). Returns count,
+    total/mean footprint area in m^2, height_known_pct/num_floors_known_pct
+    (height and floor count are sparse in real Overture data — this reports
+    coverage rather than pretending every building has a value, with
+    mean_height_m/mean_num_floors alongside when any are known), and
+    top_subtypes/top_classes (top 10 each by count). Returns a structured
+    {"error": ...} if upstream is unavailable or the dataset is missing
+    geometry/bbox.
+    """
+    try:
+        result = buildings.summarize_buildings(lat, lon, radius_m)
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    result = budget.apply_budget(result, "top_subtypes") if "top_subtypes" in result else result
+    result = budget.apply_budget(result, "top_classes") if "top_classes" in result else result
+    return _with_buildings_degraded_fields(result)
+
+
+@mcp.tool()
+def buildings_at(
+    lat: float,
+    lon: float,
+    radius_m: float = buildings.DEFAULT_NEAREST_RADIUS_M,
+    limit: int = buildings.DEFAULT_NEAREST_LIMIT,
+    include_geometry: bool = False,
+) -> dict:
+    """Nearest building footprints to a point, nearest first.
+
+    From Overture's buildings theme (issue #23). Returns {"results": [{id
+    (GERS), subtype, class, footprint_area_m2, height_m, num_floors,
+    distance_m}, ...]}. No raw geometry by default (design rule: answers,
+    not data) — pass include_geometry=true to also get each row's
+    footprint as GeoJSON, simplified to a small per-row token cap (each row
+    then also carries geometry_max_deviation_m, reporting what was lost).
+    Returns a structured {"error": ...} if upstream is unavailable or the
+    dataset is missing geometry/bbox.
+    """
+    try:
+        rows = buildings.buildings_at(lat, lon, radius_m, limit, include_geometry)
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    return _with_buildings_degraded_fields(budget.apply_budget({"results": rows}, "results"))
 
 
 @mcp.tool()
