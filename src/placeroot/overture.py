@@ -40,9 +40,22 @@ ESSENTIAL_COLUMNS = {"bbox"}
 # Overrides a theme's dataset location — set by tests to point at a
 # committed fixture instead of the live S3 release. Takes precedence over
 # the PLACEROOT_DATA_PATH[_<THEME>] env var, which in turn overrides the
-# live release. Keyed by theme so divisions (#11) can be pointed at its own
+# live release. Keyed by theme so divisions (#11) and geocode's own
+# divisions/addresses queries (#10) can each be pointed at their own
 # fixture independently of the places fixture.
+#
+# A single Overture theme can carry more than one `type` (divisions has
+# both type=division, which geocode.py reads, and type=division_area,
+# which divisions.py reads) — a bare theme key can't distinguish those, so
+# an override may also be keyed on the more specific "theme:type_" string.
+# _upstream_glob checks the specific key first and falls back to the bare
+# theme key, so every existing call site that overrides by theme alone
+# (divisions.py's admin_lookup tests included) keeps working unchanged.
 _data_path_overrides: dict[str, str] = {}
+
+
+def _override_key(theme: str, type_: str | None) -> str:
+    return theme if type_ is None else f"{theme}:{type_}"
 
 
 class UpstreamUnavailable(Exception):
@@ -66,17 +79,26 @@ class SchemaDegraded(Exception):
         self.missing = missing
 
 
-def set_data_path(path: str | None, theme: str = THEME) -> None:
+def set_data_path(path: str | None, theme: str = THEME, type_: str | None = None) -> None:
     """Point the query layer at a local dataset instead of live S3.
 
     Pass None to restore the default (env var, then discovered release) for
     that theme. Intended for tests. theme defaults to "places" for
     back-compat with existing callers that only ever queried places.
+
+    type_ defaults to None, which overrides every type under that theme
+    (what every existing caller — admin_lookup's tests included — wants:
+    "divisions" only ever has one type in play for them). Pass type_
+    explicitly only when a theme has more than one type active at once, as
+    divisions now does (type=division for geocode.py, type=division_area
+    for divisions.py) — that overrides just that type, leaving a bare-theme
+    override (or the live default) in place for the others.
     """
+    key = _override_key(theme, type_)
     if path is None:
-        _data_path_overrides.pop(theme, None)
+        _data_path_overrides.pop(key, None)
     else:
-        _data_path_overrides[theme] = path
+        _data_path_overrides[key] = path
 
 
 def _env_var_for_theme(theme: str) -> str:
@@ -85,6 +107,9 @@ def _env_var_for_theme(theme: str) -> str:
 
 
 def _upstream_glob(theme: str = THEME, type_: str = "place") -> str:
+    specific_key = _override_key(theme, type_)
+    if specific_key in _data_path_overrides:
+        return _data_path_overrides[specific_key]
     if theme in _data_path_overrides:
         return _data_path_overrides[theme]
     env_path = os.environ.get(_env_var_for_theme(theme))
@@ -92,6 +117,29 @@ def _upstream_glob(theme: str = THEME, type_: str = "place") -> str:
         return env_path
     active_release = release.resolve_release()
     return f"s3://overturemaps-us-west-2/release/{active_release}/theme={theme}/type={type_}/*"
+
+
+def conn() -> duckdb.DuckDBPyConnection:
+    """The shared DuckDB connection, for other modules (e.g. geocode.py) that
+    query themes beyond places but want the same httpfs setup and warm cache.
+    Callers must hold _conn_lock around any query they run against it."""
+    return _conn()
+
+
+def probe_schema(glob: str) -> frozenset | None:
+    """Public wrapper over the schema probe, for callers outside overture.py."""
+    return _probe_schema(glob)
+
+
+def upstream_glob(theme: str = THEME, type_: str = "place") -> str:
+    """Public wrapper: the resolved glob/path for theme (fixture override, env, or live S3).
+
+    type_ has no per-theme default beyond "place" — callers querying a
+    theme other than places (geocode.py's divisions/addresses queries,
+    divisions.py's division_area queries) must pass their own type_
+    explicitly, the same way divisions.py already does.
+    """
+    return _upstream_glob(theme, type_)
 
 
 # Guards every use of the shared _conn() connection. DuckDB connections
@@ -107,6 +155,9 @@ _conn_lock = threading.Lock()
 
 def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     con.execute("INSTALL httpfs; LOAD httpfs;")
+    # An MCP tool call isn't an interactive terminal; a progress bar just
+    # clutters (or, piped through a wrapping process, can garble) output.
+    con.execute("SET enable_progress_bar=false;")
     con.execute("SET s3_region='us-west-2';")
     # Public bucket: anonymous access.
     con.execute("SET s3_access_key_id='';")
@@ -239,12 +290,15 @@ def _bbox_around(lat: float, lon: float, radius_m: float) -> tuple[float, float,
 
 
 # Haversine great-circle distance in meters between (bbox.ymin, bbox.xmin)
-# and a named point, using named params $lat and $lon.
-_DISTANCE_EXPR = """2 * 6371000 * asin(sqrt(
+# and a named point, using named params $lat and $lon. Public: geocode.py
+# reuses this same distance expression for divisions/addresses nearest-point
+# queries so all themes agree on what "distance" means.
+DISTANCE_EXPR = """2 * 6371000 * asin(sqrt(
                 pow(sin(radians(bbox.ymin - $lat) / 2), 2)
                 + cos(radians($lat)) * cos(radians(bbox.ymin))
                 * pow(sin(radians(bbox.xmin - $lon) / 2), 2)
             ))"""
+_DISTANCE_EXPR = DISTANCE_EXPR  # noqa: N816 - kept as an alias for existing in-module uses
 
 
 def area_geometry(lat: float, lon: float, radius_m: float) -> tuple[str, str, dict]:
