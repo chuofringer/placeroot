@@ -3,13 +3,31 @@ name = "placeroot"
 version = "0.1.0"
 description = "Ground AI agents in open map data. MCP server for Overture Maps — compact answers, no API key."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
+authors = [{ name = "Vibe Mapper", email = "chuo.fringer@gmail.com" }]
 keywords = ["mcp", "overture-maps", "geospatial", "ai-agents", "openstreetmap", "duckdb"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Topic :: Software Development :: Libraries",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "duckdb>=1.5.5",
     "mcp[cli]>=2.0.0",
 ]
+
+[project.urls]
+Homepage = "https://placeroot.dev"
+Repository = "https://github.com/chuofringer/placeroot"
+Issues = "https://github.com/chuofringer/placeroot/issues"
 
 [project.scripts]
 placeroot = "placeroot.server:main"
@@ -32,6 +50,19 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/placeroot"]
+
+# The sdist follows VCS-tracked files (so .claude/, .venv/, dist/ — all
+# gitignored — are already excluded, keeping a local `uv build` identical to
+# a clean CI checkout). Drop the couple of tracked dev-only files that add
+# nothing for someone installing from source.
+[tool.hatch.build.targets.sdist]
+exclude = [
+    ".gitignore",
+    ".python-version",
+    ".github",
+    "npm",
+    "scripts/browser_smoke.py",
+]
 
 [tool.pytest.ini_options]
 addopts = "-m 'not live'"
