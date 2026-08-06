@@ -1,0 +1,22 @@
+[project]
+name = "placeroot"
+version = "0.1.0"
+description = "Ground AI agents in open map data. MCP server for Overture Maps — compact answers, no API key."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+keywords = ["mcp", "overture-maps", "geospatial", "ai-agents", "openstreetmap", "duckdb"]
+dependencies = [
+    "duckdb>=1.5.5",
+    "mcp[cli]>=2.0.0",
+]
+
+[project.scripts]
+placeroot = "placeroot.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/placeroot"]
