@@ -1,5 +1,5 @@
 """Issue #11: point -> containing admin hierarchy, against the synthetic
-divisions fixture (tests/fixtures/divisions.parquet, built by
+division_area fixture (tests/fixtures/division_areas.parquet, built by
 scripts/build_fixture.py) — five nested rectangles around places.parquet's
 downtown cluster, plus one unrelated polygon that must never appear."""
 
@@ -8,7 +8,7 @@ import pytest
 
 from placeroot import divisions, overture, server
 
-from .conftest import CENTER_LAT, CENTER_LON, DIVISIONS_FIXTURE_PATH
+from .conftest import CENTER_LAT, CENTER_LON, DIVISION_AREAS_FIXTURE_PATH
 
 
 def test_chain_is_smallest_first_and_complete():
@@ -46,7 +46,7 @@ def test_missing_geometry_raises_schema_degraded(tmp_path):
     con = duckdb.connect()
     con.execute(
         "COPY (SELECT * EXCLUDE (geometry) FROM read_parquet("
-        f"'{DIVISIONS_FIXTURE_PATH}')) TO '{out}' (FORMAT PARQUET)"
+        f"'{DIVISION_AREAS_FIXTURE_PATH}')) TO '{out}' (FORMAT PARQUET)"
     )
     overture.set_data_path(str(out), theme="divisions")
     with pytest.raises(overture.SchemaDegraded) as exc_info:
@@ -71,7 +71,7 @@ def test_server_structured_error_on_missing_geometry(tmp_path):
     con = duckdb.connect()
     con.execute(
         "COPY (SELECT * EXCLUDE (geometry) FROM read_parquet("
-        f"'{DIVISIONS_FIXTURE_PATH}')) TO '{out}' (FORMAT PARQUET)"
+        f"'{DIVISION_AREAS_FIXTURE_PATH}')) TO '{out}' (FORMAT PARQUET)"
     )
     overture.set_data_path(str(out), theme="divisions")
     result = server.admin_lookup(CENTER_LAT, CENTER_LON)
