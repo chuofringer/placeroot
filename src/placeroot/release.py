@@ -75,7 +75,18 @@ def resolve_release() -> str:
     """
     env_release = os.environ.get("PLACEROOT_OVERTURE_RELEASE")
     if env_release:
-        return env_release
+        # The release becomes a path/glob segment (…/release/<release>/…), so
+        # validate the operator-supplied override against the same shape the
+        # discovery path already enforces — a stray "../" or other junk here
+        # would otherwise flow straight into an S3 glob. Not agent-reachable
+        # today (no tool takes a release arg), but cheap defense in depth.
+        if _RELEASE_RE.match(env_release):
+            return env_release
+        logger.warning(
+            "PLACEROOT_OVERTURE_RELEASE=%r doesn't look like a release "
+            "(YYYY-MM-DD.N); ignoring it and falling back to discovery/pin.",
+            env_release,
+        )
     return _discover() or PINNED_RELEASE
 
 
