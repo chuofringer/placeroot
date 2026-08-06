@@ -5,18 +5,12 @@ question, answered entirely through PlaceRoot's MCP tools, no vendor API, no
 ETL, no spreadsheet of scraped listings. Every number below came back from a
 single MCP tool call.
 
-**Status note:** the pipeline is designed to run against live Overture S3
-(that's the default; `--offline` is the CI-safe fallback). The transcript
-quoted below is from an `--offline` run against the committed fixture,
-because the one live attempt made while preparing this example was killed by
-the sandbox environment (exit 144) after ~2 minutes with no output — not a
-query timeout or a bug reproduced in the offline path, just an execution
-environment that didn't let the process run to completion here. The live
-path has not yet been verified end-to-end against real Overture data; that's
-a follow-up for whoever reviews this before it ships. The tool sequence,
-token math, and recommendation logic below are unchanged either way — only
-the specific numbers (and the fact that "Austin" becomes a synthetic test
-fixture) differ between the two modes.
+**Status note:** the pipeline runs against live Overture S3 by default
+(verified end-to-end — see #17); `--offline` is the CI-safe fallback. The
+transcript quoted below is from an `--offline` run against the committed
+fixture so it's reproducible. The tool sequence, token math, and
+recommendation logic are the same in both modes — only the specific numbers
+(and the fact that "Austin" becomes a synthetic test fixture) differ.
 
 ## The question
 

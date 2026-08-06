@@ -93,10 +93,8 @@ PER_ROW_GEOMETRY_TOKEN_CAP = 200
 def _ensure_spatial() -> None:
     """Load DuckDB's spatial extension on the shared connection, once.
 
-    Thin wrapper over db.ensure_spatial() (issue #40), keeping this
-    module's original UpstreamUnavailable-on-failure contract. The pre-#40
-    copy called overture._conn().execute(...) without holding the
-    connection lock — a real bug (issue #24) db.ensure_spatial() fixes.
+    Thin wrapper over db.ensure_spatial(), keeping this module's
+    UpstreamUnavailable-on-failure contract.
     """
     try:
         db.ensure_spatial()
