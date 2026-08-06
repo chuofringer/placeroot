@@ -18,7 +18,7 @@ Whitelist derivation (each value traced to its source file/line):
   1944    PLAN.md: "summarize_area — category mix (1,944 places ~= 320 tokens)"
   320     PLAN.md: same line — token cost for that summarize_area call
   113     README.md / ROADMAP.md / PLAN.md: "113 queries" geocode benchmark
-  98.2    README.md / ROADMAP.md / PLAN.md: "hit@1 98.2%, hit@5 98.2%"
+  100     README.md: "hit@1 100%, hit@5 100%" (113 queries, saturated set)
   35.4    README.md: "up from an initial 35.4%/54.9%"
   54.9    README.md: same line
   21      PLAN.md: "Local tile cache -- warm ~21ms"
@@ -86,7 +86,7 @@ NUMBER_WHITELIST = {
     "1944",
     "320",
     "113",
-    "98.2",
+    "100",
     "35.4",
     "54.9",
     "21",

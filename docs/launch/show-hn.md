@@ -27,7 +27,7 @@ shops via `find_places` costs 501 tokens against ~45,000 for the raw GeoJSON
 equivalent; `summarize_area` over 1,944 places is ~320 tokens.
 
 Geocoding is built on Overture's `divisions`/`addresses` data, not Nominatim
-— deterministic matching, hit@1 98.2% measured over 113 live queries. A local
+— deterministic matching, hit@1 100% measured over 113 live queries (a saturated task set — details and caveats in the README). A local
 tile cache makes repeat queries against the same area run warm in ~21ms.
 
 MIT licensed, `uvx placeroot` or `uv run placeroot`, standard MCP stdio (a

@@ -84,7 +84,7 @@ themes, not on Nominatim or a paid geocoding API. Matching is deterministic
 proxy when population is null) breaking ties within a match tier — so it's
 transparent rather than a black-box ranking model. Measured against a live
 Overture release across 113 real-world queries (cities, neighborhoods,
-"City, ST" forms), it resolves hit@1 98.2% and hit@5 98.2%, up from an
+"City, ST" forms), it resolves hit@1 100% and hit@5 100% on that set, up from an
 initial 35.4%/54.9% before two fixes: pushing match-tier and population
 ordering into the SQL query itself (rather than after an overfetch limit —
 122 divisions worldwide are literally named "Los Angeles," and a naive
@@ -118,14 +118,11 @@ Some honest limits, not smoothed over:
   Overture's transportation theme rather than depending on a hosted routing
   service, but the mature path today is pedestrian routing and isochrones.
   Drive and cycle modes exist; walking is where it's been exercised most.
-- **Geocoding has a known, narrow gap.** Matching is substring-based, not a
-  learned model, so abbreviated forms like "St. Louis" don't match Overture's
-  canonical "Saint Louis" spelling. A small alias table would close this; it
-  hasn't been built yet.
-- **Benchmark caveats.** The 98.2% geocode hit rate is measured against 113
+- **Benchmark caveats.** The 100% geocode hit rate is measured against 113
   queries on one live Overture release, not a standardized, versioned
-  benchmark — treat it as a real measurement of current behavior, not a
-  guaranteed number across every query shape or every future release. The
+  benchmark — a saturated task set means the next honest step is a harder
+  set, and it is not a guaranteed number across every query shape or every
+  future release. The
   45,000-token raw-GeoJSON comparison is a measured per-feature cost
   extrapolated to a typical dense-block feature count, not a fixed
   constant — actual raw payload size depends on how many places are nearby

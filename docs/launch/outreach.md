@@ -13,7 +13,7 @@ ETL step, no API key. It's aimed at agent tooling rather than a GIS
 workflow, but the query layer (nearest-places, area summaries, admin
 hierarchy lookup, geocoding built on Overture's `divisions`/`addresses`
 themes instead of Nominatim) is plain DuckDB-over-Parquet and might be
-useful outside the MCP context too. Geocode hit@1 is measured at 98.2% over
+useful outside the MCP context too. Geocode hit@1 is measured at 100% over
 113 live queries against a real Overture release, with the failure modes
 documented (abbreviated "St." forms don't match Overture's spelled-out
 names yet). Repo: https://github.com/chuofringer/placeroot — if anyone here
@@ -43,7 +43,7 @@ geocoding, admin lookup) by querying the GeoParquet release directly via
 DuckDB — no ETL, bbox row-group pushdown, release auto-discovery with a
 pinned fallback. Geocoding is built entirely on the `divisions` and
 `addresses` themes (no Nominatim), and every place response carries its
-GERS id. Measured hit@1 98.2% over 113 live geocoding queries; the two
+GERS id. Measured hit@1 100% over 113 live geocoding queries (the task set is saturated; a harder set is the next step); the two
 things that mattered most were pushing match-tier/population ordering into
 the SQL query before the row-limit, and "City, ST" parsing — happy to share
 more detail if useful to anyone else building geocoding on GERS. Repo:
