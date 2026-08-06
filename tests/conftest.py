@@ -47,6 +47,11 @@ def offline_data(request, monkeypatch):
     overture.set_data_path(str(ADDRESSES_FIXTURE_PATH), theme="addresses", type_="address")
     routing.set_data_path(str(TRANSPORTATION_FIXTURE_PATH))
     buildings.set_data_path(str(BUILDINGS_FIXTURE_PATH))
+    # The in-memory built-graph cache (#39) is a module-level global that
+    # would otherwise leak a graph built against one test's data/mode/radius
+    # into the next test — clear it so every test starts from a cold cache,
+    # which the cache-specific tests rely on to count extractions accurately.
+    routing.clear_graph_cache()
     try:
         yield
     finally:
@@ -56,6 +61,7 @@ def offline_data(request, monkeypatch):
         overture.set_data_path(None, theme="addresses", type_="address")
         routing.set_data_path(None)
         buildings.set_data_path(None)
+        routing.clear_graph_cache()
 
 
 def raw_rows() -> list[dict]:
