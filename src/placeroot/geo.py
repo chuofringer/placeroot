@@ -1,0 +1,99 @@
+"""Shared geometry helpers for the query layer (issue #40).
+
+bbox_around/bbox_filter_sql used to be duplicated byte-for-byte between
+overture.py and routing.py (#42's antimeridian fix landed twice). geom_expr
+unifies a third duplicate: the "native GEOMETRY column or WKB BLOB fixture"
+probe divisions.py, buildings.py, and routing.py each carried a copy of
+(routing.py's also wrapped the result in ST_AsText — as_wkt covers that).
+"""
+
+import logging
+import math
+from functools import lru_cache
+
+import duckdb
+
+from placeroot import db
+
+logger = logging.getLogger(__name__)
+
+
+def bbox_around(lat: float, lon: float, radius_m: float) -> tuple[float, float, float, float]:
+    """Square bounding box guaranteed to contain the radius_m circle around (lat, lon).
+
+    Not itself a radius filter (corners reach radius_m * sqrt(2)) — a cheap
+    row-group prefilter; the exact circle is enforced by the haversine
+    predicate in overture.area_geometry(). Latitude is clamped to [-90, 90]
+    (issue #42: a pole-crossing search gets a band clamped at the pole
+    rather than an invalid ymin/ymax). Longitude is left unclamped/
+    unwrapped — xmin/xmax can fall outside [-180, 180] at the antimeridian;
+    bbox_filter_sql folds that into an OR of two in-range boxes, and
+    cache.tiles_for_bbox() enumerates tiles on both sides of the seam
+    directly from these raw values.
+    """
+    dlat = radius_m / 111_320.0
+    dlon = radius_m / (111_320.0 * max(math.cos(math.radians(lat)), 1e-6))
+    ymin = max(lat - dlat, -90.0)
+    ymax = min(lat + dlat, 90.0)
+    return lon - dlon, ymin, lon + dlon, ymax
+
+
+def bbox_filter_sql(
+    xmin: float, ymin: float, xmax: float, ymax: float
+) -> tuple[str, dict]:
+    """SQL bbox-intersection filter for [xmin, xmax] x [ymin, ymax], antimeridian-safe.
+
+    xmin/xmax may be outside [-180, 180] (see bbox_around) when the box
+    crosses the seam. Non-crossing case: the same single-box filter as
+    always (byte-identical SQL — no perf regression for the overwhelming
+    majority of queries). Crossing case: splits into an OR of two in-range
+    boxes — [xmin_wrapped..180] and [-180..xmax_wrapped] — each still
+    AND'd with the shared y-range. Reuses the same $xmin/$ymin/$xmax/$ymax
+    param names in both cases so callers don't need to branch on shape.
+    """
+    if xmin >= -180.0 and xmax <= 180.0:
+        filter_sql = (
+            "bbox.xmax >= $xmin AND bbox.xmin <= $xmax"
+            " AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
+        )
+        return filter_sql, {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}
+
+    # Crosses the antimeridian. Fold whichever side ran past +/-180 back
+    # in-range, then OR an "east of the seam" box against a "west of the
+    # seam" box instead of a single (now meaningless) xmin..xmax range.
+    east_xmin = xmin + 360.0 if xmin < -180.0 else xmin
+    west_xmax = xmax - 360.0 if xmax > 180.0 else xmax
+    filter_sql = (
+        "(("
+        "bbox.xmax >= $xmin AND bbox.xmin <= 180"
+        ") OR ("
+        "bbox.xmax >= -180 AND bbox.xmin <= $xmax"
+        ")) AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
+    )
+    return filter_sql, {"xmin": east_xmin, "ymin": ymin, "xmax": west_xmax, "ymax": ymax}
+
+
+@lru_cache(maxsize=16)
+def geom_expr(glob: str, as_wkt: bool = False) -> str:
+    """SQL expression yielding a GEOMETRY (or, if as_wkt, its WKT text) for glob's geometry column.
+
+    Real Overture GeoParquet carries geo metadata, so DuckDB spatial reads
+    `geometry` as a native GEOMETRY column directly; plain-parquet test
+    fixtures store it as a raw WKB BLOB, needing ST_GeomFromWKB first.
+    Detected once per (glob, as_wkt) pair and cached. A failed probe
+    degrades to the WKB-BLOB assumption rather than raising — the real
+    query hits the same problem and surfaces UpstreamUnavailable instead.
+    """
+    try:
+        with db.conn_lock:
+            described = db.shared_conn().execute(
+                f"DESCRIBE SELECT geometry FROM read_parquet('{glob}') LIMIT 0"
+            ).fetchone()
+        type_name = described[1] if described else ""
+    except duckdb.Error as e:
+        logger.warning("Geometry type probe failed for %s: %s", glob, e)
+        type_name = ""
+    is_native = type_name.upper().startswith("GEOMETRY")
+    if as_wkt:
+        return "ST_AsText(geometry)" if is_native else "ST_AsText(ST_GeomFromWKB(geometry))"
+    return "geometry" if is_native else "ST_GeomFromWKB(geometry)"
