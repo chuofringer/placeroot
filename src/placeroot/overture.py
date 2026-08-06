@@ -15,11 +15,9 @@ all now reuse the same connection via db.py — issue #40) acquires it
 first. Background tile materialization (cache.py) is the only exception:
 it always runs on its own connection via db.new_connection().
 
-Connection setup, schema probing, and geometry helpers used to be
-duplicated here and in routing.py (issue #40); both now live in db.py and
-geo.py. _conn/_conn_lock/_probe_schema remain here as thin aliases
-(deprecated in favor of importing db directly) so existing external
-references — tests included — keep working unchanged.
+Connection setup, schema probing, and geometry helpers live in db.py and
+geo.py; _conn/_conn_lock/_probe_schema are thin aliases kept for this
+module's call sites and the tests — import db directly in new code.
 """
 
 import logging

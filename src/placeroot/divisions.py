@@ -55,9 +55,8 @@ def _ensure_spatial() -> None:
 def _geom_expr(upstream: str) -> str:
     """SQL expression yielding a GEOMETRY for the dataset's geometry column.
 
-    Thin wrapper over geo.geom_expr() (issue #40) — kept as a private name
-    here since buildings.py used to carry an identical copy of this same
-    logic and both now delegate to the one shared implementation.
+    Thin wrapper over geo.geom_expr(), kept as a private name for this
+    module's call sites.
     """
     return geo.geom_expr(upstream)
 

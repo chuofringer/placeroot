@@ -18,9 +18,9 @@ Whitelist derivation (each value traced to its source file/line):
   1944    PLAN.md: "summarize_area — category mix (1,944 places ~= 320 tokens)"
   320     PLAN.md: same line — token cost for that summarize_area call
   113     README.md / ROADMAP.md / PLAN.md: "113 queries" geocode benchmark
-  100     README.md: "hit@1 100%, hit@5 100%" (113 queries, saturated set)
-  35.4    README.md: "up from an initial 35.4%/54.9%"
-  54.9    README.md: same line
+  100     README.md / ROADMAP.md / PLAN.md: hit@1 100% (113 queries, saturated set)
+  35.4    initial benchmark run (progression cited in the launch essay)
+  54.9    initial benchmark run, same measurement
   21      PLAN.md: "Local tile cache -- warm ~21ms"
   17      PLAN.md: "~5.9K tokens for a 17-call analysis"
           (also examples/site_selection/README.md: "17 tool calls total")
