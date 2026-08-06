@@ -8,24 +8,33 @@ instead of hardcoded.
 
 Concurrency (issue #24): DuckDB connections aren't safe for concurrent
 execute() calls from multiple threads, which HTTP transport mode makes
-possible (stdio only ever has one request in flight). _conn_lock, below,
-serializes every use of this module's shared connection — every _conn()
-call site in this file (and in divisions.py and geocode.py, which reuse
-this connection) acquires it first. Background tile materialization
-(cache.py) and the routing module's own shared connection (routing.py,
-which keeps a separate connection and its own equivalent lock) are the
-only exceptions, by design: they never touch this connection at all.
+possible (stdio only ever has one request in flight). db.conn_lock
+serializes every use of the shared connection — every call site in this
+file (and in routing.py, divisions.py, buildings.py, and geocode.py, which
+all now reuse the same connection via db.py — issue #40) acquires it
+first. Background tile materialization (cache.py) is the only exception:
+it always runs on its own connection via db.new_connection().
+
+Connection setup, schema probing, and geometry helpers used to be
+duplicated here and in routing.py (issue #40); both now live in db.py and
+geo.py. _conn/_conn_lock/_probe_schema remain here as thin aliases
+(deprecated in favor of importing db directly) so existing external
+references — tests included — keep working unchanged.
 """
 
 import logging
 import math
 import os
-import threading
-from functools import lru_cache
 
 import duckdb
 
-from placeroot import budget, cache, release
+from placeroot import budget, cache, db, release
+from placeroot.errors import (  # noqa: F401 - re-exported; see below
+    SchemaDegraded,
+    UpstreamUnavailable,
+)
+from placeroot.geo import bbox_around as _bbox_around  # noqa: F401 - back-compat alias, see below
+from placeroot.geo import bbox_filter_sql as _bbox_filter_sql  # noqa: F401 - back-compat alias
 
 logger = logging.getLogger(__name__)
 
@@ -68,27 +77,6 @@ def _override_key(theme: str, type_: str | None) -> str:
     return theme if type_ is None else f"{theme}:{type_}"
 
 
-class UpstreamUnavailable(Exception):
-    """A remote scan failed after DuckDB's built-in retries were exhausted.
-
-    detail is a short, agent-safe message — never a raw stack trace.
-    """
-
-    def __init__(self, detail: str):
-        super().__init__(detail)
-        self.detail = detail
-
-
-class SchemaDegraded(Exception):
-    """An essential column is missing from the active dataset."""
-
-    def __init__(self, missing: list[str]):
-        detail = f"required columns missing from dataset: {', '.join(missing)}"
-        super().__init__(detail)
-        self.detail = detail
-        self.missing = missing
-
-
 def set_data_path(path: str | None, theme: str = THEME, type_: str | None = None) -> None:
     """Point the query layer at a local dataset instead of live S3.
 
@@ -129,6 +117,14 @@ def _upstream_base() -> str:
     return os.environ.get("PLACEROOT_UPSTREAM_BASE", DEFAULT_UPSTREAM_BASE).rstrip("/")
 
 
+# Back-compat (issue #40): routing.py used to read its own, differently
+# named env var for the transportation theme instead of following the
+# PLACEROOT_DATA_PATH_<THEME> convention every other theme uses. Still
+# honored — as a fallback, checked only when the standard name isn't set —
+# so any deployment already setting it keeps working unchanged.
+_TRANSPORTATION_LEGACY_ENV_VAR = "PLACEROOT_TRANSPORTATION_DATA_PATH"
+
+
 def _upstream_glob(theme: str = THEME, type_: str = "place") -> str:
     specific_key = _override_key(theme, type_)
     if specific_key in _data_path_overrides:
@@ -136,6 +132,8 @@ def _upstream_glob(theme: str = THEME, type_: str = "place") -> str:
     if theme in _data_path_overrides:
         return _data_path_overrides[theme]
     env_path = os.environ.get(_env_var_for_theme(theme))
+    if not env_path and theme == "transportation":
+        env_path = os.environ.get(_TRANSPORTATION_LEGACY_ENV_VAR)
     if env_path:
         return env_path
     active_release = release.resolve_release()
@@ -146,12 +144,12 @@ def conn() -> duckdb.DuckDBPyConnection:
     """The shared DuckDB connection, for other modules (e.g. geocode.py) that
     query themes beyond places but want the same httpfs setup and warm cache.
     Callers must hold _conn_lock around any query they run against it."""
-    return _conn()
+    return db.shared_conn()
 
 
 def probe_schema(glob: str) -> frozenset | None:
     """Public wrapper over the schema probe, for callers outside overture.py."""
-    return _probe_schema(glob)
+    return db.probe_schema(glob)
 
 
 def upstream_glob(theme: str = THEME, type_: str = "place") -> str:
@@ -165,91 +163,14 @@ def upstream_glob(theme: str = THEME, type_: str = "place") -> str:
     return _upstream_glob(theme, type_)
 
 
-# Guards every use of the shared _conn() connection. DuckDB connections
-# aren't safe for concurrent use, and the MCP stdio server normally
-# processes one tool call at a time anyway — this lock formalizes that and
-# makes it safe for the startup metadata pre-warm (issue #31) to share the
-# same connection object from a background thread without racing a real
-# query. Background tile materialization (cache.py) deliberately does NOT
-# use this lock: it always runs on its own connection via _new_connection(),
-# never touching the shared one.
-_conn_lock = threading.Lock()
+# Deprecated: import db directly instead. Kept as thin aliases so existing
+# external references (tests included) keep working unchanged — see this
+# module's docstring and db.py's.
+_conn_lock = db.conn_lock
+_conn = db.shared_conn
+_new_connection = db.new_connection
+_probe_schema = db.probe_schema
 
-
-# Region the public Overture bucket lives in — the default unless
-# PLACEROOT_S3_REGION overrides it (issue #20's switchover: a mirror on a
-# different S3-compatible service almost always has its own region name).
-DEFAULT_S3_REGION = "us-west-2"
-
-
-def _s3_region() -> str:
-    return os.environ.get("PLACEROOT_S3_REGION", DEFAULT_S3_REGION)
-
-
-def _s3_endpoint() -> str | None:
-    """Custom S3-compatible endpoint (R2/minio/self-hosted S3), or None for
-    plain AWS S3 — set via PLACEROOT_S3_ENDPOINT (issue #20). Wired into the
-    DuckDB connection in _configure(), below."""
-    return os.environ.get("PLACEROOT_S3_ENDPOINT") or None
-
-
-def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
-    con.execute("INSTALL httpfs; LOAD httpfs;")
-    # An MCP tool call isn't an interactive terminal; a progress bar just
-    # clutters (or, piped through a wrapping process, can garble) output.
-    con.execute("SET enable_progress_bar=false;")
-    con.execute(f"SET s3_region='{_s3_region()}';")
-    endpoint = _s3_endpoint()
-    if endpoint:
-        # A mirror target (issue #20): R2/minio/self-hosted S3 generally
-        # expect path-style addressing (bucket in the path, not a
-        # virtual-hosted subdomain) and, unlike the public Overture bucket,
-        # are usually private — read credentials from the environment if the
-        # operator set them, empty (anonymous) otherwise.
-        con.execute(f"SET s3_endpoint='{endpoint}';")
-        con.execute("SET s3_url_style='path';")
-        access_key = os.environ.get("PLACEROOT_S3_ACCESS_KEY_ID", "")
-        secret_key = os.environ.get("PLACEROOT_S3_SECRET_ACCESS_KEY", "")
-        con.execute(f"SET s3_access_key_id='{access_key}';")
-        con.execute(f"SET s3_secret_access_key='{secret_key}';")
-    else:
-        # Public bucket: anonymous access.
-        con.execute("SET s3_access_key_id='';")
-        con.execute("SET s3_secret_access_key='';")
-    # Caches parquet footer/metadata per connection (issue #31): the cold
-    # cost DuckDB pays reading a remote file's footer is ~5s of the ~8s cold
-    # query; this makes a second query against the same file on the same
-    # connection skip that cost. Combined with the startup pre-warm below,
-    # the shared connection often has this paid for before a real query
-    # ever arrives.
-    con.execute("SET enable_object_cache=true;")
-    # Bounded timeout + retry on remote scans (issue #5): DuckDB's httpfs
-    # extension applies these to every S3/HTTP request it makes, so a slow
-    # or down upstream fails fast instead of hanging a tool call.
-    try:
-        con.execute("SET http_timeout=5000;")  # ms
-        con.execute("SET http_retries=2;")
-        con.execute("SET http_retry_wait_ms=200;")
-        con.execute("SET http_retry_backoff=2;")
-    except duckdb.Error as e:
-        logger.warning("Could not set httpfs timeout/retry options: %s", e)
-    return con
-
-
-@lru_cache(maxsize=1)
-def _conn() -> duckdb.DuckDBPyConnection:
-    return _configure(duckdb.connect())
-
-
-def _new_connection() -> duckdb.DuckDBPyConnection:
-    """A fresh, independently-configured connection for background work.
-
-    Background tile materialization must not share _conn() with whatever
-    query is running on the main thread — DuckDB connections aren't safe
-    for concurrent use. Pass this (uncalled) as cache.py's connection
-    factory so it can create one per background fetch.
-    """
-    return _configure(duckdb.connect())
 
 
 def warm_metadata() -> None:
@@ -260,27 +181,10 @@ def warm_metadata() -> None:
     """
     upstream = _upstream_glob()
     try:
-        with _conn_lock:
-            _conn().execute(f"SELECT * FROM read_parquet('{upstream}') LIMIT 0")
+        with db.conn_lock:
+            db.shared_conn().execute(f"SELECT * FROM read_parquet('{upstream}') LIMIT 0")
     except duckdb.Error as e:
         logger.warning("Metadata pre-warm failed for %s (continuing): %s", upstream, e)
-
-
-@lru_cache(maxsize=8)
-def _probe_schema(glob: str) -> frozenset | None:
-    """Column names present in glob's dataset, or None if the probe itself failed.
-
-    A failed probe (upstream down, glob unreadable) is treated as "unknown,
-    assume nothing missing" — the actual query below will hit the same
-    problem and surface it as UpstreamUnavailable instead.
-    """
-    try:
-        with _conn_lock:
-            cols = _conn().execute(f"SELECT * FROM read_parquet('{glob}') LIMIT 0").description
-        return frozenset(c[0] for c in cols)
-    except duckdb.Error as e:
-        logger.warning("Schema probe failed for %s: %s", glob, e)
-        return None
 
 
 def missing_columns(glob: str, required: list[str] = REQUIRED_COLUMNS) -> list[str]:
@@ -316,9 +220,10 @@ def _from_source(bbox: tuple[float, float, float, float], theme: str = THEME) ->
     upstream = _upstream_glob(theme)
     if cache.enabled():
         try:
-            with _conn_lock:
+            with db.conn_lock:
                 paths = cache.local_paths_for_query(
-                    _conn(), release.resolve_release(), theme, bbox, upstream, _new_connection
+                    db.shared_conn(), release.resolve_release(), theme, bbox, upstream,
+                    db.new_connection,
                 )
         except duckdb.Error as e:
             raise UpstreamUnavailable(str(e)) from e
@@ -326,78 +231,6 @@ def _from_source(bbox: tuple[float, float, float, float], theme: str = THEME) ->
             joined = ", ".join(f"'{p}'" for p in paths)
             return f"read_parquet([{joined}])"
     return f"read_parquet('{upstream}', hive_partitioning=1)"
-
-
-def _bbox_around(lat: float, lon: float, radius_m: float) -> tuple[float, float, float, float]:
-    """Square bounding box guaranteed to contain the radius_m circle around (lat, lon).
-
-    Not itself a radius filter — corners of the square reach out to
-    radius_m * sqrt(2). Used only as a cheap row-group prefilter; the exact
-    circle is enforced separately by the haversine predicate from
-    area_geometry().
-
-    Latitude is clamped to [-90, 90]: a search whose radius circle would
-    otherwise cross a pole gets a band clamped at the pole instead of an
-    invalid ymin/ymax. That's a real degradation (the box no longer reaches
-    radius_m in every direction near the pole — a search centered exactly on
-    the pole, for instance, only ever sees one hemisphere's worth of band)
-    but it's a sane one; true polar wraparound (a search radius that should
-    see over the pole to the opposite side of the globe) is out of scope.
-
-    Longitude is intentionally left unclamped/unwrapped — xmin/xmax can fall
-    outside [-180, 180] when the box crosses the antimeridian (issue #42).
-    Callers must handle that themselves: area_geometry() turns a crossing
-    box into an OR of two in-range boxes for its SQL filter (see
-    _bbox_filter_sql), and cache.tiles_for_bbox() enumerates tiles on both
-    sides of the seam directly from these raw, possibly out-of-range values.
-    Passing xmin/xmax straight into a single `BETWEEN`-style filter without
-    going through one of those is the bug this docstring is warning about.
-    """
-    dlat = radius_m / 111_320.0
-    dlon = radius_m / (111_320.0 * max(math.cos(math.radians(lat)), 1e-6))
-    ymin = max(lat - dlat, -90.0)
-    ymax = min(lat + dlat, 90.0)
-    return lon - dlon, ymin, lon + dlon, ymax
-
-
-def _bbox_filter_sql(
-    xmin: float, ymin: float, xmax: float, ymax: float
-) -> tuple[str, dict]:
-    """SQL bbox-intersection filter for [xmin, xmax] x [ymin, ymax], antimeridian-safe.
-
-    xmin/xmax may be outside [-180, 180] (see _bbox_around) when the box
-    crosses the seam. Non-crossing case: returns the same single-box filter
-    as always (byte-identical SQL — no perf regression for the overwhelming
-    majority of queries that never go near +/-180). Crossing case: splits
-    into an OR of two in-range boxes — [xmin_wrapped..180] and
-    [-180..xmax_wrapped] — each still AND'd with the shared y-range, so a
-    place on either side of the seam can satisfy the filter.
-
-    Reuses the same $xmin/$ymin/$xmax/$ymax param names in both cases (in
-    the crossing case, $xmin/$xmax hold the two wrapped bounds rather than
-    the raw box's corners) so callers don't need to branch on which shape of
-    params dict they got back.
-    """
-    if xmin >= -180.0 and xmax <= 180.0:
-        filter_sql = (
-            "bbox.xmax >= $xmin AND bbox.xmin <= $xmax"
-            " AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
-        )
-        return filter_sql, {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}
-
-    # Crosses the antimeridian. Fold whichever side ran past +/-180 back
-    # in-range, then OR an "east of the seam" box against a "west of the
-    # seam" box instead of a single (now meaningless) xmin..xmax range.
-    east_xmin = xmin + 360.0 if xmin < -180.0 else xmin
-    west_xmax = xmax - 360.0 if xmax > 180.0 else xmax
-    filter_sql = (
-        "(("
-        "bbox.xmax >= $xmin AND bbox.xmin <= 180"
-        ") OR ("
-        "bbox.xmax >= -180 AND bbox.xmin <= $xmax"
-        ")) AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
-    )
-    return filter_sql, {"xmin": east_xmin, "ymin": ymin, "xmax": west_xmax, "ymax": ymax}
 
 
 # Haversine great-circle distance in meters between (bbox.ymin, bbox.xmin)
