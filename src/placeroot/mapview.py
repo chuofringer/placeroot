@@ -725,13 +725,26 @@ _JS = """
     zoomAt(ev.deltaY < 0 ? 1.2 : 1 / 1.2, cx, cy);
   }, { passive: false });
 
+  // Pointer capture is only engaged once the pointer has actually moved past
+  // a small threshold. Capturing unconditionally on every pointerdown (the
+  // pre-#34 behavior) makes Chromium retarget the *click* event that follows
+  // a same-spot mousedown/mouseup to the <svg> element itself instead of the
+  // marker/shape actually under the cursor — silently breaking click-to-open
+  // popups for real mouse users (caught by scripts/browser_smoke.py, #33).
+  var DRAG_THRESHOLD = 3;
   var dragging = null;
   svg.addEventListener("pointerdown", function (ev) {
-    dragging = { x: ev.clientX, y: ev.clientY, vx: view.x, vy: view.y };
-    svg.setPointerCapture(ev.pointerId);
+    dragging = { x: ev.clientX, y: ev.clientY, vx: view.x, vy: view.y,
+                 pointerId: ev.pointerId, captured: false };
   });
   svg.addEventListener("pointermove", function (ev) {
     if (!dragging) return;
+    if (!dragging.captured) {
+      var dx0 = ev.clientX - dragging.x, dy0 = ev.clientY - dragging.y;
+      if (Math.abs(dx0) < DRAG_THRESHOLD && Math.abs(dy0) < DRAG_THRESHOLD) return;
+      svg.setPointerCapture(dragging.pointerId);
+      dragging.captured = true;
+    }
     var rect = svg.getBoundingClientRect();
     var sx = W / rect.width, sy = H / rect.height;
     view.x = dragging.vx + (ev.clientX - dragging.x) * sx;

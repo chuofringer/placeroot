@@ -30,3 +30,26 @@ jobs:
 
       - name: Pytest (offline)
         run: uv run pytest
+
+  browser-smoke:
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies (incl. browser group)
+        run: uv sync --group browser
+
+      - name: Install Chromium
+        run: uv run playwright install chromium --with-deps
+
+      - name: Browser smoke test (mapview artifact, issue #33)
+        run: uv run --group browser python scripts/browser_smoke.py
