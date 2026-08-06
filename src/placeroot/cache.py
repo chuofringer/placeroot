@@ -123,6 +123,20 @@ def ensure_tile(con, release: str, theme: str, tile: tuple[int, int], upstream_g
     return path
 
 
+def cached_tile_paths(release: str, theme: str) -> list[Path]:
+    """Every tile parquet already materialized locally for release/theme.
+
+    Used by a GERS-id lookup (issue #41): before touching upstream at all,
+    check whatever tiles the local cache already has on disk — cheap, since
+    they're small local files. Returns [] if caching hasn't touched this
+    release/theme yet (directory doesn't exist), never raises.
+    """
+    d = cache_dir() / release / theme
+    if not d.exists():
+        return []
+    return sorted(d.glob("*.parquet"))
+
+
 def evict_if_needed() -> None:
     """Delete least-recently-used cached tiles until under the size cap."""
     root = cache_dir()
