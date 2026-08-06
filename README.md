@@ -37,6 +37,15 @@ Claude Desktop / Claude Code config:
 
 More on the way — see [ROADMAP.md](ROADMAP.md).
 
+## Development
+
+```bash
+uv sync                    # installs pytest + ruff (dev dependency group)
+uv run pytest              # offline tests, run against a committed fixture
+uv run pytest -m live      # also run the opt-in test against real Overture S3
+uv run ruff check .
+```
+
 ## Why
 
 Agents are bad at maps. Existing map tools for agents either require vendor API keys or return raw GeoJSON far too large for a context window. PlaceRoot's design rule: every answer fits in ~2K tokens, and anything bigger returns a summary plus a link.
