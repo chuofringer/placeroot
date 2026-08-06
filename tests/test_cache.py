@@ -1,10 +1,11 @@
+import os
 import threading
 import time
 
 import duckdb
 import pytest
 
-from placeroot import cache
+from placeroot import cache, db
 
 from .conftest import FIXTURE_PATH
 
@@ -155,11 +156,11 @@ def test_concurrent_cache_misses_on_same_tile_only_fetch_once(con, cache_dir, mo
     calls: list[tuple] = []
     lock = threading.Lock()
 
-    def counting_ensure_tile(con_, release_, theme_, tile_, upstream_glob_):
+    def counting_ensure_tile(con_, release_, theme_, tile_, upstream_glob_, fingerprint_):
         with lock:
             calls.append(tile_)
         time.sleep(0.1)  # widen the window so a second miss can race in
-        return cache.tile_path(release_, theme_, tile_)
+        return cache.tile_path(release_, theme_, fingerprint_, tile_)
 
     monkeypatch.setattr(cache, "ensure_tile", counting_ensure_tile)
 
@@ -189,6 +190,172 @@ def test_lru_eviction_removes_oldest_tiles_when_over_cap(con, cache_dir, monkeyp
     assert len(remaining) < len(paths)
     # The most recently fetched tile should still be present (LRU keeps the newest).
     assert paths[-1].exists()
+
+
+# --- Issue #63: schema-fingerprinted tile layout --- #
+
+
+def _write_fixture_dropping_column(con: duckdb.DuckDBPyConnection, dest, column: str) -> None:
+    """A copy of the places fixture with `column` dropped — same rows/bbox
+    coverage, different (smaller) schema, so it fingerprints differently."""
+    con.execute(
+        f"COPY (SELECT * EXCLUDE ({column}) FROM read_parquet('{FIXTURE_PATH}')) "
+        f"TO '{dest}' (FORMAT PARQUET)"
+    )
+
+
+def test_stale_tile_ignored_after_upstream_schema_changes(con, cache_dir, sync_cache, tmp_path):
+    """The core issue #63 scenario: a tile materialized against schema A
+    must not be read back once upstream's schema has moved on to schema B —
+    the next query has to notice the fingerprint changed and materialize a
+    fresh tile, leaving the old one on disk but unread.
+    """
+    bbox = (-74.0, 40.0, -73.0, 41.0)  # covers the fixture's NYC-area cluster
+
+    # Schema A: materialize against the full places fixture.
+    paths_a = cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con)
+    assert paths_a
+    fingerprint_a = cache.resolve_fingerprint(RELEASE, THEME, str(FIXTURE_PATH))
+    for p in paths_a:
+        assert f"/{fingerprint_a}/" in p
+
+    # Schema B: same rows/bbox, but missing the "confidence" column — a
+    # different upstream dataset (older/newer code, a different fixture
+    # during dev) with a different column layout.
+    fixture_b = tmp_path / "places_no_confidence.parquet"
+    _write_fixture_dropping_column(con, fixture_b, "confidence")
+
+    fingerprint_b = cache.resolve_fingerprint(RELEASE, THEME, str(fixture_b))
+    assert fingerprint_b != fingerprint_a  # different columns, different fingerprint
+
+    paths_b = cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(fixture_b), lambda: con)
+    assert paths_b
+    # The new query materialized fresh tiles under schema B's fingerprint —
+    # it did not (and could not have) read schema A's stale tile.
+    assert paths_b != paths_a
+    for p in paths_b:
+        assert f"/{fingerprint_b}/" in p
+    quoted = ", ".join(f"'{p}'" for p in paths_b)
+    desc = con.execute(f"SELECT * FROM read_parquet([{quoted}]) LIMIT 0").description
+    assert "confidence" not in {c[0] for c in desc}
+
+    # The old, now-stale schema-A tile is still sitting on disk — untouched,
+    # just never looked at again (it self-cleans via LRU eviction later).
+    for t in cache.tiles_for_bbox(*bbox):
+        assert cache.tile_path(RELEASE, THEME, fingerprint_a, t).exists()
+
+
+def test_cached_tile_paths_ignores_stale_fingerprint_dir(con, cache_dir, sync_cache, tmp_path):
+    """cached_tile_paths() (place_details' cheap first-look path) must only
+    ever return tiles under the *current* schema fingerprint, never a
+    stale one left over from an earlier schema.
+    """
+    bbox = (-74.0, 40.0, -73.0, 41.0)
+    cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con)
+    stale = cache.cached_tile_paths(RELEASE, THEME, str(FIXTURE_PATH))
+    assert stale != []
+
+    fixture_b = tmp_path / "places_no_confidence.parquet"
+    _write_fixture_dropping_column(con, fixture_b, "confidence")
+
+    # Nothing has been materialized under schema B's fingerprint yet, so
+    # cached_tile_paths must report empty for it — not fall through to
+    # schema A's (stale, wrong-schema) tiles.
+    assert cache.cached_tile_paths(RELEASE, THEME, str(fixture_b)) == []
+
+
+def test_offline_fallback_serves_newest_existing_fingerprint_dir(
+    con, cache_dir, sync_cache, monkeypatch
+):
+    """Issue #63's subtle case: upstream is unreachable (probe_schema fails),
+    but cache-as-fallback (#5) must still serve whatever fingerprint dir was
+    last populated, rather than refusing to answer.
+    """
+    bbox = (-74.0, 40.0, -73.0, 41.0)
+    populated = cache.local_paths_for_query(
+        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con
+    )
+    assert populated
+
+    # Simulate upstream going unreachable: the schema probe fails no matter
+    # what glob is passed.
+    monkeypatch.setattr(db, "probe_schema", lambda glob: None)
+
+    served = cache.local_paths_for_query(
+        con, RELEASE, THEME, bbox, "s3://unreachable/*", lambda: con
+    )
+    assert served == populated  # same on-disk tiles, served without touching "upstream"
+
+
+def test_offline_fallback_with_no_existing_fingerprint_dir_returns_none(
+    con, cache_dir, monkeypatch
+):
+    """If upstream is unreachable AND nothing has ever been cached for this
+    release/theme, there's nothing to fall back to — local_paths_for_query
+    must return None (caller falls back to querying upstream directly,
+    which will hit the same unreachable error).
+    """
+    monkeypatch.setattr(db, "probe_schema", lambda glob: None)
+    bbox = (-74.0, 40.0, -73.0, 41.0)
+    result = cache.local_paths_for_query(
+        con, RELEASE, THEME, bbox, "s3://unreachable/*", lambda: con
+    )
+    assert result is None
+
+
+def test_eviction_counts_old_layout_tiles_toward_cap(con, cache_dir, monkeypatch):
+    """Pre-#63 tiles living directly under <theme>/ (no fingerprint dir) are
+    not migrated, but they must still be walked and evicted by the
+    size-based LRU cap like any other cached tile — see the module
+    docstring's "Old-layout tiles" section for why no active migration.
+    """
+    # An old-layout tile: no fingerprint subdirectory.
+    old_layout_dir = cache.cache_dir() / RELEASE / THEME
+    old_layout_dir.mkdir(parents=True)
+    old_tile = old_layout_dir / "tile_40_-74.parquet"
+    old_tile.write_bytes(b"0" * 4000)
+    old_time = time.time() - 1000
+    os.utime(old_tile, (old_time, old_time))  # oldest: first evicted
+
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", str(5000 / 1024 / 1024))
+    tiles = [(-74, 40), (-75, 40), (-76, 40)]
+    for t in tiles:
+        cache.ensure_tile(con, RELEASE, THEME, t, str(FIXTURE_PATH))
+
+    assert not old_tile.exists()  # evicted: it was the oldest file on disk
+
+
+def test_inflight_dedup_key_includes_fingerprint(con, cache_dir, monkeypatch):
+    """Two queries that miss the same tile coordinates but resolve to
+    *different* schema fingerprints must each trigger their own background
+    fetch — the in-flight dedup key has to include the fingerprint, or a
+    fetch for schema A's tile would wrongly suppress schema B's.
+    """
+    monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
+    calls: list[tuple] = []
+    lock = threading.Lock()
+
+    def counting_ensure_tile(con_, release_, theme_, tile_, upstream_glob_, fingerprint_):
+        with lock:
+            calls.append((fingerprint_, tile_))
+        time.sleep(0.1)  # widen the window so both fetches are in flight together
+        return cache.tile_path(release_, theme_, fingerprint_, tile_)
+
+    monkeypatch.setattr(cache, "ensure_tile", counting_ensure_tile)
+
+    def fake_schema_fingerprint(glob: str) -> str:
+        return "fingerprintA" if glob == "upstreamA" else "fingerprintB"
+
+    monkeypatch.setattr(cache, "schema_fingerprint", fake_schema_fingerprint)
+
+    bbox = (-74.0, 40.0, -73.0, 41.0)
+    tile = cache.tiles_for_bbox(*bbox)[0]
+    cache.local_paths_for_query(con, RELEASE, THEME, bbox, "upstreamA", duckdb.connect)
+    cache.local_paths_for_query(con, RELEASE, THEME, bbox, "upstreamB", duckdb.connect)
+    time.sleep(0.3)  # let both background attempts finish
+
+    assert ("fingerprintA", tile) in calls
+    assert ("fingerprintB", tile) in calls
 
 
 def test_parse_warm_region_valid():
