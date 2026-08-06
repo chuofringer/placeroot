@@ -173,9 +173,16 @@ def build_place_rows() -> list[tuple]:
         lat, lon = offset_point(hlat, hlon, distance, bearing)
         add(f"Arctic Place {i}", lat, lon, "bank", "bank", "open", 0.9)
 
-    # Antimeridian pair — documents (does not fix) lack of seam handling.
+    # Antimeridian cluster (issue #42): points straddling the +/-180 seam on
+    # both sides, close enough together that a radius search centered on the
+    # seam (e.g. lat=10.0, lon=179.99) must return rows from both sides for
+    # the bbox prefilter to be correct. Distinct categories so find_places'
+    # category filter and summarize_area's category mix can each be checked
+    # against both sides independently.
     add("Dateline West", 10.0, 179.98, "restaurant", "restaurant", "open", 0.7)
+    add("Dateline West Cafe", 10.001, 179.985, "coffee_shop", "coffee_shop", "open", 0.65)
     add("Dateline East", 10.0, -179.98, "restaurant", "restaurant", "open", 0.7)
+    add("Dateline East Bank", 9.999, -179.985, "bank", "bank", "open", 0.65)
 
     return rows
 
