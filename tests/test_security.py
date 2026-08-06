@@ -139,3 +139,83 @@ def test_sql_str_roundtrips_through_duckdb_parser():
     for value in ["us-west-2", "a'b", "'; DROP TABLE t; --", "trailing'"]:
         (out,) = con.execute(f"SELECT {db._sql_str(value)}").fetchone()
         assert out == value
+
+
+# --- Second-pass hardening: DoS bounds and defense-in-depth casts ---
+
+
+def _staircase(n):
+    # Near-worst-case for Douglas-Peucker: resists simplification, so each
+    # split drops ~one point — the O(n^2) shape that motivated the op budget.
+    coords = [[i * 1e-4, (i % 2) * 1e-5 + i * 1e-9] for i in range(n)]
+    return {"type": "LineString", "coordinates": coords}
+
+
+def test_simplify_rejects_oversized_geometry():
+    with pytest.raises(simplify.InvalidGeometry):
+        simplify.simplify_geometry(_staircase(simplify.MAX_INPUT_POINTS + 1))
+
+
+def test_simplify_op_budget_bounds_adversarial_input():
+    import time
+
+    t0 = time.monotonic()
+    result = simplify.simplify_geometry(_staircase(simplify.MAX_INPUT_POINTS), max_tokens=500)
+    elapsed = time.monotonic() - t0
+    # Without the op budget this staircase runs O(n^2) x ~80 fit iterations
+    # (~88s at 100k pre-fix). The budget must keep it to a few seconds even
+    # on a slow CI box; 20s is a generous ceiling that still catches a
+    # regression that removed the bound.
+    assert elapsed < 20.0
+    assert result["geometry"]["type"] == "LineString"
+    assert result["kept_points"] >= 2  # endpoints always survive
+
+
+def test_simplify_budget_does_not_harm_easily_simplified_geometry():
+    # A smooth shape simplifies with few ops, never touching the budget —
+    # confirm the bound doesn't over-simplify legitimate input.
+    import math
+
+    circle = {
+        "type": "LineString",
+        "coordinates": [
+            [math.cos(t / 200 * 2 * math.pi) * 0.01, math.sin(t / 200 * 2 * math.pi) * 0.01]
+            for t in range(200)
+        ],
+    }
+    result = simplify.simplify_geometry(circle, max_tokens=2000)
+    assert result["kept_points"] > 8  # not collapsed to endpoints
+
+
+def test_resolve_place_token_fanout_is_capped():
+    from placeroot import geocode
+
+    huge = " ".join(f"word{i}xyz" for i in range(5000))
+    tokens = geocode._significant_tokens(huge)
+    assert len(tokens) <= geocode._MAX_RESOLVE_TOKENS
+
+
+def test_query_limit_is_cast_and_clamped(cache_on, monkeypatch):
+    overture.set_data_path(str(FIXTURE_PATH))
+    try:
+        # A float limit (a non-MCP caller could pass one) must not reach the
+        # SQL LIMIT clause as-is; int()+clamp handles it without error.
+        rows = overture.find_places(40.7, -73.9, radius_m=2000, limit=3.9)
+        assert len(rows) <= overture.MAX_ROWS
+        rows = overture.find_places(40.7, -73.9, radius_m=2000, limit=10_000)
+        assert len(rows) <= overture.MAX_ROWS
+    finally:
+        overture.set_data_path(None)
+
+
+def test_release_env_override_rejects_non_release_shaped_value(monkeypatch):
+    from placeroot import release
+
+    monkeypatch.setenv("PLACEROOT_OVERTURE_RELEASE", "../../etc/passwd")
+    monkeypatch.setattr(release, "_discover", lambda: None)
+    release.reset_cache()
+    try:
+        # Junk is ignored; falls through to discovery (None here) then the pin.
+        assert release.resolve_release() == release.PINNED_RELEASE
+    finally:
+        release.reset_cache()

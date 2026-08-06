@@ -329,7 +329,9 @@ def buildings_at(
     their field — see degraded_fields().
     """
     _ensure_spatial()
-    limit = min(limit, MAX_ROWS)
+    # int() before the SQL LIMIT interpolation — defense in depth for any
+    # direct (non-MCP) caller; the MCP layer already validates the type.
+    limit = max(0, min(int(limit), MAX_ROWS))
     upstream = _upstream_glob()
     missing = set(_check_schema(upstream))
     bbox_filter, params = _bbox_filter(lat, lon, radius_m)
