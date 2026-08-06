@@ -48,3 +48,16 @@ def test_warm_start_skipped_when_cache_disabled(monkeypatch):
 def test_parse_warm_region_reexported_for_operators():
     # PLACEROOT_WARM_REGION's format is documented via this parser.
     assert parse_warm_region("40.7,-73.9,1000") == (40.7, -73.9, 1000.0)
+
+
+def test_release_attribution_reaches_instructions():
+    """Regression: MCPServer.instructions is a read-only property; main()
+    must write through the low-level server or it crashes at startup."""
+    from placeroot import server
+
+    original = server.mcp._lowlevel_server.instructions
+    try:
+        server.mcp._lowlevel_server.instructions = "probe"
+        assert server.mcp.instructions == "probe"
+    finally:
+        server.mcp._lowlevel_server.instructions = original
