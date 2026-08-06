@@ -19,6 +19,12 @@ dev = [
     "pytest>=8.0.0",
     "ruff>=0.6.0",
 ]
+# Only installed by the CI browser-smoke job (and locally via
+# `uv sync --group browser`) — a real Chromium binary has no business in the
+# offline `uv sync` / default `pytest` path. See scripts/browser_smoke.py.
+browser = [
+    "playwright>=1.40.0",
+]
 
 [build-system]
 requires = ["hatchling"]
