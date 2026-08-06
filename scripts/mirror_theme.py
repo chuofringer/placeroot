@@ -168,6 +168,19 @@ def list_source_files(
 # --- Connection ---------------------------------------------------------
 
 
+def _sql_str(value: str) -> str:
+    """A single-quoted SQL string literal with embedded single quotes escaped.
+
+    DuckDB's `SET <opt> = '...'` takes a literal, not a bind parameter, so a
+    region/endpoint/credential interpolated into one must have any single
+    quote doubled — otherwise a value containing one breaks the statement or
+    injects SQL. Mirrors placeroot.db._sql_str (this script deliberately
+    doesn't import from the package's connection module — see
+    configure_connection's own note).
+    """
+    return "'" + value.replace("'", "''") + "'"
+
+
 def configure_connection(endpoint: str | None, region: str) -> duckdb.DuckDBPyConnection:
     """A DuckDB connection configured for both anonymous reads (the public
     Overture source) and, if endpoint/credentials are set, writes to a
@@ -179,9 +192,9 @@ def configure_connection(endpoint: str | None, region: str) -> duckdb.DuckDBPyCo
     con = duckdb.connect()
     con.execute("INSTALL httpfs; LOAD httpfs;")
     con.execute("SET enable_progress_bar=false;")
-    con.execute(f"SET s3_region='{region}';")
+    con.execute(f"SET s3_region={_sql_str(region)};")
     if endpoint:
-        con.execute(f"SET s3_endpoint='{endpoint}';")
+        con.execute(f"SET s3_endpoint={_sql_str(endpoint)};")
         con.execute("SET s3_url_style='path';")
     access_key = os.environ.get(
         "PLACEROOT_S3_ACCESS_KEY_ID", os.environ.get("AWS_ACCESS_KEY_ID", "")
@@ -189,8 +202,8 @@ def configure_connection(endpoint: str | None, region: str) -> duckdb.DuckDBPyCo
     secret_key = os.environ.get(
         "PLACEROOT_S3_SECRET_ACCESS_KEY", os.environ.get("AWS_SECRET_ACCESS_KEY", "")
     )
-    con.execute(f"SET s3_access_key_id='{access_key}';")
-    con.execute(f"SET s3_secret_access_key='{secret_key}';")
+    con.execute(f"SET s3_access_key_id={_sql_str(access_key)};")
+    con.execute(f"SET s3_secret_access_key={_sql_str(secret_key)};")
     con.execute("SET http_timeout=30000;")
     con.execute("SET http_retries=3;")
     con.execute("SET http_retry_wait_ms=500;")
