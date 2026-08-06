@@ -3,7 +3,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from placeroot import overture
+from placeroot import overture, release
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "places.parquet"
 
@@ -12,11 +12,18 @@ CENTER_LON = -73.900000
 
 
 @pytest.fixture(autouse=True)
-def offline_data(request):
-    """Point the query layer at the committed fixture for every test except @live ones."""
+def offline_data(request, monkeypatch):
+    """Point the query layer at the committed fixture for every test except @live ones.
+
+    Also pins the release (so no test triggers real release discovery) and
+    disables the tile cache by default (so existing tests keep querying the
+    fixture directly) — cache-specific tests opt back in explicitly.
+    """
     if "live" in request.keywords:
         yield
         return
+    monkeypatch.setenv("PLACEROOT_OVERTURE_RELEASE", release.PINNED_RELEASE)
+    monkeypatch.setenv("PLACEROOT_CACHE", "off")
     overture.set_data_path(str(FIXTURE_PATH))
     try:
         yield
