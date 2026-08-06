@@ -46,7 +46,7 @@ def _chain(*names: str) -> list[list[dict]]:
 def build_divisions() -> list[tuple]:
     rows = []
 
-    def add(division_id, name, subtype, country, region, lat, lon, hierarchies):
+    def add(division_id, name, subtype, country, region, lat, lon, hierarchies, population=None):
         rows.append((
             division_id,
             _point_bbox(lat, lon),
@@ -55,28 +55,46 @@ def build_divisions() -> list[tuple]:
             country,
             region,
             hierarchies,
+            population,
         ))
 
     add("gers-div-us", "United States", "country", "US", None, 39.8, -98.5, _chain("United States"))
     add(
         "gers-div-ny", "New York", "region", "US", "US-NY", 43.0, -75.0,
-        _chain("United States", "New York"),
+        _chain("United States", "New York"), population=19_571_216,
     )
+    # Illinois deliberately outweighs Massachusetts in region population so
+    # a same-named-pair test (Fairview, below) can exercise the "presence in
+    # a more populous region" prominence proxy (#47) when neither candidate
+    # carries its own population.
     add(
         "gers-div-il", "Illinois", "region", "US", "US-IL", 40.0, -89.0,
-        _chain("United States", "Illinois"),
+        _chain("United States", "Illinois"), population=12_582_032,
     )
     add(
         "gers-div-ma", "Massachusetts", "region", "US", "US-MA",
-        42.4, -71.4, _chain("United States", "Massachusetts"),
+        42.4, -71.4, _chain("United States", "Massachusetts"), population=6_981_974,
     )
     add(
+        "gers-div-oh", "Ohio", "region", "US", "US-OH", 40.4, -82.9,
+        _chain("United States", "Ohio"), population=11_785_935,
+    )
+    # A non-US region, so parsing "London, Ontario" has to hit the general
+    # region-subtype-name lookup rather than the embedded US state map (#46).
+    add(
+        "gers-div-ontario", "Ontario", "region", "CA", "CA-ON", 51.25, -85.32,
+        _chain("Canada", "Ontario"),
+    )
+    # Real-world Springfield populations (MA > IL) so the population tiebreak
+    # (#47) has a clear, honest answer to check against.
+    add(
         "gers-div-springfield-il", "Springfield", "locality", "US", "US-IL",
-        39.78, -89.65, _chain("United States", "Illinois", "Springfield"),
+        39.78, -89.65, _chain("United States", "Illinois", "Springfield"), population=114_230,
     )
     add(
         "gers-div-springfield-ma", "Springfield", "locality", "US", "US-MA",
         42.10, -72.59, _chain("United States", "Massachusetts", "Springfield"),
+        population=155_929,
     )
     add(
         "gers-div-brooklyn", "Brooklyn", "locality", "US", "US-NY",
@@ -90,6 +108,46 @@ def build_divisions() -> list[tuple]:
     add(
         "gers-div-riverside", "Riverside", "neighborhood", "US", "US-IL",
         39.79, -89.64, _chain("United States", "Illinois", "Springfield", "Riverside"),
+    )
+    # Same name, two real Ohio/Ontario cities named "London" — exercises
+    # "City, ST" (US abbreviation) and "City, Region" (general region-name)
+    # parsing (#46) resolving to two different, correct candidates.
+    add(
+        "gers-div-london-oh", "London", "locality", "US", "US-OH",
+        39.89, -83.45, _chain("United States", "Ohio", "London"),
+    )
+    add(
+        "gers-div-london-on", "London", "locality", "CA", "CA-ON",
+        42.98, -81.25, _chain("Canada", "Ontario", "London"),
+    )
+    # Same name, same subtype, neither carries a population value: exercises
+    # the hierarchy-depth/region-population proxy chain (#47) rather than
+    # the population tiebreak. Hierarchy depth ties (both 3 deep), so the
+    # decisive step is Illinois's larger region population (above). IDs are
+    # deliberately the *opposite* of the wanted order (fairview-ma sorts
+    # before zz-fairview-il alphabetically) so this test only passes if the
+    # region-population proxy actually ran — id is the last tiebreak, not
+    # a coincidental first one.
+    add(
+        "gers-div-zz-fairview-il", "Fairview", "locality", "US", "US-IL",
+        39.5, -89.0, _chain("United States", "Illinois", "Fairview"),
+    )
+    add(
+        "gers-div-fairview-ma", "Fairview", "locality", "US", "US-MA",
+        42.3, -71.8, _chain("United States", "Massachusetts", "Fairview"),
+    )
+    # Same name, different subtype, neither carries population: exercises
+    # the subtype-rank step of the proxy chain (#47) ahead of hierarchy
+    # depth/region population. IDs again deliberately inverted vs. the
+    # wanted order for the same reason as Fairview above.
+    add(
+        "gers-div-zz-hilltop-loc", "Hilltop", "locality", "US", "US-IL",
+        39.6, -89.2, _chain("United States", "Illinois", "Hilltop"),
+    )
+    add(
+        "gers-div-hilltop-nbhd", "Hilltop", "neighborhood", "US", "US-NY",
+        CENTER_LAT + 0.002, CENTER_LON + 0.002,
+        _chain("United States", "New York", "Brooklyn", "Hilltop"),
     )
     return rows
 
@@ -128,10 +186,11 @@ def main() -> None:
             subtype VARCHAR,
             country VARCHAR,
             region VARCHAR,
-            hierarchies STRUCT("name" VARCHAR)[][]
+            hierarchies STRUCT("name" VARCHAR)[][],
+            population BIGINT
         )
     """)
-    con.executemany("INSERT INTO divisions VALUES (?, ?, ?, ?, ?, ?, ?)", divisions)
+    con.executemany("INSERT INTO divisions VALUES (?, ?, ?, ?, ?, ?, ?, ?)", divisions)
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
     con.execute(f"COPY divisions TO '{DIVISIONS_PATH}' (FORMAT PARQUET)")
     print(f"wrote {len(divisions)} rows to {DIVISIONS_PATH}")
