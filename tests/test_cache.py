@@ -147,9 +147,11 @@ def test_concurrent_cache_misses_on_same_tile_only_fetch_once(con, cache_dir, mo
 
 
 def test_lru_eviction_removes_oldest_tiles_when_over_cap(con, cache_dir, monkeypatch):
-    # ~2000 bytes: room for a couple of small tiles but not the whole set,
-    # forcing eviction of the least-recently-used ones.
-    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", str(2000 / 1024 / 1024))
+    # ~5000 bytes: room for a couple of small tiles but not the whole set,
+    # forcing eviction of the least-recently-used ones. (Bumped from 2000
+    # when the places fixture grew place_details columns, issue #9 — the
+    # NYC-area tile alone is now ~20KB.)
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", str(5000 / 1024 / 1024))
     tiles = [(-74, 40), (-75, 40), (-76, 40), (15, 78)]
     paths = []
     for t in tiles:

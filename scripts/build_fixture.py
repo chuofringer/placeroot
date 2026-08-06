@@ -1,20 +1,38 @@
-"""Builds the offline test fixture: tests/fixtures/places.parquet.
+"""Builds the offline test fixtures: tests/fixtures/places.parquet and
+tests/fixtures/divisions.parquet.
 
-Synthetic Overture-shaped places data (struct columns matching what
-overture.py expects: bbox, names, taxonomy, basic_category,
-operating_status, confidence). Deterministic — same seed, same output —
-so it can be regenerated and diffed. Run with:
+places.parquet: synthetic Overture-shaped places data (struct columns
+matching what overture.py expects: id, bbox, names, taxonomy,
+basic_category, operating_status, confidence, addresses, websites, phones,
+socials, brand, sources — the last six back place_details, issue #9).
+GERS ids (issue #25) are deterministic 32-char hex strings derived from each
+row's index, standing in for Overture's real GERS ids without claiming to
+be one.
+
+divisions.parquet: a small synthetic divisions-theme fixture (issue #11) —
+a handful of nested rectangular polygons (neighborhood < locality < county
+< region < country) around places.parquet's downtown cluster, plus one
+unrelated polygon far away to prove point-in-polygon actually excludes
+non-containing divisions. Real division_area geometry is irregular; these
+are rectangles because admin_lookup only needs correct containment
+semantics, not realistic shapes.
+
+Both are deterministic — same seed, same output — so they can be
+regenerated and diffed. Run with:
 
     uv run python scripts/build_fixture.py
 """
 
+import hashlib
 import math
 import random
 from pathlib import Path
 
 import duckdb
 
-FIXTURE_PATH = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "places.parquet"
+FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
+PLACES_FIXTURE_PATH = FIXTURES_DIR / "places.parquet"
+DIVISIONS_FIXTURE_PATH = FIXTURES_DIR / "divisions.parquet"
 SEED = 42
 EARTH_RADIUS_M = 6371000.0
 
@@ -31,6 +49,11 @@ CATEGORIES = [
 
 HIGH_LAT_CENTER = (78.0, 15.0)
 HIGH_LAT_N = 5
+
+
+def gers_id(index: int) -> str:
+    """Deterministic 32-hex-char id, GERS-shaped but synthetic."""
+    return hashlib.md5(f"placeroot-fixture-{SEED}-{index}".encode()).hexdigest()
 
 
 def offset_point(
@@ -51,19 +74,29 @@ def offset_point(
     return math.degrees(lat2), math.degrees(lon2)
 
 
-def build_rows() -> list[tuple]:
+def build_place_rows() -> list[tuple]:
     rng = random.Random(SEED)
     rows = []
 
-    def add(name, lat, lon, category, basic_category, status, confidence, alternates=None):
+    def add(
+        name, lat, lon, category, basic_category, status, confidence, alternates=None,
+        addresses=None, websites=None, phones=None, socials=None, brand=None, sources=None,
+    ):
+        index = len(rows)
         rows.append((
-            f"gers-{len(rows):05d}",
+            gers_id(index),
             {"xmin": lon, "ymin": lat, "xmax": lon, "ymax": lat},
             {"primary": name},
             {"primary": category, "alternates": alternates or []},
             basic_category,
             status,
             confidence,
+            addresses or [],
+            websites or [],
+            phones or [],
+            socials or [],
+            brand,
+            sources or [],
         ))
 
     # Dense urban tile: 200 points within 400m of CENTER, uniform over the disk.
@@ -76,11 +109,43 @@ def build_rows() -> list[tuple]:
         name = f"Cluster Place {i:03d}" if i != 5 else "Blue Bottle Roastery"
         status = "open" if i % 11 != 0 else "closed_permanently"
         confidence = round(0.5 + 0.49 * rng.random(), 2)
+
+        # A handful of rows get full place_details fixtures; most get none,
+        # matching real data where most places have thin attribution.
+        details = {}
+        if i == 5:  # Blue Bottle Roastery: a fully-populated place_details row.
+            details = {
+                "addresses": [
+                    {
+                        "freeform": "123 Main St", "locality": "Metropolis",
+                        "region": "NY", "postcode": "10001", "country": "US",
+                    },
+                ],
+                "websites": ["https://bluebottleroastery.example"],
+                "phones": ["+1-555-0100"],
+                "socials": ["https://instagram.example/bluebottleroastery"],
+                "brand": {"names": {"primary": "Blue Bottle Coffee"}},
+                "sources": [{"dataset": "meta", "record_id": "meta-001"}],
+            }
+        elif i == 10:  # A place with more addresses than the truncation cap.
+            details = {
+                "addresses": [
+                    {
+                        "freeform": f"{n} Overflow Ave", "locality": "Metropolis",
+                        "region": "NY", "postcode": "10001", "country": "US",
+                    }
+                    for n in range(8)
+                ],
+                "websites": ["https://overflow.example"],
+                "sources": [{"dataset": "osm", "record_id": f"osm-{n}"} for n in range(8)],
+            }
+
         add(
             name, lat, lon,
             category if not uncategorized else "exotic_niche",
             None if uncategorized else category,
             status, confidence,
+            **details,
         )
 
     # Circle-vs-square: a point at 1.2x a 500m test radius, on the bbox
@@ -111,9 +176,44 @@ def build_rows() -> list[tuple]:
     return rows
 
 
-def main() -> None:
-    rows = build_rows()
-    con = duckdb.connect()
+def box_wkt(lat_min: float, lat_max: float, lon_min: float, lon_max: float) -> str:
+    """A rectangular polygon WKT string covering the given lat/lon box."""
+    return (
+        f"POLYGON(({lon_min} {lat_min}, {lon_min} {lat_max}, "
+        f"{lon_max} {lat_max}, {lon_max} {lat_min}, {lon_min} {lat_min}))"
+    )
+
+
+def build_division_rows(con: duckdb.DuckDBPyConnection) -> list[tuple]:
+    """Nested divisions around places.parquet's downtown, smallest-first by area.
+
+    Every level here contains (CENTER_LAT, CENTER_LON); admin_lookup should
+    return all five, neighborhood first. A sixth, unrelated polygon (around
+    the high-latitude places cluster) proves non-containing divisions are
+    excluded rather than just always-included.
+    """
+    levels = [
+        ("neighborhood", box_wkt(40.695, 40.705, -73.905, -73.895)),
+        ("locality", box_wkt(40.6, 40.8, -74.0, -73.8)),
+        ("county", box_wkt(40.0, 41.0, -75.0, -73.0)),
+        ("region", box_wkt(39.0, 42.0, -76.0, -72.0)),
+        ("country", box_wkt(30.0, 50.0, -90.0, -60.0)),
+        # Unrelated: near the high-latitude places cluster, doesn't contain CENTER.
+        ("country", box_wkt(70.0, 85.0, 0.0, 30.0)),
+    ]
+    names = [
+        "Downtown", "Metropolis", "Franklin County", "Empire State", "United Testland",
+        "Arctica",
+    ]
+    rows = []
+    for i, ((subtype, wkt), name) in enumerate(zip(levels, names)):
+        (wkb,) = con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()
+        rows.append((gers_id(10_000 + i), {"primary": name}, subtype, wkb))
+    return rows
+
+
+def build_places(con: duckdb.DuckDBPyConnection) -> None:
+    rows = build_place_rows()
     con.execute("""
         CREATE TABLE places (
             id VARCHAR,
@@ -122,13 +222,47 @@ def main() -> None:
             taxonomy STRUCT("primary" VARCHAR, alternates VARCHAR[]),
             basic_category VARCHAR,
             operating_status VARCHAR,
-            confidence DOUBLE
+            confidence DOUBLE,
+            addresses STRUCT(
+                freeform VARCHAR, locality VARCHAR, region VARCHAR,
+                postcode VARCHAR, country VARCHAR
+            )[],
+            websites VARCHAR[],
+            phones VARCHAR[],
+            socials VARCHAR[],
+            brand STRUCT(names STRUCT("primary" VARCHAR)),
+            sources STRUCT(dataset VARCHAR, record_id VARCHAR)[]
         )
     """)
-    con.executemany("INSERT INTO places VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
-    FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con.execute(f"COPY places TO '{FIXTURE_PATH}' (FORMAT PARQUET)")
-    print(f"wrote {len(rows)} rows to {FIXTURE_PATH}")
+    con.executemany(
+        "INSERT INTO places VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
+    )
+    FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
+    con.execute(f"COPY places TO '{PLACES_FIXTURE_PATH}' (FORMAT PARQUET)")
+    print(f"wrote {len(rows)} rows to {PLACES_FIXTURE_PATH}")
+
+
+def build_divisions(con: duckdb.DuckDBPyConnection) -> None:
+    con.execute("INSTALL spatial; LOAD spatial;")
+    rows = build_division_rows(con)
+    con.execute("""
+        CREATE TABLE divisions (
+            id VARCHAR,
+            names STRUCT("primary" VARCHAR),
+            subtype VARCHAR,
+            geometry BLOB
+        )
+    """)
+    con.executemany("INSERT INTO divisions VALUES (?, ?, ?, ?)", rows)
+    FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
+    con.execute(f"COPY divisions TO '{DIVISIONS_FIXTURE_PATH}' (FORMAT PARQUET)")
+    print(f"wrote {len(rows)} rows to {DIVISIONS_FIXTURE_PATH}")
+
+
+def main() -> None:
+    con = duckdb.connect()
+    build_places(con)
+    build_divisions(con)
 
 
 if __name__ == "__main__":
