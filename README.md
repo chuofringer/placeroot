@@ -97,8 +97,10 @@ hit@1/hit@5:
 uv run python scripts/geocode_benchmark.py
 ```
 
-Measured against a live release (113 queries): **hit@1 98.2%, hit@5 98.2%**
-(up from an initial 35.4%/54.9%). The two biggest contributors, in order:
+Measured against a live release (113 queries): **hit@1 100%, hit@5 100%**
+(progression: 35.4%/54.9% initially, 98.2% after the performance and
+ranking work, 100% once name-variant normalization landed). The two
+biggest contributors before the final step, in order:
 the local name table finally made it possible to push match-tier and
 population into the SQL `ORDER BY` *before* the row-limit that feeds
 Python-side ranking — without that, a common name with more matches than
@@ -107,15 +109,13 @@ Angeles") could drop the well-known candidate before ranking ever saw it;
 and "City, ST"/"City, Region" parsing plus the population/prominence
 tiebreak (#46, #47) fixed the rest.
 
-One concrete, honest gap remains, not smoothed over:
-
-- **Abbreviated saint names still miss.** `"St. Louis"` and `"St. Petersburg"`
-  don't match Overture's canonical names, which spell out "Saint" in full
-  ("Saint Louis", "Saint Petersburg") — matching is substring-based, not a
-  learned model, so `"St."` and `"Saint"` are just different strings to it.
-  A small alias table (`St. -> Saint`, and the reverse) would close this;
-  flagged as a follow-up rather than solved here, since it's a narrow
-  string-normalization fix, not a ranking or performance one.
+The former "St. Louis" gap is closed by name-variant normalization
+(St./Saint, Ft./Fort, Mt./Mount, directional prefixes, diacritic folding)
+— variants only run when the literal query lacks a population-backed
+exact match, and a variant's own prominence ranks normally, so tiny
+literal namesakes can't shadow the real city. A benchmark at 100% means
+the *current task set* is saturated, not that geocoding is solved; the
+honest next step is a harder query set, not a victory lap.
 
 ## Development
 
