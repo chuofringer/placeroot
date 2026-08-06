@@ -21,10 +21,9 @@ doesn't replace Overture as the source of truth — the mirror is refreshed
 from Overture, not the other way around — it just removes Overture's
 availability from PlaceRoot's own critical path.
 
-This is scoped to the places theme (the tools that ship today all depend on
-it); `scripts/mirror_theme.py` takes `--theme`/`--type` so the same mechanism
-covers divisions, addresses, buildings, or transportation later without new
-tooling.
+This runbook walks through the places theme; `scripts/mirror_theme.py`
+takes `--theme`/`--type` so the same mechanism covers divisions, addresses,
+buildings, or transportation without new tooling.
 
 ## What you need (your side)
 
