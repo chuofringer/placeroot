@@ -2,11 +2,11 @@
 
 **Ground AI agents in open map data.**
 
-PlaceRoot is an MCP server that answers spatial questions from [Overture Maps](https://overturemaps.org) — queried live with DuckDB, no API key, no signup, no vendor platform.
+PlaceRoot is an MCP server that answers spatial questions from [Overture Maps](https://overturemaps.org) — no API key, no signup, no vendor platform.
 
-- **Answers, not data dumps.** Every tool returns compact, ranked results that fit in an agent's context window (~2K tokens), never raw GeoJSON.
-- **Fresh, rich place data.** Operating status, confidence scores, and brands from Overture (contributed by Meta, Uber, TomTom, and others).
-- **Zero setup.** Queries run directly against Overture's public GeoParquet on S3 — no ETL, no database, no key.
+- **Answers, not data dumps.** Every tool returns compact, ranked results sized for an agent's context window — never a raw GeoJSON dump.
+- **Rich, fresh place data.** Operating status, confidence scores, and brands, sourced from Overture's open dataset (contributed by Meta, Uber, TomTom, and others).
+- **Zero setup.** Reads Overture's public data directly — nothing to install beyond the server itself, no key, no database.
 
 ## Quick start
 
@@ -26,13 +26,11 @@ Add to Claude Desktop / Claude Code:
 Or run it directly:
 
 ```bash
-uv run placeroot          # stdio MCP server
-uv run placeroot --http   # streamable-HTTP endpoint at http://127.0.0.1:8321/mcp
+uvx placeroot             # stdio MCP server
+uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 ```
 
-`--http` serves plain HTTP with no TLS or auth — put a reverse proxy in front for anything beyond local use.
-
-## Tools
+## What it can do
 
 | Tool | Answers |
 |---|---|
@@ -43,33 +41,32 @@ uv run placeroot --http   # streamable-HTTP endpoint at http://127.0.0.1:8321/mc
 | `compare_areas` | 2–5 areas side by side: category mix, density, and what differs most |
 | `within_distance` | Is the nearest matching place within N meters of a point? |
 | `geocode` | Free-text place name → ranked candidates with coordinates and admin context |
-| `resolve_place` | Free-text place reference → ranked, typed GERS ids an agent can hold onto |
-| `reverse_geocode` | Point → nearest address plus its containing division chain |
+| `resolve_place` | Free-text place reference → stable ids an agent can hold onto across turns |
+| `reverse_geocode` | Point → nearest address plus its containing admin areas |
 | `summarize_buildings` | Building stock in an area: count, footprint area, height and use mix |
 | `buildings_at` | Nearest building footprints to a point |
-| `isochrone` | The area reachable within N minutes on foot, bike, or car — on PlaceRoot's own routing graph |
+| `isochrone` | The area reachable within N minutes on foot, bike, or car |
 | `render_map` | Any result → a self-contained interactive HTML map |
-| `simplify_geometry` | Any GeoJSON geometry → simplified to a token budget |
+| `simplify_geometry` | Any geometry → simplified to fit a token budget |
 
-More on the way — see [ROADMAP.md](ROADMAP.md).
+More on the way.
 
 ## Why
 
-Agents are bad at maps. Existing map tools either require vendor API keys or return raw GeoJSON far too large for a context window. PlaceRoot's design rule: every answer fits in ~2K tokens, and anything bigger returns a summary plus a link.
+Agents are bad at maps. Existing map tools either require vendor API keys or return payloads far too large for a context window. PlaceRoot's rule: every answer fits in a couple of thousand tokens, and anything bigger comes back as a summary.
 
-A few things that make it work:
+A few things that set it apart:
 
-- **GERS ids everywhere.** Every place carries its stable Overture [GERS](https://docs.overturemaps.org/gers/) id, so an agent can hold onto a place across turns and look it up again with `place_details(id=...)` instead of re-searching.
-- **Keyless geocoding.** `geocode`/`reverse_geocode` are built entirely on Overture's divisions and addresses themes — deterministic matching, no third-party geocoding API. 100% hit@1 on a ~113-query real-world benchmark (`scripts/geocode_benchmark.py`).
-- **Local caching.** Hot data is cached on first use, so repeat queries answer in milliseconds and keep working offline. Set `PLACEROOT_CACHE=off` to always query upstream.
-- **Self-hostable end to end.** Optionally mirror the data to your own S3-compatible storage and point PlaceRoot at it — see [docs/MIRROR.md](docs/MIRROR.md).
+- **Stable place ids.** Every place carries its Overture [GERS id](https://docs.overturemaps.org/gers/), so an agent can hold onto a place across turns and look it up again later instead of re-searching.
+- **Built-in geocoding.** Place-name lookup works out of the box — no third-party geocoding service involved.
+- **Fast repeat queries.** Frequently used data is cached locally, so repeat questions answer in milliseconds and keep working offline.
+- **Self-hostable end to end.** Run it locally, serve it over HTTP, or point it at your own copy of the data — no dependency on anyone else's service.
 
 ## Development
 
 ```bash
-uv sync                    # installs pytest + ruff (dev dependency group)
-uv run pytest              # offline tests against committed fixtures
-uv run pytest -m live      # also run opt-in tests against real Overture S3
+uv sync           # install dev dependencies
+uv run pytest     # offline test suite
 uv run ruff check .
 ```
 
