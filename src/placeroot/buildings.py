@@ -166,7 +166,13 @@ def _from_source(bbox: tuple[float, float, float, float]) -> str:
 
 
 def _bbox_filter(lat: float, lon: float, radius_m: float) -> tuple[str, dict]:
-    """Cheap row-group bbox prefilter + the params the centroid distance test also needs."""
+    """Cheap row-group bbox prefilter + the params the centroid distance test also needs.
+
+    radius_m is clamped to geo.MAX_QUERY_RADIUS_M (an abuse guard against a
+    world-spanning bbox — see geo.clamp_radius_m), the clamped value driving
+    both the bbox and the $radius_m centroid-distance parameter so they agree.
+    """
+    radius_m = geo.clamp_radius_m(radius_m)
     xmin, ymin, xmax, ymax = geo.bbox_around(lat, lon, radius_m)
     bbox_filter = (
         "bbox.xmax >= $xmin AND bbox.xmin <= $xmax"

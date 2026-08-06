@@ -31,6 +31,17 @@ _PASSTHROUGH_TYPES = {"Point", "MultiPoint"}
 MAX_EXPAND_ITERS = 40
 MAX_BISECT_ITERS = 40
 
+# Ceiling on the number of input vertices simplify_geometry will accept.
+# The geometry is caller-supplied (the simplify_geometry MCP tool takes it
+# directly), RDP is O(n^2) in the worst case, and the token-fit search
+# re-serializes the whole geometry up to MAX_EXPAND_ITERS + MAX_BISECT_ITERS
+# times — so an adversarially large payload is a CPU/latency DoS. 100k
+# vertices is already far more than any real footprint or admin boundary
+# these tools deal with, while keeping even the worst case tractable;
+# anything larger is rejected as InvalidGeometry rather than silently
+# tying up the server.
+MAX_INPUT_POINTS = 100_000
+
 
 class InvalidGeometry(Exception):
     """geojson isn't a recognized/well-formed Point/Line/Polygon geometry."""
@@ -185,6 +196,14 @@ def _validate(geojson) -> tuple[str, object]:
         raise InvalidGeometry("missing or malformed 'coordinates'")
     try:
         n = _count_points(gtype, coords)
+    except (TypeError, IndexError, KeyError) as e:
+        raise InvalidGeometry(f"malformed coordinates for {gtype}: {e}") from e
+    if n > MAX_INPUT_POINTS:
+        raise InvalidGeometry(
+            f"geometry has {n} points; the maximum supported is {MAX_INPUT_POINTS} "
+            "(simplify or split the geometry before sending it)"
+        )
+    try:
         lons = _all_ordinates(gtype, coords, 0)
         lats = _all_ordinates(gtype, coords, 1)
     except (TypeError, IndexError, KeyError) as e:
