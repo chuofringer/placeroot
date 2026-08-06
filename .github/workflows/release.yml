@@ -3,6 +3,11 @@ name: Release
 on:
   release:
     types: [published]
+  # Manual trigger: lets a maintainer re-run the publish without cutting a
+  # new release (e.g. after a transient CI/infra failure). Trusted publishing
+  # keys on repo + workflow filename + environment, not the event type, so a
+  # dispatched run publishes the current pyproject version normally.
+  workflow_dispatch:
 
 jobs:
   pypi:
