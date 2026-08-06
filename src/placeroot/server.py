@@ -9,7 +9,7 @@ import threading
 
 from mcp.server.mcpserver import MCPServer
 
-from placeroot import budget, cache, divisions, mapview, overture, release, simplify
+from placeroot import budget, cache, divisions, mapview, overture, release, routing, simplify
 from placeroot import geocode as geocoding
 
 logger = logging.getLogger(__name__)
@@ -259,6 +259,47 @@ def render_map(result: dict | list, title: str | None = None, inline: bool = Fal
     """
     return mapview.write_artifact(result, title=title, inline=inline)
 
+def isochrone(
+    lat: float,
+    lon: float,
+    minutes: float = 15,
+    mode: str = "walk",
+    speed_m_s: float = routing.DEFAULT_SPEED_M_S,
+    radius_m: float | None = None,
+) -> dict:
+    """Walking isochrone: the area reachable on foot from (lat, lon) within `minutes`.
+
+    Builds a street graph from Overture's transportation theme (footways,
+    paths, residential/service/etc. streets — motorways and trunks are
+    excluded as unwalkable) and runs Dijkstra out to the time budget.
+    Returns {"polygon": <GeoJSON Polygon>, "stats": {reachable_nodes,
+    max_radius_m, area_km2}, ...}. The polygon is a convex hull of reached
+    nodes (documented overestimate near concave boundaries like rivers;
+    reachable_nodes/max_radius_m are exact), decimated to fit the token
+    budget.
+
+    mode: only "walk" is implemented; driving/cycling return a structured
+    {"error": "unsupported_mode"} for now. radius_m optionally overrides
+    the auto-derived graph extraction radius (capped at 5km for walking);
+    passing something larger than the cap returns a structured error
+    instead of silently truncating.
+    """
+    if mode != "walk":
+        return {"error": "unsupported_mode", "supported": ["walk"]}
+    try:
+        return routing.isochrone(lat, lon, minutes=minutes, speed_m_s=speed_m_s, radius_m=radius_m)
+    except routing.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except routing.SchemaDegraded as e:
+        return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
+    except routing.NoGraphNearby as e:
+        return {"error": "no_graph_nearby", "detail": e.detail}
+    except routing.RadiusTooLarge as e:
+        return {
+            "error": "radius_too_large",
+            "detail": e.detail,
+            "max_radius_m": e.max_radius_m,
+        }
 
 
 def _warm_start() -> None:
