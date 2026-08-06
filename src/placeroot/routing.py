@@ -68,19 +68,26 @@ Graph cache (#39): isochrone() reuses a previously-built Graph when the
 newly-needed extraction area is fully contained within a cached graph's
 (deliberately over-fetched) area, keyed by (release, upstream source,
 mode, drive-speed-baking) — see _get_or_build_graph.
+
+Query layer (issue #40): this module used to keep its own DuckDB
+connection/lock/schema-probe/bbox-helpers/geometry-probe, entirely
+separate from overture.py's equivalents — the split predated issue #31's
+connection-factory wiring and meant this module missed that fix outright.
+It now shares overture.py's connection, bbox helpers, and probe_schema
+(all via db.py/geo.py); db.ensure_spatial() is called explicitly here
+since divisions.py/buildings.py are no longer the only spatial callers.
 """
 
 import heapq
 import logging
 import math
-import os
 import threading
 from collections import OrderedDict
-from functools import lru_cache
 
 import duckdb
 
-from placeroot import budget, cache, overture, release, simplify
+from placeroot import budget, cache, db, errors, geo, overture, release, simplify
+from placeroot.errors import UpstreamUnavailable  # noqa: F401 - re-exported; see below
 
 logger = logging.getLogger(__name__)
 
@@ -175,15 +182,14 @@ ESSENTIAL_COLUMNS = {"geometry", "bbox"}
 
 EARTH_RADIUS_M = 6371000.0
 
-_data_path_override: str | None = None
-
-# Guards every use of this module's own shared connection (routing.py keeps
-# a separate DuckDB connection from overture.py's — see _conn() below). A
-# DuckDB connection isn't safe for concurrent execute() calls from multiple
-# threads, which HTTP mode makes possible (issue #24); this lock formalizes
-# the same one-query-at-a-time discipline overture._conn_lock already
-# applies to the places/geocode connection.
-_conn_lock = threading.Lock()
+# Deprecated: import db/geo directly instead. Thin aliases (issue #40 —
+# see the module docstring) so any external reference — test_routing.py's
+# own bbox tests included — keeps working unchanged.
+_conn_lock = db.conn_lock
+_conn = db.shared_conn
+_probe_schema = db.probe_schema
+_bbox_around = geo.bbox_around
+_bbox_filter_sql = geo.bbox_filter_sql
 
 
 class UnsupportedMode(Exception):
@@ -194,18 +200,12 @@ class UnsupportedMode(Exception):
         self.mode = mode
 
 
-class UpstreamUnavailable(Exception):
-    def __init__(self, detail: str):
-        super().__init__(detail)
-        self.detail = detail
+class SchemaDegraded(errors.SchemaDegraded):
+    """Same as overture.SchemaDegraded, just labeled for the transportation
+    dataset — see errors.py for why the message text differs."""
 
-
-class SchemaDegraded(Exception):
     def __init__(self, missing: list[str]):
-        detail = f"required columns missing from transportation dataset: {', '.join(missing)}"
-        super().__init__(detail)
-        self.detail = detail
-        self.missing = missing
+        super().__init__(missing, dataset="transportation dataset")
 
 
 class NoGraphNearby(Exception):
@@ -227,74 +227,24 @@ class RadiusTooLarge(Exception):
 
 
 def set_data_path(path: str | None) -> None:
-    """Point the query layer at a local dataset instead of live S3. Tests only."""
-    global _data_path_override
-    _data_path_override = path
+    """Point the query layer at a local dataset instead of live S3. Tests only.
+
+    Delegates to overture.set_data_path's per-theme+type override (issue
+    #40) — the same mechanism buildings.py uses for its own type override.
+    """
+    overture.set_data_path(path, theme=THEME, type_="segment")
 
 
 def _upstream_glob() -> str:
-    if _data_path_override is not None:
-        return _data_path_override
-    env_path = os.environ.get("PLACEROOT_TRANSPORTATION_DATA_PATH")
-    if env_path:
-        return env_path
-    active_release = release.resolve_release()
-    return f"s3://overturemaps-us-west-2/release/{active_release}/theme={THEME}/type=segment/*"
-
-
-@lru_cache(maxsize=1)
-def _conn() -> duckdb.DuckDBPyConnection:
-    con = duckdb.connect()
-    con.execute("INSTALL httpfs; LOAD httpfs;")
-    con.execute("INSTALL spatial; LOAD spatial;")
-    con.execute("SET s3_region='us-west-2';")
-    con.execute("SET s3_access_key_id='';")
-    con.execute("SET s3_secret_access_key='';")
-    try:
-        con.execute("SET http_timeout=5000;")
-        con.execute("SET http_retries=2;")
-        con.execute("SET http_retry_wait_ms=200;")
-        con.execute("SET http_retry_backoff=2;")
-    except duckdb.Error as e:
-        logger.warning("Could not set httpfs timeout/retry options: %s", e)
-    return con
-
-
-@lru_cache(maxsize=8)
-def _probe_schema(glob: str) -> frozenset | None:
-    try:
-        with _conn_lock:
-            cols = _conn().execute(f"SELECT * FROM read_parquet('{glob}') LIMIT 0").description
-        return frozenset(c[0] for c in cols)
-    except duckdb.Error as e:
-        logger.warning("Schema probe failed for %s: %s", glob, e)
-        return None
-
-
-@lru_cache(maxsize=8)
-def _geometry_wkt_expr(glob: str) -> str:
-    """SQL expression yielding WKT for the geometry column.
-
-    Real Overture parquet types this column as a native GEOMETRY (via
-    GeoParquet metadata) — ST_AsText works on it directly. Our test fixture
-    (and possibly other sources) stores it as a plain WKB BLOB instead,
-    which needs ST_GeomFromWKB first. Detected once per glob and cached.
-    """
-    try:
-        with _conn_lock:
-            cols = _conn().execute(f"SELECT * FROM read_parquet('{glob}') LIMIT 0").description
-        types = {c[0]: str(c[1]) for c in cols}
-    except duckdb.Error as e:
-        logger.warning("Geometry type probe failed for %s: %s", glob, e)
-        types = {}
-    geom_type = types.get("geometry", "")
-    if geom_type.upper().startswith("GEOMETRY"):
-        return "ST_AsText(geometry)"
-    return "ST_AsText(ST_GeomFromWKB(geometry))"
+    # type_="segment" matches this module's own upstream path
+    # (theme=transportation/type=segment); overture._upstream_glob also
+    # honors PLACEROOT_TRANSPORTATION_DATA_PATH as a back-compat fallback
+    # for this theme specifically, so this reads identically to before #40.
+    return overture._upstream_glob(THEME, type_="segment")
 
 
 def missing_columns(glob: str) -> list[str]:
-    present = _probe_schema(glob)
+    present = db.probe_schema(glob)
     if present is None:
         return []
     return [c for c in REQUIRED_COLUMNS if c not in present]
@@ -306,50 +256,6 @@ def _check_schema(glob: str) -> list[str]:
     if essential_missing:
         raise SchemaDegraded(essential_missing)
     return missing
-
-
-def _bbox_around(lat: float, lon: float, radius_m: float) -> tuple[float, float, float, float]:
-    """Square bbox guaranteed to contain the radius_m circle around (lat, lon).
-
-    Same approach as overture._bbox_around, duplicated here rather than
-    imported so routing.py has no dependency on overture.py's internals —
-    see the follow-up list for unifying shared geo helpers (#40).
-
-    Latitude is clamped to [-90, 90] (issue #42), same as overture.py's
-    copy. Longitude is left unwrapped; see _bbox_filter_sql below for how
-    build_graph() turns a crossing box into a seam-safe SQL filter.
-    """
-    dlat = radius_m / 111_320.0
-    dlon = radius_m / (111_320.0 * max(math.cos(math.radians(lat)), 1e-6))
-    ymin = max(lat - dlat, -90.0)
-    ymax = min(lat + dlat, 90.0)
-    return lon - dlon, ymin, lon + dlon, ymax
-
-
-def _bbox_filter_sql(xmin: float, ymin: float, xmax: float, ymax: float) -> tuple[str, dict]:
-    """SQL bbox filter for [xmin, xmax] x [ymin, ymax], antimeridian-safe.
-
-    Minimal duplicate of overture._bbox_filter_sql (issue #42) — kept
-    separate for the same reason _bbox_around is duplicated rather than
-    imported (see above); unifying both is #40's job, not this fix's.
-    """
-    if xmin >= -180.0 and xmax <= 180.0:
-        filter_sql = (
-            "bbox.xmax >= $xmin AND bbox.xmin <= $xmax"
-            " AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
-        )
-        return filter_sql, {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}
-
-    east_xmin = xmin + 360.0 if xmin < -180.0 else xmin
-    west_xmax = xmax - 360.0 if xmax > 180.0 else xmax
-    filter_sql = (
-        "(("
-        "bbox.xmax >= $xmin AND bbox.xmin <= 180"
-        ") OR ("
-        "bbox.xmax >= -180 AND bbox.xmin <= $xmax"
-        ")) AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
-    )
-    return filter_sql, {"xmin": east_xmin, "ymin": ymin, "xmax": west_xmax, "ymax": ymax}
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -413,13 +319,13 @@ def _from_source(bbox: tuple[float, float, float, float]) -> str:
     upstream = _upstream_glob()
     if cache.enabled():
         try:
-            # overture._new_connection as the background-fetch factory: the
-            # tile COPY only needs httpfs, and reusing it avoids a third
-            # connection-configuration site in this module.
-            with _conn_lock:
+            # db.new_connection as the background-fetch factory: the tile
+            # COPY only needs httpfs, already covered by db.py's shared
+            # connection-configuration site (issue #40).
+            with db.conn_lock:
                 paths = cache.local_paths_for_query(
-                    _conn(), release.resolve_release(), THEME, bbox, upstream,
-                    overture._new_connection,
+                    db.shared_conn(), release.resolve_release(), THEME, bbox, upstream,
+                    db.new_connection,
                 )
         except duckdb.Error as e:
             raise UpstreamUnavailable(str(e)) from e
@@ -621,18 +527,18 @@ def build_graph(
 
     upstream = _upstream_glob()
     missing = set(_check_schema(upstream))
-    xmin, ymin, xmax, ymax = _bbox_around(lat, lon, radius_m)
+    xmin, ymin, xmax, ymax = geo.bbox_around(lat, lon, radius_m)
     bbox = (xmin, ymin, xmax, ymax)
-    bbox_filter, bbox_params = _bbox_filter_sql(xmin, ymin, xmax, ymax)
+    bbox_filter, bbox_params = geo.bbox_filter_sql(xmin, ymin, xmax, ymax)
 
-    present = _probe_schema(upstream)
+    present = db.probe_schema(upstream)
     class_expr = "NULL" if "class" in missing else "class"
     connectors_expr = "NULL" if "connectors" in missing else "connectors"
     speed_limits_missing = present is not None and "speed_limits" not in present
     speed_limits_expr = "NULL" if speed_limits_missing else "speed_limits"
     access_missing = present is not None and "access_restrictions" not in present
     access_expr = "NULL" if access_missing else "access_restrictions"
-    wkt_expr = _geometry_wkt_expr(upstream)
+    wkt_expr = geo.geom_expr(upstream, as_wkt=True)
     # Overture's transportation theme also carries rail (and other non-road)
     # segments under the same table; subtype isn't in our fixture (road-only
     # by construction) so this only filters when the column is actually
@@ -656,8 +562,16 @@ def build_graph(
     """
     params = bbox_params
     try:
-        with _conn_lock:
-            rows = _conn().execute(sql, params).fetchall()
+        # The WKT expression above may need ST_AsText/ST_GeomFromWKB —
+        # ensure the spatial extension is loaded on the shared connection
+        # before running it (issue #40: this module used to load spatial
+        # unconditionally at connection-creation time; now it's lazy, like
+        # divisions.py/buildings.py). Called outside conn_lock (it takes
+        # the lock itself) but still inside this try, so a load failure
+        # surfaces as UpstreamUnavailable exactly like a query failure did.
+        db.ensure_spatial()
+        with db.conn_lock:
+            rows = db.shared_conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
 
