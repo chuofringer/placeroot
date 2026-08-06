@@ -28,6 +28,29 @@ Claude Desktop / Claude Code config:
 }
 ```
 
+## Hosted / HTTP mode
+
+By default `placeroot` speaks stdio, the standard MCP transport for a locally-run server (as above). It can also speak streamable-HTTP — the SDK's first-party HTTP transport, not a hand-rolled bridge — so it can run as a long-lived process reachable over the network:
+
+```bash
+uv run placeroot --http                          # binds 127.0.0.1:8321
+uv run placeroot --http --host 0.0.0.0 --port 8080
+```
+
+This starts an MCP endpoint at `http://<host>:<port>/mcp` and can serve multiple concurrent requests (the underlying DuckDB connections are lock-serialized internally, so this is safe). Point a remote-capable MCP client at it:
+
+```json
+{
+  "mcpServers": {
+    "placeroot": {
+      "url": "http://127.0.0.1:8321/mcp"
+    }
+  }
+}
+```
+
+`--http` only starts the transport — it doesn't run behind TLS, auth, or a process supervisor, and it's on you to put one in front of it (a reverse proxy, `systemd`, etc.) for anything beyond local/trusted-network use. A public, no-setup hosted tier is tracked as a roadmap item — see [ROADMAP.md](ROADMAP.md) issue #24 — and isn't part of this repo yet.
+
 ## Tools
 
 | Tool | Answers |
