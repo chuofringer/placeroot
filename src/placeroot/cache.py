@@ -89,6 +89,19 @@ TILE_DEG = 1.0
 DEFAULT_CACHE_DIR = os.path.expanduser("~/.cache/placeroot")
 DEFAULT_MAX_MB = 500
 
+# Ceiling on how many 1-degree tiles a single query may fan out into. Each
+# missing tile in a query costs one background thread + one upstream COPY
+# (or, under PLACEROOT_CACHE_SYNC, one sequential COPY), so an oversized
+# bbox — e.g. from an abusive multi-thousand-km radius — could otherwise
+# spawn tens of thousands of threads/connections and hammer upstream: a
+# resource-exhaustion vector reachable straight from a tool argument. A
+# query above this cap skips the tile cache and scans upstream directly for
+# that one call (the bbox pushdown still prunes row groups); the query
+# layer's radius clamp (geo.MAX_QUERY_RADIUS_M) keeps that direct scan
+# bounded too. Normal point-radius queries touch a handful of tiles, far
+# under this.
+MAX_TILES_PER_QUERY = 128
+
 # Tiles currently being fetched by a background thread, as (release, theme,
 # tile) keys — guards against two concurrent cache misses on the same tile
 # both starting a fetch.
@@ -372,6 +385,15 @@ def local_paths_for_query(
     if fingerprint is None:
         return None
     tiles = tiles_for_bbox(*bbox)
+    if len(tiles) > MAX_TILES_PER_QUERY:
+        # Oversized bbox: don't fan out into a tile-per-thread materialization
+        # storm. Fall back to a single direct upstream scan for this query.
+        logger.warning(
+            "query bbox touches %d tiles (> MAX_TILES_PER_QUERY=%d); skipping the "
+            "tile cache and scanning upstream directly for this query",
+            len(tiles), MAX_TILES_PER_QUERY,
+        )
+        return None
 
     cached, missing = [], []
     for t in tiles:

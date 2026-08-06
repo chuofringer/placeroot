@@ -40,6 +40,18 @@ _spatial_loaded = False
 DEFAULT_S3_REGION = "us-west-2"
 
 
+def _sql_str(value: str) -> str:
+    """A single-quoted SQL string literal with embedded single quotes escaped.
+
+    DuckDB's `SET <opt> = '...'` takes a literal, not a bind parameter, so
+    values interpolated into one (the S3 region/endpoint from the
+    environment, and mirror credentials) must have any single quote doubled.
+    Otherwise a value containing one — an S3 secret key for a self-hosted
+    endpoint can be arbitrary bytes — breaks the statement or injects SQL.
+    """
+    return "'" + value.replace("'", "''") + "'"
+
+
 def _s3_region() -> str:
     return os.environ.get("PLACEROOT_S3_REGION", DEFAULT_S3_REGION)
 
@@ -55,19 +67,19 @@ def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     # An MCP tool call isn't an interactive terminal; a progress bar just
     # clutters (or, piped through a wrapping process, can garble) output.
     con.execute("SET enable_progress_bar=false;")
-    con.execute(f"SET s3_region='{_s3_region()}';")
+    con.execute(f"SET s3_region={_sql_str(_s3_region())};")
     endpoint = _s3_endpoint()
     if endpoint:
         # A mirror target (issue #20): R2/minio/self-hosted S3 generally
         # expect path-style addressing and, unlike the public Overture
         # bucket, are usually private — read credentials from the
         # environment if the operator set them, anonymous otherwise.
-        con.execute(f"SET s3_endpoint='{endpoint}';")
+        con.execute(f"SET s3_endpoint={_sql_str(endpoint)};")
         con.execute("SET s3_url_style='path';")
         access_key = os.environ.get("PLACEROOT_S3_ACCESS_KEY_ID", "")
         secret_key = os.environ.get("PLACEROOT_S3_SECRET_ACCESS_KEY", "")
-        con.execute(f"SET s3_access_key_id='{access_key}';")
-        con.execute(f"SET s3_secret_access_key='{secret_key}';")
+        con.execute(f"SET s3_access_key_id={_sql_str(access_key)};")
+        con.execute(f"SET s3_secret_access_key={_sql_str(secret_key)};")
     else:
         con.execute("SET s3_access_key_id='';")  # public bucket: anonymous access
         con.execute("SET s3_secret_access_key='';")

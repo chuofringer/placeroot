@@ -17,6 +17,33 @@ from placeroot import db
 
 logger = logging.getLogger(__name__)
 
+# Upper bound (meters) on a query radius the tool layer will honor. radius_m
+# comes straight from a tool caller, and nothing downstream bounded it: a
+# single call with a multi-thousand-kilometre radius produces a bbox
+# spanning most of the planet, which cache.local_paths_for_query() then fans
+# out into tens of thousands of 1-degree tile fetches (a background thread +
+# an upstream COPY each), and an effectively full-dataset upstream scan. 500
+# km is already far larger than any "near a point" query these tools answer
+# (results are capped at MAX_ROWS / the token budget regardless of radius),
+# so clamping here is an abuse guard, not a functional limit. The
+# transportation/isochrone path has its own, tighter per-mode caps and
+# doesn't go through this.
+MAX_QUERY_RADIUS_M = 500_000.0
+
+
+def clamp_radius_m(radius_m: float) -> float:
+    """Clamp a caller-supplied query radius to [0, MAX_QUERY_RADIUS_M].
+
+    Non-finite input (NaN/inf) maps to 0.0 rather than propagating into the
+    bbox math (math.floor(nan) raises). Callers use the returned value for
+    *both* the bbox prefilter and the exact-distance predicate so the two
+    stay consistent — clamping only the bbox would let it prune rows the
+    distance filter still wants.
+    """
+    if not math.isfinite(radius_m):
+        return 0.0
+    return min(max(radius_m, 0.0), MAX_QUERY_RADIUS_M)
+
 
 def bbox_around(lat: float, lon: float, radius_m: float) -> tuple[float, float, float, float]:
     """Square bounding box guaranteed to contain the radius_m circle around (lat, lon).
