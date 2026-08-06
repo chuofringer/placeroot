@@ -80,6 +80,9 @@ def test_serves_from_cache_when_upstream_goes_away(tmp_path, monkeypatch):
     """#5 + #8 integration: a warm cache keeps answering after upstream disappears."""
     monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.delenv("PLACEROOT_CACHE", raising=False)  # enabled (the default)
+    # Deterministic: materialize the warm-up query's tiles inline rather
+    # than handing them to a background thread (issue #31's default).
+    monkeypatch.setenv("PLACEROOT_CACHE_SYNC", "1")
 
     upstream = tmp_path / "upstream.parquet"
     upstream.write_bytes(FIXTURE_PATH.read_bytes())
