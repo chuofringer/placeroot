@@ -9,7 +9,8 @@ import threading
 
 from mcp.server.mcpserver import MCPServer
 
-from placeroot import budget, cache, divisions, overture, release
+from placeroot import budget, cache, divisions, overture, release, simplify
+from placeroot import geocode as geocoding
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +192,57 @@ def admin_lookup(lat: float, lon: float) -> dict:
     except overture.SchemaDegraded as e:
         return _schema_error(e)
     return budget.apply_budget(result, "chain")
+
+
+@mcp.tool()
+def geocode(query: str, limit: int = 5) -> dict:
+    """Free-text place name -> ranked candidate locations, from Overture divisions and places.
+
+    No Nominatim, no third-party geocoding API. Matches localities,
+    neighborhoods, regions, and countries by name (exact > prefix >
+    substring), falling back to named places if that doesn't fill `limit`.
+    Returns {"results": [{name, type, lat, lon, id (GERS), admin_context,
+    rank_score}, ...]}, budgeted like every other tool. Returns a structured
+    {"error": ...} instead of raising if the remote scan fails.
+    """
+    try:
+        rows = geocoding.geocode(query, limit)
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    return budget.apply_budget({"results": rows}, "results")
+
+
+@mcp.tool()
+def reverse_geocode(lat: float, lon: float) -> dict:
+    """Point -> nearest address (street/number/postcode) and its containing division chain.
+
+    Degrades to a divisions-only result (source: "divisions_only", plus a
+    note) if the addresses theme is unreachable, missing, or has no nearby
+    coverage — addresses is Overture's newest, least complete theme, so
+    this is the expected degraded path. Returns a structured {"error": ...}
+    instead of raising if the remote scan fails outright.
+    """
+    try:
+        return geocoding.reverse_geocode(lat, lon)
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+
+
+@mcp.tool()
+def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
+    """Simplify a GeoJSON geometry to fit a token budget, reporting what was lost.
+
+    Works on caller-supplied GeoJSON (Polygon, MultiPolygon, LineString,
+    MultiLineString; Points/MultiPoints pass through unchanged). Binary
+    searches the simplification tolerance until the result fits max_tokens
+    instead of asking the caller to guess one. Returns {"geometry": ...,
+    "max_deviation_m": ..., "original_points": N, "kept_points": M}, or a
+    structured {"error": "invalid_geometry", ...} for malformed input.
+    """
+    try:
+        return simplify.simplify_geometry(geojson, max_tokens)
+    except simplify.InvalidGeometry as e:
+        return {"error": "invalid_geometry", "detail": e.detail}
 
 
 def _warm_start() -> None:
