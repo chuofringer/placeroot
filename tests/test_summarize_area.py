@@ -49,3 +49,10 @@ def test_empty_area():
     assert result["top_categories"] == []
     assert result["uncategorized_count"] == 0
     assert result["other_categories_count"] == 0
+
+
+def test_uncategorized_zero_in_fully_categorized_area():
+    """A non-empty area with no NULL-category places must report 0, not None."""
+    result = overture.summarize_area(40.698570097831244, -73.90215789910143, 100)
+    assert result["total_places"] > 0
+    assert result["uncategorized_count"] == 0
