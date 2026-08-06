@@ -170,6 +170,7 @@ _conn_lock = db.conn_lock
 _conn = db.shared_conn
 _new_connection = db.new_connection
 _probe_schema = db.probe_schema
+_configure = db._configure
 
 
 
