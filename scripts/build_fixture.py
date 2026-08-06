@@ -1,5 +1,5 @@
 """Builds the offline test fixtures: tests/fixtures/places.parquet and
-tests/fixtures/divisions.parquet.
+tests/fixtures/division_areas.parquet.
 
 places.parquet: synthetic Overture-shaped places data (struct columns
 matching what overture.py expects: id, bbox, names, taxonomy,
@@ -9,13 +9,17 @@ GERS ids (issue #25) are deterministic 32-char hex strings derived from each
 row's index, standing in for Overture's real GERS ids without claiming to
 be one.
 
-divisions.parquet: a small synthetic divisions-theme fixture (issue #11) —
-a handful of nested rectangular polygons (neighborhood < locality < county
-< region < country) around places.parquet's downtown cluster, plus one
-unrelated polygon far away to prove point-in-polygon actually excludes
-non-containing divisions. Real division_area geometry is irregular; these
-are rectangles because admin_lookup only needs correct containment
-semantics, not realistic shapes.
+division_areas.parquet: a small synthetic divisions-theme type=division_area
+fixture (issue #11) — a handful of nested rectangular polygons (neighborhood
+< locality < county < region < country) around places.parquet's downtown
+cluster, plus one unrelated polygon far away to prove point-in-polygon
+actually excludes non-containing divisions. Real division_area geometry is
+irregular; these are rectangles because admin_lookup only needs correct
+containment semantics, not realistic shapes. Named division_areas.parquet
+(not divisions.parquet) because the divisions theme also has a
+type=division fixture — see scripts/build_geocode_fixture.py — read by
+geocode.py instead; the two live under the same theme but are different
+Overture types with different schemas.
 
 Both are deterministic — same seed, same output — so they can be
 regenerated and diffed. Run with:
@@ -32,7 +36,7 @@ import duckdb
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 PLACES_FIXTURE_PATH = FIXTURES_DIR / "places.parquet"
-DIVISIONS_FIXTURE_PATH = FIXTURES_DIR / "divisions.parquet"
+DIVISION_AREAS_FIXTURE_PATH = FIXTURES_DIR / "division_areas.parquet"
 SEED = 42
 EARTH_RADIUS_M = 6371000.0
 
@@ -242,27 +246,27 @@ def build_places(con: duckdb.DuckDBPyConnection) -> None:
     print(f"wrote {len(rows)} rows to {PLACES_FIXTURE_PATH}")
 
 
-def build_divisions(con: duckdb.DuckDBPyConnection) -> None:
+def build_division_areas(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("INSTALL spatial; LOAD spatial;")
     rows = build_division_rows(con)
     con.execute("""
-        CREATE TABLE divisions (
+        CREATE TABLE division_areas (
             id VARCHAR,
             names STRUCT("primary" VARCHAR),
             subtype VARCHAR,
             geometry BLOB
         )
     """)
-    con.executemany("INSERT INTO divisions VALUES (?, ?, ?, ?)", rows)
+    con.executemany("INSERT INTO division_areas VALUES (?, ?, ?, ?)", rows)
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
-    con.execute(f"COPY divisions TO '{DIVISIONS_FIXTURE_PATH}' (FORMAT PARQUET)")
-    print(f"wrote {len(rows)} rows to {DIVISIONS_FIXTURE_PATH}")
+    con.execute(f"COPY division_areas TO '{DIVISION_AREAS_FIXTURE_PATH}' (FORMAT PARQUET)")
+    print(f"wrote {len(rows)} rows to {DIVISION_AREAS_FIXTURE_PATH}")
 
 
 def main() -> None:
     con = duckdb.connect()
     build_places(con)
-    build_divisions(con)
+    build_division_areas(con)
 
 
 if __name__ == "__main__":
