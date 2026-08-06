@@ -98,7 +98,8 @@ Full triage on the [project board](https://github.com/users/chuofringer/projects
 - [ ] Benchmark on GeoBenchX / GeoAgentBench: demonstrate tokens-per-correct-answer wins (#26)
 - [x] Flagship demo: site-selection agent entirely on open data (#17 — live-verified, ~5.9K tokens for a 17-call analysis)
 
-**Traction bar (~week 14):** judged on signals we own (#19) — download trend over four
+**Traction bar (~week 14):** judged on signals we own (#19, defined with
+collection methods and the decision rule in [docs/METRICS.md](docs/METRICS.md)) — download trend over four
 weeks, distinct connecting clients, inbound issues/PRs from people we did not contact, and
 named real uses. Stars are reported, not a gate: they measure other people's attention, not
 whether this is worth building.
