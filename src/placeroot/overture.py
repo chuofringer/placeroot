@@ -482,7 +482,7 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
        missed) is visible in the logs as the slow path it is.
     """
     if cache.enabled():
-        tile_paths = cache.cached_tile_paths(release.resolve_release(), THEME)
+        tile_paths = cache.cached_tile_paths(release.resolve_release(), THEME, upstream)
         if tile_paths:
             joined = ", ".join(f"'{p}'" for p in tile_paths)
             row = _run_place_details_query(
