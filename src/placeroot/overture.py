@@ -68,7 +68,7 @@ def _bbox_around(lat: float, lon: float, radius_m: float) -> tuple[float, float,
 
 
 # Haversine great-circle distance in meters between (bbox.ymin, bbox.xmin)
-# and a named point, taking three positional params: lat, lat, lon.
+# and a named point, using named params $lat and $lon.
 _DISTANCE_EXPR = """2 * 6371000 * asin(sqrt(
                 pow(sin(radians(bbox.ymin - $lat) / 2), 2)
                 + cos(radians($lat)) * cos(radians(bbox.ymin))
@@ -154,7 +154,8 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
             basic_category AS category,
             count(*) AS n,
             sum(count(*)) OVER ()                                     AS total,
-            sum(count(*)) FILTER (WHERE basic_category IS NULL) OVER () AS uncategorized
+            coalesce(sum(count(*)) FILTER (WHERE basic_category IS NULL) OVER (), 0)
+                                                                      AS uncategorized
         FROM read_parquet('{_places_glob()}', hive_partitioning=1)
         WHERE {bbox_filter} AND {distance_filter}
         GROUP BY 1
