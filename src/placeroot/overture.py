@@ -457,6 +457,113 @@ _PLACE_DETAIL_LIST_FIELDS = ("addresses", "websites", "phones", "socials", "sour
 # not a general-purpose area search.
 DEFAULT_DETAILS_RADIUS_M = 200
 
+# Issue #41: a location hint (near_lat/near_lon) on an id lookup gets the same
+# bbox prefilter treatment as any other query, just with a much wider box —
+# the caller usually only knows roughly where the place was found (e.g. a
+# find_places row's lat/lon), not that it's within DEFAULT_DETAILS_RADIUS_M.
+# 50km comfortably covers "same metro area" while still pruning row groups
+# for anything but a very dense, very large release.
+ID_HINT_RADIUS_M = 50_000
+
+# (source column that gates this field via `missing`, SQL expression, result alias)
+_PLACE_DETAIL_COLUMNS = [
+    ("id", "id", "id"),
+    ("names", "names.primary", "name"),
+    ("taxonomy", "taxonomy.primary", "category"),
+    ("basic_category", "basic_category", "basic_category"),
+    ("operating_status", "operating_status", "operating_status"),
+    ("confidence", "round(confidence, 2)", "confidence"),
+    ("brand", "brand.names.primary", "brand"),
+    ("addresses", "addresses", "addresses"),
+    ("websites", "websites", "websites"),
+    ("phones", "phones", "phones"),
+    ("socials", "socials", "socials"),
+    ("sources", "sources", "sources"),
+]
+_PLACE_DETAIL_RESULT_COLS = [alias for _, _, alias in _PLACE_DETAIL_COLUMNS] + ["lat", "lon"]
+
+
+def _place_details_sql(
+    from_source: str, filters: list[str], order_by: str, missing: set[str]
+) -> str:
+    """The shared place_details SELECT, sourced from from_source.
+
+    Column list and result shape stay identical no matter which of
+    place_details' several lookup strategies (cached-tile, hint-constrained,
+    full-scan, or name+point) supplies from_source/filters — only the FROM
+    and WHERE differ between them.
+    """
+    select_list = ",\n            ".join(
+        f'{"NULL" if col in missing else expr} AS {alias}'
+        for col, expr, alias in _PLACE_DETAIL_COLUMNS
+    )
+    return f"""
+        SELECT
+            {select_list},
+            round(bbox.ymin, 6) AS lat,
+            round(bbox.xmin, 6) AS lon
+        FROM {from_source}
+        WHERE {" AND ".join(filters)}
+        ORDER BY {order_by}
+        LIMIT 1
+    """
+
+
+def _run_place_details_query(from_source: str, filters: list[str], order_by: str,
+                              params: dict, missing: set[str]) -> tuple | None:
+    sql = _place_details_sql(from_source, filters, order_by, missing)
+    try:
+        with _conn_lock:
+            return _conn().execute(sql, params).fetchone()
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(str(e)) from e
+
+
+def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None,
+                          upstream: str, missing: set[str]) -> tuple | None:
+    """Resolve a GERS id, cheapest source first (issue #41).
+
+    1. Whatever tiles the local cache already has on disk — no upstream
+       contact at all. Covers the common agent flow (find_places, whose
+       results already warmed the relevant tiles, followed by
+       place_details on one of those results).
+    2. If a location hint was given, upstream constrained by a 50km bbox
+       around it — row-group pruning applies, and a hit here also
+       materializes/reuses the matching cache tile(s) via _from_source.
+    3. Full-dataset scan, last resort — logged as a warning so an agent
+       calling place_details(id=...) without a hint (or with a hint that
+       missed) is visible in the logs as the slow path it is.
+    """
+    if cache.enabled():
+        tile_paths = cache.cached_tile_paths(release.resolve_release(), THEME)
+        if tile_paths:
+            joined = ", ".join(f"'{p}'" for p in tile_paths)
+            row = _run_place_details_query(
+                f"read_parquet([{joined}])", ["id = $id"], "1", {"id": id}, missing
+            )
+            if row is not None:
+                return row
+
+    if near_lat is not None and near_lon is not None:
+        xmin, ymin, xmax, ymax = _bbox_around(near_lat, near_lon, ID_HINT_RADIUS_M)
+        bbox_filter = (
+            "bbox.xmax >= $xmin AND bbox.xmin <= $xmax"
+            " AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
+        )
+        params = {"id": id, "xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}
+        from_source = _from_source((xmin, ymin, xmax, ymax))
+        row = _run_place_details_query(from_source, ["id = $id", bbox_filter], "1", params, missing)
+        if row is not None:
+            return row
+
+    logger.warning(
+        "place_details(id=%s) fell back to a full-dataset scan (no cache hit, "
+        "no near_lat/near_lon hint given, or the hint missed) — issue #41", id,
+    )
+    return _run_place_details_query(
+        f"read_parquet('{upstream}', hive_partitioning=1)", ["id = $id"], "1", {"id": id}, missing
+    )
+
 
 def place_details(
     id: str | None = None,
@@ -464,6 +571,8 @@ def place_details(
     lat: float | None = None,
     lon: float | None = None,
     radius_m: float = DEFAULT_DETAILS_RADIUS_M,
+    near_lat: float | None = None,
+    near_lon: float | None = None,
 ) -> dict | None:
     """One place, in full: resolved by GERS id, or by name + a nearby point.
 
@@ -472,18 +581,20 @@ def place_details(
     if neither is given. Returns None if no place matches — callers (the
     server tool) turn that into a structured {"error": "not_found", ...}.
 
+    near_lat/near_lon (issue #41) are an optional location hint for the id
+    path only — pass the lat/lon of the row the id came from (e.g. a
+    find_places result) to constrain the id lookup with a 50km bbox
+    prefilter instead of scanning the whole dataset. Ignored when id isn't
+    given. Bare id lookups (no hint) still work exactly as before; they just
+    check the local tile cache first and fall back to a full scan, logged,
+    if that misses too.
+
     Raises SchemaDegraded if bbox is missing (needed for the name+point
     path; an id lookup doesn't strictly need it, but the schema probe
     doesn't distinguish the two calls) or UpstreamUnavailable if the remote
     scan fails after retries. Non-essential columns (addresses, websites,
     phones, socials, brand, sources, confidence, ...) missing from the
     dataset come back as None — see degraded_fields().
-
-    Caveat: an id-only lookup has no spatial hint to prune row groups with,
-    so it scans the whole active dataset. Fine against the small offline
-    fixture and a warmed local cache tile; a cold id lookup against the live
-    S3 release would be a full-dataset scan — flagged as a follow-up, not
-    solved here (see the worktree's final report).
     """
     if not id and not (name and lat is not None and lon is not None):
         raise ValueError("place_details requires id, or name together with lat and lon")
@@ -492,10 +603,7 @@ def place_details(
     missing = set(_check_schema(upstream))
 
     if id:
-        filters = ["id = $id"]
-        params: dict = {"id": id}
-        from_source = f"read_parquet('{upstream}', hive_partitioning=1)"
-        order_by = "1"
+        row = _place_details_by_id(id, near_lat, near_lon, upstream, missing)
     else:
         bbox_filter, distance_filter, params = area_geometry(lat, lon, radius_m)
         bbox = (params["xmin"], params["ymin"], params["xmax"], params["ymax"])
@@ -504,44 +612,11 @@ def place_details(
             filters.append("names.primary ILIKE $name")
             params["name"] = f"%{name}%"
         from_source = _from_source(bbox)
-        order_by = _DISTANCE_EXPR
+        row = _run_place_details_query(from_source, filters, _DISTANCE_EXPR, params, missing)
 
-    def col(name_: str, expr: str) -> str:
-        return "NULL" if name_ in missing else expr
-
-    sql = f"""
-        SELECT
-            {col("id", "id")}                                     AS id,
-            {col("names", "names.primary")}                       AS name,
-            {col("taxonomy", "taxonomy.primary")}                 AS category,
-            {col("basic_category", "basic_category")}             AS basic_category,
-            {col("operating_status", "operating_status")}         AS operating_status,
-            {col("confidence", "round(confidence, 2)")}           AS confidence,
-            {col("brand", "brand.names.primary")}                 AS brand,
-            {col("addresses", "addresses")}                       AS addresses,
-            {col("websites", "websites")}                         AS websites,
-            {col("phones", "phones")}                             AS phones,
-            {col("socials", "socials")}                           AS socials,
-            {col("sources", "sources")}                           AS sources,
-            round(bbox.ymin, 6)                                   AS lat,
-            round(bbox.xmin, 6)                                   AS lon
-        FROM {from_source}
-        WHERE {" AND ".join(filters)}
-        ORDER BY {order_by}
-        LIMIT 1
-    """
-    try:
-        with _conn_lock:
-            row = _conn().execute(sql, params).fetchone()
-    except duckdb.Error as e:
-        raise UpstreamUnavailable(str(e)) from e
     if row is None:
         return None
-    cols = [
-        "id", "name", "category", "basic_category", "operating_status", "confidence",
-        "brand", "addresses", "websites", "phones", "socials", "sources", "lat", "lon",
-    ]
-    result = dict(zip(cols, row))
+    result = dict(zip(_PLACE_DETAIL_RESULT_COLS, row))
     for field in _PLACE_DETAIL_LIST_FIELDS:
         kept, omitted = budget.truncate_list(result[field])
         result[field] = kept

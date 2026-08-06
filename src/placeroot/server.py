@@ -92,6 +92,8 @@ def place_details(
     lat: float | None = None,
     lon: float | None = None,
     radius_m: float = overture.DEFAULT_DETAILS_RADIUS_M,
+    near_lat: float | None = None,
+    near_lon: float | None = None,
 ) -> dict:
     """One place, in full: addresses, websites, phones, socials, brand,
     source attribution, GERS id, confidence, and operating status.
@@ -104,9 +106,15 @@ def place_details(
     matching "<field>_omitted_count". Returns {"error": "not_found", ...}
     if nothing matches, or a structured {"error": ...} if the upstream
     dataset is unavailable or missing columns this tool depends on.
+
+    When looking up by id, also pass near_lat/near_lon — the lat/lon from
+    the find_places (or other tool) row the id came from — so the lookup
+    can be narrowed to a ~50km box instead of scanning the whole dataset.
+    Ignored when resolving by name. Omitting it still works, just slower on
+    a cold, uncached id.
     """
     try:
-        result = overture.place_details(id, name, lat, lon, radius_m)
+        result = overture.place_details(id, name, lat, lon, radius_m, near_lat, near_lon)
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
     except overture.UpstreamUnavailable as e:
