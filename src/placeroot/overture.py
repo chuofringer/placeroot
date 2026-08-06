@@ -15,7 +15,7 @@ from functools import lru_cache
 
 import duckdb
 
-from placeroot import cache, release
+from placeroot import budget, cache, release
 
 logger = logging.getLogger(__name__)
 
@@ -28,14 +28,21 @@ THEME = "places"
 # Columns every tool depends on somewhere. bbox is the only one treated as
 # essential (it's what the radius/distance math runs on) — the rest degrade
 # gracefully: a tool still answers, just without that field, and callers can
-# check degraded_fields() to note it.
-REQUIRED_COLUMNS = ["names", "taxonomy", "basic_category", "operating_status", "confidence", "bbox"]
+# check degraded_fields() to note it. id (GERS, issue #25) and the place_details
+# fields (addresses/websites/phones/socials/brand/sources, issue #9) degrade
+# the same way: missing means that field comes back None/empty, not a failure.
+REQUIRED_COLUMNS = [
+    "names", "taxonomy", "basic_category", "operating_status", "confidence", "bbox",
+    "id", "addresses", "websites", "phones", "socials", "brand", "sources",
+]
 ESSENTIAL_COLUMNS = {"bbox"}
 
-# Overrides the places dataset location — set by tests to point at a
+# Overrides a theme's dataset location — set by tests to point at a
 # committed fixture instead of the live S3 release. Takes precedence over
-# the PLACEROOT_DATA_PATH env var, which in turn overrides the live release.
-_data_path_override: str | None = None
+# the PLACEROOT_DATA_PATH[_<THEME>] env var, which in turn overrides the
+# live release. Keyed by theme so divisions (#11) can be pointed at its own
+# fixture independently of the places fixture.
+_data_path_overrides: dict[str, str] = {}
 
 
 class UpstreamUnavailable(Exception):
@@ -59,24 +66,32 @@ class SchemaDegraded(Exception):
         self.missing = missing
 
 
-def set_data_path(path: str | None) -> None:
+def set_data_path(path: str | None, theme: str = THEME) -> None:
     """Point the query layer at a local dataset instead of live S3.
 
-    Pass None to restore the default (env var, then discovered release).
-    Intended for tests.
+    Pass None to restore the default (env var, then discovered release) for
+    that theme. Intended for tests. theme defaults to "places" for
+    back-compat with existing callers that only ever queried places.
     """
-    global _data_path_override
-    _data_path_override = path
+    if path is None:
+        _data_path_overrides.pop(theme, None)
+    else:
+        _data_path_overrides[theme] = path
 
 
-def _upstream_glob() -> str:
-    if _data_path_override is not None:
-        return _data_path_override
-    env_path = os.environ.get("PLACEROOT_DATA_PATH")
+def _env_var_for_theme(theme: str) -> str:
+    # Back-compat: places kept its original, unsuffixed env var name.
+    return "PLACEROOT_DATA_PATH" if theme == THEME else f"PLACEROOT_DATA_PATH_{theme.upper()}"
+
+
+def _upstream_glob(theme: str = THEME, type_: str = "place") -> str:
+    if theme in _data_path_overrides:
+        return _data_path_overrides[theme]
+    env_path = os.environ.get(_env_var_for_theme(theme))
     if env_path:
         return env_path
     active_release = release.resolve_release()
-    return f"s3://overturemaps-us-west-2/release/{active_release}/theme={THEME}/type=place/*"
+    return f"s3://overturemaps-us-west-2/release/{active_release}/theme={theme}/type={type_}/*"
 
 
 # Guards every use of the shared _conn() connection. DuckDB connections
@@ -163,36 +178,42 @@ def _probe_schema(glob: str) -> frozenset | None:
         return None
 
 
-def missing_columns(glob: str) -> list[str]:
-    """REQUIRED_COLUMNS not present in glob's schema. Empty if the probe failed."""
+def missing_columns(glob: str, required: list[str] = REQUIRED_COLUMNS) -> list[str]:
+    """`required` columns not present in glob's schema. Empty if the probe failed.
+
+    required defaults to the places REQUIRED_COLUMNS; other themes (e.g.
+    divisions, see divisions.py) pass their own list.
+    """
     present = _probe_schema(glob)
     if present is None:
         return []
-    return [c for c in REQUIRED_COLUMNS if c not in present]
+    return [c for c in required if c not in present]
 
 
 def degraded_fields() -> list[str]:
-    """Non-essential REQUIRED_COLUMNS missing from the currently active dataset."""
+    """Non-essential REQUIRED_COLUMNS missing from the currently active places dataset."""
     return [c for c in missing_columns(_upstream_glob()) if c not in ESSENTIAL_COLUMNS]
 
 
-def _check_schema(glob: str) -> list[str]:
+def _check_schema(
+    glob: str, required: list[str] = REQUIRED_COLUMNS, essential: set[str] = ESSENTIAL_COLUMNS
+) -> list[str]:
     """Missing columns for glob, raising SchemaDegraded if any are essential."""
-    missing = missing_columns(glob)
-    essential_missing = [c for c in missing if c in ESSENTIAL_COLUMNS]
+    missing = missing_columns(glob, required)
+    essential_missing = [c for c in missing if c in essential]
     if essential_missing:
         raise SchemaDegraded(essential_missing)
     return missing
 
 
-def _from_source(bbox: tuple[float, float, float, float]) -> str:
+def _from_source(bbox: tuple[float, float, float, float], theme: str = THEME) -> str:
     """SQL FROM-clause source for a places query: local cache tiles, or upstream."""
-    upstream = _upstream_glob()
+    upstream = _upstream_glob(theme)
     if cache.enabled():
         try:
             with _conn_lock:
                 paths = cache.local_paths_for_query(
-                    _conn(), release.resolve_release(), THEME, bbox, upstream, _new_connection
+                    _conn(), release.resolve_release(), theme, bbox, upstream, _new_connection
                 )
         except duckdb.Error as e:
             raise UpstreamUnavailable(str(e)) from e
@@ -296,9 +317,11 @@ def find_places(
     basic_category_expr = "NULL" if "basic_category" in missing else "basic_category"
     operating_status_expr = "NULL" if "operating_status" in missing else "operating_status"
     confidence_expr = "NULL" if "confidence" in missing else "round(confidence, 2)"
+    id_expr = "NULL" if "id" in missing else "id"
 
     sql = f"""
         SELECT
+            {id_expr}                           AS id,
             {name_expr}                         AS name,
             {category_expr}                     AS category,
             {basic_category_expr}               AS basic_category,
@@ -318,7 +341,7 @@ def find_places(
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     cols = [
-        "name", "category", "basic_category", "operating_status",
+        "id", "name", "category", "basic_category", "operating_status",
         "confidence", "lat", "lon", "distance_m",
     ]
     return [dict(zip(cols, r)) for r in rows]
@@ -366,4 +389,190 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
         "top_categories": [{"category": c, "count": n} for c, n, _, _ in top],
         "other_categories_count": other_categories_count,
         "uncategorized_count": uncategorized_count,
+    }
+
+
+# Array-valued fields on a place row that can be long enough to blow the
+# token budget on their own (issue #9) — truncated via budget.truncate_list,
+# never dropped silently. Kept small and explicit rather than derived, since
+# it's the set place_details actually selects below.
+_PLACE_DETAIL_LIST_FIELDS = ("addresses", "websites", "phones", "socials", "sources")
+
+# place_details' own default search radius when resolving by name + lat/lon
+# instead of by GERS id — a small "did you mean the place right here" window,
+# not a general-purpose area search.
+DEFAULT_DETAILS_RADIUS_M = 200
+
+
+def place_details(
+    id: str | None = None,
+    name: str | None = None,
+    lat: float | None = None,
+    lon: float | None = None,
+    radius_m: float = DEFAULT_DETAILS_RADIUS_M,
+) -> dict | None:
+    """One place, in full: resolved by GERS id, or by name + a nearby point.
+
+    Exactly one resolution strategy applies: pass id, or pass name together
+    with lat/lon (nearest name match within radius_m wins). Raises ValueError
+    if neither is given. Returns None if no place matches — callers (the
+    server tool) turn that into a structured {"error": "not_found", ...}.
+
+    Raises SchemaDegraded if bbox is missing (needed for the name+point
+    path; an id lookup doesn't strictly need it, but the schema probe
+    doesn't distinguish the two calls) or UpstreamUnavailable if the remote
+    scan fails after retries. Non-essential columns (addresses, websites,
+    phones, socials, brand, sources, confidence, ...) missing from the
+    dataset come back as None — see degraded_fields().
+
+    Caveat: an id-only lookup has no spatial hint to prune row groups with,
+    so it scans the whole active dataset. Fine against the small offline
+    fixture and a warmed local cache tile; a cold id lookup against the live
+    S3 release would be a full-dataset scan — flagged as a follow-up, not
+    solved here (see the worktree's final report).
+    """
+    if not id and not (name and lat is not None and lon is not None):
+        raise ValueError("place_details requires id, or name together with lat and lon")
+
+    upstream = _upstream_glob()
+    missing = set(_check_schema(upstream))
+
+    if id:
+        filters = ["id = $id"]
+        params: dict = {"id": id}
+        from_source = f"read_parquet('{upstream}', hive_partitioning=1)"
+        order_by = "1"
+    else:
+        bbox_filter, distance_filter, params = area_geometry(lat, lon, radius_m)
+        bbox = (params["xmin"], params["ymin"], params["xmax"], params["ymax"])
+        filters = [bbox_filter, distance_filter]
+        if "names" not in missing:
+            filters.append("names.primary ILIKE $name")
+            params["name"] = f"%{name}%"
+        from_source = _from_source(bbox)
+        order_by = _DISTANCE_EXPR
+
+    def col(name_: str, expr: str) -> str:
+        return "NULL" if name_ in missing else expr
+
+    sql = f"""
+        SELECT
+            {col("id", "id")}                                     AS id,
+            {col("names", "names.primary")}                       AS name,
+            {col("taxonomy", "taxonomy.primary")}                 AS category,
+            {col("basic_category", "basic_category")}             AS basic_category,
+            {col("operating_status", "operating_status")}         AS operating_status,
+            {col("confidence", "round(confidence, 2)")}           AS confidence,
+            {col("brand", "brand.names.primary")}                 AS brand,
+            {col("addresses", "addresses")}                       AS addresses,
+            {col("websites", "websites")}                         AS websites,
+            {col("phones", "phones")}                             AS phones,
+            {col("socials", "socials")}                           AS socials,
+            {col("sources", "sources")}                           AS sources,
+            round(bbox.ymin, 6)                                   AS lat,
+            round(bbox.xmin, 6)                                   AS lon
+        FROM {from_source}
+        WHERE {" AND ".join(filters)}
+        ORDER BY {order_by}
+        LIMIT 1
+    """
+    try:
+        with _conn_lock:
+            row = _conn().execute(sql, params).fetchone()
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(str(e)) from e
+    if row is None:
+        return None
+    cols = [
+        "id", "name", "category", "basic_category", "operating_status", "confidence",
+        "brand", "addresses", "websites", "phones", "socials", "sources", "lat", "lon",
+    ]
+    result = dict(zip(cols, row))
+    for field in _PLACE_DETAIL_LIST_FIELDS:
+        kept, omitted = budget.truncate_list(result[field])
+        result[field] = kept
+        if omitted:
+            result[f"{field}_omitted_count"] = omitted
+    return result
+
+
+def within_distance(
+    lat: float,
+    lon: float,
+    max_distance_m: float,
+    category: str | None = None,
+    name: str | None = None,
+) -> dict:
+    """Is the nearest matching place within max_distance_m of (lat, lon)?
+
+    category/name narrow the search the same way as find_places. The search
+    window is capped at max_distance_m * 2 so a "nothing nearby" answer
+    doesn't degrade into an unbounded scan — a real nearest match beyond
+    that window comes back as nearest: None rather than its true distance.
+    Raises the same SchemaDegraded/UpstreamUnavailable as find_places.
+    """
+    search_radius_m = max_distance_m * 2
+    rows = find_places(lat, lon, search_radius_m, category=category, name=name, limit=1)
+    if not rows:
+        return {"within": False, "nearest": None, "distance_m": None}
+    nearest = rows[0]
+    return {
+        "within": nearest["distance_m"] <= max_distance_m,
+        "nearest": nearest,
+        "distance_m": nearest["distance_m"],
+    }
+
+
+def compare_areas(areas: list[tuple[float, float]], radius_m: float = 1000) -> dict:
+    """Side-by-side category mix for 2-5 area centers sharing one radius_m.
+
+    Reuses summarize_area per area, then aligns counts across areas for the
+    top ~10 categories by combined count, adds place density per km^2 per
+    area, and flags the categories with the largest relative difference
+    between areas ("differentiators") — the most useful signal for "how is
+    area A different from area B."
+
+    Raises ValueError if areas isn't 2-5 centers. Propagates
+    SchemaDegraded/UpstreamUnavailable from the first area whose
+    summarize_area call fails — a partial comparison isn't returned.
+    """
+    if not 2 <= len(areas) <= 5:
+        raise ValueError("compare_areas takes between 2 and 5 area centers")
+
+    summaries = [summarize_area(lat, lon, radius_m) for lat, lon in areas]
+
+    combined_counts: dict[str, int] = {}
+    for s in summaries:
+        for row in s["top_categories"]:
+            cat, n = row["category"], row["count"]
+            combined_counts[cat] = combined_counts.get(cat, 0) + n
+    top_categories = sorted(combined_counts, key=lambda c: combined_counts[c], reverse=True)[:10]
+
+    area_km2 = math.pi * (radius_m / 1000) ** 2
+    per_area = []
+    for (lat, lon), s in zip(areas, summaries):
+        counts = {row["category"]: row["count"] for row in s["top_categories"]}
+        per_area.append({
+            "center": {"lat": lat, "lon": lon},
+            "total_places": s["total_places"],
+            "density_per_km2": round(s["total_places"] / area_km2, 2) if area_km2 else 0,
+            "category_counts": {c: counts.get(c, 0) for c in top_categories},
+        })
+
+    differentiators = []
+    for c in top_categories:
+        values = [a["category_counts"][c] for a in per_area]
+        lo, hi = min(values), max(values)
+        differentiators.append({
+            "category": c,
+            "min_count": lo,
+            "max_count": hi,
+            "relative_difference": round((hi - lo) / hi, 2) if hi else 0,
+        })
+    differentiators.sort(key=lambda d: d["relative_difference"], reverse=True)
+
+    return {
+        "areas": per_area,
+        "categories": top_categories,
+        "differentiators": differentiators,
     }
