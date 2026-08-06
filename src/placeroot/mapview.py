@@ -1,17 +1,25 @@
-"""Self-contained HTML map artifact renderer (issue #15).
+"""Self-contained HTML map artifact renderer (issue #15, extended by #34).
 
 Turns find_places / summarize_area JSON — or caller-supplied GeoJSON — into
 ONE standalone HTML file: inline CSS, inline JS, vector data embedded, no
 CDN, no tile server, no API key, zero network requests when opened. The
 viewer is a small hand-written SVG pan/zoom map (equirectangular projection,
 cos(lat) corrected so both axes share one meters-per-unit scale) with marker
-dots, click-to-open popups, a scale bar, and an attribution line — not an
-embedded copy of Leaflet/MapLibre.
+dots, polygon/line shapes, click-to-open popups, a scale bar, and an
+attribution line — not an embedded copy of Leaflet/MapLibre.
+
+Beyond Point features, the renderer understands Polygon, MultiPolygon,
+LineString and MultiLineString geometry (from caller GeoJSON, and from
+routing.isochrone()'s {"polygon": <geojson>, "stats": {...}, ...} result
+shape). Polygons with holes are rendered as one SVG path with fill-rule
+evenodd — the ring winding order Overture/GeoJSON producers use doesn't
+matter, only that holes are listed as additional rings.
 
 The MCP tool boundary (server.render_map) returns only a tiny
-{"path", "bytes", "features_rendered"} envelope so the (potentially large)
-HTML never counts against the token budget in ROADMAP.md's "answers, not
-data dumps" rule — the file on disk is the artifact.
+{"path", "bytes", "features_rendered", "skipped_features"} envelope so the
+(potentially large) HTML never counts against the token budget in
+ROADMAP.md's "answers, not data dumps" rule — the file on disk is the
+artifact.
 """
 
 import html
@@ -133,6 +141,257 @@ def extract_points(data) -> list[dict]:
     return []
 
 
+# --- shape (Polygon/MultiPolygon/LineString/MultiLineString) extraction ----
+
+_SHAPE_GEOMETRY_TYPES = ("Polygon", "MultiPolygon", "LineString", "MultiLineString")
+
+
+def _validate_ring(coords) -> list[list[float]] | None:
+    """A GeoJSON linear ring -> [[lon, lat], ...], or None if malformed.
+
+    Requires at least 4 positions (3 distinct + closing point, per the
+    GeoJSON spec) each with numeric, finite lon/lat.
+    """
+    if not isinstance(coords, list) or len(coords) < 4:
+        return None
+    ring = []
+    for c in coords:
+        if not isinstance(c, (list, tuple)) or len(c) < 2:
+            return None
+        lon = _as_float(c[0])
+        lat = _as_float(c[1])
+        if lon is None or lat is None:
+            return None
+        ring.append([lon, lat])
+    return ring
+
+
+def _validate_polygon_rings(coords) -> list[list[list[float]]] | None:
+    """A Polygon's `coordinates` (list of rings) -> validated rings, or None."""
+    if not isinstance(coords, list) or not coords:
+        return None
+    rings = []
+    for ring_coords in coords:
+        ring = _validate_ring(ring_coords)
+        if ring is None:
+            return None
+        rings.append(ring)
+    return rings
+
+
+def _validate_line(coords) -> list[list[float]] | None:
+    """A LineString's `coordinates` -> [[lon, lat], ...], or None if malformed."""
+    if not isinstance(coords, list) or len(coords) < 2:
+        return None
+    line = []
+    for c in coords:
+        if not isinstance(c, (list, tuple)) or len(c) < 2:
+            return None
+        lon = _as_float(c[0])
+        lat = _as_float(c[1])
+        if lon is None or lat is None:
+            return None
+        line.append([lon, lat])
+    return line
+
+
+def _shape_from_geometry(geometry: dict, name: str | None, props: dict) -> dict | None:
+    """geometry dict (already known to be Polygon/MultiPolygon/Line*) -> a render-ready shape.
+
+    Polygon rendering only needs a flat bag of rings (outer + holes) drawn
+    with fill-rule=evenodd, so MultiPolygon parts are flattened into one
+    "polygon" shape rather than kept as separate shapes/popups.
+    """
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates")
+    if gtype == "Polygon":
+        rings = _validate_polygon_rings(coords)
+        if not rings:
+            return None
+        return {"kind": "polygon", "rings": rings, "name": name, "props": props}
+    if gtype == "MultiPolygon":
+        if not isinstance(coords, list) or not coords:
+            return None
+        rings: list[list[list[float]]] = []
+        for poly_coords in coords:
+            r = _validate_polygon_rings(poly_coords)
+            if r is None:
+                return None
+            rings.extend(r)
+        if not rings:
+            return None
+        return {"kind": "polygon", "rings": rings, "name": name, "props": props}
+    if gtype == "LineString":
+        line = _validate_line(coords)
+        if line is None:
+            return None
+        return {"kind": "line", "lines": [line], "name": name, "props": props}
+    if gtype == "MultiLineString":
+        if not isinstance(coords, list) or not coords:
+            return None
+        lines = []
+        for line_coords in coords:
+            line = _validate_line(line_coords)
+            if line is None:
+                return None
+            lines.append(line)
+        if not lines:
+            return None
+        return {"kind": "line", "lines": lines, "name": name, "props": props}
+    return None
+
+
+def _shape_from_geojson_feature(feature: dict) -> dict | None:
+    """A GeoJSON Feature with Polygon/MultiPolygon/LineString/MultiLineString geometry."""
+    geometry = feature.get("geometry")
+    if not isinstance(geometry, dict):
+        return None
+    props = dict(feature.get("properties") or {})
+    return _shape_from_geometry(geometry, props.get("name"), props)
+
+
+def _shape_from_isochrone_result(data: dict) -> dict | None:
+    """routing.isochrone()'s {"polygon": <geojson>, "stats": {...}, ...} -> one shape.
+
+    Stats and the request parameters are flattened into the shape's props so
+    they show up directly in the click popup rather than as a nested object.
+    """
+    geometry = data.get("polygon")
+    if not isinstance(geometry, dict):
+        return None
+    shape = _shape_from_geometry(geometry, "Isochrone", {})
+    if shape is None:
+        return None
+    props: dict = {}
+    center = data.get("center")
+    if isinstance(center, dict):
+        clat = _as_float(center.get("lat"))
+        clon = _as_float(center.get("lon"))
+        if clat is not None and clon is not None:
+            props["center"] = f"{clat:.5f}, {clon:.5f}"
+    for key in ("minutes", "mode", "speed_m_s", "polygon_method", "truncated"):
+        if key in data:
+            props[key] = data[key]
+    stats = data.get("stats")
+    if isinstance(stats, dict):
+        props.update(stats)
+    shape["props"] = props
+    return shape
+
+
+def _is_isochrone_result(data: dict) -> bool:
+    geometry = data.get("polygon")
+    return isinstance(geometry, dict) and geometry.get("type") in ("Polygon", "MultiPolygon")
+
+
+def _handle_feature_dict(item: dict, points: list[dict], shapes: list[dict]) -> bool:
+    """Route a single GeoJSON Feature dict to points or shapes.
+
+    Returns True if the feature contributed a point or shape, False if its
+    geometry was missing/unsupported/malformed (caller counts these as
+    skipped).
+    """
+    geometry = item.get("geometry")
+    if not isinstance(geometry, dict):
+        return False
+    gtype = geometry.get("type")
+    if gtype == "Point":
+        point = _point_from_geojson_feature(item)
+        if point is None:
+            return False
+        points.append(point)
+        return True
+    if gtype in _SHAPE_GEOMETRY_TYPES:
+        shape = _shape_from_geojson_feature(item)
+        if shape is None:
+            return False
+        shapes.append(shape)
+        return True
+    return False
+
+
+def extract_features(data) -> dict:
+    """Normalize a tool result or caller GeoJSON into points + shapes.
+
+    A superset of extract_points(): also recognizes Polygon, MultiPolygon,
+    LineString, and MultiLineString geometry (in Features, FeatureCollections,
+    or bare lists) as well as routing.isochrone()'s
+    {"polygon": <geojson>, "stats": {...}, ...} result shape.
+
+    Returns {"points": [...], "shapes": [...], "skipped_features": N} where
+    each shape is {"kind": "polygon"|"line", "rings"|"lines": [...],
+    "name": ..., "props": {...}}. Anything with missing/malformed geometry
+    or unusable coordinates is dropped and counted in skipped_features
+    rather than raising — render_map degrades to fewer features rather than
+    failing outright.
+    """
+    points: list[dict] = []
+    shapes: list[dict] = []
+    skipped = 0
+
+    if data is None:
+        return {"points": points, "shapes": shapes, "skipped_features": 0}
+
+    if isinstance(data, dict):
+        if _is_isochrone_result(data):
+            shape = _shape_from_isochrone_result(data)
+            if shape:
+                shapes.append(shape)
+            else:
+                skipped += 1
+            return {"points": points, "shapes": shapes, "skipped_features": skipped}
+        if isinstance(data.get("results"), list):
+            for r in data["results"]:
+                if not isinstance(r, dict):
+                    skipped += 1
+                    continue
+                point = _point_from_row(r)
+                if point:
+                    points.append(point)
+                else:
+                    skipped += 1
+            return {"points": points, "shapes": shapes, "skipped_features": skipped}
+        if isinstance(data.get("features"), list):
+            for f in data["features"]:
+                if not isinstance(f, dict) or not _handle_feature_dict(f, points, shapes):
+                    skipped += 1
+            return {"points": points, "shapes": shapes, "skipped_features": skipped}
+        if isinstance(data.get("center"), dict):
+            lat = _as_float(data["center"].get("lat"))
+            lon = _as_float(data["center"].get("lon"))
+            if lat is None or lon is None:
+                return {"points": points, "shapes": shapes, "skipped_features": skipped}
+            props = {k: v for k, v in data.items() if k != "center"}
+            points.append({"lat": lat, "lon": lon, "name": "Area summary", "props": props})
+            return {"points": points, "shapes": shapes, "skipped_features": skipped}
+        if data.get("geometry"):
+            if not _handle_feature_dict(data, points, shapes):
+                skipped += 1
+            return {"points": points, "shapes": shapes, "skipped_features": skipped}
+        point = _point_from_row(data)
+        if point:
+            points.append(point)
+        return {"points": points, "shapes": shapes, "skipped_features": skipped}
+
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                skipped += 1
+                continue
+            if item.get("geometry"):
+                if not _handle_feature_dict(item, points, shapes):
+                    skipped += 1
+            else:
+                point = _point_from_row(item)
+                if point:
+                    points.append(point)
+                else:
+                    skipped += 1
+        return {"points": points, "shapes": shapes, "skipped_features": skipped}
+
+    return {"points": points, "shapes": shapes, "skipped_features": skipped}
+
+
 # --- HTML/CSS/JS template pieces --------------------------------------------
 # Assembled with plain str.replace (never str.format/f-string) against the
 # whole document: CSS and JS are full of literal { } braces that .format
@@ -149,6 +408,9 @@ _CSS = """
   --accent: #2563eb;
   --marker: #e0562b;
   --marker-stroke: #ffffff;
+  --shape-fill: rgba(37, 99, 235, 0.16);
+  --shape-stroke: #2563eb;
+  --line-stroke: #2563eb;
   --shadow: 0 2px 10px rgba(20, 24, 30, 0.12);
 }
 @media (prefers-color-scheme: dark) {
@@ -161,6 +423,9 @@ _CSS = """
     --accent: #6ea8fe;
     --marker: #ff8a5b;
     --marker-stroke: #1d2127;
+    --shape-fill: rgba(110, 168, 254, 0.22);
+    --shape-stroke: #6ea8fe;
+    --line-stroke: #6ea8fe;
     --shadow: 0 2px 14px rgba(0, 0, 0, 0.45);
   }
 }
@@ -191,6 +456,15 @@ header .count { color: var(--muted); font-size: 0.85rem; }
 .marker text {
   font-size: 11px; fill: var(--text); pointer-events: none;
   paint-order: stroke; stroke: var(--panel-bg); stroke-width: 3px;
+}
+.shape-polygon {
+  fill: var(--shape-fill); stroke: var(--shape-stroke); stroke-width: 2;
+  cursor: pointer;
+}
+.shape-polygon:hover { fill-opacity: 0.85; }
+.shape-line {
+  fill: none; stroke: var(--line-stroke); stroke-width: 2.5;
+  stroke-linejoin: round; stroke-linecap: round; cursor: pointer;
 }
 .panel {
   position: absolute; top: 12px; right: 12px;
@@ -240,8 +514,12 @@ _JS = """
 (function () {
   "use strict";
   var DATA = __DATA_JSON__;
+  var POINTS = DATA.points || [];
+  var SHAPES = DATA.shapes || [];
+  var SVGNS = "http://www.w3.org/2000/svg";
   var svg = document.getElementById("map");
   var viewport = document.getElementById("viewport");
+  var shapesGroup = document.getElementById("shapes");
   var markersGroup = document.getElementById("markers");
   var popup = document.getElementById("popup");
   var scaleFill = document.getElementById("scale-fill");
@@ -259,16 +537,24 @@ _JS = """
   function fmtVal(v) {
     if (v === null || v === undefined) return "";
     if (typeof v === "number") return String(Math.round(v * 100) / 100);
+    if (typeof v === "boolean") return v ? "true" : "false";
     return String(v);
   }
 
-  if (!DATA.length) {
+  if (!POINTS.length && !SHAPES.length) {
     emptyMsg.style.display = "flex";
     return;
   }
 
-  var lats = DATA.map(function (p) { return p.lat; });
-  var lons = DATA.map(function (p) { return p.lon; });
+  var lats = POINTS.map(function (p) { return p.lat; });
+  var lons = POINTS.map(function (p) { return p.lon; });
+  SHAPES.forEach(function (s) {
+    var vertexLists = s.kind === "polygon" ? s.rings : s.lines;
+    (vertexLists || []).forEach(function (vl) {
+      vl.forEach(function (c) { lons.push(c[0]); lats.push(c[1]); });
+    });
+  });
+
   var minLat = Math.min.apply(null, lats), maxLat = Math.max.apply(null, lats);
   var minLon = Math.min.apply(null, lons), maxLon = Math.max.apply(null, lons);
   var latPad = Math.max((maxLat - minLat) * 0.12, 0.003);
@@ -298,16 +584,69 @@ _JS = """
 
   var METERS_PER_DEG = 111320;
 
-  DATA.forEach(function (p, i) {
+  function pathFromRing(ring) {
+    var d = "";
+    ring.forEach(function (c, idx) {
+      var xy = project(c[1], c[0]);
+      d += (idx === 0 ? "M" : "L") + xy[0].toFixed(2) + "," + xy[1].toFixed(2) + " ";
+    });
+    return d + "Z ";
+  }
+
+  function centroidOf(vertexList) {
+    var cx = 0, cy = 0, n = vertexList.length;
+    vertexList.forEach(function (c) {
+      var xy = project(c[1], c[0]);
+      cx += xy[0]; cy += xy[1];
+    });
+    return [cx / n, cy / n];
+  }
+
+  SHAPES.forEach(function (s) {
+    if (s.kind === "polygon" && s.rings && s.rings.length) {
+      var d = "";
+      s.rings.forEach(function (ring) { d += pathFromRing(ring); });
+      var path = document.createElementNS(SVGNS, "path");
+      path.setAttribute("d", d.trim());
+      path.setAttribute("fill-rule", "evenodd");
+      path.setAttribute("class", "shape-polygon");
+      var c0 = centroidOf(s.rings[0]);
+      var entity = { name: s.name, props: s.props || {}, _x: c0[0], _y: c0[1] };
+      path.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        showPopup(entity);
+      });
+      shapesGroup.appendChild(path);
+    } else if (s.kind === "line" && s.lines && s.lines.length) {
+      s.lines.forEach(function (line) {
+        var parts = line.map(function (c, idx) {
+          var xy = project(c[1], c[0]);
+          return (idx === 0 ? "M" : "L") + xy[0].toFixed(2) + "," + xy[1].toFixed(2);
+        });
+        var path = document.createElementNS(SVGNS, "path");
+        path.setAttribute("d", parts.join(" "));
+        path.setAttribute("class", "shape-line");
+        var c0 = centroidOf(line);
+        var entity = { name: s.name, props: s.props || {}, _x: c0[0], _y: c0[1] };
+        path.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          showPopup(entity);
+        });
+        shapesGroup.appendChild(path);
+      });
+    }
+  });
+
+  POINTS.forEach(function (p, i) {
     var xy = project(p.lat, p.lon);
     p._x = xy[0]; p._y = xy[1];
-    var g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    var g = document.createElementNS(SVGNS, "g");
     g.setAttribute("class", "marker");
-    var c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    var c = document.createElementNS(SVGNS, "circle");
     c.setAttribute("cx", xy[0]); c.setAttribute("cy", xy[1]); c.setAttribute("r", 6);
     g.appendChild(c);
     if (p.name) {
-      var t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      var t = document.createElementNS(SVGNS, "text");
       t.setAttribute("x", xy[0] + 9); t.setAttribute("y", xy[1] + 4);
       t.textContent = p.name;
       g.appendChild(t);
@@ -386,13 +725,26 @@ _JS = """
     zoomAt(ev.deltaY < 0 ? 1.2 : 1 / 1.2, cx, cy);
   }, { passive: false });
 
+  // Pointer capture is only engaged once the pointer has actually moved past
+  // a small threshold. Capturing unconditionally on every pointerdown (the
+  // pre-#34 behavior) makes Chromium retarget the *click* event that follows
+  // a same-spot mousedown/mouseup to the <svg> element itself instead of the
+  // marker/shape actually under the cursor — silently breaking click-to-open
+  // popups for real mouse users (caught by scripts/browser_smoke.py, #33).
+  var DRAG_THRESHOLD = 3;
   var dragging = null;
   svg.addEventListener("pointerdown", function (ev) {
-    dragging = { x: ev.clientX, y: ev.clientY, vx: view.x, vy: view.y };
-    svg.setPointerCapture(ev.pointerId);
+    dragging = { x: ev.clientX, y: ev.clientY, vx: view.x, vy: view.y,
+                 pointerId: ev.pointerId, captured: false };
   });
   svg.addEventListener("pointermove", function (ev) {
     if (!dragging) return;
+    if (!dragging.captured) {
+      var dx0 = ev.clientX - dragging.x, dy0 = ev.clientY - dragging.y;
+      if (Math.abs(dx0) < DRAG_THRESHOLD && Math.abs(dy0) < DRAG_THRESHOLD) return;
+      svg.setPointerCapture(dragging.pointerId);
+      dragging.captured = true;
+    }
     var rect = svg.getBoundingClientRect();
     var sx = W / rect.width, sy = H / rect.height;
     view.x = dragging.vx + (ev.clientX - dragging.x) * sx;
@@ -440,6 +792,7 @@ _DOC = """<!doctype html>
   <div id="map-container">
     <svg id="map" viewBox="0 0 1000 640" preserveAspectRatio="xMidYMid meet">
       <g id="viewport">
+        <g id="shapes"></g>
         <g id="markers"></g>
       </g>
     </svg>
@@ -465,18 +818,43 @@ _DOC = """<!doctype html>
 """
 
 
-def render_html(points: list[dict], title: str | None = None) -> str:
-    """Render points (as produced by extract_points) into one standalone HTML document."""
+def render_html(
+    points: list[dict], title: str | None = None, shapes: list[dict] | None = None
+) -> str:
+    """Render points + shapes (as produced by extract_points/extract_features) into one HTML doc.
+
+    `shapes` is optional and defaults to none, so callers that only ever
+    dealt with points (extract_points()) keep working unchanged.
+    """
+    shapes = shapes or []
     safe_title = html.escape(title or "PlaceRoot map", quote=True)
     count = len(points)
-    count_label = f"{count} place{'s' if count != 1 else ''}"
-    data_for_js = [
+    shape_count = len(shapes)
+    label_parts = []
+    if count or not shape_count:
+        label_parts.append(f"{count} place{'s' if count != 1 else ''}")
+    if shape_count:
+        label_parts.append(f"{shape_count} shape{'s' if shape_count != 1 else ''}")
+    count_label = " · ".join(label_parts)
+
+    points_for_js = [
         {"lat": p["lat"], "lon": p["lon"], "name": p.get("name"), "props": p.get("props") or {}}
         for p in points
     ]
+    shapes_for_js = []
+    for s in shapes:
+        entry = {"kind": s.get("kind"), "name": s.get("name"), "props": s.get("props") or {}}
+        if s.get("kind") == "polygon":
+            entry["rings"] = s.get("rings") or []
+        else:
+            entry["lines"] = s.get("lines") or []
+        shapes_for_js.append(entry)
+
     # default=str: props may carry values (e.g. Decimal-ish) json can't natively
     # serialize; "</script>" guard prevents the embedded JSON from closing the tag early.
-    data_json = json.dumps(data_for_js, default=str).replace("</", "<\\/")
+    data_json = json.dumps(
+        {"points": points_for_js, "shapes": shapes_for_js}, default=str
+    ).replace("</", "<\\/")
 
     js = _JS.replace("__DATA_JSON__", data_json)
     doc = (
@@ -502,13 +880,18 @@ def write_artifact(
     inline: bool = False,
     out_dir: Path | None = None,
 ) -> dict:
-    """Extract points from data, render the HTML artifact, and write it to disk.
+    """Extract points/shapes from data, render the HTML artifact, and write it to disk.
 
-    Returns {"path": str, "bytes": int, "features_rendered": int}, plus
-    "html" when inline=True and the document is under INLINE_MAX_BYTES.
+    Returns {"path": str, "bytes": int, "features_rendered": int,
+    "skipped_features": int}, plus "html" when inline=True and the document
+    is under INLINE_MAX_BYTES. skipped_features counts rows/features present
+    in `data` that couldn't be rendered (missing coordinates, malformed or
+    unsupported geometry) — render_map degrades rather than failing.
     """
-    points = extract_points(data)
-    doc = render_html(points, title=title)
+    extracted = extract_features(data)
+    points = extracted["points"]
+    shapes = extracted["shapes"]
+    doc = render_html(points, title=title, shapes=shapes)
     encoded = doc.encode("utf-8")
 
     directory = out_dir if out_dir is not None else artifact_dir()
@@ -520,7 +903,8 @@ def write_artifact(
     result = {
         "path": str(path),
         "bytes": len(encoded),
-        "features_rendered": len(points),
+        "features_rendered": len(points) + len(shapes),
+        "skipped_features": extracted["skipped_features"],
     }
     if inline and len(encoded) <= INLINE_MAX_BYTES:
         result["html"] = doc
