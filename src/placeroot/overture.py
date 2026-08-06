@@ -5,6 +5,16 @@ bbox column pushdown keeps remote scans to a handful of row groups. A local
 tile cache (see cache.py) sits in front of repeat remote scans for the same
 area, and the active release (see release.py) is discovered at runtime
 instead of hardcoded.
+
+Concurrency (issue #24): DuckDB connections aren't safe for concurrent
+execute() calls from multiple threads, which HTTP transport mode makes
+possible (stdio only ever has one request in flight). _conn_lock, below,
+serializes every use of this module's shared connection — every _conn()
+call site in this file (and in divisions.py and geocode.py, which reuse
+this connection) acquires it first. Background tile materialization
+(cache.py) and the routing module's own shared connection (routing.py,
+which keeps a separate connection and its own equivalent lock) are the
+only exceptions, by design: they never touch this connection at all.
 """
 
 import logging

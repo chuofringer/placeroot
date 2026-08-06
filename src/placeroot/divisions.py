@@ -48,9 +48,9 @@ def _ensure_spatial() -> None:
     global _spatial_loaded
     if _spatial_loaded:
         return
-    con = overture._conn()
     try:
-        con.execute("INSTALL spatial; LOAD spatial;")
+        with overture._conn_lock:
+            overture._conn().execute("INSTALL spatial; LOAD spatial;")
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(f"could not load spatial extension: {e}") from e
     _spatial_loaded = True
