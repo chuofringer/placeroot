@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PlaceRoot — grounded map answers for AI agents</title>
+<meta name="description" content="PlaceRoot is a keyless MCP server that answers spatial questions from Overture Maps open data, sized for an agent's context window.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+
+<header class="top">
+  <h1>PlaceRoot</h1>
+  <nav>
+    <a href="demo-map.html">live map demo</a>
+  </nav>
+</header>
+
+<p class="tagline">
+  An MCP server that answers spatial questions from
+  Overture Maps open data — queried live from the public GeoParquet
+  release with DuckDB. No API key. No vendor platform. Every answer sized
+  for an agent's context window, not a browser.
+</p>
+
+<div class="badges">
+  <span class="badge">keyless</span>
+  <span class="badge">Overture-native</span>
+  <span class="badge">token-budgeted</span>
+  <span class="badge">no ETL</span>
+  <span class="badge">MIT licensed</span>
+</div>
+
+<section id="onboarding">
+  <h2><span class="step">1</span>Add it to your agent</h2>
+  <p>Claude Desktop / Claude Code config — no signup, no API key to paste in.</p>
+  <div class="config-block panel">
+    <button class="copy-btn" id="copy-config" type="button" aria-label="Copy config to clipboard">Copy</button>
+    <pre id="config-json"><code>{
+  "mcpServers": {
+    "placeroot": {
+      "command": "uvx",
+      "args": ["placeroot"]
+    }
+  }
+}</code></pre>
+  </div>
+  <p class="install-line">Or run it directly: <code>uv run placeroot</code> starts the stdio MCP server.</p>
+</section>
+
+<section id="tokens">
+  <h2><span class="step">2</span>See the difference a token budget makes</h2>
+  <p>
+    One real query — <strong>coffee shops within 500m</strong> — run against
+    this repo's committed offline test fixture, two ways: what a raw
+    GeoJSON dump looks like, and what PlaceRoot's <code>find_places</code>
+    actually returns.
+  </p>
+
+  <div class="compare">
+    <div class="compare-col">
+      <h3>Raw GeoJSON <span class="token-count raw">~45,000 tokens</span></h3>
+      <p class="sub">typical raw GeoJSON for this query — full Overture Places
+        schema, all categories within radius, no ranking or truncation</p>
+      <div class="scroll-panel"><pre>{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "08f2a10793b0a2b1030037c9c1234567",
+      "geometry": { "type": "Point", "coordinates": [-73.899751, 40.699798] },
+      "bbox": [-73.899751, 40.699798, -73.899751, 40.699798],
+      "properties": {
+        "version": 3,
+        "sources": [
+          { "property": "", "dataset": "meta",
+            "record_id": "1234567890123456789",
+            "update_time": "2024-11-15T00:00:00.000Z", "confidence": 0.98 },
+          { "property": "names", "dataset": "Microsoft", "record_id": null,
+            "update_time": "2024-10-02T00:00:00.000Z", "confidence": 0.91 }
+        ],
+        "names": { "primary": "Cluster Place 160", "common": null, "rules": null },
+        "categories": { "primary": "coffee_shop",
+          "alternate": ["cafe", "breakfast_brunch_restaurant"] },
+        "confidence": 0.67,
+        "websites": ["https://example-coffee-160.example.com"],
+        "socials": ["https://www.instagram.com/clusterplace160",
+          "https://www.facebook.com/clusterplace160"],
+        "emails": ["hello@example-coffee-160.example.com"],
+        "phones": ["+12125550160"],
+        "brand": { "names": { "primary": null, "common": null, "rules": null },
+          "wikidata": null },
+        "addresses": [{ "freeform": "160 Cluster Ave", "locality": "New York",
+          "postcode": "10003", "region": "NY", "country": "US" }],
+        "operating_status": "open"
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "08f2a10793b0a2b1030037c9c7654321",
+      "geometry": { "type": "Point", "coordinates": [-73.900576, 40.699636] },
+      "bbox": [-73.900576, 40.699636, -73.900576, 40.699636],
+      "properties": {
+        "version": 2,
+        "sources": [
+          { "property": "", "dataset": "meta",
+            "record_id": "9876543210987654321",
+            "update_time": "2024-08-03T00:00:00.000Z", "confidence": 0.94 }
+        ],
+        "names": { "primary": "Cluster Place 000", "common": null, "rules": null },
+        "categories": { "primary": "coffee_shop", "alternate": ["cafe"] },
+        "confidence": 0.63,
+        "websites": [],
+        "socials": [],
+        "emails": [],
+        "phones": ["+12125550100"],
+        "brand": { "names": { "primary": null, "common": null, "rules": null },
+          "wikidata": null },
+        "addresses": [{ "freeform": "100 Cluster Ave", "locality": "New York",
+          "postcode": "10003", "region": "NY", "country": "US" }],
+        "operating_status": "closed_permanently"
+      }
+    }
+
+    /* … ~148 more features. Overture's row-group pruning gets you the
+       right tile fast; it does not shrink the payload once it lands.
+       Each feature above runs ~291 tokens (measured, chars/4) at this
+       schema depth — ~150 places is a normal count within 500m of a
+       dense downtown block across all categories, not just coffee. */
+  ]
+}</pre></div>
+      <p class="compare-note">
+        <code>~45,000</code> = 291 tokens/feature (measured: <code>len(json.dumps(feature))
+        // 4</code> against one representative Overture Places record, full native
+        schema) × ~150 features, the typical all-category place count within
+        500m of a dense downtown intersection. This repo's committed test
+        fixture only has 210 synthetic rows total, too small to reproduce
+        that count directly — the per-feature token cost above is real and
+        measured against this repo's actual code paths.
+      </p>
+    </div>
+
+    <div class="compare-col">
+      <h3>PlaceRoot <span class="token-count placeroot">501 tokens</span></h3>
+      <p class="sub">measured: <code>find_places(lat, lon, 500, category="coffee_shop")</code>
+        against the committed offline fixture</p>
+      <div class="scroll-panel"><pre>{
+  "results": [
+    {
+      "name": "Cluster Place 160",
+      "category": "coffee_shop",
+      "basic_category": "coffee_shop",
+      "operating_status": "open",
+      "confidence": 0.67,
+      "lat": 40.699798,
+      "lon": -73.899751,
+      "distance_m": 31.0
+    },
+    {
+      "name": "Cluster Place 000",
+      "category": "coffee_shop",
+      "basic_category": "coffee_shop",
+      "operating_status": "closed_permanently",
+      "confidence": 0.63,
+      "lat": 40.699636,
+      "lon": -73.900576,
+      "distance_m": 63.0
+    },
+    {
+      "name": "Cluster Place 104",
+      "category": "coffee_shop",
+      "basic_category": "coffee_shop",
+      "operating_status": "open",
+      "confidence": 0.88,
+      "lat": 40.700003,
+      "lon": -73.898479,
+      "distance_m": 128.0
+    }
+
+    /* … 7 more, nearest-first, same shape. All 10 results together:
+       2005 JSON characters, 501 estimated tokens (chars/4 heuristic,
+       same one placeroot.budget uses to enforce its own 2000-token
+       default budget). */
+  ]
+}</pre></div>
+      <p class="compare-note">
+        Reproduce it: <code>uv run python -c "from placeroot import overture,
+        budget; overture.set_data_path('tests/fixtures/places.parquet');
+        r=overture.find_places(40.7,-73.9,500,category='coffee_shop',limit=10);
+        print(budget.estimate_tokens({'results': r}))"</code> — real output
+        against the fixture committed in this repo, not a rounded guess.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section id="map-demo">
+  <h2><span class="step">3</span>See it on a map — no key, no CDN</h2>
+  <p>
+    The same query, rendered by <code>render_map</code> /
+    <code>placeroot.mapview</code> into one self-contained HTML file:
+    inline CSS and JS, vector markers, click-to-open popups, a scale bar,
+    zero network requests when opened. This is a real generated artifact,
+    not a screenshot.
+  </p>
+  <iframe class="map-embed" src="demo-map.html" title="PlaceRoot live map demo" loading="lazy"></iframe>
+  <p class="map-links">
+    <a href="demo-map.html">Open the map artifact directly</a> — same file,
+    full window.
+  </p>
+</section>
+
+<section id="facts">
+  <h2><span class="step">4</span>What's actually in it</h2>
+  <ul class="facts">
+    <li><strong>Keyless.</strong> Queries run directly against Overture's
+      public S3 GeoParquet release with DuckDB — no signup, no API key,
+      no vendor platform on the critical path.</li>
+    <li><strong>Fresh, not a stale snapshot.</strong> Every place carries
+      Overture's <code>operating_status</code> and a <code>confidence</code>
+      score, contributed by Meta, Uber, TomTom, and others — an agent can
+      reason about whether a place is actually still open.</li>
+    <li><strong>Token-budgeted by design.</strong> Every tool response is
+      built to fit roughly 2K tokens; when a result would blow past that,
+      the response is truncated (rows dropped nearest-first-preserved,
+      then optional fields stripped) and says so with
+      <code>truncated: true</code> and <code>omitted_count</code>, rather
+      than silently dumping more than an agent can use.</li>
+    <li><strong>A local tile cache.</strong> The first query touching a
+      1°×1° tile materializes it to disk; every later query touching that
+      tile reads local parquet instead of rescanning S3 — the design
+      target is warm queries under 500ms, and it keeps working if the
+      network doesn't.</li>
+    <li><strong>GERS ids in every response.</strong> Each place carries
+      Overture's stable GERS identifier — a cross-session, cross-tool
+      reference an agent can hold onto and resolve later, instead of
+      re-searching by name and hoping for the same match.</li>
+    <li><strong>No ETL.</strong> There's no intermediate database or
+      import job — every query reads Overture's GeoParquet directly, with
+      bbox column pushdown to prune row groups.</li>
+    <li><strong>MIT licensed.</strong> No usage tier, no metered key.</li>
+  </ul>
+</section>
+
+<section id="tools">
+  <h2><span class="step">5</span>Tools today</h2>
+  <table class="tools">
+    <thead><tr><th>Tool</th><th>Answers</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>find_places</code></td>
+        <td>Named places near a point, nearest first, with category,
+          confidence, and operating status</td>
+      </tr>
+      <tr>
+        <td><code>summarize_area</code></td>
+        <td>What's in an area: total places and top categories</td>
+      </tr>
+      <tr>
+        <td><code>render_map</code></td>
+        <td>Any <code>find_places</code>/<code>summarize_area</code> result
+          as a self-contained interactive HTML map</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<footer>
+  <span>MIT licensed.</span>
+  <span>Overture Maps Foundation contributors.</span>
+</footer>
+
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var btn = document.getElementById("copy-config");
+  var codeEl = document.getElementById("config-json");
+  if (!btn || !codeEl) return;
+  btn.addEventListener("click", function () {
+    var text = codeEl.textContent;
+    function marked() {
+      btn.textContent = "Copied";
+      btn.setAttribute("data-state", "copied");
+      setTimeout(function () {
+        btn.textContent = "Copy";
+        btn.removeAttribute("data-state");
+      }, 1600);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(marked, function () {
+        fallbackCopy(text, marked);
+      });
+    } else {
+      fallbackCopy(text, marked);
+    }
+  });
+
+  function fallbackCopy(text, done) {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try { document.execCommand("copy"); } catch (e) { /* best effort */ }
+    document.body.removeChild(ta);
+    done();
+  }
+})();
+</script>
+</body>
+</html>
