@@ -4,7 +4,7 @@ pyproject.toml addopts); run explicitly with `uv run pytest -m live`.
 
 import pytest
 
-from placeroot import overture, routing
+from placeroot import geocode, overture, routing
 
 
 @pytest.mark.live
@@ -54,3 +54,15 @@ def test_isochrone_against_real_overture_transportation_data():
     assert result["stats"]["reachable_nodes"] > 1
     assert result["polygon"]["type"] == "Polygon"
     assert len(result["polygon"]["coordinates"][0]) >= 4
+
+
+@pytest.mark.live
+def test_resolve_place_against_real_overture_data():
+    """#22 smoke test: a business name + city, with a rough location hint,
+    should resolve to a place-kind candidate carrying a real GERS id.
+    """
+    results = geocode.resolve_place(
+        "Manana coffee Austin", near_lat=30.2672, near_lon=-97.7431, limit=5
+    )
+    assert results
+    assert any(r["kind"] == "place" and r["id"] for r in results)

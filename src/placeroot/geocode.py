@@ -1,4 +1,5 @@
-"""geocode / reverse_geocode on Overture data — no Nominatim, no third-party calls (#10).
+"""geocode / reverse_geocode / resolve_place on Overture data (#10) — no Nominatim, no
+third-party geocoding calls.
 
 geocode ranks divisions (locality/neighborhood/region/country) by name match
 quality, falling back to places when divisions alone don't fill `limit`.
@@ -6,7 +7,11 @@ reverse_geocode finds the nearest address point and its containing division
 chain, degrading to divisions-only when the addresses theme is unreachable
 or missing (addresses is a much newer, less complete Overture theme than
 places/divisions, so this is the realistic failure mode, not a hypothetical
-one).
+one). resolve_place (#22) merges geocode()'s divisions with a name-filtered
+find_places search into one typed, ranked list of GERS ids — see its own
+docstring below for why that's a distinct tool from geocode() rather than
+just a wider `type` filter on it (it needs a location hint to bound the
+places search, which geocode() never has).
 
 Ranking is deterministic and cheap on purpose: exact name match beats
 prefix beats substring; within a tier, ties break on population (or, when
@@ -92,11 +97,48 @@ containing region (a division in a more populous state/province edges out
 one in a less populous one when nothing else distinguishes them). No ML,
 no external prominence dataset — every input here already exists in
 Overture's own divisions rows.
+
+--- #53: name-variant normalization (St./Saint, diacritics, ...) ---
+
+Overture's canonical division names pick one convention (never both) —
+"Saint Louis" vs "St. Louis", "Sao Paulo" vs "Sao Paulo" with a tilde — but
+a free-text query can spell it either way. geocode() runs the literal query
+first, exactly as before; only when that literal query doesn't reach an
+exact-or-prefix division match backed by real prominence (tier 3/2 *and*
+carrying a population figure — see below for why population, specifically,
+gates this) does a second pass retry with normalized variants: bidirectional
+token swaps for a small set of common abbreviations (St./Saint, Ft./Fort,
+Mt./Mount, and — leading-token only, since a bare "N" mid-query is too
+ambiguous to touch — N./S./E./W. vs North/South/East/West), plus a
+diacritic-folded pass (unicodedata NFD, combining marks stripped) using
+DuckDB's own strip_accents() on the name column, so accented and unaccented
+spellings match each other regardless of which one Overture's canonical
+name uses.
+
+The retry gate checks for population, not just tier, because a literal
+exact match is not by itself proof the query has been "found": Overture's
+divisions include plenty of tiny, unpopulated places sharing a name with
+somewhere much more prominent — a literal query for "St. Louis" also
+exact-matches a handful of small villages worldwide literally spelled that
+way (verified live), while the famous Missouri city is canonically named
+"Saint Louis" in Overture's own data and only turns up through the
+abbreviation-variant retry. A tier-3/2 match with a real population value
+behind it is a much stronger signal the literal search already found the
+right thing, and skips the (otherwise pointless) extra query.
+
+Variant-sourced rows are tagged (_rank_key's *last* tiebreak, after the #47
+population/proxy chain) so a variant match's own prominence still wins
+against a same-tier literal match the normal #47 way — literal only breaks
+a full tie, it doesn't override population. Returned names are always
+Overture's untouched canonical spelling; only the matching step is
+normalized.
 """
 
 import logging
 import math
+import re
 import time
+import unicodedata
 from pathlib import Path
 
 import duckdb
@@ -153,9 +195,25 @@ US_STATES = {
 _US_STATES_BY_NAME = {name.lower(): abbr for abbr, name in US_STATES.items()}
 
 
+def _strip_diacritics(s: str) -> str:
+    """NFD-normalize and drop combining marks (#53) — "São Paulo" -> "Sao Paulo".
+
+    Only used for matching; canonical names returned to callers are never
+    passed through this.
+    """
+    return "".join(c for c in unicodedata.normalize("NFD", s) if not unicodedata.combining(c))
+
+
+def _normalize_for_match(s: str) -> str:
+    return _strip_diacritics(s).lower()
+
+
 def _match_tier(name: str, query: str) -> int:
-    """3 = exact, 2 = prefix, 1 = substring, 0 = no match (caller already filtered those out)."""
-    n, q = name.lower(), query.lower()
+    """3 = exact, 2 = prefix, 1 = substring, 0 = no match (caller already filtered those out).
+
+    Diacritic-insensitive (#53): "Sao Paulo" and "São Paulo" compare equal.
+    """
+    n, q = _normalize_for_match(name), _normalize_for_match(query)
     if n == q:
         return 3
     if n.startswith(q):
@@ -163,12 +221,38 @@ def _match_tier(name: str, query: str) -> int:
     return 1
 
 
+def _effective_tier(row: dict, query: str) -> int:
+    """Match tier for `row`, using its stored `_tier` (#53) when present.
+
+    A variant-sourced row was found via a *different* literal string than
+    `query` (e.g. "Saint Louis" matched against the "St. Louis" the caller
+    actually typed) — recomputing _match_tier(row["name"], query) at rank
+    time would grade it against text it was never matched on, and (since
+    "Saint Louis" isn't a prefix/substring of "St. Louis") wrongly demote a
+    genuine exact match down to the weak fallback tier. `_tier`, set when
+    the row was fetched, is the tier it actually achieved.
+    """
+    stored = row.get("_tier")
+    return stored if stored is not None else _match_tier(row["name"], query)
+
+
 def _rank_key(row: dict, query: str, region_population: dict[str, int]):
     """Sort key: match tier, then (#47) population if known, else a
     documented proxy chain of subtype rank / hierarchy depth / the row's
-    own region's population — then id for full determinism. All ascending
-    (smaller sorts first)."""
-    tier = _match_tier(row["name"], query)
+    own region's population, then (#53) literal-over-variant, then id for
+    full determinism. All ascending (smaller sorts first).
+
+    The literal-over-variant tiebreak sits *after* the #47 chain, not
+    before it: real data has plenty of tiny, unrelated places sharing a
+    literal-exact name with a query ("St. Louis" also matches a handful of
+    small towns/villages, worldwide, literally spelled that way) — a
+    variant match's own population/prominence has to be allowed to win over
+    those the same way it would against any other literal match. Literal
+    only wins when every other signal is tied, which is the case #53 is
+    actually documented to care about (two otherwise-identical candidates,
+    one found straight, one found through a spelling variant).
+    """
+    tier = _effective_tier(row, query)
     population = row.get("population")
     weight = _SUBTYPE_WEIGHT.get(row.get("subtype"), 0)
     depth = len(row.get("admin_context") or [])
@@ -180,12 +264,13 @@ def _rank_key(row: dict, query: str, region_population: dict[str, int]):
         -weight,
         depth,
         -region_pop,
+        1 if row.get("_variant") else 0,
         row["id"],
     )
 
 
 def _rank_score(row: dict, query: str) -> float:
-    tier = _match_tier(row["name"], query)
+    tier = _effective_tier(row, query)
     tier_score = {3: 1.0, 2: 0.7, 1: 0.4}[tier]
     weight = _SUBTYPE_WEIGHT.get(row.get("subtype"), 0)
     population = row.get("population")
@@ -194,7 +279,13 @@ def _rank_score(row: dict, query: str) -> float:
     # scale — a locality of 10M people isn't "10x more correct" than one
     # of 10k, it's a tiebreak, not a confidence signal.
     population_bonus = min(0.05, math.log10(population + 1) / 140) if population else 0.0
-    return round(tier_score + weight * 0.01 + population_bonus, 3)
+    score = tier_score + weight * 0.01 + population_bonus
+    if row.get("_variant"):
+        # Small, fixed penalty (#53) so a variant-sourced row's rank_score
+        # never ties a same-tier literal match's — consistent with the
+        # ordering _rank_key already enforces.
+        score -= 0.01
+    return round(score, 3)
 
 
 def _admin_context(hierarchies, self_name: str | None = None) -> list[str]:
@@ -393,6 +484,59 @@ def _parse_region_suffix(query: str, local_table: str | None) -> tuple[str, str 
     return query, None, None
 
 
+# --- #53: name-variant normalization -------------------------------------
+
+# token (lowercased, trailing "." stripped) -> alternate spellings to try,
+# in preference order. Bidirectional: the abbreviation maps to the
+# expansion and vice versa, so a query in either convention finds a
+# canonical name written in the other.
+_ABBR_VARIANTS: dict[str, list[str]] = {
+    "st": ["Saint"], "saint": ["St.", "St"],
+    "ft": ["Fort"], "fort": ["Ft.", "Ft"],
+    "mt": ["Mount"], "mount": ["Mt.", "Mt"],
+}
+
+# Same idea, but only applied to a query's leading token — a bare "N" or
+# "S" elsewhere in a multi-word query is too ambiguous (initials, a street
+# suffix, ...) to safely expand.
+_CARDINAL_VARIANTS: dict[str, list[str]] = {
+    "n": ["North"], "north": ["N.", "N"],
+    "s": ["South"], "south": ["S.", "S"],
+    "e": ["East"], "east": ["E.", "E"],
+    "w": ["West"], "west": ["W.", "W"],
+}
+
+
+def _token_variants(token: str, leading: bool) -> list[str]:
+    key = token.strip(".").lower()
+    variants = list(_ABBR_VARIANTS.get(key, []))
+    if leading:
+        variants += _CARDINAL_VARIANTS.get(key, [])
+    return variants
+
+
+def _abbreviation_variant_queries(query: str) -> list[str]:
+    """query -> whole-query variants with one token swapped for a common
+    abbreviation/expansion (#53) — "St. Louis" -> ["Saint Louis"], "North
+    Hollywood" -> ["N. Hollywood", "N Hollywood"]. Deduplicated, excludes
+    the original query itself (case-insensitively)."""
+    tokens = query.split(" ")
+    variants = []
+    for i, tok in enumerate(tokens):
+        for alt in _token_variants(tok, leading=(i == 0)):
+            new_tokens = list(tokens)
+            new_tokens[i] = alt
+            variants.append(" ".join(new_tokens))
+    seen = {query.lower()}
+    out = []
+    for v in variants:
+        vl = v.lower()
+        if vl not in seen:
+            seen.add(vl)
+            out.append(v)
+    return out
+
+
 def _match_tier_order_sql(name_expr: str) -> str:
     """SQL ORDER BY expression pushing exact/prefix matches — the most
     populous ones first — ahead of plain substring matches, *before* LIMIT
@@ -418,7 +562,13 @@ def _match_tier_order_sql(name_expr: str) -> str:
     return f"{tier_expr}, population DESC NULLS LAST"
 
 
-def _query_divisions_from_local(table_path: str, query: str, region_code: str | None) -> list[dict]:
+def _query_divisions_from_local(
+    table_path: str, query: str, region_code: str | None, name_match_expr: str = "name"
+) -> list[dict]:
+    """name_match_expr (#53) is the SQL expression matched against $pattern
+    /$exact/$prefix — "name" for a plain literal search, or
+    "strip_accents(name)" for the diacritic-folded second-pass query (caller
+    passes an already diacritic-stripped `query` to match against it)."""
     region_filter = "AND region = $region_code" if region_code else ""
     params: dict = {"pattern": f"%{query}%", "exact": query, "prefix": f"{query}%"}
     if region_code:
@@ -426,9 +576,9 @@ def _query_divisions_from_local(table_path: str, query: str, region_code: str | 
     sql = f"""
         SELECT id, name, subtype, country, region, lat, lon, admin_chain, population
         FROM read_parquet('{table_path}')
-        WHERE name ILIKE $pattern
+        WHERE {name_match_expr} ILIKE $pattern
         {region_filter}
-        ORDER BY {_match_tier_order_sql("name")}
+        ORDER BY {_match_tier_order_sql(name_match_expr)}
         LIMIT {DIVISION_OVERFETCH}
     """
     try:
@@ -447,9 +597,13 @@ def _query_divisions_from_local(table_path: str, query: str, region_code: str | 
     return result
 
 
-def _query_divisions_from_upstream(query: str, region_code: str | None) -> list[dict]:
+def _query_divisions_from_upstream(
+    query: str, region_code: str | None, name_match_expr: str = "names.primary"
+) -> list[dict]:
     """Direct upstream scan — the pre-#43 path, used when no local table is
     available (PLACEROOT_CACHE=off, or materialization failed).
+
+    name_match_expr: see _query_divisions_from_local (#53).
     """
     # type=division (points + hierarchies), not divisions.py's type=division_area
     # (polygons) — the two share a theme but are read from different fixtures/globs.
@@ -467,9 +621,9 @@ def _query_divisions_from_upstream(query: str, region_code: str | None) -> list[
         SELECT id, names.primary AS name, subtype, country, region,
                bbox.ymin AS lat, bbox.xmin AS lon, hierarchies, {population_expr}
         FROM read_parquet('{glob}', hive_partitioning=1)
-        WHERE names.primary ILIKE $pattern
+        WHERE {name_match_expr} ILIKE $pattern
         {region_filter}
-        ORDER BY {_match_tier_order_sql("names.primary")}
+        ORDER BY {_match_tier_order_sql(name_match_expr)}
         LIMIT {DIVISION_OVERFETCH}
     """
     try:
@@ -488,10 +642,20 @@ def _query_divisions_from_upstream(query: str, region_code: str | None) -> list[
     return result
 
 
-def _query_divisions(query: str, region_code: str | None, local_table: str | None) -> list[dict]:
+def _query_divisions(
+    query: str,
+    region_code: str | None,
+    local_table: str | None,
+    fold_diacritics: bool = False,
+) -> list[dict]:
+    """fold_diacritics (#53): match strip_accents(name) against `query`
+    (which the caller must already have run through _strip_diacritics) —
+    the diacritic-folded half of the second-pass variant retry."""
     if local_table is not None:
-        return _query_divisions_from_local(local_table, query, region_code)
-    return _query_divisions_from_upstream(query, region_code)
+        name_expr = "strip_accents(name)" if fold_diacritics else "name"
+        return _query_divisions_from_local(local_table, query, region_code, name_expr)
+    name_expr = "strip_accents(names.primary)" if fold_diacritics else "names.primary"
+    return _query_divisions_from_upstream(query, region_code, name_expr)
 
 
 def _query_places_fallback(query: str) -> list[dict]:
@@ -554,6 +718,52 @@ def geocode(query: str, limit: int = DEFAULT_LIMIT) -> list[dict]:
         search_query = query
         divisions = _query_divisions(search_query, None, local_table)
 
+    # #53: literal query didn't reach an exact-or-prefix division match with
+    # some real prominence behind it — retry with normalized variants
+    # (abbreviation swaps + diacritic folding) and merge in whatever they
+    # find. Rows sourced this way are tagged `_variant`, which _rank_key
+    # only ever uses as the last tiebreak (after the #47 population/proxy
+    # chain) — see _rank_key's docstring for why: a literal exact match
+    # against Overture's population-less tiny-village namesakes must not
+    # get to shadow a genuinely prominent place found only through a
+    # spelling variant ("St. Louis" also literally names several small,
+    # unpopulated villages worldwide; the famous one is "Saint Louis" in
+    # Overture's own naming and needs the variant retry to enter the
+    # candidate pool at all — verified live, see the #53 module docstring).
+    #
+    # "Good enough" literal match: at least one exact/prefix candidate that
+    # actually carries a population figure — Overture populates that field
+    # for most well-known places (#47), so its presence is itself a signal
+    # the literal search already found something real, not just a
+    # same-spelling coincidence.
+    best_literal_tier = max((_match_tier(c["name"], search_query) for c in divisions), default=0)
+    literal_match_has_prominence = any(
+        _match_tier(c["name"], search_query) == best_literal_tier
+        and c.get("population") is not None
+        for c in divisions
+    )
+    if best_literal_tier < 2 or not literal_match_has_prominence:
+        seen_ids = {c["id"] for c in divisions}
+        variant_rows: list[dict] = []
+        for variant_query in _abbreviation_variant_queries(search_query):
+            for row in _query_divisions(variant_query, region_code, local_table):
+                if row["id"] not in seen_ids:
+                    row["_variant"] = True
+                    # Tier against the variant text it actually matched
+                    # (#53) — see _effective_tier's docstring for why this
+                    # can't be recomputed against the original query later.
+                    row["_tier"] = _match_tier(row["name"], variant_query)
+                    variant_rows.append(row)
+                    seen_ids.add(row["id"])
+        stripped_query = _strip_diacritics(search_query)
+        for row in _query_divisions(stripped_query, region_code, local_table, fold_diacritics=True):
+            if row["id"] not in seen_ids:
+                row["_variant"] = True
+                row["_tier"] = _match_tier(row["name"], stripped_query)
+                variant_rows.append(row)
+                seen_ids.add(row["id"])
+        divisions = divisions + variant_rows
+
     region_population = _region_population_lookup(local_table)
     divisions.sort(key=lambda r: _rank_key(r, search_query, region_population))
 
@@ -563,7 +773,7 @@ def geocode(query: str, limit: int = DEFAULT_LIMIT) -> list[dict]:
     # — worth paying to fill out a weak result set (a prefix/substring-only
     # match, or none at all), not worth paying just to pad an already-exact
     # answer out to `limit`.
-    has_exact_division = any(_match_tier(c["name"], search_query) == 3 for c in divisions)
+    has_exact_division = any(_effective_tier(c, search_query) == 3 for c in divisions)
     candidates = divisions
     if len(candidates) < limit and not has_exact_division:
         seen_names = {(c["name"].lower()) for c in candidates}
@@ -588,6 +798,171 @@ def geocode(query: str, limit: int = DEFAULT_LIMIT) -> list[dict]:
             ),
         })
     return out
+
+
+# --- #22: GERS id resolution -----------------------------------------------
+
+# resolve_place overfetches both sources before merging/ranking/trimming to
+# `limit`, the same reasoning as DIVISION_OVERFETCH: a shallow per-source
+# limit can drop the right candidate before the merged ranking ever sees it.
+_RESOLVE_OVERFETCH = 10
+
+# Bbox radius (#22) for the name-filtered find_places call when no
+# near_lat/near_lon hint is given but a division match is in hand — "same
+# metro area" as the top division match, not a general-purpose area search.
+_RESOLVE_PLACE_RADIUS_M = 20_000
+
+_MATCH_TIER_LABELS = {3: "exact", 2: "prefix", 1: "substring"}
+
+# Small enough to filter, generic enough that requiring them in a name
+# match would be actively wrong ("the Whole Foods on Lamar" — "the"/"on"
+# aren't part of any real place name). Dropped before a query is split into
+# per-token find_places searches and before word-overlap scoring.
+_STOPWORDS = {"the", "a", "an", "on", "in", "at", "near", "of", "and", "by"}
+
+
+def _match_label(name: str, query: str) -> str:
+    return _MATCH_TIER_LABELS[_match_tier(name, query)]
+
+
+def _significant_tokens(query: str) -> list[str]:
+    """query -> its meaningful words: >=3 chars, not a stopword, in order of
+    appearance. Falls back to the whole query if nothing survives (e.g. a
+    query that's all short/stopword tokens) rather than searching nothing.
+    """
+    tokens = [t for t in re.findall(r"[\w'-]+", query) if len(t) >= 3]
+    significant = [t for t in tokens if t.lower() not in _STOPWORDS]
+    return significant or tokens or [query]
+
+
+def _place_match_label(name: str, query: str) -> str | None:
+    """Match label for a place candidate found via per-token search (#22),
+    or None if it isn't actually related to `query` — the per-token
+    find_places calls below are deliberately loose (OR of significant
+    words) for recall, so this is what keeps an unrelated nearby place from
+    polluting results just because it happens to share one common word.
+
+    Unlike _match_tier (divisions, where the query and the canonical name
+    are usually close to the same shape), a free-text place query commonly
+    carries extra context the place's own name doesn't ("Mañana coffee
+    Austin" vs. a place literally named "Mañana Coffee") — so containment
+    is checked in both directions, and failing that, a shared significant
+    word still counts as a (weaker) match.
+    """
+    n, q = _normalize_for_match(name), _normalize_for_match(query)
+    if n == q:
+        return "exact"
+    if n.startswith(q) or q.startswith(n):
+        return "prefix"
+    if n in q or q in n:
+        return "substring"
+    n_tokens = set(_significant_tokens(n))
+    q_tokens = set(_significant_tokens(q))
+    if n_tokens & q_tokens:
+        return "substring"
+    return None
+
+
+def resolve_place(
+    query: str,
+    near_lat: float | None = None,
+    near_lon: float | None = None,
+    limit: int = 3,
+) -> list[dict]:
+    """Free-text place reference -> ranked, typed GERS ids an agent can hold onto.
+
+    The point of this tool: "the Whole Foods on Lamar" or "Travis County"
+    are free text, not stable references — resolve_place turns either shape
+    into a GERS id a caller can pass to place_details/other tools later.
+    Merges two sources: geocode()'s division matches (a name/region/county/
+    country), and find_places searches over the places theme (a business or
+    POI), one per significant word in the query (so a query that names a
+    place plus extra context — "Mañana coffee Austin" — still finds a place
+    literally named just "Mañana Coffee") — bbox-limited to near_lat/near_lon
+    if given, else to a 20km vicinity around the top division match (so a
+    location hint isn't required when the query itself names a place, e.g.
+    "Travis County, TX"). Place candidates unrelated to the query beyond
+    incidentally sharing one word with something nearby are dropped, not
+    just down-ranked — see _place_match_label.
+
+    Each candidate: {"id" (GERS), "kind": "division" | "place", "name",
+    "lat", "lon", "match": "exact" | "prefix" | "substring", plus
+    "admin_context" (division) or "category" (place)}. Ranked by match tier
+    first — kind-agnostic, an exact place beats a prefix-matched division —
+    then by prominence (division rank_score / place confidence, both
+    roughly 0-1 scales), then id for determinism. Never more than `limit`
+    results.
+
+    No match is a valid answer, not an error: an unresolvable query returns
+    an empty list. Raises overture.UpstreamUnavailable if a remote scan
+    fails after retries, or overture.SchemaDegraded if the places dataset
+    is missing bbox — the caller (server.py) turns either into a structured
+    error like every other tool.
+    """
+    query = query.strip()
+    limit = max(1, min(limit, MAX_LIMIT))
+    if not query:
+        return []
+
+    geocode_hits = geocode(query, limit=_RESOLVE_OVERFETCH)
+    division_hits = [r for r in geocode_hits if r["type"] != "place"]
+
+    if near_lat is not None and near_lon is not None:
+        reference = (near_lat, near_lon)
+    elif division_hits:
+        reference = (division_hits[0]["lat"], division_hits[0]["lon"])
+    else:
+        reference = None
+
+    place_rows: list[dict] = []
+    if reference is not None:
+        ref_lat, ref_lon = reference
+        seen_place_ids: set[str] = set()
+        for token in _significant_tokens(query):
+            for row in overture.find_places(
+                ref_lat, ref_lon, radius_m=_RESOLVE_PLACE_RADIUS_M,
+                name=token, limit=_RESOLVE_OVERFETCH,
+            ):
+                if row["id"] and row["id"] not in seen_place_ids:
+                    seen_place_ids.add(row["id"])
+                    place_rows.append(row)
+
+    candidates = []
+    seen_ids: set[str] = set()
+    for r in division_hits:
+        if not r["id"] or r["id"] in seen_ids:
+            continue
+        seen_ids.add(r["id"])
+        candidates.append({
+            "id": r["id"], "kind": "division", "name": r["name"],
+            "lat": r["lat"], "lon": r["lon"],
+            "admin_context": r["admin_context"],
+            "match": _match_label(r["name"], query),
+            "_prominence": r["rank_score"],
+        })
+    for r in place_rows:
+        if not r["id"] or r["id"] in seen_ids or not r["name"]:
+            continue
+        label = _place_match_label(r["name"], query)
+        if label is None:
+            continue
+        seen_ids.add(r["id"])
+        candidates.append({
+            "id": r["id"], "kind": "place", "name": r["name"],
+            "lat": r["lat"], "lon": r["lon"],
+            "category": r["category"],
+            "match": label,
+            "_prominence": r.get("confidence") or 0.0,
+        })
+
+    candidates.sort(key=lambda c: (
+        -{"exact": 3, "prefix": 2, "substring": 1}[c["match"]],
+        -c["_prominence"],
+        c["id"],
+    ))
+    for c in candidates:
+        del c["_prominence"]
+    return candidates[:limit]
 
 
 def _nearest_address(lat: float, lon: float) -> dict | None:
