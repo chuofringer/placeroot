@@ -5,6 +5,7 @@ Run: uv run placeroot
 
 import logging
 import os
+import threading
 
 from mcp.server.mcpserver import MCPServer
 
@@ -84,7 +85,13 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
 
 
 def _warm_start() -> None:
-    """Best-effort cache pre-warm for PLACEROOT_WARM_REGION. Never blocks or raises."""
+    """Best-effort cache pre-warm for PLACEROOT_WARM_REGION. Never blocks or raises.
+
+    "Never blocks" refers to startup not being able to hang or crash on
+    this — the call itself is synchronous (PLACEROOT_CACHE_SYNC), since
+    this already only runs once, at startup, specifically to materialize
+    the home region's tiles before real traffic arrives.
+    """
     spec = os.environ.get("PLACEROOT_WARM_REGION")
     if not spec or not cache.enabled():
         return
@@ -93,10 +100,24 @@ def _warm_start() -> None:
         logger.warning("PLACEROOT_WARM_REGION=%r is malformed, expected 'lat,lon,radius_m'", spec)
         return
     lat, lon, radius_m = parsed
+    previous = os.environ.get("PLACEROOT_CACHE_SYNC")
+    os.environ["PLACEROOT_CACHE_SYNC"] = "1"
     try:
         overture.find_places(lat, lon, radius_m, limit=1)
     except Exception as e:  # noqa: BLE001 - warm-on-start must never break startup
         logger.warning("PLACEROOT_WARM_REGION pre-warm failed (continuing): %s", e)
+    finally:
+        if previous is None:
+            os.environ.pop("PLACEROOT_CACHE_SYNC", None)
+        else:
+            os.environ["PLACEROOT_CACHE_SYNC"] = previous
+
+
+def _warm_metadata_async() -> None:
+    """Kick off the shared connection's parquet-metadata pre-warm (issue #31)
+    on a daemon thread so it doesn't delay startup, only the first query.
+    """
+    threading.Thread(target=overture.warm_metadata, daemon=True).start()
 
 
 def main() -> None:
@@ -106,6 +127,7 @@ def main() -> None:
     mcp._lowlevel_server.instructions = (
         f"{BASE_INSTRUCTIONS} Backed by Overture Maps release {active_release}."
     )
+    _warm_metadata_async()
     _warm_start()
     mcp.run()
 

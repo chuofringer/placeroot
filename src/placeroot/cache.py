@@ -17,11 +17,26 @@ that scans arbitrary large regions once each.
 
 Eviction is mtime-based LRU over the whole cache directory, capped by
 total size (not by file count or age), and re-checked after every write.
+
+Query-first, materialize-later (issue #31): a COPY that pulls a whole tile
+out of upstream costs seconds, and a caller shouldn't block a user-facing
+query on it. When a query touches a tile that isn't cached yet,
+local_paths_for_query() returns None (the caller falls back to scanning
+upstream directly for *that* query) and kicks off materialization of the
+missing tile(s) on a background daemon thread instead of waiting. Each
+background fetch gets its own DuckDB connection — connections aren't safe
+for concurrent use, and this one is created and used entirely off the
+caller's connection/thread. An in-flight set (guarded by a lock) makes sure
+two queries that both miss the same tile only trigger one fetch. Tests and
+the startup warm-start want deterministic, synchronous behavior instead —
+set PLACEROOT_CACHE_SYNC to materialize missing tiles inline, on the
+caller's own connection, before returning.
 """
 
 import logging
 import math
 import os
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -30,10 +45,28 @@ TILE_DEG = 1.0
 DEFAULT_CACHE_DIR = os.path.expanduser("~/.cache/placeroot")
 DEFAULT_MAX_MB = 500
 
+# Tiles currently being fetched by a background thread, as (release, theme,
+# tile) keys — guards against two concurrent cache misses on the same tile
+# both starting a fetch.
+_inflight: set[tuple[str, str, tuple[int, int]]] = set()
+_inflight_lock = threading.Lock()
+
 
 def enabled() -> bool:
     """False iff PLACEROOT_CACHE=off. On (the default) otherwise."""
     return os.environ.get("PLACEROOT_CACHE", "").strip().lower() != "off"
+
+
+def sync_mode() -> bool:
+    """True iff PLACEROOT_CACHE_SYNC is set to a truthy value.
+
+    Forces local_paths_for_query() to materialize missing tiles inline
+    instead of handing them to a background thread — used by tests (so
+    cache behavior is deterministic) and the startup warm-start (which is
+    already an explicit, best-effort blocking call).
+    """
+    value = os.environ.get("PLACEROOT_CACHE_SYNC", "").strip().lower()
+    return value not in ("", "0", "false", "off")
 
 
 def cache_dir() -> Path:
@@ -110,22 +143,81 @@ def evict_if_needed() -> None:
         i += 1
 
 
-def local_paths_for_query(
-    con, release: str, theme: str, bbox: tuple[float, float, float, float], upstream_glob: str
-) -> list[str] | None:
-    """Local cached parquet paths covering bbox, fetching uncached tiles from upstream.
+def _materialize_in_background(
+    release: str, theme: str, tile: tuple[int, int], upstream_glob: str, new_connection
+) -> None:
+    """Fetch `tile` on a daemon thread with its own connection, deduped by _inflight.
 
-    Returns None if caching is disabled. If a tile is already cached, its
-    upstream is never touched again for that tile — this is what lets
-    queries keep answering from cache when upstream later goes down (issue
-    #5's cache-as-fallback path).
+    Never raises to the caller — a failed background fetch is logged and
+    just leaves the tile uncached for next time (the calling query already
+    got its answer from upstream directly).
+    """
+    key = (release, theme, tile)
+    with _inflight_lock:
+        if key in _inflight:
+            return
+        _inflight.add(key)
+
+    def _run():
+        try:
+            ensure_tile(new_connection(), release, theme, tile, upstream_glob)
+        except Exception as e:  # noqa: BLE001 - background fetch must never surface
+            logger.warning("Background tile materialization failed for %s: %s", key, e)
+        finally:
+            with _inflight_lock:
+                _inflight.discard(key)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def local_paths_for_query(
+    con,
+    release: str,
+    theme: str,
+    bbox: tuple[float, float, float, float],
+    upstream_glob: str,
+    new_connection=None,
+) -> list[str] | None:
+    """Local cached parquet paths covering bbox, or None to fall back to upstream.
+
+    Returns None if caching is disabled. If every touched tile is already
+    cached, returns their paths without touching upstream at all — this is
+    what lets queries keep answering from cache when upstream later goes
+    down (issue #5's cache-as-fallback path).
+
+    If any touched tile is missing, this does NOT block materializing it
+    (a tile COPY costs seconds — issue #31): under PLACEROOT_CACHE_SYNC it
+    fetches the missing tiles inline on `con` and returns the complete set
+    of paths; otherwise it schedules background fetches (via
+    `new_connection`, a zero-arg factory for a fresh connection — required
+    whenever caching is enabled, since the background thread must not share
+    `con`) and returns None so the caller queries upstream directly for
+    this one query instead of waiting.
     """
     if not enabled():
         return None
-    xmin, ymin, xmax, ymax = bbox
-    tiles = tiles_for_bbox(xmin, ymin, xmax, ymax)
-    paths = [ensure_tile(con, release, theme, t, upstream_glob) for t in tiles]
-    return [str(p) for p in paths]
+    tiles = tiles_for_bbox(*bbox)
+
+    cached, missing = [], []
+    for t in tiles:
+        path = tile_path(release, theme, t)
+        if path.exists():
+            os.utime(path, None)  # bump mtime: this tile is recently used
+            cached.append(path)
+        else:
+            missing.append(t)
+
+    if not missing:
+        return [str(p) for p in cached]
+
+    if sync_mode():
+        for t in missing:
+            cached.append(ensure_tile(con, release, theme, t, upstream_glob))
+        return [str(p) for p in cached]
+
+    for t in missing:
+        _materialize_in_background(release, theme, t, upstream_glob, new_connection)
+    return None
 
 
 def parse_warm_region(spec: str) -> tuple[float, float, float] | None:
