@@ -28,7 +28,7 @@ import os
 
 import duckdb
 
-from placeroot import budget, cache, db, release
+from placeroot import budget, cache, db, geo, release
 from placeroot.errors import (  # noqa: F401 - re-exported; see below
     SchemaDegraded,
     UpstreamUnavailable,
@@ -266,7 +266,12 @@ def area_geometry(
     params: near the antimeridian those diverge (see _bbox_filter_sql), and
     it's this raw, possibly out-of-range box that cache.tiles_for_bbox()
     needs to enumerate tiles on both sides of the seam.
+
+    radius_m is clamped to geo.MAX_QUERY_RADIUS_M (an abuse guard against a
+    world-spanning bbox — see geo.clamp_radius_m) and the clamped value is
+    used for both the bbox and the $radius_m distance parameter so they agree.
     """
+    radius_m = geo.clamp_radius_m(radius_m)
     xmin, ymin, xmax, ymax = _bbox_around(lat, lon, radius_m)
     bbox_filter, bbox_params = _bbox_filter_sql(xmin, ymin, xmax, ymax)
     distance_filter = f"{_DISTANCE_EXPR} <= $radius_m"
