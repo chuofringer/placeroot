@@ -190,11 +190,43 @@ def _bbox_around(lat: float, lon: float, radius_m: float) -> tuple[float, float,
 
     Same approach as overture._bbox_around, duplicated here rather than
     imported so routing.py has no dependency on overture.py's internals —
-    see the follow-up list for unifying shared geo helpers.
+    see the follow-up list for unifying shared geo helpers (#40).
+
+    Latitude is clamped to [-90, 90] (issue #42), same as overture.py's
+    copy. Longitude is left unwrapped; see _bbox_filter_sql below for how
+    build_graph() turns a crossing box into a seam-safe SQL filter.
     """
     dlat = radius_m / 111_320.0
     dlon = radius_m / (111_320.0 * max(math.cos(math.radians(lat)), 1e-6))
-    return lon - dlon, lat - dlat, lon + dlon, lat + dlat
+    ymin = max(lat - dlat, -90.0)
+    ymax = min(lat + dlat, 90.0)
+    return lon - dlon, ymin, lon + dlon, ymax
+
+
+def _bbox_filter_sql(xmin: float, ymin: float, xmax: float, ymax: float) -> tuple[str, dict]:
+    """SQL bbox filter for [xmin, xmax] x [ymin, ymax], antimeridian-safe.
+
+    Minimal duplicate of overture._bbox_filter_sql (issue #42) — kept
+    separate for the same reason _bbox_around is duplicated rather than
+    imported (see above); unifying both is #40's job, not this fix's.
+    """
+    if xmin >= -180.0 and xmax <= 180.0:
+        filter_sql = (
+            "bbox.xmax >= $xmin AND bbox.xmin <= $xmax"
+            " AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
+        )
+        return filter_sql, {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}
+
+    east_xmin = xmin + 360.0 if xmin < -180.0 else xmin
+    west_xmax = xmax - 360.0 if xmax > 180.0 else xmax
+    filter_sql = (
+        "(("
+        "bbox.xmax >= $xmin AND bbox.xmin <= 180"
+        ") OR ("
+        "bbox.xmax >= -180 AND bbox.xmin <= $xmax"
+        ")) AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
+    )
+    return filter_sql, {"xmin": east_xmin, "ymin": ymin, "xmax": west_xmax, "ymax": ymax}
 
 
 def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -340,6 +372,7 @@ def build_graph(lat: float, lon: float, radius_m: float) -> Graph:
     missing = set(_check_schema(upstream))
     xmin, ymin, xmax, ymax = _bbox_around(lat, lon, radius_m)
     bbox = (xmin, ymin, xmax, ymax)
+    bbox_filter, bbox_params = _bbox_filter_sql(xmin, ymin, xmax, ymax)
 
     class_expr = "NULL" if "class" in missing else "class"
     connectors_expr = "NULL" if "connectors" in missing else "connectors"
@@ -361,11 +394,10 @@ def build_graph(lat: float, lon: float, radius_m: float) -> Graph:
             {connectors_expr} AS connectors,
             {wkt_expr} AS wkt
         FROM {_from_source(bbox)}
-        WHERE bbox.xmax >= $xmin AND bbox.xmin <= $xmax
-          AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax
+        WHERE {bbox_filter}
           {subtype_filter}
     """
-    params = {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}
+    params = bbox_params
     try:
         rows = _conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
