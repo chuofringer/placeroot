@@ -43,6 +43,32 @@ def test_tiles_for_bbox_spans_multiple_tiles():
     assert set(tiles) == {(-75, 40), (-75, 41), (-74, 40), (-74, 41)}
 
 
+def test_tiles_for_bbox_crosses_east_seam():
+    """Issue #42: a bbox that overshoots +180 (xmax > 180) must enumerate
+    tiles on both sides of the antimeridian — the east-of-seam column
+    (179) and the wrapped west-of-seam column (-180), not a bogus tile at
+    raw column 180."""
+    tiles = cache.tiles_for_bbox(179.5, 9.0, 180.5, 11.0)
+    xs = {tx for tx, _ty in tiles}
+    assert 179 in xs
+    assert -180 in xs
+    assert 180 not in xs
+
+
+def test_tiles_for_bbox_crosses_west_seam():
+    tiles = cache.tiles_for_bbox(-180.5, 9.0, -179.5, 11.0)
+    xs = {tx for tx, _ty in tiles}
+    assert -180 in xs
+    assert 179 in xs
+    assert -181 not in xs
+
+
+def test_tiles_for_bbox_non_crossing_box_unaffected_by_wrap():
+    """Wrapping is the identity for an already in-range box — same tile ids
+    as before the antimeridian fix."""
+    assert cache.tiles_for_bbox(-73.95, 40.65, -73.85, 40.75) == [(-74, 40)]
+
+
 def test_enabled_defaults_true(monkeypatch):
     monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
     assert cache.enabled() is True
