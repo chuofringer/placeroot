@@ -477,7 +477,8 @@ def place_details(
         LIMIT 1
     """
     try:
-        row = _conn().execute(sql, params).fetchone()
+        with _conn_lock:
+            row = _conn().execute(sql, params).fetchone()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     if row is None:

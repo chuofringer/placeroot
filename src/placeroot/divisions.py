@@ -25,6 +25,7 @@ parameter) would let it slot in without further plumbing.
 """
 
 import logging
+from functools import lru_cache
 
 import duckdb
 
@@ -55,6 +56,26 @@ def _ensure_spatial() -> None:
     _spatial_loaded = True
 
 
+@lru_cache(maxsize=8)
+def _geom_expr(upstream: str) -> str:
+    """SQL expression yielding a GEOMETRY for the dataset's geometry column.
+
+    Real Overture GeoParquet carries geo metadata, so DuckDB spatial reads
+    `geometry` as a native GEOMETRY; plain-parquet fixtures store raw WKB
+    BLOBs, which need ST_GeomFromWKB. Probe the column type once per glob.
+    """
+    try:
+        with overture._conn_lock:
+            (_, type_name) = overture._conn().execute(
+                f"DESCRIBE SELECT geometry FROM read_parquet('{upstream}') LIMIT 0"
+            ).fetchone()[:2]
+    except duckdb.Error:
+        # Probe failure means upstream itself is unreachable — let the real
+        # query hit the same problem and surface it as UpstreamUnavailable.
+        return "ST_GeomFromWKB(geometry)"
+    return "geometry" if type_name.upper().startswith("GEOMETRY") else "ST_GeomFromWKB(geometry)"
+
+
 def admin_lookup(lat: float, lon: float) -> dict:
     """Containing admin hierarchy for a point, smallest division first.
 
@@ -77,19 +98,21 @@ def admin_lookup(lat: float, lon: float) -> dict:
     name_expr = "NULL" if "names" in missing else "names.primary"
     subtype_expr = "NULL" if "subtype" in missing else "subtype"
     id_expr = "NULL" if "id" in missing else "id"
+    geom_expr = _geom_expr(upstream)
 
     sql = f"""
         SELECT
             {id_expr}   AS id,
             {name_expr} AS name,
             {subtype_expr} AS type,
-            ST_Area(ST_GeomFromWKB(geometry)) AS area
+            ST_Area({geom_expr}) AS area
         FROM read_parquet('{upstream}', hive_partitioning=1)
-        WHERE ST_Contains(ST_GeomFromWKB(geometry), ST_Point($lon, $lat))
+        WHERE ST_Contains({geom_expr}, ST_Point($lon, $lat))
         ORDER BY area ASC
     """
     try:
-        rows = overture._conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
+        with overture._conn_lock:
+            rows = overture._conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
     chain = [{"name": name, "type": type_, "id": id_} for id_, name, type_, _area in rows]
