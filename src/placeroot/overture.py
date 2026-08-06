@@ -10,6 +10,7 @@ instead of hardcoded.
 import logging
 import math
 import os
+import threading
 from functools import lru_cache
 
 import duckdb
@@ -78,14 +79,30 @@ def _upstream_glob() -> str:
     return f"s3://overturemaps-us-west-2/release/{active_release}/theme={THEME}/type=place/*"
 
 
-@lru_cache(maxsize=1)
-def _conn() -> duckdb.DuckDBPyConnection:
-    con = duckdb.connect()
+# Guards every use of the shared _conn() connection. DuckDB connections
+# aren't safe for concurrent use, and the MCP stdio server normally
+# processes one tool call at a time anyway — this lock formalizes that and
+# makes it safe for the startup metadata pre-warm (issue #31) to share the
+# same connection object from a background thread without racing a real
+# query. Background tile materialization (cache.py) deliberately does NOT
+# use this lock: it always runs on its own connection via _new_connection(),
+# never touching the shared one.
+_conn_lock = threading.Lock()
+
+
+def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     con.execute("INSTALL httpfs; LOAD httpfs;")
     con.execute("SET s3_region='us-west-2';")
     # Public bucket: anonymous access.
     con.execute("SET s3_access_key_id='';")
     con.execute("SET s3_secret_access_key='';")
+    # Caches parquet footer/metadata per connection (issue #31): the cold
+    # cost DuckDB pays reading a remote file's footer is ~5s of the ~8s cold
+    # query; this makes a second query against the same file on the same
+    # connection skip that cost. Combined with the startup pre-warm below,
+    # the shared connection often has this paid for before a real query
+    # ever arrives.
+    con.execute("SET enable_object_cache=true;")
     # Bounded timeout + retry on remote scans (issue #5): DuckDB's httpfs
     # extension applies these to every S3/HTTP request it makes, so a slow
     # or down upstream fails fast instead of hanging a tool call.
@@ -99,6 +116,36 @@ def _conn() -> duckdb.DuckDBPyConnection:
     return con
 
 
+@lru_cache(maxsize=1)
+def _conn() -> duckdb.DuckDBPyConnection:
+    return _configure(duckdb.connect())
+
+
+def _new_connection() -> duckdb.DuckDBPyConnection:
+    """A fresh, independently-configured connection for background work.
+
+    Background tile materialization must not share _conn() with whatever
+    query is running on the main thread — DuckDB connections aren't safe
+    for concurrent use. Pass this (uncalled) as cache.py's connection
+    factory so it can create one per background fetch.
+    """
+    return _configure(duckdb.connect())
+
+
+def warm_metadata() -> None:
+    """Best-effort: touch the shared connection's parquet metadata cache for
+    the active upstream dataset (issue #31), so the first real query doesn't
+    pay the cold footer-read cost alone. Meant to run on a background thread
+    at startup; failures are logged and swallowed, never raised.
+    """
+    upstream = _upstream_glob()
+    try:
+        with _conn_lock:
+            _conn().execute(f"SELECT * FROM read_parquet('{upstream}') LIMIT 0")
+    except duckdb.Error as e:
+        logger.warning("Metadata pre-warm failed for %s (continuing): %s", upstream, e)
+
+
 @lru_cache(maxsize=8)
 def _probe_schema(glob: str) -> frozenset | None:
     """Column names present in glob's dataset, or None if the probe itself failed.
@@ -108,7 +155,8 @@ def _probe_schema(glob: str) -> frozenset | None:
     problem and surface it as UpstreamUnavailable instead.
     """
     try:
-        cols = _conn().execute(f"SELECT * FROM read_parquet('{glob}') LIMIT 0").description
+        with _conn_lock:
+            cols = _conn().execute(f"SELECT * FROM read_parquet('{glob}') LIMIT 0").description
         return frozenset(c[0] for c in cols)
     except duckdb.Error as e:
         logger.warning("Schema probe failed for %s: %s", glob, e)
@@ -142,9 +190,10 @@ def _from_source(bbox: tuple[float, float, float, float]) -> str:
     upstream = _upstream_glob()
     if cache.enabled():
         try:
-            paths = cache.local_paths_for_query(
-                _conn(), release.resolve_release(), THEME, bbox, upstream
-            )
+            with _conn_lock:
+                paths = cache.local_paths_for_query(
+                    _conn(), release.resolve_release(), THEME, bbox, upstream, _new_connection
+                )
         except duckdb.Error as e:
             raise UpstreamUnavailable(str(e)) from e
         if paths:
@@ -264,7 +313,8 @@ def find_places(
         LIMIT {limit}
     """
     try:
-        rows = _conn().execute(sql, params).fetchall()
+        with _conn_lock:
+            rows = _conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     cols = [
@@ -300,7 +350,8 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
         ORDER BY n DESC
     """
     try:
-        rows = _conn().execute(sql, params).fetchall()
+        with _conn_lock:
+            rows = _conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     total_places = rows[0][2] if rows else 0
