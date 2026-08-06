@@ -64,8 +64,10 @@ def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
         # environment if the operator set them, anonymous otherwise.
         con.execute(f"SET s3_endpoint='{endpoint}';")
         con.execute("SET s3_url_style='path';")
-        con.execute(f"SET s3_access_key_id='{os.environ.get('PLACEROOT_S3_ACCESS_KEY_ID', '')}';")
-        con.execute(f"SET s3_secret_access_key='{os.environ.get('PLACEROOT_S3_SECRET_ACCESS_KEY', '')}';")
+        access_key = os.environ.get("PLACEROOT_S3_ACCESS_KEY_ID", "")
+        secret_key = os.environ.get("PLACEROOT_S3_SECRET_ACCESS_KEY", "")
+        con.execute(f"SET s3_access_key_id='{access_key}';")
+        con.execute(f"SET s3_secret_access_key='{secret_key}';")
     else:
         con.execute("SET s3_access_key_id='';")  # public bucket: anonymous access
         con.execute("SET s3_secret_access_key='';")
