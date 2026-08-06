@@ -1,6 +1,6 @@
 {
   "name": "placeroot",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Ground AI agents in open map data. MCP server for Overture Maps — compact answers, no API key. Placeholder for the placeroot project; the server currently ships on PyPI (uvx placeroot).",
   "bin": { "placeroot": "index.js" },
   "files": ["index.js"],
