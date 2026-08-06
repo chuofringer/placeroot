@@ -116,6 +116,19 @@ def _env_var_for_theme(theme: str) -> str:
     return "PLACEROOT_DATA_PATH" if theme == THEME else f"PLACEROOT_DATA_PATH_{theme.upper()}"
 
 
+# The public Overture bucket's release root. Issue #20: PLACEROOT_UPSTREAM_BASE
+# swaps this for a mirror (our own bucket, or any other S3-compatible/local
+# base) without touching the theme=/type=/release path structure below it, so
+# an upstream layout change stays an inconvenience (re-point the env var) —
+# never an outage. See scripts/mirror_theme.py (builds the mirror) and
+# docs/MIRROR.md (the switchover runbook).
+DEFAULT_UPSTREAM_BASE = "s3://overturemaps-us-west-2/release"
+
+
+def _upstream_base() -> str:
+    return os.environ.get("PLACEROOT_UPSTREAM_BASE", DEFAULT_UPSTREAM_BASE).rstrip("/")
+
+
 def _upstream_glob(theme: str = THEME, type_: str = "place") -> str:
     specific_key = _override_key(theme, type_)
     if specific_key in _data_path_overrides:
@@ -126,7 +139,7 @@ def _upstream_glob(theme: str = THEME, type_: str = "place") -> str:
     if env_path:
         return env_path
     active_release = release.resolve_release()
-    return f"s3://overturemaps-us-west-2/release/{active_release}/theme={theme}/type={type_}/*"
+    return f"{_upstream_base()}/{active_release}/theme={theme}/type={type_}/*"
 
 
 def conn() -> duckdb.DuckDBPyConnection:
@@ -163,15 +176,46 @@ def upstream_glob(theme: str = THEME, type_: str = "place") -> str:
 _conn_lock = threading.Lock()
 
 
+# Region the public Overture bucket lives in — the default unless
+# PLACEROOT_S3_REGION overrides it (issue #20's switchover: a mirror on a
+# different S3-compatible service almost always has its own region name).
+DEFAULT_S3_REGION = "us-west-2"
+
+
+def _s3_region() -> str:
+    return os.environ.get("PLACEROOT_S3_REGION", DEFAULT_S3_REGION)
+
+
+def _s3_endpoint() -> str | None:
+    """Custom S3-compatible endpoint (R2/minio/self-hosted S3), or None for
+    plain AWS S3 — set via PLACEROOT_S3_ENDPOINT (issue #20). Wired into the
+    DuckDB connection in _configure(), below."""
+    return os.environ.get("PLACEROOT_S3_ENDPOINT") or None
+
+
 def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     con.execute("INSTALL httpfs; LOAD httpfs;")
     # An MCP tool call isn't an interactive terminal; a progress bar just
     # clutters (or, piped through a wrapping process, can garble) output.
     con.execute("SET enable_progress_bar=false;")
-    con.execute("SET s3_region='us-west-2';")
-    # Public bucket: anonymous access.
-    con.execute("SET s3_access_key_id='';")
-    con.execute("SET s3_secret_access_key='';")
+    con.execute(f"SET s3_region='{_s3_region()}';")
+    endpoint = _s3_endpoint()
+    if endpoint:
+        # A mirror target (issue #20): R2/minio/self-hosted S3 generally
+        # expect path-style addressing (bucket in the path, not a
+        # virtual-hosted subdomain) and, unlike the public Overture bucket,
+        # are usually private — read credentials from the environment if the
+        # operator set them, empty (anonymous) otherwise.
+        con.execute(f"SET s3_endpoint='{endpoint}';")
+        con.execute("SET s3_url_style='path';")
+        access_key = os.environ.get("PLACEROOT_S3_ACCESS_KEY_ID", "")
+        secret_key = os.environ.get("PLACEROOT_S3_SECRET_ACCESS_KEY", "")
+        con.execute(f"SET s3_access_key_id='{access_key}';")
+        con.execute(f"SET s3_secret_access_key='{secret_key}';")
+    else:
+        # Public bucket: anonymous access.
+        con.execute("SET s3_access_key_id='';")
+        con.execute("SET s3_secret_access_key='';")
     # Caches parquet footer/metadata per connection (issue #31): the cold
     # cost DuckDB pays reading a remote file's footer is ~5s of the ~8s cold
     # query; this makes a second query against the same file on the same
