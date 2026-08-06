@@ -41,22 +41,26 @@ tests, and a hardcoded upstream release.
 - [x] Expose GERS ids in every tool response — stable place references, no
       competitor surfaces them (#25)
 
-## v0.3 — capabilities nobody else has keyless
+## v0.3 — capabilities nobody else has keyless (core shipped 2026-08-06)
 
 - [x] Self-contained map artifact: any result renders as a live HTML map, no
       CDN, no tile key, no external viewer (#15)
 - [x] Own routing stack, walking MVP: routable graph and isochrones from
       Overture transportation, no hosted routing service on the critical path
       (#18; drive/cycle, concave hulls, graph caching tracked in #36–#39)
-- [ ] Buildings and transportation themes (#23)
-- [ ] Hosted streamable-HTTP endpoint — sells latency, never access (#24)
+- [x] Buildings and transportation themes (#23; transportation via the routing
+      stack, buildings via summarize_buildings / buildings_at)
+- [ ] Hosted streamable-HTTP endpoint — sells latency, never access (#24;
+      transport code shipped — `placeroot --http` — hosting/TLS/DNS is the
+      owner-side remainder)
 
 ## Later, demand-driven
 
-- [ ] GERS id resolution service — free-text place references → GERS ids; the
-      cheap part (returning ids we already have) moved up to v0.2 (#22, #25)
-- [ ] Own mirror of the places theme, so an upstream layout change is an
-      inconvenience rather than an outage (#20)
+- [x] GERS id resolution — `resolve_place`: free-text place references →
+      GERS ids, divisions and places merged (#22, #25)
+- [ ] Own mirror of the places theme (#20; tooling + switchover shipped —
+      scripts/mirror_theme.py, PLACEROOT_UPSTREAM_BASE, docs/MIRROR.md —
+      bucket + the 10.5 GB transfer are the owner-side remainder)
 - [ ] Live layers: transit feeds, weather context
 
 ## Relationships, not dependencies

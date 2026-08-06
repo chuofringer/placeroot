@@ -89,13 +89,12 @@ Full triage on the [project board](https://github.com/users/chuofringer/projects
       ourselves (#15). A GeoLibre bridge is an additional output target and a community
       relationship, not a dependency; engage opengeos early either way.
 - [x] placeroot.dev landing page built (#28) — deploy awaits DNS/Pages setup (yours)
-- [ ] Listings: awesome-mcp-servers, mcpservers.org, Glama, PulseMCP, Smithery, MCP
-      registry (searches for "overture" there return zero results today — claim it),
-      awesome-agentic-AI-for-ST
-- [ ] Show HN + demo video; r/gis, r/LocalLLaMA, Overture Slack, OSM community
-- [ ] "Why agents are bad at maps" post naming the payload problem — cite Mapbox's own
-      Dec 2025 "GeoAI in 2026" post and Google's $14–25/1K grounding pricing
-- [ ] Benchmark on GeoBenchX / GeoAgentBench: demonstrate tokens-per-correct-answer wins (#26)
+- [x] Listing entries drafted for all 7 registries (docs/launch/registry-submissions.md);
+      submission itself is owner-side, gated on #16's publishes
+- [x] Show HN text + community outreach notes drafted (docs/launch/); posting is owner-side
+- [x] "Why agents are bad at maps" essay drafted (docs/launch/), Mapbox/Geoawesome cited
+- [x] Tokens-per-correct-answer benchmark shipped and run live (#26): 90% accuracy,
+      median 2,543x fewer tokens than raw payloads (benchmarks/results.md)
 - [x] Flagship demo: site-selection agent entirely on open data (#17 — live-verified, ~5.9K tokens for a 17-call analysis)
 
 **Traction bar (~week 14):** judged on signals we own (#19, defined with
