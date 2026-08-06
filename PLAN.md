@@ -94,7 +94,7 @@ groundfact (social channels exist), 15 others (registered domains or package col
 - [x] Offline test suite and CI (#6); measured token budget (#7)
 - [x] Local tile cache — warm ~21ms, cold under ~5s, works offline (#8, #31)
 - [x] `place_details`, `compare_areas`, `within_distance` (#9, #12, #13, #41)
-- [x] `geocode` / `reverse_geocode` on Overture data (hit@1 98.2% live), `admin_lookup` (#10, #11, #43, #46, #47)
+- [x] `geocode` / `reverse_geocode` on Overture data (hit@1 100% live, saturated set), `admin_lookup` (#10, #11, #43, #46, #47)
 - [x] `simplify_geometry` (the payload tool) (#14)
 - [x] Expose GERS ids in every tool response (#25)
 - [x] Register domains: placeroot.dev (canonical) + placeroot.com (redirect), done

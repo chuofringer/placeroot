@@ -4,8 +4,8 @@ Ready-to-paste entries per registry. **Blocker, read first:** PyPI and npm
 publishing (ROADMAP #16 / PLAN.md Phase 1) has not shipped yet as of this
 draft — `uvx placeroot` / `npx placeroot` are the intended install commands
 and match `pyproject.toml` (`name = "placeroot"`) and `npm/package.json`
-(`name: "placeroot"`, currently a `0.0.1` placeholder pointing at the PyPI
-release), but neither package is live on its registry today. Every entry
+(`name: "placeroot"`, a placeholder pointing at the PyPI release), but
+neither package is live on its registry today. Every entry
 below is written as it should read once #16 ships — do not submit any of
 these until the packages are published and the install commands actually
 work, or the submission will be rejected/flagged by registry maintainers who
@@ -95,13 +95,13 @@ from documentation, not a validated publish:
     "url": "https://github.com/chuofringer/placeroot",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.3.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "placeroot",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -114,7 +114,7 @@ from documentation, not a validated publish:
 TODO before submitting: confirm the `packages[].registryType`/`transport`
 enum values against the current schema (`pkg/model/` in the registry repo)
 and bump `version` to whatever actually lands on PyPI — this draft's
-`0.1.0` matches `pyproject.toml` at time of writing but the PyPI publish
+`0.3.0` matches `pyproject.toml` at time of writing but the PyPI publish
 itself (#16) hasn't happened yet. The official registry currently returns
 zero results for "overture" (noted in PLAN.md) — this is an open namespace.
 

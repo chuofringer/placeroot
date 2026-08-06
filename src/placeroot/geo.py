@@ -1,10 +1,8 @@
-"""Shared geometry helpers for the query layer (issue #40).
+"""Shared geometry helpers for the query layer.
 
-bbox_around/bbox_filter_sql used to be duplicated byte-for-byte between
-overture.py and routing.py (#42's antimeridian fix landed twice). geom_expr
-unifies a third duplicate: the "native GEOMETRY column or WKB BLOB fixture"
-probe divisions.py, buildings.py, and routing.py each carried a copy of
-(routing.py's also wrapped the result in ST_AsText — as_wkt covers that).
+bbox_around/bbox_filter_sql build antimeridian-safe bounding boxes;
+geom_expr resolves the "native GEOMETRY column or WKB BLOB fixture" probe
+shared by every theme module (as_wkt covers callers that need text).
 """
 
 import logging

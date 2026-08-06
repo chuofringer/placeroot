@@ -14,9 +14,9 @@ workflow, but the query layer (nearest-places, area summaries, admin
 hierarchy lookup, geocoding built on Overture's `divisions`/`addresses`
 themes instead of Nominatim) is plain DuckDB-over-Parquet and might be
 useful outside the MCP context too. Geocode hit@1 is measured at 100% over
-113 live queries against a real Overture release, with the failure modes
-documented (abbreviated "St." forms don't match Overture's spelled-out
-names yet). Repo: https://github.com/chuofringer/placeroot — if anyone here
+113 live queries against a real Overture release (a saturated task set —
+a harder query set is the honest next step).
+Repo: https://github.com/chuofringer/placeroot — if anyone here
 has opinions on the geocoding tiebreak logic or has hit correctness issues
 with Overture's divisions theme specifically, I'd like to hear about it.
 

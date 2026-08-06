@@ -27,13 +27,15 @@ shops via `find_places` costs 501 tokens against ~45,000 for the raw GeoJSON
 equivalent; `summarize_area` over 1,944 places is ~320 tokens.
 
 Geocoding is built on Overture's `divisions`/`addresses` data, not Nominatim
-— deterministic matching, hit@1 100% measured over 113 live queries (a saturated task set — details and caveats in the README). A local
+— deterministic matching, hit@1 100% measured over 113 live queries (a saturated task set; a harder query set is the honest next step). A local
 tile cache makes repeat queries against the same area run warm in ~21ms.
 
 MIT licensed, `uvx placeroot` or `uv run placeroot`, standard MCP stdio (a
-streamable-HTTP mode exists for self-hosting). No hosted tier yet. Routing is
-walking-first. Geocoding doesn't yet handle "St. Louis" vs. Overture's
-"Saint Louis" spelling — substring matching, not a learned model.
+streamable-HTTP mode exists for self-hosting). No hosted tier yet. Routing
+covers walk, cycle, and drive, with walking the most exercised. Geocode
+matching is deterministic (exact/prefix/substring plus name-variant
+normalization like St./Saint), not a learned model — transparent, but not
+state-of-the-art on ambiguous or misspelled queries.
 
 Repo: https://github.com/chuofringer/placeroot — interested in where the
 token budgets break down on real queries, and what's missing for your use

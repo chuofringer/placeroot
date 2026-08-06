@@ -69,13 +69,9 @@ newly-needed extraction area is fully contained within a cached graph's
 (deliberately over-fetched) area, keyed by (release, upstream source,
 mode, drive-speed-baking) — see _get_or_build_graph.
 
-Query layer (issue #40): this module used to keep its own DuckDB
-connection/lock/schema-probe/bbox-helpers/geometry-probe, entirely
-separate from overture.py's equivalents — the split predated issue #31's
-connection-factory wiring and meant this module missed that fix outright.
-It now shares overture.py's connection, bbox helpers, and probe_schema
-(all via db.py/geo.py); db.ensure_spatial() is called explicitly here
-since divisions.py/buildings.py are no longer the only spatial callers.
+Query layer: this module shares the package-wide connection, bbox
+helpers, and schema probe (via db.py/geo.py); db.ensure_spatial() is
+called explicitly here since this module needs the spatial extension.
 """
 
 import heapq
@@ -98,7 +94,6 @@ CYCLE_SPEED_M_S = 4.2  # ~15 km/h cycling pace
 WALK_MAX_RADIUS_M = 5000.0  # walking isochrones never need to look further than this
 CYCLE_MAX_RADIUS_M = 15000.0
 DRIVE_MAX_RADIUS_M = 60000.0
-MAX_RADIUS_M = WALK_MAX_RADIUS_M  # back-compat alias; walk was the only mode pre-#38
 RADIUS_BUFFER = 1.25  # street paths aren't straight lines; pad the extraction radius
 MAX_POLYGON_POINTS = 100  # decimation cap before the token-budget pass (convex hull path)
 
@@ -182,12 +177,10 @@ ESSENTIAL_COLUMNS = {"geometry", "bbox"}
 
 EARTH_RADIUS_M = 6371000.0
 
-# Deprecated: import db/geo directly instead. Thin aliases (issue #40 —
-# see the module docstring) so any external reference — test_routing.py's
-# own bbox tests included — keeps working unchanged.
+# Thin aliases so tests and benchmarks can reach the shared db/geo
+# helpers through this module; import db/geo directly in new code.
 _conn_lock = db.conn_lock
 _conn = db.shared_conn
-_probe_schema = db.probe_schema
 _bbox_around = geo.bbox_around
 _bbox_filter_sql = geo.bbox_filter_sql
 
@@ -236,10 +229,10 @@ def set_data_path(path: str | None) -> None:
 
 
 def _upstream_glob() -> str:
-    # type_="segment" matches this module's own upstream path
+    # type_="segment" matches this module's upstream path
     # (theme=transportation/type=segment); overture._upstream_glob also
-    # honors PLACEROOT_TRANSPORTATION_DATA_PATH as a back-compat fallback
-    # for this theme specifically, so this reads identically to before #40.
+    # honors PLACEROOT_TRANSPORTATION_DATA_PATH as a fallback for this
+    # theme specifically.
     return overture._upstream_glob(THEME, type_="segment")
 
 

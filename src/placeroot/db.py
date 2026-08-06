@@ -1,12 +1,8 @@
-"""Shared DuckDB connection management for the query layer (issue #40).
+"""Shared DuckDB connection management for the query layer.
 
-overture.py and routing.py each used to configure and hold their own
-DuckDB connection/lock/schema-probe (fully separate — routing.py's split
-predated, and missed, issue #31's connection-factory fix), and
-divisions.py/buildings.py each re-implemented "load spatial once" locally
-(buildings.py's copy skipped the connection lock — a real bug the HTTP
-concurrency audit missed). This is now the one place that configures a
-connection (httpfs, object cache, S3 timeouts/retries) and loads spatial.
+This is the one place that configures a connection (httpfs, object cache,
+S3 timeouts/retries) and loads the spatial extension; every theme module
+(overture, routing, divisions, buildings) goes through it.
 
 Concurrency (issue #24): conn_lock serializes every use of shared_conn(),
 since DuckDB connections aren't safe for concurrent execute() calls.
