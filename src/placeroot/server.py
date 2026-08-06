@@ -353,35 +353,44 @@ def render_map(result: dict | list, title: str | None = None, inline: bool = Fal
     """
     return mapview.write_artifact(result, title=title, inline=inline)
 
+@mcp.tool()
 def isochrone(
     lat: float,
     lon: float,
     minutes: float = 15,
     mode: str = "walk",
-    speed_m_s: float = routing.DEFAULT_SPEED_M_S,
+    speed_m_s: float | None = None,
     radius_m: float | None = None,
 ) -> dict:
-    """Walking isochrone: the area reachable on foot from (lat, lon) within `minutes`.
+    """Isochrone: the area reachable from (lat, lon) within `minutes`, by mode.
 
-    Builds a street graph from Overture's transportation theme (footways,
-    paths, residential/service/etc. streets — motorways and trunks are
-    excluded as unwalkable) and runs Dijkstra out to the time budget.
-    Returns {"polygon": <GeoJSON Polygon>, "stats": {reachable_nodes,
-    max_radius_m, area_km2}, ...}. The polygon is a convex hull of reached
-    nodes (documented overestimate near concave boundaries like rivers;
-    reachable_nodes/max_radius_m are exact), decimated to fit the token
-    budget.
+    Builds a street graph from Overture's transportation theme and runs
+    Dijkstra out to the time budget. mode is "walk" (default), "cycle", or
+    "drive" — each excludes its own set of unusable road classes (e.g.
+    drive excludes footway/path/steps; cycle and drive exclude
+    motorway/trunk... drive itself allows motorways) and respects one-way
+    restrictions for cycle/drive (walk ignores them). speed_m_s overrides
+    the mode's default speed model (walk 1.4 m/s, cycle 4.2 m/s, drive
+    per-edge from Overture's speed_limits or a class-based default table)
+    with a single constant. Returns {"polygon": <GeoJSON Polygon>, "stats":
+    {reachable_nodes, max_radius_m, area_km2}, ...}. The polygon traces the
+    boundary of reached nodes' occupied grid cells (falling back to a
+    convex hull for very small reachable sets); reachable_nodes/
+    max_radius_m are always exact, only the drawn polygon shape
+    approximates, and is decimated/simplified to fit the token budget.
 
-    mode: only "walk" is implemented; driving/cycling return a structured
-    {"error": "unsupported_mode"} for now. radius_m optionally overrides
-    the auto-derived graph extraction radius (capped at 5km for walking);
-    passing something larger than the cap returns a structured error
-    instead of silently truncating.
+    radius_m optionally overrides the auto-derived graph extraction radius
+    (capped per mode: 5km walk, 15km cycle, 60km drive); passing something
+    larger than the cap returns a structured error instead of silently
+    truncating. An unrecognized mode string returns a structured
+    {"error": "unsupported_mode"}.
     """
-    if mode != "walk":
-        return {"error": "unsupported_mode", "supported": ["walk"]}
     try:
-        return routing.isochrone(lat, lon, minutes=minutes, speed_m_s=speed_m_s, radius_m=radius_m)
+        return routing.isochrone(
+            lat, lon, minutes=minutes, mode=mode, speed_m_s=speed_m_s, radius_m=radius_m
+        )
+    except routing.UnsupportedMode:
+        return {"error": "unsupported_mode", "supported": sorted(routing.MODE_CONFIG)}
     except routing.UpstreamUnavailable as e:
         return _upstream_error(e)
     except routing.SchemaDegraded as e:
