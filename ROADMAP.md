@@ -63,6 +63,30 @@ tests, and a hardcoded upstream release.
       bucket + the 10.5 GB transfer are the owner-side remainder)
 - [ ] Live layers: transit feeds, weather context
 
+## Competitive watch (verified 2026-08-06)
+
+A three-track market re-verification (details in [PLAN.md](PLAN.md)) confirmed the
+category position: no other project ships token-budgeted answers, GERS ids in every
+response, keyless Overture geocoding, keyless global own-graph isochrones, or
+self-contained offline map artifacts. The position is features, not a moat — two
+adjacent projects appeared within three weeks and one the day of the check. Standing
+watch items, none blocking:
+
+- **sparkgeo/geo-mcp-servers** — curated tracker of 77 geo MCP servers; our listing
+  target and the category radar. Check on each release.
+- **capan/isochrone** — keyless own-graph isochrones (Berlin-only, pedestrian-only);
+  the nearest conceptual neighbor to our routing stack.
+- **thatapicompany/overture-maps-mcp** — keyed hosted-API wrapper claiming
+  "token-efficient summaries"; first competitor gesturing at our headline.
+- **Camino AI** — commercial "location intelligence for agents" startup, keyed/metered.
+- **Google Maps Grounding Lite** — free while Experimental; a GA pricing decision
+  ($2.80–7.00/1K published as potential) changes the cost-comparison story.
+- **Overture first-party tooling** — ORATOR is still an SF-Bay prototype; any move
+  toward an official Overture MCP server changes risk 7 in PLAN.md.
+
+The empty "overture" search in the official MCP registry is the clock: #16 ships
+before someone else fills it.
+
 ## Relationships, not dependencies
 
 A GeoLibre bridge and upstream contributions to Overture tooling are both
