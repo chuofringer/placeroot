@@ -519,6 +519,19 @@ def main() -> None:
     _warm_start()
     if args.http:
         logger.info("placeroot: streamable-HTTP on http://%s:%s/mcp", args.host, args.port)
+        if args.host not in ("127.0.0.1", "localhost", "::1"):
+            # The SDK only auto-enables DNS-rebinding/Origin protection for the
+            # loopback literals, and placeroot configures no authentication —
+            # so a non-loopback bind exposes every tool, unauthenticated, to
+            # anyone who can reach this host:port. Warn loudly; the operator
+            # must front it with a reverse proxy / auth layer (see README).
+            logger.warning(
+                "placeroot is bound to a NON-LOOPBACK host (%s) with NO "
+                "authentication — every tool is exposed to anyone who can reach "
+                "%s:%s. Put a reverse proxy / auth layer in front of it before "
+                "using this beyond a trusted local network.",
+                args.host, args.host, args.port,
+            )
         mcp.run(transport="streamable-http", host=args.host, port=args.port)
     else:
         mcp.run()

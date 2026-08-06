@@ -33,14 +33,32 @@ MAX_BISECT_ITERS = 40
 
 # Ceiling on the number of input vertices simplify_geometry will accept.
 # The geometry is caller-supplied (the simplify_geometry MCP tool takes it
-# directly), RDP is O(n^2) in the worst case, and the token-fit search
-# re-serializes the whole geometry up to MAX_EXPAND_ITERS + MAX_BISECT_ITERS
-# times — so an adversarially large payload is a CPU/latency DoS. 100k
+# directly), so an adversarially large payload is a CPU/latency DoS. 50k
 # vertices is already far more than any real footprint or admin boundary
-# these tools deal with, while keeping even the worst case tractable;
-# anything larger is rejected as InvalidGeometry rather than silently
-# tying up the server.
-MAX_INPUT_POINTS = 100_000
+# these tools deal with; anything larger is rejected as InvalidGeometry.
+MAX_INPUT_POINTS = 50_000
+
+# Point count alone doesn't bound work: RDP is O(n^2) in the worst case
+# (an input that resists simplification — a fine staircase/zigzag — drops
+# only ~one point per split), and the token-fit search below re-runs RDP up
+# to MAX_EXPAND_ITERS + MAX_BISECT_ITERS times. A 50k-vertex adversarial
+# shape would still peg a core for many seconds. So the *total* number of
+# perpendicular-distance evaluations across one simplify_geometry call is
+# capped: once exceeded, RDP stops splitting and returns its current
+# best-effort keep set (still a valid, endpoint-preserving simplification).
+# ~6M ops is ~1-2s of worst-case CPU and far more than any legitimate
+# geometry needs. Threaded through the call (not a module global) so
+# concurrent --http calls don't share or race one counter.
+_RDP_OP_BUDGET = 6_000_000
+
+
+class _OpBudget:
+    """Mutable per-call ceiling on RDP perpendicular-distance evaluations."""
+
+    __slots__ = ("remaining",)
+
+    def __init__(self, limit: int = _RDP_OP_BUDGET):
+        self.remaining = limit
 
 
 class InvalidGeometry(Exception):
@@ -61,8 +79,17 @@ def _perp_dist_m(pt, start, end) -> float:
     return num / den
 
 
-def _rdp_keep_indices(points_m: list[tuple[float, float]], epsilon_m: float) -> list[int]:
-    """Ramer-Douglas-Peucker over projected points; keeps indices, always including endpoints."""
+def _rdp_keep_indices(
+    points_m: list[tuple[float, float]], epsilon_m: float, budget: "_OpBudget | None" = None
+) -> list[int]:
+    """Ramer-Douglas-Peucker over projected points; keeps indices, always including endpoints.
+
+    If `budget` is given, perpendicular-distance evaluations are counted
+    against it; when it runs out, splitting stops and the current keep set
+    is returned as-is (best-effort). The result is always a valid
+    simplification with both endpoints kept — just possibly less aggressive
+    than an unbounded run.
+    """
     n = len(points_m)
     if n < 3:
         return list(range(n))
@@ -73,6 +100,10 @@ def _rdp_keep_indices(points_m: list[tuple[float, float]], epsilon_m: float) -> 
         start_i, end_i = stack.pop()
         if end_i - start_i < 2:
             continue
+        if budget is not None:
+            budget.remaining -= end_i - start_i - 1
+            if budget.remaining < 0:
+                break
         start, end = points_m[start_i], points_m[end_i]
         dmax, idx = -1.0, -1
         for i in range(start_i + 1, end_i):
@@ -103,7 +134,7 @@ def _project(coord, mpd_lon: float, mpd_lat: float) -> tuple[float, float]:
     return coord[0] * mpd_lon, coord[1] * mpd_lat
 
 
-def _simplify_line(coords: list, epsilon_m: float, mpd_lon: float, mpd_lat: float):
+def _simplify_line(coords: list, epsilon_m: float, mpd_lon: float, mpd_lat: float, budget=None):
     """Simplify one coordinate list (a LineString or a polygon ring).
 
     Returns (new_coords, max_deviation_m). Ring closure is preserved for
@@ -112,25 +143,25 @@ def _simplify_line(coords: list, epsilon_m: float, mpd_lon: float, mpd_lat: floa
     if len(coords) < 3:
         return list(coords), 0.0
     points_m = [_project(c, mpd_lon, mpd_lat) for c in coords]
-    kept = _rdp_keep_indices(points_m, epsilon_m)
+    kept = _rdp_keep_indices(points_m, epsilon_m, budget)
     dev = _max_deviation_m(points_m, kept)
     return [coords[i] for i in kept], dev
 
 
-def _walk(gtype: str, coords, epsilon_m: float, mpd_lon: float, mpd_lat: float):
+def _walk(gtype: str, coords, epsilon_m: float, mpd_lon: float, mpd_lat: float, budget=None):
     """Simplify coords for gtype -> (new_coords, original_points, kept_points, max_deviation_m)."""
     if gtype == "LineString":
-        new_line, dev = _simplify_line(coords, epsilon_m, mpd_lon, mpd_lat)
+        new_line, dev = _simplify_line(coords, epsilon_m, mpd_lon, mpd_lat, budget)
         return new_line, len(coords), len(new_line), dev
     if gtype == "MultiLineString":
-        results = [_simplify_line(line, epsilon_m, mpd_lon, mpd_lat) for line in coords]
+        results = [_simplify_line(line, epsilon_m, mpd_lon, mpd_lat, budget) for line in coords]
         new_coords = [r[0] for r in results]
         orig = sum(len(line) for line in coords)
         kept = sum(len(r[0]) for r in results)
         dev = max((r[1] for r in results), default=0.0)
         return new_coords, orig, kept, dev
     if gtype == "Polygon":
-        results = [_simplify_line(ring, epsilon_m, mpd_lon, mpd_lat) for ring in coords]
+        results = [_simplify_line(ring, epsilon_m, mpd_lon, mpd_lat, budget) for ring in coords]
         new_coords = [r[0] for r in results]
         orig = sum(len(ring) for ring in coords)
         kept = sum(len(r[0]) for r in results)
@@ -139,7 +170,7 @@ def _walk(gtype: str, coords, epsilon_m: float, mpd_lon: float, mpd_lat: float):
     if gtype == "MultiPolygon":
         new_polys, orig, kept, dev = [], 0, 0, 0.0
         for poly in coords:
-            results = [_simplify_line(ring, epsilon_m, mpd_lon, mpd_lat) for ring in poly]
+            results = [_simplify_line(ring, epsilon_m, mpd_lon, mpd_lat, budget) for ring in poly]
             new_polys.append([r[0] for r in results])
             orig += sum(len(ring) for ring in poly)
             kept += sum(len(r[0]) for r in results)
@@ -242,8 +273,13 @@ def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
     mpd_lat = METERS_PER_DEGREE_LAT
     mpd_lon = METERS_PER_DEGREE_LAT * max(math.cos(math.radians(ref_lat)), 1e-6)
 
+    # One shared op budget for the whole call: every RDP pass in the token-fit
+    # search below draws from it, so total worst-case CPU is bounded no matter
+    # the input shape or how many search iterations run (issue: O(n^2) RDP DoS).
+    op_budget = _OpBudget()
+
     def build(epsilon_m: float):
-        new_coords, orig, kept, dev = _walk(gtype, coords, epsilon_m, mpd_lon, mpd_lat)
+        new_coords, orig, kept, dev = _walk(gtype, coords, epsilon_m, mpd_lon, mpd_lat, op_budget)
         geom = {"type": gtype, "coordinates": new_coords}
         return geom, orig, kept, dev
 

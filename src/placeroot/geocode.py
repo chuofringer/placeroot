@@ -825,14 +825,23 @@ def _match_label(name: str, query: str) -> str:
     return _MATCH_TIER_LABELS[_match_tier(name, query)]
 
 
+# resolve_place runs one find_places per significant token, each taking the
+# shared DuckDB connection lock — so an unbounded token count from a huge
+# query string is a lock-contention DoS against the whole server, not just a
+# slow response. A real place reference ("the Whole Foods on South Lamar,
+# Austin") is a handful of words; cap the fan-out well above that.
+_MAX_RESOLVE_TOKENS = 12
+
+
 def _significant_tokens(query: str) -> list[str]:
     """query -> its meaningful words: >=3 chars, not a stopword, in order of
-    appearance. Falls back to the whole query if nothing survives (e.g. a
-    query that's all short/stopword tokens) rather than searching nothing.
+    appearance, capped at _MAX_RESOLVE_TOKENS. Falls back to the whole query
+    if nothing survives (e.g. a query that's all short/stopword tokens)
+    rather than searching nothing.
     """
     tokens = [t for t in re.findall(r"[\w'-]+", query) if len(t) >= 3]
     significant = [t for t in tokens if t.lower() not in _STOPWORDS]
-    return significant or tokens or [query]
+    return (significant or tokens or [query])[:_MAX_RESOLVE_TOKENS]
 
 
 def _place_match_label(name: str, query: str) -> str | None:
