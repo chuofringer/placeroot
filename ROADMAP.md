@@ -37,6 +37,8 @@ tests, and a hardcoded upstream release.
 - [ ] `admin_lookup` — point → admin hierarchy (#11)
 - [ ] `compare_areas`, `within_distance` (#12, #13)
 - [ ] `simplify_geometry` — the payload tool (#14)
+- [ ] Expose GERS ids in every tool response — stable place references, no
+      competitor surfaces them (#25)
 
 ## v0.3 — capabilities nobody else has keyless
 
@@ -49,7 +51,8 @@ tests, and a hardcoded upstream release.
 
 ## Later, demand-driven
 
-- [ ] GERS id resolution — free-text place references → stable Overture ids (#22)
+- [ ] GERS id resolution service — free-text place references → GERS ids; the
+      cheap part (returning ids we already have) moved up to v0.2 (#22, #25)
 - [ ] Own mirror of the places theme, so an upstream layout change is an
       inconvenience rather than an outage (#20)
 - [ ] Live layers: transit feeds, weather context
