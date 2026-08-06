@@ -43,7 +43,12 @@ uv run placeroot --http   # streamable-HTTP endpoint at http://127.0.0.1:8321/mc
 | `compare_areas` | 2–5 areas side by side: category mix, density, and what differs most |
 | `within_distance` | Is the nearest matching place within N meters of a point? |
 | `geocode` | Free-text place name → ranked candidates with coordinates and admin context |
+| `resolve_place` | Free-text place reference → ranked, typed GERS ids an agent can hold onto |
 | `reverse_geocode` | Point → nearest address plus its containing division chain |
+| `summarize_buildings` | Building stock in an area: count, footprint area, height and use mix |
+| `buildings_at` | Nearest building footprints to a point |
+| `isochrone` | The area reachable within N minutes on foot, bike, or car — on PlaceRoot's own routing graph |
+| `render_map` | Any result → a self-contained interactive HTML map |
 | `simplify_geometry` | Any GeoJSON geometry → simplified to a token budget |
 
 More on the way — see [ROADMAP.md](ROADMAP.md).
