@@ -1,5 +1,6 @@
 import re
 from html.parser import HTMLParser
+from pathlib import Path
 
 from placeroot import mapview
 
@@ -200,8 +201,9 @@ def test_render_html_json_payload_cannot_break_out_of_script_tag():
 def test_write_artifact_writes_file_and_returns_small_envelope(tmp_path):
     payload = {"results": _rows(8)}
     result = mapview.write_artifact(payload, title="My Area", out_dir=tmp_path)
-    assert set(result) == {"path", "bytes", "features_rendered"}
+    assert set(result) == {"path", "bytes", "features_rendered", "skipped_features"}
     assert result["features_rendered"] == 8
+    assert result["skipped_features"] == 0
     from pathlib import Path
 
     written = Path(result["path"])
@@ -242,3 +244,205 @@ def test_artifact_dir_default_sits_alongside_cache_dir(monkeypatch):
 def test_artifact_dir_env_override(monkeypatch, tmp_path):
     monkeypatch.setenv("PLACEROOT_ARTIFACT_DIR", str(tmp_path / "custom"))
     assert mapview.artifact_dir() == tmp_path / "custom"
+
+
+# --- extract_features: shapes (#34) -----------------------------------------
+
+_OUTER_RING = [
+    [CENTER_LON - 0.01, CENTER_LAT - 0.01],
+    [CENTER_LON + 0.01, CENTER_LAT - 0.01],
+    [CENTER_LON + 0.01, CENTER_LAT + 0.01],
+    [CENTER_LON - 0.01, CENTER_LAT + 0.01],
+    [CENTER_LON - 0.01, CENTER_LAT - 0.01],
+]
+_HOLE_RING = [
+    [CENTER_LON - 0.003, CENTER_LAT - 0.003],
+    [CENTER_LON + 0.003, CENTER_LAT - 0.003],
+    [CENTER_LON + 0.003, CENTER_LAT + 0.003],
+    [CENTER_LON - 0.003, CENTER_LAT + 0.003],
+    [CENTER_LON - 0.003, CENTER_LAT - 0.003],
+]
+
+
+def test_extract_features_polygon_with_hole_keeps_both_rings():
+    payload = {
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {"type": "Polygon", "coordinates": [_OUTER_RING, _HOLE_RING]},
+                "properties": {"name": "Park with pond"},
+            }
+        ]
+    }
+    result = mapview.extract_features(payload)
+    assert result["skipped_features"] == 0
+    assert len(result["shapes"]) == 1
+    shape = result["shapes"][0]
+    assert shape["kind"] == "polygon"
+    assert len(shape["rings"]) == 2
+    assert shape["rings"][0] == _OUTER_RING
+    assert shape["rings"][1] == _HOLE_RING
+
+
+def test_extract_features_multipolygon_flattens_rings():
+    payload = {
+        "type": "Feature",
+        "geometry": {"type": "MultiPolygon", "coordinates": [[_OUTER_RING], [_HOLE_RING]]},
+        "properties": {"name": "Two blocks"},
+    }
+    result = mapview.extract_features(payload)
+    assert len(result["shapes"]) == 1
+    assert len(result["shapes"][0]["rings"]) == 2
+
+
+def test_extract_features_linestring_and_multilinestring():
+    line_a = [[CENTER_LON, CENTER_LAT], [CENTER_LON + 0.01, CENTER_LAT + 0.01]]
+    line_b = [[CENTER_LON + 0.02, CENTER_LAT], [CENTER_LON + 0.03, CENTER_LAT]]
+    payload = {
+        "features": [
+            {"type": "Feature", "geometry": {"type": "LineString", "coordinates": line_a},
+             "properties": {"name": "Trail"}},
+            {"type": "Feature", "geometry": {"type": "MultiLineString",
+             "coordinates": [line_a, line_b]}, "properties": {"name": "Trail network"}},
+        ]
+    }
+    result = mapview.extract_features(payload)
+    assert result["skipped_features"] == 0
+    kinds = [s["kind"] for s in result["shapes"]]
+    assert kinds == ["line", "line"]
+    assert result["shapes"][0]["lines"] == [line_a]
+    assert result["shapes"][1]["lines"] == [line_a, line_b]
+
+
+def test_extract_features_isochrone_result_shape():
+    isochrone_result = {
+        "center": {"lat": CENTER_LAT, "lon": CENTER_LON},
+        "minutes": 15,
+        "mode": "walk",
+        "speed_m_s": 1.4,
+        "polygon": {"type": "Polygon", "coordinates": [_OUTER_RING]},
+        "polygon_method": "convex_hull",
+        "stats": {"reachable_nodes": 42, "max_radius_m": 950.3, "area_km2": 0.51},
+    }
+    result = mapview.extract_features(isochrone_result)
+    assert result["skipped_features"] == 0
+    assert len(result["points"]) == 0
+    assert len(result["shapes"]) == 1
+    shape = result["shapes"][0]
+    assert shape["kind"] == "polygon"
+    assert shape["rings"] == [_OUTER_RING]
+    assert shape["props"]["reachable_nodes"] == 42
+    assert shape["props"]["max_radius_m"] == 950.3
+    assert shape["props"]["minutes"] == 15
+    assert "CENTER_LAT" not in str(shape["props"]["center"])  # sanity: it's formatted, not repr'd
+
+
+def test_write_artifact_isochrone_result_renders_one_polygon_and_stats_popup(tmp_path):
+    isochrone_result = {
+        "center": {"lat": CENTER_LAT, "lon": CENTER_LON},
+        "minutes": 15,
+        "mode": "walk",
+        "polygon": {"type": "Polygon", "coordinates": [_OUTER_RING]},
+        "stats": {"reachable_nodes": 42, "max_radius_m": 950.3, "area_km2": 0.51},
+    }
+    result = mapview.write_artifact(isochrone_result, title="Iso", out_dir=tmp_path)
+    assert result["features_rendered"] == 1
+    assert result["skipped_features"] == 0
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    assert "reachable_nodes" in doc
+    assert "42" in doc
+    assert "Isochrone" in doc
+
+
+def test_extract_features_mixed_points_and_polygon_bounds_data():
+    payload = {
+        "features": [
+            {"type": "Feature", "geometry": {"type": "Point",
+             "coordinates": [CENTER_LON + 0.5, CENTER_LAT + 0.5]},
+             "properties": {"name": "Far point"}},
+            {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [_OUTER_RING]},
+             "properties": {"name": "Near polygon"}},
+        ]
+    }
+    result = mapview.extract_features(payload)
+    assert len(result["points"]) == 1
+    assert len(result["shapes"]) == 1
+    doc = mapview.render_html(result["points"], title="Mixed", shapes=result["shapes"])
+    # every vertex needed for client-side bounds fitting must be embedded.
+    assert str(CENTER_LON + 0.5) in doc
+    assert str(CENTER_LAT + 0.5) in doc
+    for lon, lat in _OUTER_RING:
+        assert str(lon) in doc
+        assert str(lat) in doc
+
+
+def test_render_html_with_shapes_has_no_external_references():
+    payload = {
+        "features": [
+            {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [_OUTER_RING]},
+             "properties": {"name": "Area"}},
+        ]
+    }
+    result = mapview.extract_features(payload)
+    doc = mapview.render_html(result["points"], title="Shapes", shapes=result["shapes"])
+    assert not _EXTERNAL_REF_RE.search(doc)
+
+
+def test_extract_features_malformed_geometry_is_skipped_and_counted():
+    payload = {
+        "features": [
+            {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [[]]},
+             "properties": {}},
+            {"type": "Feature", "geometry": {"type": "Polygon",
+             "coordinates": [[[0, 0], [1, 1]]]}, "properties": {}},  # ring too short
+            {"type": "Feature", "geometry": {"type": "LineString", "coordinates": [[0, 0]]},
+             "properties": {}},  # line needs >= 2 points
+            {"type": "Feature", "geometry": {"type": "MultiPolygon", "coordinates": []},
+             "properties": {}},
+            {"type": "Feature", "geometry": {"type": "Polygon",
+             "coordinates": [[["a", "b"], [1, 1], [2, 2], [0, 0]]]}, "properties": {}},
+            {"type": "Feature", "geometry": {"type": "Sphere", "coordinates": []},
+             "properties": {}},  # unsupported geometry type
+            {"type": "Feature", "geometry": {"type": "Point",
+             "coordinates": [CENTER_LON, CENTER_LAT]}, "properties": {"name": "Good point"}},
+        ]
+    }
+    result = mapview.extract_features(payload)
+    assert len(result["points"]) == 1
+    assert len(result["shapes"]) == 0
+    assert result["skipped_features"] == 6
+
+
+def test_write_artifact_malformed_geometry_degrades_gracefully(tmp_path):
+    payload = {
+        "features": [
+            {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [[]]},
+             "properties": {}},
+            {"type": "Feature", "geometry": {"type": "Point",
+             "coordinates": [CENTER_LON, CENTER_LAT]}, "properties": {"name": "Good"}},
+        ]
+    }
+    result = mapview.write_artifact(payload, title="Degrade", out_dir=tmp_path)
+    assert result["features_rendered"] == 1
+    assert result["skipped_features"] == 1
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    _parse_ok(doc)  # must not raise even with a partially-malformed input
+
+
+# --- render_html: shapes (#34) ----------------------------------------------
+
+
+def test_render_html_renders_shapes_group_and_evenodd_fill_rule():
+    shapes = [{"kind": "polygon", "rings": [_OUTER_RING, _HOLE_RING], "name": "Hole test",
+               "props": {}}]
+    doc = mapview.render_html([], title="Shapes only", shapes=shapes)
+    assert "shape-polygon" in doc
+    assert "fill-rule" in doc
+    assert '"kind": "polygon"' in doc or '"kind":"polygon"' in doc
+
+
+def test_render_html_no_shapes_backward_compatible():
+    points = mapview.extract_points({"results": _rows(2)})
+    doc = mapview.render_html(points, title="No shapes")
+    assert "shape-polygon" in doc  # CSS class always present (empty shapes array)
+    assert '"shapes": []' in doc or '"shapes":[]' in doc

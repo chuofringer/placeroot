@@ -257,13 +257,17 @@ def render_map(result: dict | list, title: str | None = None, inline: bool = Fal
     """Render find_places/summarize_area JSON (or caller-supplied GeoJSON) as a map.
 
     Writes ONE self-contained HTML file — inline CSS/JS, vector markers with
-    labels and click popups, a scale bar, attribution, no CDN, no tile
-    server, no API key, zero network requests when opened — to
-    PLACEROOT_ARTIFACT_DIR (default: alongside the tile cache directory).
-    The file itself is the artifact; this tool's response stays small on
-    purpose. Returns {"path", "bytes", "features_rendered"}. Pass
-    inline=true to also get the HTML back in the response when it's small
-    enough to be worth it.
+    labels and click popups, polygon/line shapes (including
+    routing.isochrone()'s {"polygon": ..., "stats": {...}} output), a scale
+    bar, attribution, no CDN, no tile server, no API key, zero network
+    requests when opened — to PLACEROOT_ARTIFACT_DIR (default: alongside the
+    tile cache directory). The file itself is the artifact; this tool's
+    response stays small on purpose. Returns {"path", "bytes",
+    "features_rendered", "skipped_features"} — skipped_features counts
+    rows/features that couldn't be rendered (missing coordinates, malformed
+    geometry) rather than failing the call outright. Pass inline=true to
+    also get the HTML back in the response when it's small enough to be
+    worth it.
     """
     return mapview.write_artifact(result, title=title, inline=inline)
 
