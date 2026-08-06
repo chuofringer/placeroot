@@ -5,13 +5,29 @@ around a point, runs Dijkstra out to a time budget, and returns the
 reachable-node set as a polygon plus stats. MVP scope is walking only —
 see isochrone()'s mode handling for driving/cycling.
 
-Node model: a graph node is a segment *endpoint* (its connectors entry with
-at == 0.0 or at == 1.0). Interior connectors (mid-segment splits/shared
-intersections) are not treated as separate routing nodes in this MVP — the
-segment's full length (all its vertices) is folded into a single edge
-between its two endpoints. This is a real simplification: two segments
-that share an interior connector but don't both terminate there won't be
-linked in the graph. Tracked as a follow-up (see final report).
+Node model: every connectors entry on a segment — endpoints (at == 0.0 or
+1.0) and interior connectors (0 < at < 1, e.g. a mid-segment intersection
+with another segment) — becomes a graph node. A segment with connectors at
+[0.0, 0.4, 1.0] is split into two edges (0.0->0.4, 0.4->1.0). Overture's
+`at` is a linear-reference fraction of the segment's *arc length*, not of
+its vertex count, so an edge's length is simply
+`abs(at_b - at_a) * segment_length_m` — no re-walking of the vertex list
+is needed for length; a vertex list walk is only used to interpolate the
+(lat, lon) of an interior split point for the node's coordinates. Because
+node identity is keyed by the connector id, two segments that share only
+an interior connector (a real-world crossing that isn't a shared endpoint)
+now unify onto the same node and the crossing is routable.
+
+Snapping: the origin doesn't just snap to the nearest node overall.
+Overture data sometimes has small disconnected fragments (a short sidewalk
+pair with no link to the rest of the graph) that can be geometrically
+closer to the query point than the real street network. After building
+the graph, snap_to_graph() computes connected components and prefers the
+nearest node within SNAP_RADIUS_M whose component has at least
+MIN_USABLE_COMPONENT_NODES nodes, skipping over closer nodes that belong
+to tiny fragments (logged when this happens). If nothing within the snap
+radius sits in a usable component, isochrone() raises NoGraphNearby, same
+as when the graph is empty.
 
 Polygon method: convex hull of reached nodes. This is the "honest fallback"
 named in the design brief, not a concave alpha-shape — it's simple,
@@ -40,6 +56,9 @@ DEFAULT_SPEED_M_S = 1.4  # ~5 km/h walking pace
 MAX_RADIUS_M = 5000.0  # walking isochrones never need to look further than this
 RADIUS_BUFFER = 1.25  # street paths aren't straight lines; pad the extraction radius
 MAX_POLYGON_POINTS = 100  # decimation cap before the token-budget pass
+
+SNAP_RADIUS_M = 300.0  # how far the origin may snap to reach a usable graph node
+MIN_USABLE_COMPONENT_NODES = 5  # components smaller than this are treated as fragments
 
 # Overture road classes a pedestrian cannot use. Everything else (footway,
 # path, residential, service, tertiary, living_street, cycleway, steps,
@@ -186,6 +205,44 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(a))
 
 
+def _cumulative_lengths_m(points: list[tuple[float, float]]) -> list[float]:
+    """Cumulative haversine arc length (m) at each vertex, points[0] -> 0.0."""
+    cum = [0.0]
+    for i in range(len(points) - 1):
+        lon1, lat1 = points[i]
+        lon2, lat2 = points[i + 1]
+        cum.append(cum[-1] + _haversine_m(lat1, lon1, lat2, lon2))
+    return cum
+
+
+def _point_at_fraction(
+    points: list[tuple[float, float]], at: float, cum: list[float]
+) -> tuple[float, float]:
+    """(lat, lon) at arc-length fraction `at` (0..1) along points, per cum lengths.
+
+    `at` is Overture's linear-reference fraction of the segment's *arc
+    length*, not of the vertex index — so we walk the cumulative-length
+    table to find which vertex pair straddles the target distance, then
+    interpolate linearly within that pair.
+    """
+    total = cum[-1]
+    if at <= 0.0 or total <= 0.0:
+        lon, lat = points[0]
+        return lat, lon
+    if at >= 1.0:
+        lon, lat = points[-1]
+        return lat, lon
+    target = at * total
+    i = 0
+    while i < len(cum) - 2 and cum[i + 1] < target:
+        i += 1
+    seg_len = cum[i + 1] - cum[i]
+    frac = (target - cum[i]) / seg_len if seg_len > 0 else 0.0
+    lon1, lat1 = points[i]
+    lon2, lat2 = points[i + 1]
+    return lat1 + frac * (lat2 - lat1), lon1 + frac * (lon2 - lon1)
+
+
 def _parse_linestring_wkt(wkt: str) -> list[tuple[float, float]]:
     """"LINESTRING (lon1 lat1, lon2 lat2, ...)" -> [(lon, lat), ...]."""
     inner = wkt.strip()
@@ -248,6 +305,26 @@ class Graph:
                 best_id, best_d = node_id, d
         return best_id
 
+    def connected_components(self) -> list[set[str]]:
+        """Node ids grouped by connectivity (undirected BFS)."""
+        seen: set[str] = set()
+        components: list[set[str]] = []
+        for start in self.adjacency:
+            if start in seen:
+                continue
+            component: set[str] = set()
+            stack = [start]
+            seen.add(start)
+            while stack:
+                node = stack.pop()
+                component.add(node)
+                for neighbor, _ in self.adjacency[node]:
+                    if neighbor not in seen:
+                        seen.add(neighbor)
+                        stack.append(neighbor)
+            components.append(component)
+        return components
+
 
 def build_graph(lat: float, lon: float, radius_m: float) -> Graph:
     """Walkable street graph within radius_m of (lat, lon).
@@ -308,24 +385,40 @@ def build_graph(lat: float, lon: float, radius_m: float) -> Graph:
         start_lon, start_lat = points[0]
         end_lon, end_lat = points[-1]
         start_id, end_id = None, None
+        interior: list[tuple[float, str]] = []  # (at, connector_id), 0 < at < 1
         if connectors:
             for conn in connectors:
-                if conn["at"] <= 0.0:
+                at = conn["at"]
+                if at <= 0.0:
                     start_id = conn["connector_id"]
-                elif conn["at"] >= 1.0:
+                elif at >= 1.0:
                     end_id = conn["connector_id"]
+                else:
+                    interior.append((at, conn["connector_id"]))
         if start_id is None:
             start_id = f"pt_{round(start_lon, 6)}_{round(start_lat, 6)}"
         if end_id is None:
             end_id = f"pt_{round(end_lon, 6)}_{round(end_lat, 6)}"
 
-        length_m = sum(
-            _haversine_m(points[i][1], points[i][0], points[i + 1][1], points[i + 1][0])
-            for i in range(len(points) - 1)
-        )
+        cum = _cumulative_lengths_m(points)
+        total_length_m = cum[-1]
+
+        # Node stops along the segment's arc-length parameterization, sorted
+        # by `at`: the two endpoints plus any interior connectors (mid-segment
+        # intersections). Each consecutive pair becomes one graph edge, so a
+        # segment shared with another segment only via an interior connector
+        # still gets linked into the graph at that connector's node.
+        stops = [(0.0, start_id)] + sorted(interior) + [(1.0, end_id)]
+
         graph.add_node(start_id, start_lat, start_lon)
         graph.add_node(end_id, end_lat, end_lon)
-        graph.add_edge(start_id, end_id, length_m)
+        for at, connector_id in interior:
+            ilat, ilon = _point_at_fraction(points, at, cum)
+            graph.add_node(connector_id, ilat, ilon)
+
+        for (at_a, id_a), (at_b, id_b) in zip(stops, stops[1:]):
+            edge_length_m = (at_b - at_a) * total_length_m
+            graph.add_edge(id_a, id_b, edge_length_m)
 
     return graph
 
@@ -346,6 +439,64 @@ def dijkstra(graph: Graph, source: str, max_seconds: float, speed_m_s: float) ->
                 dist[neighbor] = nd
                 heapq.heappush(heap, (nd, neighbor))
     return dist
+
+
+def snap_to_graph(
+    graph: Graph,
+    lat: float,
+    lon: float,
+    snap_radius_m: float = SNAP_RADIUS_M,
+    min_component_nodes: int = MIN_USABLE_COMPONENT_NODES,
+) -> str | None:
+    """Nearest usable-component node to (lat, lon), or None if none qualifies.
+
+    "Usable" means: within snap_radius_m, and belonging to a connected
+    component with at least min_component_nodes nodes (or the graph's
+    largest component, if every component happens to be smaller than the
+    threshold). This avoids snapping the origin onto a tiny disconnected
+    fragment — e.g. an isolated sidewalk pair — that happens to sit closer
+    to the query point than the real street network.
+    """
+    components = graph.connected_components()
+    if not components:
+        return None
+    largest = max(components, key=len)
+    component_of: dict[str, set[str]] = {}
+    for component in components:
+        for node_id in component:
+            component_of[node_id] = component
+
+    candidates = []
+    for node_id, (nlat, nlon) in graph.coords.items():
+        d = _haversine_m(lat, lon, nlat, nlon)
+        if d <= snap_radius_m:
+            candidates.append((d, node_id))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda pair: pair[0])
+
+    nearest_d, nearest_id = candidates[0]
+    nearest_component = component_of[nearest_id]
+    if len(nearest_component) >= min_component_nodes or nearest_component is largest:
+        return nearest_id
+
+    # The nearest node is stuck in a small disconnected fragment; look
+    # further out (still within the snap radius) for a node in a usable
+    # component instead.
+    for d, node_id in candidates[1:]:
+        component = component_of[node_id]
+        if len(component) >= min_component_nodes or component is largest:
+            logger.info(
+                "snap_to_graph: nearest node %s is %.1fm away in an isolated "
+                "%d-node fragment; snapping to %s (%.1fm away, %d-node "
+                "component) instead",
+                nearest_id, nearest_d, len(nearest_component),
+                node_id, d, len(component),
+            )
+            return node_id
+
+    # Everything within the snap radius is a tiny fragment.
+    return None
 
 
 def convex_hull(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -435,7 +586,9 @@ def isochrone(
     if graph.node_count() == 0:
         raise NoGraphNearby(lat, lon, extraction_radius)
 
-    source = graph.nearest_node(lat, lon)
+    source = snap_to_graph(graph, lat, lon)
+    if source is None:
+        raise NoGraphNearby(lat, lon, extraction_radius)
     reached = dijkstra(graph, source, max_seconds, speed_m_s)
 
     reached_coords = [graph.coords[n] for n in reached]  # (lat, lon)
