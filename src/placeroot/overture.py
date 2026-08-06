@@ -280,13 +280,70 @@ def _bbox_around(lat: float, lon: float, radius_m: float) -> tuple[float, float,
     Not itself a radius filter — corners of the square reach out to
     radius_m * sqrt(2). Used only as a cheap row-group prefilter; the exact
     circle is enforced separately by the haversine predicate from
-    area_geometry(). Longitude is not clamped/wrapped at the antimeridian:
-    a search near lon=+/-180 produces an out-of-range box and will miss
-    places on the other side of the seam.
+    area_geometry().
+
+    Latitude is clamped to [-90, 90]: a search whose radius circle would
+    otherwise cross a pole gets a band clamped at the pole instead of an
+    invalid ymin/ymax. That's a real degradation (the box no longer reaches
+    radius_m in every direction near the pole — a search centered exactly on
+    the pole, for instance, only ever sees one hemisphere's worth of band)
+    but it's a sane one; true polar wraparound (a search radius that should
+    see over the pole to the opposite side of the globe) is out of scope.
+
+    Longitude is intentionally left unclamped/unwrapped — xmin/xmax can fall
+    outside [-180, 180] when the box crosses the antimeridian (issue #42).
+    Callers must handle that themselves: area_geometry() turns a crossing
+    box into an OR of two in-range boxes for its SQL filter (see
+    _bbox_filter_sql), and cache.tiles_for_bbox() enumerates tiles on both
+    sides of the seam directly from these raw, possibly out-of-range values.
+    Passing xmin/xmax straight into a single `BETWEEN`-style filter without
+    going through one of those is the bug this docstring is warning about.
     """
     dlat = radius_m / 111_320.0
     dlon = radius_m / (111_320.0 * max(math.cos(math.radians(lat)), 1e-6))
-    return lon - dlon, lat - dlat, lon + dlon, lat + dlat
+    ymin = max(lat - dlat, -90.0)
+    ymax = min(lat + dlat, 90.0)
+    return lon - dlon, ymin, lon + dlon, ymax
+
+
+def _bbox_filter_sql(
+    xmin: float, ymin: float, xmax: float, ymax: float
+) -> tuple[str, dict]:
+    """SQL bbox-intersection filter for [xmin, xmax] x [ymin, ymax], antimeridian-safe.
+
+    xmin/xmax may be outside [-180, 180] (see _bbox_around) when the box
+    crosses the seam. Non-crossing case: returns the same single-box filter
+    as always (byte-identical SQL — no perf regression for the overwhelming
+    majority of queries that never go near +/-180). Crossing case: splits
+    into an OR of two in-range boxes — [xmin_wrapped..180] and
+    [-180..xmax_wrapped] — each still AND'd with the shared y-range, so a
+    place on either side of the seam can satisfy the filter.
+
+    Reuses the same $xmin/$ymin/$xmax/$ymax param names in both cases (in
+    the crossing case, $xmin/$xmax hold the two wrapped bounds rather than
+    the raw box's corners) so callers don't need to branch on which shape of
+    params dict they got back.
+    """
+    if xmin >= -180.0 and xmax <= 180.0:
+        filter_sql = (
+            "bbox.xmax >= $xmin AND bbox.xmin <= $xmax"
+            " AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
+        )
+        return filter_sql, {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}
+
+    # Crosses the antimeridian. Fold whichever side ran past +/-180 back
+    # in-range, then OR an "east of the seam" box against a "west of the
+    # seam" box instead of a single (now meaningless) xmin..xmax range.
+    east_xmin = xmin + 360.0 if xmin < -180.0 else xmin
+    west_xmax = xmax - 360.0 if xmax > 180.0 else xmax
+    filter_sql = (
+        "(("
+        "bbox.xmax >= $xmin AND bbox.xmin <= 180"
+        ") OR ("
+        "bbox.xmax >= -180 AND bbox.xmin <= $xmax"
+        ")) AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
+    )
+    return filter_sql, {"xmin": east_xmin, "ymin": ymin, "xmax": west_xmax, "ymax": ymax}
 
 
 # Haversine great-circle distance in meters between (bbox.ymin, bbox.xmin)
@@ -301,28 +358,32 @@ DISTANCE_EXPR = """2 * 6371000 * asin(sqrt(
 _DISTANCE_EXPR = DISTANCE_EXPR  # noqa: N816 - kept as an alias for existing in-module uses
 
 
-def area_geometry(lat: float, lon: float, radius_m: float) -> tuple[str, str, dict]:
+def area_geometry(
+    lat: float, lon: float, radius_m: float
+) -> tuple[str, str, dict, tuple[float, float, float, float]]:
     """Shared "is this place within radius_m of (lat, lon)" predicate.
 
-    Returns (bbox_filter_sql, distance_filter_sql, params) — the bbox filter
-    is a cheap row-group prefilter using intersection semantics (so it
-    doesn't drop non-point geometry the way full-containment would); the
-    distance filter is the exact circle and is what actually decides
+    Returns (bbox_filter_sql, distance_filter_sql, params, bbox) — the bbox
+    filter is a cheap row-group prefilter using intersection semantics (so
+    it doesn't drop non-point geometry the way full-containment would); the
+    distance filter is the exact circle (already antimeridian-safe: it's
+    built from sin/cos, which are periodic, so a raw longitude difference
+    across the seam still comes out small) and is what actually decides
     membership. Both find_places and summarize_area use this so they agree
     on what's "in" an area. params is a dict of named parameters shared by
     both filters plus any additional query-specific ones the caller adds.
+
+    bbox is the raw (xmin, ymin, xmax, ymax) box from _bbox_around — pass it
+    straight to _from_source()/cache lookups, not the bbox_filter's own
+    params: near the antimeridian those diverge (see _bbox_filter_sql), and
+    it's this raw, possibly out-of-range box that cache.tiles_for_bbox()
+    needs to enumerate tiles on both sides of the seam.
     """
     xmin, ymin, xmax, ymax = _bbox_around(lat, lon, radius_m)
-    bbox_filter = (
-        "bbox.xmax >= $xmin AND bbox.xmin <= $xmax"
-        " AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
-    )
+    bbox_filter, bbox_params = _bbox_filter_sql(xmin, ymin, xmax, ymax)
     distance_filter = f"{_DISTANCE_EXPR} <= $radius_m"
-    params = {
-        "xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax,
-        "lat": lat, "lon": lon, "radius_m": radius_m,
-    }
-    return bbox_filter, distance_filter, params
+    params = {**bbox_params, "lat": lat, "lon": lon, "radius_m": radius_m}
+    return bbox_filter, distance_filter, params, (xmin, ymin, xmax, ymax)
 
 
 def find_places(
@@ -343,8 +404,7 @@ def find_places(
     limit = min(limit, MAX_ROWS)
     upstream = _upstream_glob()
     missing = set(_check_schema(upstream))
-    bbox_filter, distance_filter, params = area_geometry(lat, lon, radius_m)
-    bbox = (params["xmin"], params["ymin"], params["xmax"], params["ymax"])
+    bbox_filter, distance_filter, params, bbox = area_geometry(lat, lon, radius_m)
     filters = [bbox_filter, distance_filter]
     if "names" not in missing:
         filters.append("names.primary IS NOT NULL")
@@ -411,8 +471,7 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
     """
     upstream = _upstream_glob()
     missing = set(_check_schema(upstream))
-    bbox_filter, distance_filter, params = area_geometry(lat, lon, radius_m)
-    bbox = (params["xmin"], params["ymin"], params["xmax"], params["ymax"])
+    bbox_filter, distance_filter, params, bbox = area_geometry(lat, lon, radius_m)
     category_expr = "NULL" if "basic_category" in missing else "basic_category"
     sql = f"""
         SELECT
@@ -546,11 +605,8 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
 
     if near_lat is not None and near_lon is not None:
         xmin, ymin, xmax, ymax = _bbox_around(near_lat, near_lon, ID_HINT_RADIUS_M)
-        bbox_filter = (
-            "bbox.xmax >= $xmin AND bbox.xmin <= $xmax"
-            " AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
-        )
-        params = {"id": id, "xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}
+        bbox_filter, bbox_params = _bbox_filter_sql(xmin, ymin, xmax, ymax)
+        params = {"id": id, **bbox_params}
         from_source = _from_source((xmin, ymin, xmax, ymax))
         row = _run_place_details_query(from_source, ["id = $id", bbox_filter], "1", params, missing)
         if row is not None:
@@ -605,8 +661,7 @@ def place_details(
     if id:
         row = _place_details_by_id(id, near_lat, near_lon, upstream, missing)
     else:
-        bbox_filter, distance_filter, params = area_geometry(lat, lon, radius_m)
-        bbox = (params["xmin"], params["ymin"], params["xmax"], params["ymax"])
+        bbox_filter, distance_filter, params, bbox = area_geometry(lat, lon, radius_m)
         filters = [bbox_filter, distance_filter]
         if "names" not in missing:
             filters.append("names.primary ILIKE $name")

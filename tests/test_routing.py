@@ -22,6 +22,31 @@ EXPECTED_NODE_COUNT = fx.GRID_N * fx.GRID_N + 5 + 2
 EXPECTED_EDGE_COUNT = len(fx.build_edges()) - 1 + 4 + 1
 
 
+def test_bbox_filter_sql_unchanged_for_non_crossing_box():
+    """Issue #42: routing.py carries its own duplicate of the antimeridian
+    fix (see its _bbox_around/_bbox_filter_sql docstrings — unifying with
+    overture.py's copy is #40's job, not this one's). The non-crossing case
+    must stay byte-identical to the filter build_graph used before."""
+    filter_sql, params = routing._bbox_filter_sql(-74.0, 40.0, -73.0, 41.0)
+    assert filter_sql == (
+        "bbox.xmax >= $xmin AND bbox.xmin <= $xmax"
+        " AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
+    )
+    assert params == {"xmin": -74.0, "ymin": 40.0, "xmax": -73.0, "ymax": 41.0}
+
+
+def test_bbox_filter_sql_wraps_at_antimeridian():
+    filter_sql, params = routing._bbox_filter_sql(179.9, 9.0, 180.4, 11.0)
+    assert "OR" in filter_sql
+    assert params["xmin"] == pytest.approx(179.9)
+    assert params["xmax"] == pytest.approx(180.4 - 360.0)
+
+
+def test_bbox_around_clamps_latitude_to_poles():
+    xmin, ymin, xmax, ymax = routing._bbox_around(89.9, 15.0, 50_000)
+    assert ymax == 90.0
+
+
 def _path_length(*nodes: tuple[int, int]) -> float:
     """Ground-truth length (m) of a path through named grid nodes, via the
     same haversine + coordinate helpers the fixture and routing module use."""
