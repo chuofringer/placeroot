@@ -51,6 +51,10 @@ This starts an MCP endpoint at `http://<host>:<port>/mcp` and can serve multiple
 
 `--http` only starts the transport — it doesn't run behind TLS, auth, or a process supervisor, and it's on you to put one in front of it (a reverse proxy, `systemd`, etc.) for anything beyond local/trusted-network use. A public, no-setup hosted tier is tracked as a roadmap item — see [ROADMAP.md](ROADMAP.md) issue #24 — and isn't part of this repo yet.
 
+## Mirroring the places theme (optional)
+
+By default every query reads directly from the public Overture bucket — no setup needed. An operator who wants their own copy (so an upstream layout change or outage is an inconvenience, not a stop, per ROADMAP.md's "no hard dependency on anyone else" rule) can mirror the places theme to their own S3-compatible storage with `scripts/mirror_theme.py`, then point a server at it with `PLACEROOT_UPSTREAM_BASE`. See [docs/MIRROR.md](docs/MIRROR.md) for the full runbook.
+
 ## Tools
 
 | Tool | Answers |
