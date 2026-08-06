@@ -1,5 +1,5 @@
-"""Builds the offline test fixtures: tests/fixtures/places.parquet and
-tests/fixtures/division_areas.parquet.
+"""Builds the offline test fixtures: tests/fixtures/places.parquet,
+tests/fixtures/division_areas.parquet, and tests/fixtures/buildings.parquet.
 
 places.parquet: synthetic Overture-shaped places data (struct columns
 matching what overture.py expects: id, bbox, names, taxonomy,
@@ -21,7 +21,11 @@ type=division fixture — see scripts/build_geocode_fixture.py — read by
 geocode.py instead; the two live under the same theme but are different
 Overture types with different schemas.
 
-Both are deterministic — same seed, same output — so they can be
+buildings.parquet: an 8x10 grid of 80 synthetic rectangular footprints
+(issue #23) around places.parquet's downtown cluster — see the "Buildings
+fixture" comment further down for how areas are kept exact for tests.
+
+All three are deterministic — same seed, same output — so they can be
 regenerated and diffed. Run with:
 
     uv run python scripts/build_fixture.py
@@ -37,8 +41,10 @@ import duckdb
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 PLACES_FIXTURE_PATH = FIXTURES_DIR / "places.parquet"
 DIVISION_AREAS_FIXTURE_PATH = FIXTURES_DIR / "division_areas.parquet"
+BUILDINGS_FIXTURE_PATH = FIXTURES_DIR / "buildings.parquet"
 SEED = 42
 EARTH_RADIUS_M = 6371000.0
+METERS_PER_DEGREE_LAT = 111_320.0
 
 # A fake "downtown" — not a real Overture location.
 CENTER_LAT = 40.700000
@@ -223,6 +229,97 @@ def build_division_rows(con: duckdb.DuckDBPyConnection) -> list[tuple]:
     return rows
 
 
+# --- Buildings fixture (issue #23) -----------------------------------------
+# An 8x10 grid (80 footprints — the buildings theme is huge in real life, so
+# this stays deliberately small) of synthetic rectangular footprints around
+# places.parquet's downtown cluster. Each rectangle is built directly in
+# degree-space from a width_m/depth_m pair using the exact same
+# meters<->degrees conversion buildings.py's _area_m2 applies when reading
+# it back — so a rectangle's true area is exactly width_m * depth_m, and
+# tests can compute ground-truth areas from the generator's own dimensions
+# (no shapely, no float slop) rather than trusting the query layer's math to
+# grade itself.
+BUILDING_GRID_ROWS = 8
+BUILDING_GRID_COLS = 10  # 8 * 10 = 80 footprints
+BUILDING_SPACING_M = 25.0  # grid pitch, center to center
+# Cycled by index so width/depth/subtype/height coverage are all
+# deterministic and evenly distributed across the grid.
+BUILDING_WIDTHS_M = [6.0, 9.0, 12.0, 15.0, 18.0]
+BUILDING_DEPTHS_M = [8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0]
+BUILDING_SUBTYPES = ["residential", "commercial", "industrial", None]
+BUILDING_CLASS_BY_SUBTYPE = {
+    "residential": "house", "commercial": "retail", "industrial": "warehouse", None: None,
+}
+# height/num_floors set for roughly a third of rows (idx % 3 == 0) — sparse,
+# matching real Overture coverage; the other two thirds are None so
+# summarize_buildings' *_known_pct has something real to report.
+BUILDING_HEIGHT_STRIDE = 3
+BUILDING_FLOOR_HEIGHT_M = 3.2
+
+
+def build_building_rows(con: duckdb.DuckDBPyConnection) -> list[tuple]:
+    """80 synthetic footprints on a grid centered on CENTER_LAT/CENTER_LON.
+
+    Returns rows shaped (id, geometry WKB, bbox, subtype, class, height,
+    num_floors) matching buildings.py's REQUIRED_COLUMNS. See the module
+    comment above for why each footprint's degree-space rectangle is built
+    from its exact width_m/depth_m rather than an offset_point() geodesic
+    walk: it keeps ground-truth areas exact for tests.
+    """
+    mpd_lat = METERS_PER_DEGREE_LAT
+    mpd_lon = METERS_PER_DEGREE_LAT * math.cos(math.radians(CENTER_LAT))
+    dlat_spacing = BUILDING_SPACING_M / mpd_lat
+    dlon_spacing = BUILDING_SPACING_M / mpd_lon
+
+    rows = []
+    idx = 0
+    for i in range(BUILDING_GRID_ROWS):
+        for j in range(BUILDING_GRID_COLS):
+            base_lat = CENTER_LAT + (i - BUILDING_GRID_ROWS / 2) * dlat_spacing
+            base_lon = CENTER_LON + (j - BUILDING_GRID_COLS / 2) * dlon_spacing
+            width_m = BUILDING_WIDTHS_M[idx % len(BUILDING_WIDTHS_M)]
+            depth_m = BUILDING_DEPTHS_M[idx % len(BUILDING_DEPTHS_M)]
+            dlon = width_m / mpd_lon
+            dlat = depth_m / mpd_lat
+            lat_max, lon_max = base_lat + dlat, base_lon + dlon
+
+            subtype = BUILDING_SUBTYPES[idx % len(BUILDING_SUBTYPES)]
+            cls = BUILDING_CLASS_BY_SUBTYPE[subtype]
+            height, num_floors = None, None
+            if idx % BUILDING_HEIGHT_STRIDE == 0:
+                num_floors = 1 + (idx % 5)
+                height = round(num_floors * BUILDING_FLOOR_HEIGHT_M, 1)
+
+            wkt = box_wkt(base_lat, lat_max, base_lon, lon_max)
+            (wkb,) = con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()
+            bbox = {"xmin": base_lon, "ymin": base_lat, "xmax": lon_max, "ymax": lat_max}
+            rows.append((
+                gers_id(20_000 + idx), wkb, bbox, subtype, cls, height, num_floors,
+            ))
+            idx += 1
+    return rows
+
+
+def build_buildings(con: duckdb.DuckDBPyConnection) -> None:
+    con.execute("INSTALL spatial; LOAD spatial;")
+    rows = build_building_rows(con)
+    con.execute("""
+        CREATE TABLE buildings (
+            id VARCHAR,
+            geometry BLOB,
+            bbox STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE),
+            subtype VARCHAR,
+            class VARCHAR,
+            height DOUBLE,
+            num_floors INTEGER
+        )
+    """)
+    con.executemany("INSERT INTO buildings VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+    FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
+    con.execute(f"COPY buildings TO '{BUILDINGS_FIXTURE_PATH}' (FORMAT PARQUET)")
+    print(f"wrote {len(rows)} rows to {BUILDINGS_FIXTURE_PATH}")
+
+
 def build_places(con: duckdb.DuckDBPyConnection) -> None:
     rows = build_place_rows()
     con.execute("""
@@ -274,6 +371,7 @@ def main() -> None:
     con = duckdb.connect()
     build_places(con)
     build_division_areas(con)
+    build_buildings(con)
 
 
 if __name__ == "__main__":
