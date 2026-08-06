@@ -81,10 +81,32 @@ def max_bytes() -> float:
 def tiles_for_bbox(
     xmin: float, ymin: float, xmax: float, ymax: float, tile_deg: float = TILE_DEG
 ) -> list[tuple[int, int]]:
-    """(tile_x, tile_y) grid cells a bbox touches, tile_x/y = floor(lon/lat / tile_deg)."""
+    """(tile_x, tile_y) grid cells a bbox touches, tile_x/y = floor(lon/lat / tile_deg).
+
+    xmin/xmax may fall outside [-180, 180] (issue #42: overture._bbox_around
+    doesn't clamp/wrap longitude, so a search near the antimeridian produces
+    a box like xmin=179.9, xmax=180.4). floor() over that raw range still
+    walks a contiguous run of tile columns; wrap_x() then folds any column
+    outside the canonical [-180, 180) range back into it (mod 360), which is
+    exactly the tile on the *other* side of the seam — e.g. tile column 180
+    (out of range) wraps to -180 (the westmost column, valid). For a
+    non-crossing box every column is already in range, so wrap_x is the
+    identity and tile ids are unchanged from before this fix.
+    """
     x0, x1 = math.floor(xmin / tile_deg), math.floor(xmax / tile_deg)
     y0, y1 = math.floor(ymin / tile_deg), math.floor(ymax / tile_deg)
-    return [(tx, ty) for tx in range(x0, x1 + 1) for ty in range(y0, y1 + 1)]
+    span = round(360.0 / tile_deg)
+    half = span // 2
+
+    def wrap_x(tx: int) -> int:
+        return ((tx + half) % span) - half
+
+    tiles = [(wrap_x(tx), ty) for tx in range(x0, x1 + 1) for ty in range(y0, y1 + 1)]
+    # Preserve first-seen order while deduping: wrapping can only fold two
+    # raw columns onto the same tile if the box is wider than a full 360
+    # degrees of longitude, i.e. radius_m far beyond any realistic query —
+    # cheap insurance against a duplicate tile fetch in that pathological case.
+    return list(dict.fromkeys(tiles))
 
 
 def tile_path(release: str, theme: str, tile: tuple[int, int]) -> Path:
