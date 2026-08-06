@@ -55,7 +55,16 @@ and `addresses` themes — no Nominatim, no third-party geocoding API, no key.
 Matching is deterministic (exact name > prefix > substring, falling back to
 named places when divisions alone don't fill the result limit), not a
 learned ranking model, so it's transparent but not state-of-the-art on
-ambiguous or misspelled queries.
+ambiguous or misspelled queries. Same-tier ties break on population (or a
+documented subtype-rank/hierarchy-depth/region-population proxy when
+population is null) — see `src/placeroot/geocode.py`'s module docstring for
+the full design.
+
+The first `geocode()` call in a process materializes a local name table
+from Overture's `divisions`/`type=division` theme (once per release,
+~20-30s, logged) so every later query answers from a local parquet file
+instead of a live S3 scan — set `PLACEROOT_CACHE=off` to disable this and
+always scan upstream directly.
 
 `scripts/geocode_benchmark.py` runs ~100 real-world queries (cities,
 neighborhoods, "city, state" forms) against live Overture data and reports
@@ -65,19 +74,25 @@ hit@1/hit@5:
 uv run python scripts/geocode_benchmark.py
 ```
 
-Measured against a live release (113 queries): **hit@1 35.4%, hit@5 54.9%**.
-Two concrete, honest gaps this surfaced, not smoothed over:
+Measured against a live release (113 queries): **hit@1 98.2%, hit@5 98.2%**
+(up from an initial 35.4%/54.9%). The two biggest contributors, in order:
+the local name table finally made it possible to push match-tier and
+population into the SQL `ORDER BY` *before* the row-limit that feeds
+Python-side ranking — without that, a common name with more matches than
+the overfetch limit (122 divisions worldwide are literally named "Los
+Angeles") could drop the well-known candidate before ranking ever saw it;
+and "City, ST"/"City, Region" parsing plus the population/prominence
+tiebreak (#46, #47) fixed the rest.
 
-- **"City, ST" queries often miss.** Overture division names are bare
-  ("Chicago", not "Chicago, IL"), so a query like `"Chicago, IL"` gets no
-  division match and falls back to named places — surfacing businesses
-  whose name happens to contain that string (e.g. a motel or clinic named
-  "... - Chicago, IL") instead of the city.
-- **Common city names are ambiguous worldwide**, and ranking has no
-  population or prominence signal to break ties — `"Boston"` or `"Reno"`
-  can rank a same-named locality in another country or state above the
-  well-known one. Fixing this needs a real disambiguation signal (population,
-  Wikidata-linked prominence); flagged as a follow-up rather than solved here.
+One concrete, honest gap remains, not smoothed over:
+
+- **Abbreviated saint names still miss.** `"St. Louis"` and `"St. Petersburg"`
+  don't match Overture's canonical names, which spell out "Saint" in full
+  ("Saint Louis", "Saint Petersburg") — matching is substring-based, not a
+  learned model, so `"St."` and `"Saint"` are just different strings to it.
+  A small alias table (`St. -> Saint`, and the reverse) would close this;
+  flagged as a follow-up rather than solved here, since it's a narrow
+  string-normalization fix, not a ranking or performance one.
 
 ## Development
 
