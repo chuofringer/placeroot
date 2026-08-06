@@ -149,6 +149,29 @@ def build_divisions() -> list[tuple]:
         CENTER_LAT + 0.002, CENTER_LON + 0.002,
         _chain("United States", "New York", "Brooklyn", "Hilltop"),
     )
+    # #53: Overture's canonical name uses the expanded "Saint" spelling —
+    # a literal query for "St. Louis" (or "St Louis") must not find it
+    # without the abbreviation-variant retry.
+    add(
+        "gers-div-saint-louis", "Saint Louis", "locality", "US", "US-MO",
+        38.63, -90.20, _chain("United States", "Missouri", "Saint Louis"),
+        population=301_578,
+    )
+    # #53: a tiny, unpopulated village that happens to be literally spelled
+    # "St. Louis" (mirrors real Overture data, verified live) — the literal
+    # query must not stop at this exact-tier-but-unpopulated match; the
+    # populated "Saint Louis" variant above has to win on prominence.
+    add(
+        "gers-div-st-louis-tiny", "St. Louis", "locality", "FR", "FR-ARA",
+        45.5, 4.8, _chain("France", "Auvergne-Rhone-Alpes", "St. Louis"),
+    )
+    # #53: canonical name carries a diacritic — a plain-ASCII query for
+    # "Sao Paulo" must not find it without the diacritic-folded retry.
+    add(
+        "gers-div-sao-paulo", "São Paulo", "locality", "BR", "BR-SP",
+        -23.55, -46.63, _chain("Brazil", "São Paulo"),
+        population=12_300_000,
+    )
     return rows
 
 
