@@ -264,11 +264,14 @@ def _recommend(candidates, summaries, competition, anchors, admin_names) -> str:
         grocery_ok = anchors[i]["grocery"]["within"]
         total_places = summaries[i]["total_places"]
         chain = admin_names[i]["chain"]
-        neighborhood = chain[0]["name"] if chain else c["label"]
+        # chain[0] is the smallest *division* containing the point — often the
+        # locality (e.g. "Austin" for every candidate), not the neighborhood.
+        # The candidate label is the meaningful name; the chain is context.
+        locality = chain[0]["name"] if chain else "unknown"
         scored.append(
             {
                 "label": c["label"],
-                "neighborhood": neighborhood,
+                "locality": locality,
                 "n_competitors": n_competitors,
                 "grocery_ok": grocery_ok,
                 "total_places": total_places,
@@ -284,15 +287,20 @@ def _recommend(candidates, summaries, competition, anchors, admin_names) -> str:
     lines = ["## Recommendation\n"]
     for s in scored:
         lines.append(
-            f"- **{s['neighborhood']}** ({s['label']}): {s['n_competitors']} existing "
+            f"- **{s['label']}** ({s['locality']}): {s['n_competitors']} existing "
             f"coffee_shop competitor(s) within {RADIUS_M}m, grocery anchor "
             f"{'within' if s['grocery_ok'] else 'NOT within'} {ANCHOR_MAX_DISTANCE_M}m, "
             f"{s['total_places']} total places nearby."
         )
+    tied = sum(1 for s in scored if s["n_competitors"] == best["n_competitors"]) > 1
+    competitors_clause = (
+        f"{best['n_competitors']} coffee_shop competitors within {RADIUS_M}m"
+        + (" (tied with other candidates)" if tied else " (fewest among candidates)")
+    )
     lines.append(
-        f"\n**Recommended: {best['neighborhood']}** — fewest coffee_shop competitors "
-        f"({best['n_competitors']}) among candidates with a grocery anchor in reach, "
-        f"and {best['total_places']} total places nearby to draw walk-in traffic from."
+        f"\n**Recommended: {best['label']}** — grocery anchor in reach, "
+        f"{competitors_clause}, and the most nearby activity "
+        f"({best['total_places']} total places) to draw walk-in traffic from."
     )
     return "\n".join(lines)
 
