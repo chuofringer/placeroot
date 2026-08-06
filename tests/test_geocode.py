@@ -1,9 +1,21 @@
 import duckdb
 import pytest
 
-from placeroot import geocode, overture, server
+from placeroot import geocode, overture, release, server
 
 from .conftest import ADDRESSES_FIXTURE_PATH, CENTER_LAT, CENTER_LON, DIVISIONS_FIXTURE_PATH
+
+
+@pytest.fixture
+def geocode_cache(tmp_path, monkeypatch):
+    """Enables the #43 local divisions table (default fixtures otherwise run
+    with PLACEROOT_CACHE=off, see conftest.offline_data) at an isolated,
+    per-test cache dir.
+    """
+    d = tmp_path / "placeroot-cache"
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(d))
+    monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
+    return d
 
 
 def test_exact_name_match_ranks_above_prefix_and_substring():
@@ -139,3 +151,119 @@ def test_server_geocode_structured_error_on_unreachable_upstream(tmp_path):
     result = server.geocode("Brooklyn", limit=5)
     assert result["error"] == "upstream_unavailable"
     overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions", type_="division")
+
+
+# --- #43: local divisions name table -------------------------------------
+
+
+def test_materializes_local_divisions_table_on_first_call(geocode_cache):
+    path = geocode._local_divisions_table_path(release.PINNED_RELEASE)
+    assert not path.exists()
+    results = geocode.geocode("Brooklyn", limit=5)
+    assert path.exists()
+    assert any(r["name"] == "Brooklyn" for r in results)
+
+
+def test_local_table_is_reused_without_rematerializing(geocode_cache):
+    geocode.geocode("Brooklyn", limit=5)
+    path = geocode._local_divisions_table_path(release.PINNED_RELEASE)
+    mtime = path.stat().st_mtime
+    geocode.geocode("Springfield", limit=5)
+    assert path.stat().st_mtime == mtime  # same file, not rebuilt
+
+
+def test_results_are_correct_via_local_table(geocode_cache):
+    results = geocode.geocode("Springfield", limit=10)
+    assert len(results) == 2
+    assert all(r["name"] == "Springfield" for r in results)
+
+
+def test_cache_off_skips_materialization_and_still_answers(monkeypatch, tmp_path):
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "placeroot-cache"))
+    monkeypatch.setenv("PLACEROOT_CACHE", "off")
+    path = geocode._local_divisions_table_path(release.PINNED_RELEASE)
+    results = geocode.geocode("Brooklyn", limit=5)
+    assert not path.exists()
+    assert any(r["name"] == "Brooklyn" for r in results)
+
+
+# --- #46: "City, ST" / "City, Region" parsing -----------------------------
+
+
+def test_city_comma_state_abbreviation_resolves_correct_region():
+    results = geocode.geocode("Springfield, IL", limit=5)
+    assert results
+    springfields = [r for r in results if r["name"] == "Springfield"]
+    assert springfields
+    assert all(r["admin_context"] == ["United States", "Illinois"] for r in springfields)
+
+
+def test_city_comma_state_disambiguates_the_other_same_named_city():
+    results = geocode.geocode("Springfield, MA", limit=5)
+    top = next(r for r in results if r["name"] == "Springfield")
+    assert top["admin_context"] == ["United States", "Massachusetts"]
+    # The Illinois Springfield must not appear at all — it's out of region.
+    assert not any(
+        r["name"] == "Springfield" and r["admin_context"] == ["United States", "Illinois"]
+        for r in results
+    )
+
+
+def test_city_state_still_finds_the_only_matching_region():
+    results = geocode.geocode("Brooklyn, NY", limit=5)
+    assert results[0]["name"] == "Brooklyn"
+    assert results[0]["admin_context"] == ["United States", "New York"]
+
+
+def test_city_comma_general_region_name_resolves_via_local_table(geocode_cache):
+    # "Ontario" isn't a US state — this only resolves through
+    # _resolve_region_from_table, which needs the local table (#43).
+    results = geocode.geocode("London, Ontario", limit=5)
+    assert results
+    assert results[0]["name"] == "London"
+    assert results[0]["admin_context"] == ["Canada", "Ontario"]
+
+
+def test_city_state_abbreviation_disambiguates_from_general_region(geocode_cache):
+    results = geocode.geocode("London, OH", limit=5)
+    assert results
+    assert results[0]["name"] == "London"
+    assert results[0]["admin_context"] == ["United States", "Ohio"]
+
+
+def test_unparseable_suffix_degrades_to_todays_behavior():
+    # "ZZ" isn't a real state/region — the whole literal string is searched,
+    # matching nothing (division names are bare, never "City, ST").
+    assert geocode.geocode("Springfield, ZZ", limit=5) == []
+
+
+# --- #47: prominence disambiguation ---------------------------------------
+
+
+def test_population_breaks_tie_between_same_named_localities():
+    results = geocode.geocode("Springfield", limit=10)
+    assert len(results) == 2
+    # Real-world populations: Springfield, MA > Springfield, IL.
+    assert results[0]["admin_context"] == ["United States", "Massachusetts"]
+    assert results[1]["admin_context"] == ["United States", "Illinois"]
+
+
+def test_region_population_proxy_breaks_tie_when_no_population(geocode_cache):
+    # Neither fixture "Fairview" carries a population value; the ids are
+    # deliberately ordered so an id-only tiebreak would pick the wrong one —
+    # this only passes if the region-population proxy (Illinois > Massachusetts
+    # in the fixture) actually ran.
+    results = geocode.geocode("Fairview", limit=5)
+    assert len(results) == 2
+    assert results[0]["admin_context"] == ["United States", "Illinois"]
+    assert results[1]["admin_context"] == ["United States", "Massachusetts"]
+
+
+def test_subtype_rank_proxy_outranks_hierarchy_and_region_when_no_population():
+    # Neither fixture "Hilltop" carries a population value; ids are again
+    # deliberately inverted, so this only passes if subtype rank
+    # (locality > neighborhood) actually decided the order.
+    results = geocode.geocode("Hilltop", limit=5)
+    assert len(results) == 2
+    assert results[0]["type"] == "locality"
+    assert results[1]["type"] == "neighborhood"
