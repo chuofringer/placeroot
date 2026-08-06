@@ -13,6 +13,8 @@ straight from tool arguments:
     interpolated into DuckDB SET statements
 """
 
+import sys
+
 import duckdb
 import pytest
 
@@ -219,3 +221,42 @@ def test_release_env_override_rejects_non_release_shaped_value(monkeypatch):
         assert release.resolve_release() == release.PINNED_RELEASE
     finally:
         release.reset_cache()
+
+
+def test_non_loopback_http_bind_warns(caplog, monkeypatch):
+    import logging
+
+    from placeroot import server
+
+    # Drive the real main() but stub the server run + warmups so nothing
+    # blocks or hits the network; assert the non-loopback bind warns.
+    monkeypatch.setattr(server, "_warm_metadata_async", lambda: None)
+    monkeypatch.setattr(server, "_warm_start", lambda: None)
+    monkeypatch.setattr(server.release, "resolve_release", lambda: "2026-07-22.0")
+    monkeypatch.setattr(server.mcp, "run", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", ["placeroot", "--http", "--host", "0.0.0.0"])
+    with caplog.at_level(logging.WARNING, logger="placeroot.server"):
+        server.main()
+    assert any("NON-LOOPBACK" in r.message for r in caplog.records)
+
+
+def test_loopback_http_bind_does_not_warn(caplog, monkeypatch):
+    import logging
+
+    from placeroot import server
+
+    monkeypatch.setattr(server, "_warm_metadata_async", lambda: None)
+    monkeypatch.setattr(server, "_warm_start", lambda: None)
+    monkeypatch.setattr(server.release, "resolve_release", lambda: "2026-07-22.0")
+    monkeypatch.setattr(server.mcp, "run", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", ["placeroot", "--http"])
+    with caplog.at_level(logging.WARNING, logger="placeroot.server"):
+        server.main()
+    assert not any("NON-LOOPBACK" in r.message for r in caplog.records)
+
+
+def test_loopback_http_bind_is_the_default():
+    from placeroot import server
+
+    args = server.parse_transport_args(["--http"])
+    assert args.host == "127.0.0.1"
