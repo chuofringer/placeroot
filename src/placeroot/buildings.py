@@ -60,11 +60,10 @@ import json
 import logging
 import math
 from collections import Counter
-from functools import lru_cache
 
 import duckdb
 
-from placeroot import cache, overture, release, simplify
+from placeroot import cache, db, geo, overture, release, simplify
 from placeroot.simplify import METERS_PER_DEGREE_LAT
 
 logger = logging.getLogger(__name__)
@@ -90,41 +89,29 @@ TOP_N_BREAKDOWN = 10
 # boundary) instead of one row's geometry alone blowing it.
 PER_ROW_GEOMETRY_TOKEN_CAP = 200
 
-_spatial_loaded = False
-
 
 def _ensure_spatial() -> None:
-    """Load DuckDB's spatial extension on the shared connection, once."""
-    global _spatial_loaded
-    if _spatial_loaded:
-        return
-    con = overture._conn()
+    """Load DuckDB's spatial extension on the shared connection, once.
+
+    Thin wrapper over db.ensure_spatial() (issue #40), keeping this
+    module's original UpstreamUnavailable-on-failure contract. The pre-#40
+    copy called overture._conn().execute(...) without holding the
+    connection lock — a real bug (issue #24) db.ensure_spatial() fixes.
+    """
     try:
-        con.execute("INSTALL spatial; LOAD spatial;")
+        db.ensure_spatial()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(f"could not load spatial extension: {e}") from e
-    _spatial_loaded = True
 
 
-@lru_cache(maxsize=8)
 def _geom_expr(upstream: str) -> str:
     """SQL expression yielding a GEOMETRY for the dataset's geometry column.
 
-    Identical logic to divisions._geom_expr — real Overture GeoParquet
-    carries geo metadata so DuckDB spatial reads `geometry` as a native
-    GEOMETRY; our plain-parquet WKB-BLOB fixture needs ST_GeomFromWKB
-    first. Probed once per glob and cached.
+    Thin wrapper over geo.geom_expr() (issue #40) — identical logic to
+    divisions.py's former copy; both now delegate to the one shared
+    implementation.
     """
-    try:
-        with overture._conn_lock:
-            (_, type_name) = overture._conn().execute(
-                f"DESCRIBE SELECT geometry FROM read_parquet('{upstream}') LIMIT 0"
-            ).fetchone()[:2]
-    except duckdb.Error:
-        # Probe failure means upstream itself is unreachable — let the real
-        # query hit the same problem and surface it as UpstreamUnavailable.
-        return "ST_GeomFromWKB(geometry)"
-    return "geometry" if type_name.upper().startswith("GEOMETRY") else "ST_GeomFromWKB(geometry)"
+    return geo.geom_expr(upstream)
 
 
 def set_data_path(path: str | None) -> None:
@@ -165,10 +152,10 @@ def _from_source(bbox: tuple[float, float, float, float]) -> str:
     upstream = _upstream_glob()
     if cache.enabled():
         try:
-            with overture._conn_lock:
+            with db.conn_lock:
                 paths = cache.local_paths_for_query(
-                    overture._conn(), release.resolve_release(), THEME, bbox, upstream,
-                    overture._new_connection,
+                    db.shared_conn(), release.resolve_release(), THEME, bbox, upstream,
+                    db.new_connection,
                 )
         except duckdb.Error as e:
             raise overture.UpstreamUnavailable(str(e)) from e
@@ -180,7 +167,7 @@ def _from_source(bbox: tuple[float, float, float, float]) -> str:
 
 def _bbox_filter(lat: float, lon: float, radius_m: float) -> tuple[str, dict]:
     """Cheap row-group bbox prefilter + the params the centroid distance test also needs."""
-    xmin, ymin, xmax, ymax = overture._bbox_around(lat, lon, radius_m)
+    xmin, ymin, xmax, ymax = geo.bbox_around(lat, lon, radius_m)
     bbox_filter = (
         "bbox.xmax >= $xmin AND bbox.xmin <= $xmax"
         " AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
@@ -269,8 +256,8 @@ def summarize_buildings(
         WHERE {_CENTROID_DISTANCE_EXPR} <= $radius_m
     """
     try:
-        with overture._conn_lock:
-            rows = overture._conn().execute(sql, params).fetchall()
+        with db.conn_lock:
+            rows = db.shared_conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
 
@@ -375,8 +362,8 @@ def buildings_at(
         LIMIT {limit}
     """
     try:
-        with overture._conn_lock:
-            rows = overture._conn().execute(sql, params).fetchall()
+        with db.conn_lock:
+            rows = db.shared_conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
 
