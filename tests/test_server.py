@@ -101,6 +101,24 @@ def test_warm_metadata_async_returns_without_waiting_for_the_probe(monkeypatch):
     time.sleep(0.3)  # let the background thread finish before the test exits
     assert started == [True]
 
+def test_render_map_tool_writes_artifact_from_find_places_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("PLACEROOT_ARTIFACT_DIR", str(tmp_path))
+    found = server.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=5)
+    result = server.render_map(found, title="Nearby")
+    assert set(result) == {"path", "bytes", "features_rendered"}
+    assert result["features_rendered"] == len(found["results"])
+    from pathlib import Path
+
+    assert Path(result["path"]).exists()
+
+
+def test_render_map_tool_handles_summarize_area_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("PLACEROOT_ARTIFACT_DIR", str(tmp_path))
+    summary = server.summarize_area(CENTER_LAT, CENTER_LON, radius_m=1000)
+    result = server.render_map(summary, title="Area")
+    assert result["features_rendered"] == 1  # one marker at the area center
+
+
 
 def test_release_attribution_reaches_instructions():
     """Regression: MCPServer.instructions is a read-only property; main()
