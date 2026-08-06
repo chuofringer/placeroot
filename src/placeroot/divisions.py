@@ -37,7 +37,7 @@ THEME = "divisions"
 
 # Columns admin_lookup depends on. geometry is essential — without it there
 # is no point-in-polygon test to run at all, unlike places' softer columns.
-REQUIRED_COLUMNS = ["id", "names", "subtype", "geometry"]
+REQUIRED_COLUMNS = ["id", "names", "subtype", "geometry", "bbox", "division_id"]
 ESSENTIAL_COLUMNS = {"geometry"}
 
 _spatial_loaded = False
@@ -97,8 +97,25 @@ def admin_lookup(lat: float, lon: float) -> dict:
 
     name_expr = "NULL" if "names" in missing else "names.primary"
     subtype_expr = "NULL" if "subtype" in missing else "subtype"
-    id_expr = "NULL" if "id" in missing else "id"
+    # Prefer the parent division's GERS id: division_area rows are polygon
+    # variants (land/territorial) with their own row ids but a shared
+    # division_id, which is the stable reference agents should hold.
+    if "division_id" not in missing:
+        id_expr = "coalesce(division_id, id)"
+    elif "id" not in missing:
+        id_expr = "id"
+    else:
+        id_expr = "NULL"
     geom_expr = _geom_expr(upstream)
+    # The bbox column prunes remote row groups before the (expensive) exact
+    # containment test — without it this is an ST_Contains over every
+    # division polygon on Earth (measured 10+ minutes live).
+    bbox_prefilter = (
+        "bbox.xmin <= $lon AND bbox.xmax >= $lon"
+        " AND bbox.ymin <= $lat AND bbox.ymax >= $lat AND "
+        if "bbox" not in missing
+        else ""
+    )
 
     sql = f"""
         SELECT
@@ -107,7 +124,7 @@ def admin_lookup(lat: float, lon: float) -> dict:
             {subtype_expr} AS type,
             ST_Area({geom_expr}) AS area
         FROM read_parquet('{upstream}', hive_partitioning=1)
-        WHERE ST_Contains({geom_expr}, ST_Point($lon, $lat))
+        WHERE {bbox_prefilter}ST_Contains({geom_expr}, ST_Point($lon, $lat))
         ORDER BY area ASC
     """
     try:
@@ -115,5 +132,13 @@ def admin_lookup(lat: float, lon: float) -> dict:
             rows = overture._conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
-    chain = [{"name": name, "type": type_, "id": id_} for id_, name, type_, _area in rows]
+    # division_area carries multiple polygon rows per division (e.g. land and
+    # maritime variants) — keep the first (smallest-area) row per division.
+    chain, seen = [], set()
+    for id_, name, type_, _area in rows:
+        key = id_ if id_ is not None else (name, type_)
+        if key in seen:
+            continue
+        seen.add(key)
+        chain.append({"name": name, "type": type_, "id": id_})
     return {"chain": chain}
