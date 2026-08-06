@@ -68,14 +68,14 @@ groundfact (social channels exist), 15 others (registered domains or package col
       (verified live: downtown Austin, 8 results ≈ 390 tokens, 5.6s cold)
 - [x] `summarize_area` — category mix (1,944 places ≈ 320 tokens)
 - [x] MCP server (Python SDK 2.0), `uv run placeroot`
-- [ ] Fix radius geometry and count correctness (#1, #2, #3)
-- [ ] Overture release auto-discovery + graceful degradation (#4, #5)
-- [ ] Offline test suite and CI (#6); measured token budget (#7)
-- [ ] Local row-group cache — warm under 500ms, works offline (#8)
-- [ ] `place_details`, `compare_areas`, `within_distance` (#9, #12, #13)
-- [ ] `geocode` / `reverse_geocode` on Overture data, `admin_lookup` (#10, #11)
-- [ ] `simplify_geometry` (the payload tool) (#14)
-- [ ] Expose GERS ids in every tool response (#25)
+- [x] Fix radius geometry and count correctness (#1, #2, #3)
+- [x] Overture release auto-discovery + graceful degradation (#4, #5)
+- [x] Offline test suite and CI (#6); measured token budget (#7)
+- [x] Local tile cache — warm ~21ms, cold under ~5s, works offline (#8, #31)
+- [x] `place_details`, `compare_areas`, `within_distance` (#9, #12, #13, #41)
+- [x] `geocode` / `reverse_geocode` on Overture data (hit@1 98.2% live), `admin_lookup` (#10, #11, #43, #46, #47)
+- [x] `simplify_geometry` (the payload tool) (#14)
+- [x] Expose GERS ids in every tool response (#25)
 - [x] Register domains: placeroot.dev (canonical) + placeroot.com (redirect), done
       2026-08-05; .io intentionally skipped (#27)
 - [ ] Publish PyPI + npm (#16 — P0 as of 2026-08-05: the architecture is replicable
@@ -85,11 +85,10 @@ Full triage on the [project board](https://github.com/users/chuofringer/projects
 
 ### Phase 2 — Distribution (weeks 8–13)
 
-- [ ] Self-contained map artifact — any result opens as a live HTML map we ship
+- [x] Self-contained map artifact — any result opens as a live HTML map we ship
       ourselves (#15). A GeoLibre bridge is an additional output target and a community
       relationship, not a dependency; engage opengeos early either way.
-- [ ] placeroot.dev landing page: token-comparison hero, live map via #15, copy-paste
-      config above the fold; static page on Cloudflare Pages, deliberately not an app (#28)
+- [x] placeroot.dev landing page built (#28) — deploy awaits DNS/Pages setup (yours)
 - [ ] Listings: awesome-mcp-servers, mcpservers.org, Glama, PulseMCP, Smithery, MCP
       registry (searches for "overture" there return zero results today — claim it),
       awesome-agentic-AI-for-ST
@@ -97,7 +96,7 @@ Full triage on the [project board](https://github.com/users/chuofringer/projects
 - [ ] "Why agents are bad at maps" post naming the payload problem — cite Mapbox's own
       Dec 2025 "GeoAI in 2026" post and Google's $14–25/1K grounding pricing
 - [ ] Benchmark on GeoBenchX / GeoAgentBench: demonstrate tokens-per-correct-answer wins (#26)
-- [ ] Flagship demo: site-selection agent entirely on open data
+- [x] Flagship demo: site-selection agent entirely on open data (#17 — live-verified, ~5.9K tokens for a 17-call analysis)
 
 **Traction bar (~week 14):** judged on signals we own (#19) — download trend over four
 weeks, distinct connecting clients, inbound issues/PRs from people we did not contact, and

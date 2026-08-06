@@ -16,36 +16,38 @@ Tracked on the [project board](https://github.com/users/chuofringer/projects/2).
    answers "what is where" questions. It will not ship flood/fire/wind risk
    scores, property risk ratings, or insurance-flavored analytics.
 
-## v0.1 (current)
+## v0.1
 
 - [x] `find_places` — nearest named places with taxonomy, confidence, operating status
 - [x] `summarize_area` — category mix for an area
 
-## v0.2 — correct, resilient, useful
+## v0.2 — correct, resilient, useful (shipped 2026-08-06)
 
 Correctness and independence first: the query layer has known geometry bugs, no
 tests, and a hardcoded upstream release.
 
-- [ ] Fix radius geometry: circular distance in SQL, honest counts (#1, #2, #3)
-- [ ] Overture release auto-discovery with pinned fallback (#4)
-- [ ] Graceful degradation when upstream is slow, down, or renamed (#5)
-- [ ] Offline test suite and CI on committed fixtures (#6)
-- [ ] Measured token-budget enforcement with visible truncation (#7)
-- [ ] Local row-group cache — warm queries under 500ms, works offline (#8)
-- [ ] `place_details` — one place in full (#9)
-- [ ] `geocode` / `reverse_geocode` built on Overture, not Nominatim (#10)
-- [ ] `admin_lookup` — point → admin hierarchy (#11)
-- [ ] `compare_areas`, `within_distance` (#12, #13)
-- [ ] `simplify_geometry` — the payload tool (#14)
-- [ ] Expose GERS ids in every tool response — stable place references, no
+- [x] Fix radius geometry: circular distance in SQL, honest counts (#1, #2, #3)
+- [x] Overture release auto-discovery with pinned fallback (#4)
+- [x] Graceful degradation when upstream is slow, down, or renamed (#5)
+- [x] Offline test suite and CI on committed fixtures (#6)
+- [x] Measured token-budget enforcement with visible truncation (#7)
+- [x] Local row-group cache — warm queries under 500ms, works offline (#8)
+- [x] `place_details` — one place in full (#9)
+- [x] `geocode` / `reverse_geocode` built on Overture, not Nominatim (#10) —
+      live benchmark hit@1 98.2% over 113 queries, warm under 0.3s (#43, #46, #47)
+- [x] `admin_lookup` — point → admin hierarchy (#11)
+- [x] `compare_areas`, `within_distance` (#12, #13)
+- [x] `simplify_geometry` — the payload tool (#14)
+- [x] Expose GERS ids in every tool response — stable place references, no
       competitor surfaces them (#25)
 
 ## v0.3 — capabilities nobody else has keyless
 
-- [ ] Self-contained map artifact: any result renders as a live HTML map, no
+- [x] Self-contained map artifact: any result renders as a live HTML map, no
       CDN, no tile key, no external viewer (#15)
-- [ ] Own routing stack: routable graph and isochrones from Overture
-      transportation, no hosted routing service on the critical path (#17)
+- [x] Own routing stack, walking MVP: routable graph and isochrones from
+      Overture transportation, no hosted routing service on the critical path
+      (#18; drive/cycle, concave hulls, graph caching tracked in #36–#39)
 - [ ] Buildings and transportation themes (#23)
 - [ ] Hosted streamable-HTTP endpoint — sells latency, never access (#24)
 
