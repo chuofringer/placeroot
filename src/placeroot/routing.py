@@ -42,6 +42,7 @@ import heapq
 import logging
 import math
 import os
+import threading
 from functools import lru_cache
 
 import duckdb
@@ -71,6 +72,14 @@ ESSENTIAL_COLUMNS = {"geometry", "bbox"}
 EARTH_RADIUS_M = 6371000.0
 
 _data_path_override: str | None = None
+
+# Guards every use of this module's own shared connection (routing.py keeps
+# a separate DuckDB connection from overture.py's — see _conn() below). A
+# DuckDB connection isn't safe for concurrent execute() calls from multiple
+# threads, which HTTP mode makes possible (issue #24); this lock formalizes
+# the same one-query-at-a-time discipline overture._conn_lock already
+# applies to the places/geocode connection.
+_conn_lock = threading.Lock()
 
 
 class UpstreamUnavailable(Exception):
@@ -142,7 +151,8 @@ def _conn() -> duckdb.DuckDBPyConnection:
 @lru_cache(maxsize=8)
 def _probe_schema(glob: str) -> frozenset | None:
     try:
-        cols = _conn().execute(f"SELECT * FROM read_parquet('{glob}') LIMIT 0").description
+        with _conn_lock:
+            cols = _conn().execute(f"SELECT * FROM read_parquet('{glob}') LIMIT 0").description
         return frozenset(c[0] for c in cols)
     except duckdb.Error as e:
         logger.warning("Schema probe failed for %s: %s", glob, e)
@@ -159,7 +169,8 @@ def _geometry_wkt_expr(glob: str) -> str:
     which needs ST_GeomFromWKB first. Detected once per glob and cached.
     """
     try:
-        cols = _conn().execute(f"SELECT * FROM read_parquet('{glob}') LIMIT 0").description
+        with _conn_lock:
+            cols = _conn().execute(f"SELECT * FROM read_parquet('{glob}') LIMIT 0").description
         types = {c[0]: str(c[1]) for c in cols}
     except duckdb.Error as e:
         logger.warning("Geometry type probe failed for %s: %s", glob, e)
@@ -293,10 +304,11 @@ def _from_source(bbox: tuple[float, float, float, float]) -> str:
             # overture._new_connection as the background-fetch factory: the
             # tile COPY only needs httpfs, and reusing it avoids a third
             # connection-configuration site in this module.
-            paths = cache.local_paths_for_query(
-                _conn(), release.resolve_release(), THEME, bbox, upstream,
-                overture._new_connection,
-            )
+            with _conn_lock:
+                paths = cache.local_paths_for_query(
+                    _conn(), release.resolve_release(), THEME, bbox, upstream,
+                    overture._new_connection,
+                )
         except duckdb.Error as e:
             raise UpstreamUnavailable(str(e)) from e
         if paths:
@@ -399,7 +411,8 @@ def build_graph(lat: float, lon: float, radius_m: float) -> Graph:
     """
     params = bbox_params
     try:
-        rows = _conn().execute(sql, params).fetchall()
+        with _conn_lock:
+            rows = _conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
 

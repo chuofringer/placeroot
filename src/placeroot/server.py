@@ -1,8 +1,16 @@
 """PlaceRoot MCP server — ground AI agents in open map data.
 
-Run: uv run placeroot
+Run (stdio, the default): uv run placeroot
+Run (streamable-HTTP): uv run placeroot --http [--host 127.0.0.1] [--port 8321]
+
+HTTP mode uses the mcp SDK's first-party streamable-HTTP transport
+(MCPServer.run(transport="streamable-http", ...), backed by uvicorn — no
+hand-rolled protocol bridge) and can serve multiple requests concurrently.
+See overture.py's module docstring for how the shared query connection
+stays safe under that concurrency.
 """
 
+import argparse
 import logging
 import os
 import threading
@@ -23,6 +31,9 @@ BASE_INSTRUCTIONS = (
 )
 
 mcp = MCPServer("placeroot", instructions=BASE_INSTRUCTIONS)
+
+DEFAULT_HTTP_HOST = "127.0.0.1"
+DEFAULT_HTTP_PORT = 8321
 
 
 def _upstream_error(e: Exception) -> dict:
@@ -346,7 +357,40 @@ def _warm_metadata_async() -> None:
     threading.Thread(target=overture.warm_metadata, daemon=True).start()
 
 
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="placeroot",
+        description="PlaceRoot MCP server — ground AI agents in open map data.",
+    )
+    parser.add_argument(
+        "--http",
+        action="store_true",
+        help="Serve the streamable-HTTP transport instead of stdio (the default).",
+    )
+    parser.add_argument(
+        "--host",
+        default=DEFAULT_HTTP_HOST,
+        help=f"Host to bind in --http mode (default: {DEFAULT_HTTP_HOST}).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_HTTP_PORT,
+        help=f"Port to bind in --http mode (default: {DEFAULT_HTTP_PORT}).",
+    )
+    return parser
+
+
+def parse_transport_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse CLI args into transport config (mode/host/port). Extracted from
+    main() so the mode-selection logic is directly unit-testable without
+    starting a server.
+    """
+    return _build_arg_parser().parse_args(argv)
+
+
 def main() -> None:
+    args = parse_transport_args()
     active_release = release.resolve_release()
     # MCPServer.instructions is a read-only property over the low-level
     # server, which is what the initialize response actually reads from.
@@ -355,7 +399,11 @@ def main() -> None:
     )
     _warm_metadata_async()
     _warm_start()
-    mcp.run()
+    if args.http:
+        logger.info("placeroot: streamable-HTTP on http://%s:%s/mcp", args.host, args.port)
+        mcp.run(transport="streamable-http", host=args.host, port=args.port)
+    else:
+        mcp.run()
 
 
 if __name__ == "__main__":
