@@ -57,6 +57,22 @@ def fit_rows(
     return kept, omitted > 0 or stripped, omitted
 
 
+def truncate_list(items: list | None, max_items: int = 5) -> tuple[list | None, int]:
+    """Truncate a single field's array value to max_items, never silently.
+
+    Returns (kept, omitted_count). None/empty pass through unchanged with
+    omitted_count 0. Used for place_details' array fields (addresses,
+    websites, phones, socials, sources, issue #9) — those can be long
+    enough on their own to blow the token budget, and unlike find_places'
+    row lists, apply_budget's row-dropping doesn't apply to a single
+    place's fields, so this is the array-level equivalent: callers surface
+    omitted_count > 0 as "<field>_omitted_count" on the response.
+    """
+    if not items or len(items) <= max_items:
+        return items, 0
+    return items[:max_items], len(items) - max_items
+
+
 def apply_budget(payload: dict, list_key: str, budget_tokens: int | None = None) -> dict:
     """Fit payload[list_key] — a ranked list — within the token budget.
 
