@@ -104,3 +104,27 @@ def test_resolve_release_uses_discovery_when_no_override(monkeypatch):
     monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
     monkeypatch.setattr(release, "_discover", lambda: "2026-08-01.0")
     assert release.resolve_release() == "2026-08-01.0"
+
+
+def test_discover_compares_patch_numerically(monkeypatch):
+    """Regression: plain max() would rank 2026-07-22.9 above 2026-07-22.10."""
+    listing = """<?xml version="1.0"?>
+    <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+        <CommonPrefixes><Prefix>release/2026-07-22.9/</Prefix></CommonPrefixes>
+        <CommonPrefixes><Prefix>release/2026-07-22.10/</Prefix></CommonPrefixes>
+        <CommonPrefixes><Prefix>release/2026-06-25.0/</Prefix></CommonPrefixes>
+    </ListBucketResult>
+    """
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return listing.encode("utf-8")
+
+    monkeypatch.setattr(release.urllib.request, "urlopen", lambda *a, **k: FakeResponse())
+    assert release._discover() == "2026-07-22.10"

@@ -61,7 +61,9 @@ def _discover(timeout_s: float = 5.0) -> str | None:
     if not releases:
         logger.warning("Overture release discovery found no releases, using pinned release")
         return None
-    return max(releases)
+    # Plain max() would sort "2026-07-22.9" above "2026-07-22.10"; compare
+    # the patch component numerically.
+    return max(releases, key=lambda r: (r[: r.rindex(".")], int(r[r.rindex(".") + 1 :])))
 
 
 @lru_cache(maxsize=1)
