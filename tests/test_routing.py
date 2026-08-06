@@ -11,10 +11,15 @@ ORIGIN_LON = fx.ORIGIN_LON
 # Radius (m) generous enough to pull the whole 20x20 grid into one query.
 WHOLE_GRID_RADIUS_M = 3000
 
-EXPECTED_NODE_COUNT = fx.GRID_N * fx.GRID_N
+# Grid nodes, plus the issue #37 fixture additions that also fall inside
+# WHOLE_GRID_RADIUS_M of ORIGIN: the interior-connector crossing (5 nodes:
+# x_a0, x_a1, x_b0, x_b1, x_cross) and the isolated 2-node fragment
+# (frag_0, frag_1) near grid node (5, 5). See build_routing_fixture.py.
+EXPECTED_NODE_COUNT = fx.GRID_N * fx.GRID_N + 5 + 2
 # All grid edges (horizontal + vertical + diagonal) minus the one motorway
-# shortcut, which the walkable filter must exclude.
-EXPECTED_EDGE_COUNT = len(fx.build_edges()) - 1
+# shortcut (excluded by the walkable filter), plus the crossing's 4 split
+# edges and the isolated fragment's 1 edge (same #37 additions as above).
+EXPECTED_EDGE_COUNT = len(fx.build_edges()) - 1 + 4 + 1
 
 
 def _path_length(*nodes: tuple[int, int]) -> float:
@@ -154,3 +159,58 @@ def test_server_isochrone_radius_too_large_error():
 def test_server_isochrone_no_graph_nearby_error():
     result = server.isochrone(0.0, 0.0, minutes=10, radius_m=500)
     assert result["error"] == "no_graph_nearby"
+
+
+# --- Issue #37: interior-connector splitting + component-aware snapping ---
+
+
+def test_interior_connector_links_two_segments_at_a_shared_crossing():
+    """x_a0-x_a1 and x_b0-x_b1 only share the *interior* connector x_cross
+    (at == 0.5 on both) — neither segment terminates there. The crossing
+    must still be traversable, and each split edge's length must be half
+    of its parent segment's real length (arc-length fraction, not a
+    straight-line reinterpolation)."""
+    clat, clon = fx.cross_center_latlon()
+    graph = routing.build_graph(clat, clon, 100)
+
+    assert fx.CROSS_CONNECTOR_ID in graph.adjacency
+    neighbor_ids = {n for n, _ in graph.adjacency[fx.CROSS_CONNECTOR_ID]}
+    assert neighbor_ids == {"x_a0", "x_a1", "x_b0", "x_b1"}
+    for _, length_m in graph.adjacency[fx.CROSS_CONNECTOR_ID]:
+        assert length_m == pytest.approx(fx.CROSS_HALF_LEN_M, rel=1e-3)
+
+    dist = routing.dijkstra(graph, "x_a0", max_seconds=1000, speed_m_s=1.0)
+    assert "x_b1" in dist
+    assert dist["x_b1"] == pytest.approx(2 * fx.CROSS_HALF_LEN_M, rel=1e-3)
+
+
+def test_snap_to_graph_skips_isolated_fragment_for_larger_component():
+    """frag_0/frag_1 form an isolated 2-node fragment placed nearer to the
+    query point than real grid node (5, 5). Snapping must prefer the grid
+    node's much larger component over the geometrically-closer fragment."""
+    qlat, qlon = fx.isolated_query_latlon()
+    graph = routing.build_graph(qlat, qlon, 150)
+
+    # Sanity: the fragment really is closer than the grid node, and both
+    # are present in this graph.
+    frag_d = routing._haversine_m(qlat, qlon, *graph.coords["frag_0"])
+    grid_node_id = fx.node_id(*fx.ISOLATED_ANCHOR_NODE)
+    grid_d = routing._haversine_m(qlat, qlon, *graph.coords[grid_node_id])
+    assert frag_d < grid_d
+
+    components = graph.connected_components()
+    frag_component = next(c for c in components if "frag_0" in c)
+    grid_component = next(c for c in components if grid_node_id in c)
+    assert len(frag_component) < routing.MIN_USABLE_COMPONENT_NODES
+    assert len(grid_component) >= routing.MIN_USABLE_COMPONENT_NODES
+
+    source = routing.snap_to_graph(graph, qlat, qlon)
+    assert source == grid_node_id
+
+
+def test_isochrone_snaps_past_isolated_fragment():
+    qlat, qlon = fx.isolated_query_latlon()
+    result = routing.isochrone(qlat, qlon, minutes=5, radius_m=150)
+    # If snapping had picked the 2-node fragment instead, only 1-2 nodes
+    # (frag_1, maybe frag_0) would ever be reachable.
+    assert result["stats"]["reachable_nodes"] > routing.MIN_USABLE_COMPONENT_NODES
