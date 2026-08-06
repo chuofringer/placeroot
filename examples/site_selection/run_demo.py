@@ -40,7 +40,9 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_PLACES = REPO_ROOT / "tests" / "fixtures" / "places.parquet"
-FIXTURE_DIVISIONS = REPO_ROOT / "tests" / "fixtures" / "divisions.parquet"
+# admin_lookup consumes type=division_area polygons; the sibling
+# divisions.parquet (type=division, no geometry) belongs to geocode.
+FIXTURE_DIVISIONS = REPO_ROOT / "tests" / "fixtures" / "division_areas.parquet"
 
 RADIUS_M = 800
 COMPETITOR_CATEGORY = "coffee_shop"
