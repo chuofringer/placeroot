@@ -294,7 +294,11 @@ def find_places(
     remote scan fails after retries. Non-essential columns missing from the
     dataset come back as None in their field — see degraded_fields().
     """
-    limit = min(limit, MAX_ROWS)
+    # int() before interpolating into the SQL LIMIT clause: the MCP layer
+    # already type-validates this arg, but the cast makes the query layer
+    # safe for any direct (non-MCP) caller too, rather than relying on the
+    # transport for injection safety. Clamped to [0, MAX_ROWS].
+    limit = max(0, min(int(limit), MAX_ROWS))
     upstream = _upstream_glob()
     missing = set(_check_schema(upstream))
     bbox_filter, distance_filter, params, bbox = area_geometry(lat, lon, radius_m)

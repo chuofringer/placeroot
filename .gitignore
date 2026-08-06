@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 dist/
 .DS_Store
+
+# Local Claude Code session state (agent worktrees, etc.) — never shipped.
+.claude/
