@@ -32,10 +32,19 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Idempotent: if this version is already on PyPI (e.g. a re-run
+          # after the npm job failed, or an infra retry), treat it as a
+          # no-op success instead of erroring on the duplicate upload — so
+          # the npm job below (needs: pypi) can still run.
+          skip-existing: true
 
   npm:
     runs-on: ubuntu-latest
     needs: pypi
+    # Run whenever pypi didn't hard-fail — including when it was skipped or
+    # a no-op — so npm can publish independently of a fresh PyPI upload.
+    if: ${{ !cancelled() && needs.pypi.result == 'success' }}
     permissions:
       contents: read  # explicit so checkout works regardless of the repo's
                       # default-token-permission setting (private repo).
