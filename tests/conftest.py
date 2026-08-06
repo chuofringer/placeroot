@@ -6,7 +6,13 @@ import pytest
 from placeroot import overture, release
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "places.parquet"
+# type=division_area (polygons; consumed by divisions.py's admin_lookup) and
+# type=division (points + hierarchy chain; consumed by geocode.py) are two
+# different Overture types under the same "divisions" theme — see
+# overture.py's _override_key for how both fixtures stay active at once.
+DIVISION_AREAS_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "division_areas.parquet"
 DIVISIONS_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "divisions.parquet"
+ADDRESSES_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "addresses.parquet"
 
 CENTER_LAT = 40.700000
 CENTER_LON = -73.900000
@@ -18,9 +24,10 @@ def offline_data(request, monkeypatch):
 
     Also pins the release (so no test triggers real release discovery) and
     disables the tile cache by default (so existing tests keep querying the
-    fixture directly) — cache-specific tests opt back in explicitly. Both
-    the places and divisions (#11) themes are pointed at their own
-    committed fixture via overture.set_data_path's per-theme override.
+    fixture directly) — cache-specific tests opt back in explicitly. places,
+    divisions (#11, both its types), and addresses (#10) are each pointed at
+    their own committed fixture via overture.set_data_path's per-theme (and,
+    for divisions, per-type) override.
     """
     if "live" in request.keywords:
         yield
@@ -28,12 +35,21 @@ def offline_data(request, monkeypatch):
     monkeypatch.setenv("PLACEROOT_OVERTURE_RELEASE", release.PINNED_RELEASE)
     monkeypatch.setenv("PLACEROOT_CACHE", "off")
     overture.set_data_path(str(FIXTURE_PATH))
-    overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions")
+    # Bare theme override: what divisions.py's admin_lookup (type_="division_area")
+    # resolves to, and what every existing divisions test already expects.
+    overture.set_data_path(str(DIVISION_AREAS_FIXTURE_PATH), theme="divisions")
+    # More specific type_ override: only geocode.py's type_="division" queries
+    # resolve to this one; admin_lookup's lookups fall through to the bare
+    # override above instead.
+    overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions", type_="division")
+    overture.set_data_path(str(ADDRESSES_FIXTURE_PATH), theme="addresses", type_="address")
     try:
         yield
     finally:
         overture.set_data_path(None)
         overture.set_data_path(None, theme="divisions")
+        overture.set_data_path(None, theme="divisions", type_="division")
+        overture.set_data_path(None, theme="addresses", type_="address")
 
 
 def raw_rows() -> list[dict]:
