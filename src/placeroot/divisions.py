@@ -12,7 +12,7 @@ a small synthetic fixture (a handful of nested polygons) instead of a
 divisions dataset large enough that point-in-polygon over it would be slow
 without a spatial index.
 
-Design choice, documented rather than hidden: this reuses overture._conn()
+Design choice, documented rather than hidden: this reuses db.shared_conn()
 (so the spatial extension loads once, alongside httpfs) but does NOT route
 through cache.py's tile cache the way places queries do. The places cache
 exists because point-radius searches cluster geographically and get
@@ -25,11 +25,10 @@ parameter) would let it slot in without further plumbing.
 """
 
 import logging
-from functools import lru_cache
 
 import duckdb
 
-from placeroot import overture
+from placeroot import db, geo, overture
 
 logger = logging.getLogger(__name__)
 
@@ -40,40 +39,27 @@ THEME = "divisions"
 REQUIRED_COLUMNS = ["id", "names", "subtype", "geometry", "bbox", "division_id"]
 ESSENTIAL_COLUMNS = {"geometry"}
 
-_spatial_loaded = False
-
 
 def _ensure_spatial() -> None:
-    """Load DuckDB's spatial extension on the shared connection, once."""
-    global _spatial_loaded
-    if _spatial_loaded:
-        return
+    """Load DuckDB's spatial extension on the shared connection, once.
+
+    Thin wrapper over db.ensure_spatial() (issue #40) that keeps this
+    module's original UpstreamUnavailable-on-failure contract.
+    """
     try:
-        with overture._conn_lock:
-            overture._conn().execute("INSTALL spatial; LOAD spatial;")
+        db.ensure_spatial()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(f"could not load spatial extension: {e}") from e
-    _spatial_loaded = True
 
 
-@lru_cache(maxsize=8)
 def _geom_expr(upstream: str) -> str:
     """SQL expression yielding a GEOMETRY for the dataset's geometry column.
 
-    Real Overture GeoParquet carries geo metadata, so DuckDB spatial reads
-    `geometry` as a native GEOMETRY; plain-parquet fixtures store raw WKB
-    BLOBs, which need ST_GeomFromWKB. Probe the column type once per glob.
+    Thin wrapper over geo.geom_expr() (issue #40) — kept as a private name
+    here since buildings.py used to carry an identical copy of this same
+    logic and both now delegate to the one shared implementation.
     """
-    try:
-        with overture._conn_lock:
-            (_, type_name) = overture._conn().execute(
-                f"DESCRIBE SELECT geometry FROM read_parquet('{upstream}') LIMIT 0"
-            ).fetchone()[:2]
-    except duckdb.Error:
-        # Probe failure means upstream itself is unreachable — let the real
-        # query hit the same problem and surface it as UpstreamUnavailable.
-        return "ST_GeomFromWKB(geometry)"
-    return "geometry" if type_name.upper().startswith("GEOMETRY") else "ST_GeomFromWKB(geometry)"
+    return geo.geom_expr(upstream)
 
 
 def admin_lookup(lat: float, lon: float) -> dict:
@@ -128,8 +114,8 @@ def admin_lookup(lat: float, lon: float) -> dict:
         ORDER BY area ASC
     """
     try:
-        with overture._conn_lock:
-            rows = overture._conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
+        with db.conn_lock:
+            rows = db.shared_conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
     # division_area carries multiple polygon rows per division (e.g. land and
