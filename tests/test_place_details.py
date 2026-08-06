@@ -152,7 +152,7 @@ def test_id_in_cached_tile_short_circuits_upstream(cached_id_lookup, tmp_path):
     # keeps, so the roastery is cached even though it won't be among the
     # nearest 25 places to CENTER_LAT/CENTER_LON.
     overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=25)
-    assert cache.cached_tile_paths(release.resolve_release(), overture.THEME) != []
+    assert cache.cached_tile_paths(release.resolve_release(), overture.THEME, str(upstream)) != []
 
     upstream.unlink()  # upstream is now gone; only the cached tile remains
 
@@ -166,7 +166,8 @@ def test_id_hint_constrained_lookup_finds_place_outside_cache(cached_id_lookup, 
     arctic = _arctic_place_0()
 
     # No tile cached for the arctic region yet.
-    assert cache.cached_tile_paths(release.resolve_release(), overture.THEME) == []
+    upstream_glob = str(FIXTURE_PATH)
+    assert cache.cached_tile_paths(release.resolve_release(), overture.THEME, upstream_glob) == []
 
     # A correct hint should still resolve it via the bbox-constrained
     # upstream path (not a full scan).
@@ -178,7 +179,7 @@ def test_id_hint_constrained_lookup_finds_place_outside_cache(cached_id_lookup, 
 
     # And it must have materialized the matching cache tile as a side
     # effect of going through _from_source, ready for the next lookup.
-    assert cache.cached_tile_paths(release.resolve_release(), overture.THEME) != []
+    assert cache.cached_tile_paths(release.resolve_release(), overture.THEME, upstream_glob) != []
 
 
 def test_wrong_hint_falls_back_to_full_scan_and_still_finds_it(cached_id_lookup):
