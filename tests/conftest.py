@@ -3,7 +3,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from placeroot import overture, release
+from placeroot import overture, release, routing
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "places.parquet"
 # type=division_area (polygons; consumed by divisions.py's admin_lookup) and
@@ -13,6 +13,7 @@ FIXTURE_PATH = Path(__file__).parent / "fixtures" / "places.parquet"
 DIVISION_AREAS_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "division_areas.parquet"
 DIVISIONS_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "divisions.parquet"
 ADDRESSES_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "addresses.parquet"
+TRANSPORTATION_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "transportation.parquet"
 
 CENTER_LAT = 40.700000
 CENTER_LON = -73.900000
@@ -43,6 +44,7 @@ def offline_data(request, monkeypatch):
     # override above instead.
     overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions", type_="division")
     overture.set_data_path(str(ADDRESSES_FIXTURE_PATH), theme="addresses", type_="address")
+    routing.set_data_path(str(TRANSPORTATION_FIXTURE_PATH))
     try:
         yield
     finally:
@@ -50,6 +52,7 @@ def offline_data(request, monkeypatch):
         overture.set_data_path(None, theme="divisions")
         overture.set_data_path(None, theme="divisions", type_="division")
         overture.set_data_path(None, theme="addresses", type_="address")
+        routing.set_data_path(None)
 
 
 def raw_rows() -> list[dict]:
