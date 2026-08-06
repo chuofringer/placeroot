@@ -1,0 +1,13 @@
+# Cloudflare Pages header rules for the PlaceRoot landing page.
+#
+# Deploy: point a Cloudflare Pages project at this repo with build output
+# directory = site/ and no build command (it's static, no framework, no
+# build step). placeroot.dev DNS is not wired up yet — this file just makes
+# the deploy step a non-event once it is.
+#
+# https://developers.cloudflare.com/pages/configuration/headers/
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self'; base-uri 'none'; form-action 'none'
