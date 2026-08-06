@@ -66,3 +66,18 @@ def test_high_latitude_cluster_is_findable():
     results = overture.find_places(78.0, 15.0, radius_m=1000, limit=25)
     assert len(results) == 5
     assert all(r["distance_m"] <= 1000 for r in results)
+
+
+def test_ids_present_and_stable_across_identical_queries():
+    """Regression for #25: every result carries a GERS id, and it's stable
+    across two identical queries — an agent can hold onto it across turns."""
+    first = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=10)
+    second = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=10)
+    assert all(r["id"] for r in first)
+    assert [r["id"] for r in first] == [r["id"] for r in second]
+
+
+def test_ids_match_ground_truth():
+    expected = {row["id"] for row in raw_rows()}
+    results = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=25)
+    assert all(r["id"] in expected for r in results)
