@@ -1,4 +1,5 @@
 from placeroot import server
+from placeroot.cache import parse_warm_region
 
 from .conftest import CENTER_LAT, CENTER_LON
 
@@ -21,3 +22,29 @@ def test_find_places_tool_truncates_under_tiny_budget(monkeypatch):
     result = server.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=25)
     assert result["truncated"] is True
     assert result["omitted_count"] > 0
+
+
+def test_warm_start_is_a_noop_without_warm_region(monkeypatch):
+    monkeypatch.delenv("PLACEROOT_WARM_REGION", raising=False)
+    server._warm_start()  # must not raise
+
+
+def test_warm_start_logs_and_continues_on_malformed_region(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("PLACEROOT_WARM_REGION", "not-a-region")
+    monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
+    with caplog.at_level(logging.WARNING, logger="placeroot.server"):
+        server._warm_start()  # must not raise
+    assert "malformed" in caplog.text
+
+
+def test_warm_start_skipped_when_cache_disabled(monkeypatch):
+    monkeypatch.setenv("PLACEROOT_WARM_REGION", f"{CENTER_LAT},{CENTER_LON},1000")
+    monkeypatch.setenv("PLACEROOT_CACHE", "off")
+    server._warm_start()  # must not raise, and must not attempt to query
+
+
+def test_parse_warm_region_reexported_for_operators():
+    # PLACEROOT_WARM_REGION's format is documented via this parser.
+    assert parse_warm_region("40.7,-73.9,1000") == (40.7, -73.9, 1000.0)
