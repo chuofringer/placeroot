@@ -232,10 +232,10 @@
       tile reads local parquet instead of rescanning S3 — the design
       target is warm queries under 500ms, and it keeps working if the
       network doesn't.</li>
-    <li><strong>GERS ids, on the roadmap.</strong> Overture's stable GERS
-      place identifiers are already in the underlying dataset; surfacing
-      them in every tool response is a tracked, not-yet-shipped item
-      (see ROADMAP.md).</li>
+    <li><strong>GERS ids in every response.</strong> Each place carries
+      Overture's stable GERS identifier — a cross-session, cross-tool
+      reference an agent can hold onto and resolve later, instead of
+      re-searching by name and hoping for the same match.</li>
     <li><strong>No ETL.</strong> There's no intermediate database or
       import job — every query reads Overture's GeoParquet directly, with
       bbox column pushdown to prune row groups.</li>
