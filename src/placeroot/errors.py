@@ -1,11 +1,10 @@
-"""Structured exceptions shared across the query-layer modules (issue #40).
+"""Structured exceptions shared across the query-layer modules.
 
-overture.py and routing.py used to define their own, textually identical
-UpstreamUnavailable and near-identical SchemaDegraded (differing only in
-the dataset label in the message — "dataset" vs "transportation dataset";
-the dataset param preserves both). Both modules still expose these as
-module-level names (aliases in overture.py; a subclass pinning the label
-in routing.py) so every existing except-clause keeps working unchanged.
+The dataset param customizes the label in SchemaDegraded messages
+("dataset" vs "transportation dataset"). overture.py and routing.py
+re-export these as module-level names (aliases in overture.py; a subclass
+pinning the label in routing.py) so except-clauses can catch them from
+either module.
 """
 
 

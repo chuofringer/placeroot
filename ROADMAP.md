@@ -34,7 +34,7 @@ tests, and a hardcoded upstream release.
 - [x] Local row-group cache — warm queries under 500ms, works offline (#8)
 - [x] `place_details` — one place in full (#9)
 - [x] `geocode` / `reverse_geocode` built on Overture, not Nominatim (#10) —
-      live benchmark hit@1 98.2% over 113 queries, warm under 0.3s (#43, #46, #47)
+      live benchmark hit@1 100% over 113 queries (saturated set), warm under 0.3s (#43, #46, #47, #53)
 - [x] `admin_lookup` — point → admin hierarchy (#11)
 - [x] `compare_areas`, `within_distance` (#12, #13)
 - [x] `simplify_geometry` — the payload tool (#14)

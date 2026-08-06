@@ -153,7 +153,7 @@ def test_isochrone_raises_no_graph_nearby_far_from_the_grid():
 
 def test_build_graph_raises_radius_too_large():
     with pytest.raises(routing.RadiusTooLarge):
-        routing.build_graph(ORIGIN_LAT, ORIGIN_LON, routing.MAX_RADIUS_M + 1)
+        routing.build_graph(ORIGIN_LAT, ORIGIN_LON, routing.WALK_MAX_RADIUS_M + 1)
 
 
 def test_build_graph_raises_schema_degraded_on_wrong_dataset():
@@ -195,7 +195,7 @@ def test_server_isochrone_cycle_mode_now_works():
 def test_server_isochrone_radius_too_large_error():
     result = server.isochrone(ORIGIN_LAT, ORIGIN_LON, minutes=15, radius_m=999_999)
     assert result["error"] == "radius_too_large"
-    assert result["max_radius_m"] == routing.MAX_RADIUS_M
+    assert result["max_radius_m"] == routing.WALK_MAX_RADIUS_M
 
 
 def test_server_isochrone_no_graph_nearby_error():

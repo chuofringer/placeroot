@@ -2,20 +2,15 @@
 
 **Ground AI agents in open map data.**
 
-PlaceRoot is an MCP server that answers spatial questions from [Overture Maps](https://overturemaps.org) open data — queried live from the public GeoParquet release with DuckDB.
+PlaceRoot is an MCP server that answers spatial questions from [Overture Maps](https://overturemaps.org) — queried live with DuckDB, no API key, no signup, no vendor platform.
 
-- **No API key. No signup. No vendor platform.**
-- **Answers, not data dumps** — every tool returns compact, ranked, token-budgeted results an agent can actually use.
-- **Fresh place data** — Overture's `operating_status` and confidence signals (contributed by Meta, Uber, TomTom, and others), not a stale snapshot.
-- **No ETL** — queries run directly against Overture's S3 GeoParquet with row-group pruning.
+- **Answers, not data dumps.** Every tool returns compact, ranked results that fit in an agent's context window (~2K tokens), never raw GeoJSON.
+- **Fresh, rich place data.** Operating status, confidence scores, and brands from Overture (contributed by Meta, Uber, TomTom, and others).
+- **Zero setup.** Queries run directly against Overture's public GeoParquet on S3 — no ETL, no database, no key.
 
 ## Quick start
 
-```bash
-uv run placeroot        # stdio MCP server
-```
-
-Claude Desktop / Claude Code config:
+Add to Claude Desktop / Claude Code:
 
 ```json
 {
@@ -28,32 +23,14 @@ Claude Desktop / Claude Code config:
 }
 ```
 
-## Hosted / HTTP mode
-
-By default `placeroot` speaks stdio, the standard MCP transport for a locally-run server (as above). It can also speak streamable-HTTP — the SDK's first-party HTTP transport, not a hand-rolled bridge — so it can run as a long-lived process reachable over the network:
+Or run it directly:
 
 ```bash
-uv run placeroot --http                          # binds 127.0.0.1:8321
-uv run placeroot --http --host 0.0.0.0 --port 8080
+uv run placeroot          # stdio MCP server
+uv run placeroot --http   # streamable-HTTP endpoint at http://127.0.0.1:8321/mcp
 ```
 
-This starts an MCP endpoint at `http://<host>:<port>/mcp` and can serve multiple concurrent requests (the underlying DuckDB connections are lock-serialized internally, so this is safe). Point a remote-capable MCP client at it:
-
-```json
-{
-  "mcpServers": {
-    "placeroot": {
-      "url": "http://127.0.0.1:8321/mcp"
-    }
-  }
-}
-```
-
-`--http` only starts the transport — it doesn't run behind TLS, auth, or a process supervisor, and it's on you to put one in front of it (a reverse proxy, `systemd`, etc.) for anything beyond local/trusted-network use. A public, no-setup hosted tier is tracked as a roadmap item — see [ROADMAP.md](ROADMAP.md) issue #24 — and isn't part of this repo yet.
-
-## Mirroring the places theme (optional)
-
-By default every query reads directly from the public Overture bucket — no setup needed. An operator who wants their own copy (so an upstream layout change or outage is an inconvenience, not a stop, per ROADMAP.md's "no hard dependency on anyone else" rule) can mirror the places theme to their own S3-compatible storage with `scripts/mirror_theme.py`, then point a server at it with `PLACEROOT_UPSTREAM_BASE`. See [docs/MIRROR.md](docs/MIRROR.md) for the full runbook.
+`--http` serves plain HTTP with no TLS or auth — put a reverse proxy in front for anything beyond local use.
 
 ## Tools
 
@@ -61,78 +38,40 @@ By default every query reads directly from the public Overture bucket — no set
 |---|---|
 | `find_places` | Named places near a point, nearest first, with category, confidence, and operating status |
 | `summarize_area` | What's in an area: total places and top categories |
-| `place_details` | One place in full: addresses, websites, phones, socials, brand, source attribution, confidence, operating status — by GERS id or by name + point |
+| `place_details` | One place in full: addresses, contacts, brand, sources, confidence |
 | `admin_lookup` | The admin hierarchy containing a point: neighborhood up to country |
-| `compare_areas` | 2-5 areas side by side: category mix, place density, and what differs most |
-| `within_distance` | Is the nearest place matching a category/name within N meters of a point? |
-| `geocode` | Free-text place name -> ranked candidates (name, type, lat/lon, GERS id, admin context) |
-| `reverse_geocode` | Point -> nearest address plus its containing division chain |
-| `simplify_geometry` | Any GeoJSON geometry -> simplified to a token budget, with the deviation it cost |
+| `compare_areas` | 2–5 areas side by side: category mix, density, and what differs most |
+| `within_distance` | Is the nearest matching place within N meters of a point? |
+| `geocode` | Free-text place name → ranked candidates with coordinates and admin context |
+| `resolve_place` | Free-text place reference → ranked, typed GERS ids an agent can hold onto |
+| `reverse_geocode` | Point → nearest address plus its containing division chain |
+| `summarize_buildings` | Building stock in an area: count, footprint area, height and use mix |
+| `buildings_at` | Nearest building footprints to a point |
+| `isochrone` | The area reachable within N minutes on foot, bike, or car — on PlaceRoot's own routing graph |
+| `render_map` | Any result → a self-contained interactive HTML map |
+| `simplify_geometry` | Any GeoJSON geometry → simplified to a token budget |
 
 More on the way — see [ROADMAP.md](ROADMAP.md).
 
-## GERS ids
+## Why
 
-Every place PlaceRoot returns carries its Overture **GERS id** (Global Entity Reference System) in an `id` field. GERS ids are stable identifiers for real-world entities, not row numbers — the same place gets the same id across queries and across Overture releases, so an agent can hold onto one across turns (or persist it) and look the place back up later with `place_details(id=...)` instead of re-searching by name and location. `find_places`, `place_details`, `within_distance`, `admin_lookup`'s division entries, and `geocode` all return one.
+Agents are bad at maps. Existing map tools either require vendor API keys or return raw GeoJSON far too large for a context window. PlaceRoot's design rule: every answer fits in ~2K tokens, and anything bigger returns a summary plus a link.
 
-### Geocoding, honestly
+A few things that make it work:
 
-`geocode` and `reverse_geocode` are built entirely on Overture's `divisions`
-and `addresses` themes — no Nominatim, no third-party geocoding API, no key.
-Matching is deterministic (exact name > prefix > substring, falling back to
-named places when divisions alone don't fill the result limit), not a
-learned ranking model, so it's transparent but not state-of-the-art on
-ambiguous or misspelled queries. Same-tier ties break on population (or a
-documented subtype-rank/hierarchy-depth/region-population proxy when
-population is null) — see `src/placeroot/geocode.py`'s module docstring for
-the full design.
-
-The first `geocode()` call in a process materializes a local name table
-from Overture's `divisions`/`type=division` theme (once per release,
-~20-30s, logged) so every later query answers from a local parquet file
-instead of a live S3 scan — set `PLACEROOT_CACHE=off` to disable this and
-always scan upstream directly.
-
-`scripts/geocode_benchmark.py` runs ~100 real-world queries (cities,
-neighborhoods, "city, state" forms) against live Overture data and reports
-hit@1/hit@5:
-
-```bash
-uv run python scripts/geocode_benchmark.py
-```
-
-Measured against a live release (113 queries): **hit@1 100%, hit@5 100%**
-(progression: 35.4%/54.9% initially, 98.2% after the performance and
-ranking work, 100% once name-variant normalization landed). The two
-biggest contributors before the final step, in order:
-the local name table finally made it possible to push match-tier and
-population into the SQL `ORDER BY` *before* the row-limit that feeds
-Python-side ranking — without that, a common name with more matches than
-the overfetch limit (122 divisions worldwide are literally named "Los
-Angeles") could drop the well-known candidate before ranking ever saw it;
-and "City, ST"/"City, Region" parsing plus the population/prominence
-tiebreak (#46, #47) fixed the rest.
-
-The former "St. Louis" gap is closed by name-variant normalization
-(St./Saint, Ft./Fort, Mt./Mount, directional prefixes, diacritic folding)
-— variants only run when the literal query lacks a population-backed
-exact match, and a variant's own prominence ranks normally, so tiny
-literal namesakes can't shadow the real city. A benchmark at 100% means
-the *current task set* is saturated, not that geocoding is solved; the
-honest next step is a harder query set, not a victory lap.
+- **GERS ids everywhere.** Every place carries its stable Overture [GERS](https://docs.overturemaps.org/gers/) id, so an agent can hold onto a place across turns and look it up again with `place_details(id=...)` instead of re-searching.
+- **Keyless geocoding.** `geocode`/`reverse_geocode` are built entirely on Overture's divisions and addresses themes — deterministic matching, no third-party geocoding API. 100% hit@1 on a ~113-query real-world benchmark (`scripts/geocode_benchmark.py`).
+- **Local caching.** Hot data is cached on first use, so repeat queries answer in milliseconds and keep working offline. Set `PLACEROOT_CACHE=off` to always query upstream.
+- **Self-hostable end to end.** Optionally mirror the data to your own S3-compatible storage and point PlaceRoot at it — see [docs/MIRROR.md](docs/MIRROR.md).
 
 ## Development
 
 ```bash
 uv sync                    # installs pytest + ruff (dev dependency group)
-uv run pytest              # offline tests, run against a committed fixture
-uv run pytest -m live      # also run the opt-in test against real Overture S3
+uv run pytest              # offline tests against committed fixtures
+uv run pytest -m live      # also run opt-in tests against real Overture S3
 uv run ruff check .
 ```
-
-## Why
-
-Agents are bad at maps. Existing map tools for agents either require vendor API keys or return raw GeoJSON far too large for a context window. PlaceRoot's design rule: every answer fits in ~2K tokens, and anything bigger returns a summary plus a link.
 
 ## License
 
