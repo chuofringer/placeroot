@@ -32,6 +32,11 @@ in the repo, and there is no 2FA prompt for CI.
 
 1. Bump the version in **both** `pyproject.toml` and `npm/package.json` (keep
    them in sync) and land it on `main`.
+1. Refresh the marketing site in the same change (see
+   [WEBSITE.md § Per-release refresh](WEBSITE.md#per-release-refresh)): the
+   version chip, footer byline, installer note, "new in this release" tools,
+   and the tool list/count. `uv run pytest tests/test_site_version_sync.py
+   tests/test_site_tools_sync.py` fails if any of that is stale.
 2. GitHub → **Releases → Draft a new release** → tag `vX.Y.Z` on `main` →
    **Publish**. That fires `release.yml`:
    - `pypi` job: `uv build` → `pypa/gh-action-pypi-publish` (with
