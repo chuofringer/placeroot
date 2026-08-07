@@ -537,20 +537,28 @@ def local_paths_for_query(
         return [str(p) for p in cached]
 
     if sync_mode():
+        # Claim every tile this query holds BEFORE each fetch (#158):
+        # ensure_tile runs its own evict_if_needed() right after writing, so
+        # a query spanning several missing tiles would otherwise evict the
+        # ones it fetched earlier this loop (they're the oldest *unclaimed*
+        # files) before the caller ever reads them — defeating #150 with
+        # zero concurrency. The refresh must cover the hits and the
+        # already-fetched tiles too, not just the tile about to be fetched:
+        # a loop of sequential upstream COPYs can outlast _CLAIM_TTL_S, and
+        # a claim taken only once at discovery (or at that tile's own fetch)
+        # would expire mid-loop and leave the tile evictable again. Claiming
+        # a not-yet-existing path is harmless: eviction only deletes files
+        # that exist and skips claimed paths regardless.
+        held = [str(p) for p in cached]
         for t in missing:
-            # Claim the tile BEFORE fetching it (#158): ensure_tile runs its
-            # own evict_if_needed() right after writing, so a query spanning
-            # several missing tiles would otherwise evict the ones it fetched
-            # earlier this loop (they're the oldest *unclaimed* files) before
-            # the caller ever reads them — defeating #150 with zero
-            # concurrency. Reserving the claim up front means every eviction
-            # pass, including ensure_tile's own, skips this tile. Claiming a
-            # not-yet-existing path is harmless: eviction only deletes files
-            # that exist and skips claimed paths regardless.
-            path = tile_path(release, theme, fingerprint, t)
-            claim_paths([str(path)])
+            held.append(str(tile_path(release, theme, fingerprint, t)))
+            claim_paths(held)
             cached.append(ensure_tile(con, release, theme, t, upstream_glob, fingerprint))
-        return [str(p) for p in cached]
+        paths = [str(p) for p in cached]
+        # Fresh TTL on the way out so the caller has the full window to read
+        # the files, however long the fetch loop took.
+        claim_paths(paths)
+        return paths
 
     for t in missing:
         _materialize_in_background(release, theme, t, upstream_glob, fingerprint, new_connection)

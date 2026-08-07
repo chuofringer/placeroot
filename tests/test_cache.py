@@ -275,6 +275,38 @@ def test_sync_multi_tile_query_does_not_evict_its_own_tiles(
     assert gone == [], f"query returned paths to tiles it self-evicted: {gone}"
 
 
+def test_sync_loop_outlasting_claim_ttl_does_not_evict_its_own_tiles(
+    con, cache_dir, sync_cache, monkeypatch
+):
+    """#158 follow-up: a sync fetch loop that runs longer than _CLAIM_TTL_S
+    must still not evict this query's own tiles. A claim taken once (at
+    discovery for hits, at that tile's own fetch for misses) expires mid-loop
+    when sequential upstream COPYs outlast the TTL, leaving early tiles
+    evictable again — so the loop must refresh every held claim before each
+    fetch. Simulated by aging all live claims by half the TTL inside each
+    ensure_tile call, as if each fetch took ~30s of wall clock."""
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", str(3000 / 1024 / 1024))
+    bbox = (-74.5, 40.5, -73.5, 41.5)  # spans 4 tiles (one dense, three sparse)
+    tiles = cache.tiles_for_bbox(*bbox)
+    assert len(tiles) >= 3  # need a fan-out longer than 2*TTL/aging for the bug
+
+    real_ensure_tile = cache.ensure_tile
+
+    def slow_ensure_tile(*args, **kwargs):
+        with cache._claims_lock:
+            for p in list(cache._claims):
+                cache._claims[p] -= cache._CLAIM_TTL_S / 2
+        return real_ensure_tile(*args, **kwargs)
+
+    monkeypatch.setattr(cache, "ensure_tile", slow_ensure_tile)
+
+    paths = cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con)
+    assert paths is not None
+    assert len(paths) == len(tiles)
+    gone = [p for p in paths if not os.path.exists(p)]
+    assert gone == [], f"claims expired mid-loop; query self-evicted: {gone}"
+
+
 # --- Issue #63: schema-fingerprinted tile layout --- #
 
 
