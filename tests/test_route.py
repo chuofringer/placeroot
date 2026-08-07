@@ -250,6 +250,25 @@ def test_route_prefers_no_route_when_retry_radius_fails_after_earlier_snap_succe
     assert result["error"] == "no_route"
 
 
+def test_route_reuses_cached_graph_across_calls():
+    """route() goes through _get_or_build_graph (#39), so a repeat route
+    over the same area must not pay a second graph extraction."""
+    calls: list[float] = []
+    real_build_graph = routing.build_graph
+
+    def counting_build_graph(*args, **kwargs):
+        calls.append(args[2])
+        return real_build_graph(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(routing, "build_graph", counting_build_graph)
+        first = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
+        second = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
+
+    assert first["distance_m"] == second["distance_m"]
+    assert len(calls) == 1, "second identical route paid a fresh graph extraction"
+
+
 def test_route_unsupported_mode_raises():
     with pytest.raises(routing.UnsupportedMode):
         routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="teleport")

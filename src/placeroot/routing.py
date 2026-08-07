@@ -1333,7 +1333,8 @@ def route(
 
     Extracts a bounded street graph around the midpoint of the two points
     (radius derived from their straight-line distance, same RADIUS_BUFFER
-    padding as isochrone's own extraction) and runs a target-terminated
+    padding as isochrone's own extraction; cached across calls via
+    _get_or_build_graph (#39), shared with isochrone) and runs a target-terminated
     Dijkstra from the origin's snapped node to the destination's, tracking
     both cumulative time and cumulative true edge length (Graph.adjacency's
     length_m, distinct from a drive graph's baked-seconds weight — see
@@ -1417,7 +1418,11 @@ def route(
     snapped_both = False
     for i, radius_m in enumerate(radii_m):
         is_last = i == len(radii_m) - 1
-        graph = build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None)
+        # Via the shared graph cache (#39), not a bare build_graph: repeat
+        # routes over the same area — and route()/isochrone() over the same
+        # area — reuse one extraction instead of paying a fresh multi-second
+        # upstream scan each call.
+        graph = _get_or_build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None)
         if graph.node_count() == 0:
             if is_last and not snapped_both:
                 raise NoGraphNearby(center_lat, center_lon, radius_m)
