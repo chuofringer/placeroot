@@ -20,9 +20,11 @@ geo.py; _conn/_conn_lock/_probe_schema are thin aliases kept for this
 module's call sites and the tests — import db directly in new code.
 """
 
+import hashlib
 import logging
 import math
 import os
+import struct
 import threading
 
 import duckdb
@@ -595,6 +597,64 @@ def clear_division_geometry_cache() -> None:
         _division_geometry_cache.clear()
 
 
+# On-disk twin of _division_geometry_cache (#153). The in-process cache (#148)
+# turns the second resolve of a division_id into a dict hit, but the FIRST
+# resolve of every process pays the full ~73s division_area column scan (no
+# point to prune by, ids unsorted). Persisting the resolved polygon under the
+# tile cache dir, keyed by the division_area glob (which encodes release +
+# theme + any set_data_path override) and division_id, makes that cost
+# once-per-release-per-machine instead of once-per-process. What's cached is
+# the exact ST_Union_Agg result (WKB + its bbox), so the merged polygon is
+# byte-for-byte identical — a coastal division's land+maritime union can never
+# silently shrink, which is the hazard the naive bbox-prefilter fix risks.
+# Serialized as: 1 flag byte (1=found, 0=cached miss), then for a hit 4
+# little-endian float64 bbox values + the raw WKB. No hex, no pickle.
+_DIVISION_DISK_MISS = object()
+
+
+def _division_polygon_disk_path(div_upstream: str, division_id: str):
+    """Local cache file for a resolved division polygon, or None if disabled."""
+    if not cache.enabled():
+        return None
+    glob_key = hashlib.sha256(div_upstream.encode("utf-8")).hexdigest()[:16]
+    id_key = hashlib.sha256(division_id.encode("utf-8")).hexdigest()[:32]
+    return cache.cache_dir() / "division_polygons" / glob_key / f"{id_key}.bin"
+
+
+def _read_division_polygon_disk(path):
+    """Resolved tuple from disk, None for a cached miss, or _DIVISION_DISK_MISS
+    if the file is absent/unreadable/corrupt (caller should re-resolve)."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return _DIVISION_DISK_MISS
+    if not data:
+        return _DIVISION_DISK_MISS
+    if data[0] == 0:
+        return None  # a cached "unknown id" miss
+    try:
+        xmin, xmax, ymin, ymax = struct.unpack("<dddd", data[1:33])
+    except struct.error:
+        return _DIVISION_DISK_MISS  # truncated/corrupt — re-resolve
+    return (bytes(data[33:]), xmin, xmax, ymin, ymax)
+
+
+def _write_division_polygon_disk(path, resolved: tuple | None) -> None:
+    """Best-effort persist. A disk failure never breaks the resolve."""
+    if resolved is None:
+        payload = b"\x00"
+    else:
+        wkb, xmin, xmax, ymin, ymax = resolved
+        payload = b"\x01" + struct.pack("<dddd", xmin, xmax, ymin, ymax) + bytes(wkb)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_bytes(payload)
+        tmp.replace(path)  # atomic — a reader sees the whole file or none
+    except OSError as e:
+        logger.warning("Could not persist division polygon to %s: %s", path, e)
+
+
 def _resolve_division_geometry(
     division_id: str,
 ) -> tuple[bytes, float, float, float, float] | None:
@@ -624,6 +684,14 @@ def _resolve_division_geometry(
     with _division_geometry_lock:
         if cache_key in _division_geometry_cache:
             return _division_geometry_cache[cache_key]
+    # On-disk cache (#153): survives process restarts, so only the first
+    # resolve of a division per release per machine pays the ~73s scan.
+    disk_path = _division_polygon_disk_path(div_upstream, division_id)
+    if disk_path is not None:
+        disk = _read_division_polygon_disk(disk_path)
+        if disk is not _DIVISION_DISK_MISS:
+            _cache_division_geometry(cache_key, disk)  # promote into the process
+            return disk
     missing = set(missing_columns(div_upstream, _DIVISION_AREA_REQUIRED_COLUMNS))
     essential_missing = [c for c in missing if c in _DIVISION_AREA_ESSENTIAL_COLUMNS]
     if essential_missing:
@@ -657,6 +725,8 @@ def _resolve_division_geometry(
     # detect "division_id matched nothing."
     resolved = None if (row is None or row[1] is None) else row
     _cache_division_geometry(cache_key, resolved)
+    if disk_path is not None:
+        _write_division_polygon_disk(disk_path, resolved)
     return resolved
 
 
