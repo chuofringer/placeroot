@@ -22,6 +22,7 @@ from placeroot import (
     buildings,
     cache,
     divisions,
+    geo,
     mapview,
     overture,
     release,
@@ -262,6 +263,48 @@ def within_distance(
     except overture.SchemaDegraded as e:
         return _schema_error(e)
     return _with_degraded_fields(result)
+
+
+@mcp.tool()
+def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
+    """Straight-line (great-circle) distance in meters between every origin and destination.
+
+    origins and destinations are each a list of {"lat": ..., "lon": ...}
+    points, capped at 10 each (100 pairs max) — this is a plain haversine
+    calculation, not a routed distance or travel time, so it's cheap but it
+    is NOT what Google/Mapbox distance-matrix APIs return: no roads, no
+    turns, no travel time. For "how far can I get in N minutes" use
+    isochrone() instead.
+
+    Returns {"elements": [{"origin_idx": 0, "dest_idx": 0, "distance_m":
+    812}, ...]}, flat and origin-major (all destinations for origin 0,
+    then origin 1, ...), budgeted like every other tool. Empty origins or
+    destinations returns {"elements": []}. Returns a structured {"error":
+    "bad_request", ...} instead of raising if either list exceeds 10
+    points or a point is missing/non-numeric lat or lon.
+    """
+    if len(origins) > 10 or len(destinations) > 10:
+        return {
+            "error": "bad_request",
+            "detail": "at most 10 origins and 10 destinations are allowed",
+        }
+    if not origins or not destinations:
+        return {"elements": []}
+    try:
+        o_pts = [(float(p["lat"]), float(p["lon"])) for p in origins]
+        d_pts = [(float(p["lat"]), float(p["lon"])) for p in destinations]
+    except (KeyError, TypeError, ValueError) as e:
+        return {"error": "bad_request", "detail": f"each point needs numeric lat and lon: {e}"}
+    elements = [
+        {
+            "origin_idx": oi,
+            "dest_idx": di,
+            "distance_m": round(geo.haversine_m(olat, olon, dlat, dlon)),
+        }
+        for oi, (olat, olon) in enumerate(o_pts)
+        for di, (dlat, dlon) in enumerate(d_pts)
+    ]
+    return budget.apply_budget({"elements": elements}, "elements")
 
 
 @mcp.tool()
