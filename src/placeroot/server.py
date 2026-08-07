@@ -25,6 +25,7 @@ from placeroot import (
     divisions,
     errors,
     geo,
+    land_use,
     mapview,
     overture,
     release,
@@ -464,6 +465,37 @@ def buildings_at(
     except overture.SchemaDegraded as e:
         return _schema_error(e)
     return _with_buildings_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+
+
+@mcp.tool()
+def land_use_at(lat: float, lon: float) -> dict:
+    """What kind of land is this: land use and land cover classification at a point.
+
+    From Overture's base theme (issue #167) — PlaceRoot's first tool over
+    base, distinct from find_places/summarize_area (those cover discrete
+    POIs, not the land itself). Returns {"lat", "lon", "land_use":
+    {"subtype", "class", "name"} or null, "land_cover": {"subtype",
+    "class"} or null}. No raw geometry (design rule: answers, not data).
+
+    null for either field means no polygon of that type covers the point —
+    coverage is OSM-derived and patchy outside well-mapped cities, so this
+    is a common, valid answer for a rural or remote point, not an error.
+    When multiple polygons overlap (Overture nests them, e.g. a park inside
+    a residential parcel), the smallest/most specific one is returned and
+    a "note" flags that the pick was made among several valid candidates.
+    Returns a structured {"error": ...} if upstream is unavailable or a
+    base-theme dataset is missing geometry/bbox.
+    """
+    try:
+        result = land_use.land_use_at(lat, lon)
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    degraded = land_use.degraded_fields()
+    if degraded:
+        result["degraded_fields"] = degraded
+    return result
 
 
 @mcp.tool()
