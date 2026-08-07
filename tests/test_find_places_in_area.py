@@ -56,7 +56,7 @@ def _wkb(con: duckdb.DuckDBPyConnection, wkt: str) -> bytes:
 
 def _place_row(
     id_, name, lon, lat, category="shop", basic_category="shop",
-    operating_status="open", confidence=0.9,
+    operating_status="open", confidence=0.9, brand=None, websites=None,
 ):
     return (
         id_,
@@ -66,7 +66,12 @@ def _place_row(
         basic_category,
         operating_status,
         confidence,
-        [], [], [], [], None, [],
+        [],
+        websites or [],
+        [],
+        [],
+        {"names": {"primary": brand}} if brand else None,
+        [],
     )
 
 
@@ -106,6 +111,9 @@ def polygon_fixtures(tmp_path):
                     category="coffee_shop", basic_category="coffee_shop"),
         _place_row("place-bank", "Inside Bank", BANK_LON, BANK_LAT,
                     category="bank", basic_category="bank"),
+        _place_row("place-chain", "Chain Bakery", 3.0, 7.0,
+                    category="bakery", basic_category="bakery",
+                    brand="Blue Bottle Coffee", websites=["https://example.com"]),
         _place_row("place-faint", "Faint Place", FAINT_LON, FAINT_LAT,
                     operating_status="closed_permanently", confidence=0.2),
         _place_row("place-multi-a", "Multi A", MULTI_A_LON, MULTI_A_LAT),
@@ -231,3 +239,26 @@ def test_server_division_id_rejects_bad_filter_values(polygon_fixtures):
         server.find_places(division_id=DIV_NOTCH, operating_status="banana")["error"]
         == "bad_request"
     )
+
+
+def test_rows_on_the_division_path_carry_brand_and_presence_flags(polygon_fixtures):
+    """The polygon path shares _place_select_exprs with the point path, so
+    its rows carry the same brand/has_website/has_phone fields (#128) —
+    one row shape for both modes of the tool."""
+    rows = overture.find_places_in_division(DIV_NOTCH)
+    by_name = {r["name"]: r for r in rows}
+    chain = by_name["Chain Bakery"]
+    assert chain["brand"] == "Blue Bottle Coffee"
+    assert chain["has_website"] is True
+    assert chain["has_phone"] is False
+    assert by_name["Inside Place"]["brand"] is None
+
+
+def test_brand_filter_composes_with_division_id(polygon_fixtures):
+    rows = overture.find_places_in_division(DIV_NOTCH, brand="Blue Bottle")
+    assert {r["name"] for r in rows} == {"Chain Bakery"}
+
+
+def test_has_website_filter_composes_with_division_id(polygon_fixtures):
+    rows = overture.find_places_in_division(DIV_NOTCH, has_website=True)
+    assert {r["name"] for r in rows} == {"Chain Bakery"}
