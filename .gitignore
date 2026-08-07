@@ -6,3 +6,7 @@ dist/
 
 # Local Claude Code session state (agent worktrees, etc.) — never shipped.
 .claude/
+
+# Local website design handoff + prototype (not shipped)
+design_handoff_placeroot_website/
+*.zip
