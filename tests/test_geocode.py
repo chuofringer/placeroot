@@ -80,6 +80,45 @@ def test_upstream_unavailable_raises(tmp_path):
     overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions", type_="division")
 
 
+# --- #83: places fallback is bounded to an anchor's vicinity ---------------
+
+
+def test_places_fallback_bounded_via_trailing_division_word():
+    # "Blue Bottle Roastery" alone never matches a division; appending the
+    # real fixture division "Brooklyn" gives _fallback_anchor something to
+    # resolve, bounding the places search to Brooklyn's vicinity (#83) —
+    # this must still find the (nearby) fixture place.
+    results = geocode.geocode("Blue Bottle Roastery Brooklyn", limit=5)
+    names = [r["name"] for r in results]
+    assert "Blue Bottle Roastery" in names
+
+
+def test_places_fallback_excludes_matches_outside_anchor_vicinity():
+    # "Arctic Place 0" is a real fixture place, ~4000km from the fixture's
+    # "Brooklyn" division. Before #83, the fallback scanned the places
+    # theme unconstrained and would have found it by name alone; the
+    # anchor-bounded search must exclude it as out of vicinity.
+    results = geocode.geocode("Arctic Place 0 Brooklyn", limit=5)
+    assert not any(r["name"] == "Arctic Place 0" for r in results)
+
+
+def test_places_fallback_still_runs_unbounded_with_no_location_context():
+    # No division/region word anywhere in the query — no anchor can be
+    # derived (#83's own documented fallback: still search, just without a
+    # bbox, rather than dropping a genuine name-only query to nothing).
+    results = geocode.geocode("Blue Bottle Roastery", limit=5)
+    names = [r["name"] for r in results]
+    assert "Blue Bottle Roastery" in names
+
+
+def test_division_only_queries_unaffected_by_places_fallback_change():
+    # An exact division match still skips the places fallback path
+    # entirely, same as before #83.
+    results = geocode.geocode("Brooklyn", limit=5)
+    assert results[0]["name"] == "Brooklyn"
+    assert results[0]["type"] == "locality"
+
+
 # --- reverse_geocode ---
 
 
