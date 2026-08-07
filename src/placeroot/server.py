@@ -69,24 +69,53 @@ def _with_buildings_degraded_fields(result: dict) -> dict:
     return result
 
 
+def _with_category_hint(payload: dict, category: str | None, widen_hint: str) -> dict:
+    """Add a non-fatal "note" when a category filter matched nothing (#117).
+
+    find_places matches category by substring, so a wrong or invalid
+    Overture slug just returns zero rows — indistinguishable from "this
+    area really has none". The note points at search_categories and at
+    whichever widening move fits the mode the caller used (a bigger
+    radius for the point path, a bigger division for the polygon path).
+    """
+    if category and not payload.get("results"):
+        payload["note"] = (
+            f"no places matched category '{category}' here; if that may not be a "
+            "valid Overture category slug, use search_categories to find the right "
+            f"one, or {widen_hint} / drop the category filter."
+        )
+    return payload
+
+
 @mcp.tool()
 def find_places(
-    lat: float,
-    lon: float,
+    lat: float | None = None,
+    lon: float | None = None,
     radius_m: float = 1000,
     category: str | None = None,
     name: str | None = None,
     min_confidence: float | None = None,
     operating_status: str | None = None,
     limit: int = 10,
+    division_id: str | None = None,
 ) -> dict:
-    """Find named places near a point, nearest first.
+    """Find named places, either near a point or inside a division's boundary.
+
+    Two mutually exclusive modes:
+    - Point + radius: pass lat and lon (radius_m defaults to 1000m).
+      Results are nearest-first, within a circle around (lat, lon).
+    - Division polygon: pass division_id (a GERS id, e.g. from admin_lookup's
+      chain) instead of lat/lon. Results are every matching place whose
+      point falls inside that division's true boundary polygon — no radius
+      to guess, and no circle clipping a coastline or straddling a border.
+      Results are ordered by name (there's no reference point to rank
+      distance from).
 
     category matches Overture's taxonomy (e.g. 'coffee_shop', 'restaurant',
-    'grocery'); name is a substring match on the place name. Results include
-    operating_status ("in business" / "permanently closed" / null when
-    unknown) — a business-lifecycle signal, NOT opening hours; this data has
-    no open-now information.
+    'grocery'); name is a substring match on the place name — both compose
+    with either mode. Results include operating_status ("in business" /
+    "permanently closed" / null when unknown) — a business-lifecycle
+    signal, NOT opening hours; this data has no open-now information.
 
     min_confidence (0.0-1.0) keeps only rows whose confidence score is at
     least that value; out-of-range values return a bad_request error.
@@ -96,16 +125,48 @@ def find_places(
     "closed_permanently", "closed_temporarily"), matched case-insensitively
     — "permanently closed"/"closed" also match Overture's separate
     "closed_permanently" raw value, since both relabel the same way.
-    Unrecognized values return a bad_request error. Both filters are a
-    silent no-op (not an error) if the underlying column (confidence /
-    operating_status) is absent from the active dataset — see
-    degraded_fields() on the response.
-
+    Unrecognized values return a bad_request error. Both compose with
+    either mode, and both are a silent no-op (not an error) if the
+    underlying column (confidence / operating_status) is absent from the
+    active dataset — see degraded_fields() on the response.
     Returns {"results": [...]}, plus truncated/omitted_count if the answer
-    didn't fit the token budget. If the upstream dataset is unavailable or
-    missing columns this tool depends on, returns a structured {"error":
-    ...} instead of raising.
+    didn't fit the token budget. Returns a structured {"error": "bad_request",
+    ...} if neither mode's inputs are given (or both are), {"error":
+    "not_found", ...} if division_id doesn't match any known division, or
+    a structured {"error": ...} if the upstream dataset is unavailable or
+    missing columns this tool depends on. If a category filter was given and
+    it matched nothing (in either mode), a non-fatal "note" field hints that
+    the category slug may be wrong and points at search_categories.
     """
+    point_given = lat is not None or lon is not None
+    if division_id is not None and point_given:
+        return {
+            "error": "bad_request",
+            "detail": "pass either lat/lon (+radius_m) or division_id, not both",
+        }
+    if division_id is None and not point_given:
+        return {
+            "error": "bad_request",
+            "detail": "pass either lat/lon (+radius_m) or division_id",
+        }
+    if division_id is not None:
+        try:
+            rows = overture.find_places_in_division(
+                division_id, category, name, min_confidence, operating_status, limit
+            )
+        except ValueError as e:
+            return {"error": "bad_request", "detail": str(e)}
+        except overture.UpstreamUnavailable as e:
+            return _upstream_error(e)
+        except overture.SchemaDegraded as e:
+            return _schema_error(e)
+        if rows is None:
+            return {"error": "not_found", "detail": "no division matched division_id"}
+        payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+        return _with_category_hint(payload, category, widen_hint="try a larger division")
+
+    if lat is None or lon is None:
+        return {"error": "bad_request", "detail": "pass both lat and lon"}
     try:
         rows = overture.find_places(
             lat, lon, radius_m, category, name, min_confidence, operating_status, limit
@@ -116,7 +177,8 @@ def find_places(
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
         return _schema_error(e)
-    return _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+    payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+    return _with_category_hint(payload, category, widen_hint="widen radius_m")
 
 
 @mcp.tool()
@@ -325,6 +387,49 @@ def geocode(query: str, limit: int = 5) -> dict:
 
 
 @mcp.tool()
+def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
+    """Geocode up to 20 free-text queries in one call, one best match each.
+
+    Cuts N round-trips of geocode() into one: for each query, runs
+    geocode(query, limit_per_query) and keeps only the top candidate.
+    Returns {"results": [{"query", "name", "type", "lat", "lon", "id"
+    (GERS), "rank_score"}, ...]}, one row per query, in input order — a
+    query with no match gets {"query", "error": "no match"} instead, and
+    does not fail the rest of the batch. queries is capped at 20; a longer
+    list returns a structured {"error": ...} rather than truncating
+    silently. Budgeted like every other tool. Returns a structured
+    {"error": ...} instead of raising if the remote scan itself fails.
+    """
+    if len(queries) > 20:
+        return {
+            "error": "bad_request",
+            "detail": f"geocode_batch accepts at most 20 queries, got {len(queries)}",
+        }
+    rows = []
+    try:
+        for query in queries:
+            candidates = geocoding.geocode(query, limit_per_query)
+            if not candidates:
+                rows.append({"query": query, "error": "no match"})
+                continue
+            top = candidates[0]
+            rows.append(
+                {
+                    "query": query,
+                    "name": top["name"],
+                    "type": top["type"],
+                    "lat": top["lat"],
+                    "lon": top["lon"],
+                    "id": top["id"],
+                    "rank_score": top["rank_score"],
+                }
+            )
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    return budget.apply_budget({"results": rows}, "results")
+
+
+@mcp.tool()
 def resolve_place(
     query: str,
     near_lat: float | None = None,
@@ -440,7 +545,8 @@ def isochrone(
     (capped per mode: 5km walk, 15km cycle, 60km drive); passing something
     larger than the cap returns a structured error instead of silently
     truncating. An unrecognized mode string returns a structured
-    {"error": "unsupported_mode"}.
+    {"error": "unsupported_mode"}. minutes must be > 0 and radius_m (if
+    given) must be >= 0, else returns {"error": "bad_request"}.
     """
     try:
         return routing.isochrone(
@@ -460,6 +566,8 @@ def isochrone(
             "detail": e.detail,
             "max_radius_m": e.max_radius_m,
         }
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
 
 
 def _warm_start() -> None:
