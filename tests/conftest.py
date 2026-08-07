@@ -56,6 +56,7 @@ def offline_data(request, monkeypatch):
         yield
     finally:
         overture.set_data_path(None)
+        overture.clear_division_geometry_cache()
         overture.set_data_path(None, theme="divisions")
         overture.set_data_path(None, theme="divisions", type_="division")
         overture.set_data_path(None, theme="addresses", type_="address")
