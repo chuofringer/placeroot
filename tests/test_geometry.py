@@ -33,6 +33,17 @@ def test_bbox_around_clamps_latitude_to_poles():
     assert ymin == -90.0
 
 
+def test_bbox_around_clamps_degenerate_span_at_pole():
+    """Issue #163 (A1): at lat=90 (a VALID coordinate) cos(lat) floors to
+    1e-6, so dlon would otherwise blow up to ~4.49M degrees even at a
+    modest radius. bbox_around must clamp the half-width so the box never
+    exceeds full-globe coverage (a wider box is meaningless anyway)."""
+    xmin, ymin, xmax, ymax = overture._bbox_around(90.0, 0.0, 500_000)
+    assert xmax - xmin <= 360.0
+    assert ymax - ymin <= 180.0
+    assert all(math.isfinite(v) for v in (xmin, ymin, xmax, ymax))
+
+
 def test_bbox_around_leaves_longitude_unwrapped():
     """_bbox_around itself still doesn't wrap/clamp longitude at the seam —
     that's intentional (see its docstring): area_geometry() and

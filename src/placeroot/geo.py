@@ -72,6 +72,16 @@ def bbox_around(lat: float, lon: float, radius_m: float) -> tuple[float, float, 
     """
     dlat = radius_m / 111_320.0
     dlon = radius_m / (111_320.0 * max(math.cos(math.radians(lat)), 1e-6))
+    # Near a pole, cos(lat) floors to 1e-6 and dlon blows up to millions of
+    # degrees even for a modest radius (issue #163's A1: lat=90 is a VALID
+    # coordinate, but the unclamped dlon there made cache.tiles_for_bbox()
+    # enumerate tens of millions of tiles before the MAX_TILES_PER_QUERY cap
+    # ever got to look at len(tiles)). A half-width beyond 180/90 degrees
+    # already covers every longitude/latitude there is, so clamping here is
+    # lossless for any real query and just defuses the degenerate case at
+    # its source.
+    dlon = min(dlon, 180.0)
+    dlat = min(dlat, 90.0)
     ymin = max(lat - dlat, -90.0)
     ymax = min(lat + dlat, 90.0)
     return lon - dlon, ymin, lon + dlon, ymax
