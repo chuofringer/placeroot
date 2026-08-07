@@ -21,6 +21,7 @@ from placeroot import (
     budget,
     buildings,
     cache,
+    categories,
     divisions,
     geo,
     mapview,
@@ -486,6 +487,28 @@ def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
             )
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
+    return budget.apply_budget({"results": rows}, "results")
+
+
+@mcp.tool()
+def search_categories(query: str, limit: int = 8) -> dict:
+    """Free text -> valid Overture category slugs, for find_places'/
+    summarize_area's `category` param.
+
+    Lookup only — no geo filtering, no upstream dataset dependency; matches
+    against a bundled snapshot of Overture's places taxonomy (pinned to
+    schema v1.9.0). Ranks exact slug match > slug prefix > slug substring >
+    a match on any taxonomy path segment, so close siblings like "cafe" vs
+    "coffee_shop" both surface rather than one silently winning. Returns
+    {"results": [{"slug", "path"}, ...]} — path is the root-to-leaf
+    taxonomy (e.g. ["eat_and_drink", "cafe", "coffee_shop"]), budgeted like
+    every other tool. An empty/whitespace query returns {"results": []}.
+    limit must be 1-50; out of range returns a structured
+    {"error": "bad_request", ...}.
+    """
+    if limit < 1 or limit > 50:
+        return {"error": "bad_request", "detail": "limit must be between 1 and 50"}
+    rows = categories.search_categories(query, limit)
     return budget.apply_budget({"results": rows}, "results")
 
 
