@@ -192,6 +192,55 @@ def test_server_geocode_structured_error_on_unreachable_upstream(tmp_path):
     overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions", type_="division")
 
 
+# --- #110: geocode_batch ---------------------------------------------------
+
+
+def test_geocode_batch_happy_path_returns_one_row_per_query_in_order():
+    result = server.geocode_batch(["Brooklyn", "Springfield, IL", "Riverside"])
+    assert "results" in result
+    rows = result["results"]
+    assert len(rows) == 3
+    assert [r["query"] for r in rows] == ["Brooklyn", "Springfield, IL", "Riverside"]
+    for r in rows:
+        assert "error" not in r
+        assert r["name"]
+        assert isinstance(r["lat"], float)
+        assert isinstance(r["lon"], float)
+        assert r["id"]
+    assert rows[0]["name"] == "Brooklyn"
+    assert rows[2]["name"] == "Riverside"
+
+
+def test_geocode_batch_mixed_resolvable_and_no_match():
+    result = server.geocode_batch(["Brooklyn", "Nonexistentplacexyz123"])
+    rows = result["results"]
+    assert len(rows) == 2
+    assert rows[0]["query"] == "Brooklyn"
+    assert "error" not in rows[0]
+    assert rows[0]["name"] == "Brooklyn"
+    assert rows[1] == {"query": "Nonexistentplacexyz123", "error": "no match"}
+
+
+def test_geocode_batch_over_cap_returns_error_not_partial_results():
+    result = server.geocode_batch(["Brooklyn"] * 21)
+    assert "error" in result
+    assert "results" not in result
+
+
+def test_geocode_batch_empty_list_returns_empty_results():
+    assert server.geocode_batch([]) == {"results": []}
+
+
+def test_geocode_batch_structured_error_on_unreachable_upstream(tmp_path):
+    overture.set_data_path(
+        str(tmp_path / "does-not-exist" / "*.parquet"), theme="divisions", type_="division"
+    )
+    overture.set_data_path(str(tmp_path / "does-not-exist" / "*.parquet"), theme="places")
+    result = server.geocode_batch(["Brooklyn"])
+    assert result["error"] == "upstream_unavailable"
+    overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions", type_="division")
+
+
 # --- #43: local divisions name table -------------------------------------
 
 
