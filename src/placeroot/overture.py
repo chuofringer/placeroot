@@ -296,15 +296,57 @@ def _label_operating_status(value):
     return _OPERATING_STATUS_LABELS.get(value, value)
 
 
+def _operating_status_reverse_map() -> dict[str, list[str]]:
+    """label -> every raw Overture value that relabels to it, e.g.
+    "permanently closed" -> ["closed", "closed_permanently"]."""
+    reverse: dict[str, list[str]] = {}
+    for raw, label in _OPERATING_STATUS_LABELS.items():
+        reverse.setdefault(label, []).append(raw)
+    return reverse
+
+
+def _resolve_operating_status(operating_status: str) -> list[str]:
+    """Resolve a caller-supplied operating_status (relabeled or raw, case-
+    insensitive) to the raw Overture value(s) it should filter on.
+
+    Raises ValueError if the value matches neither a relabeled value nor a
+    raw Overture value.
+    """
+    needle = operating_status.strip().lower()
+    reverse = _operating_status_reverse_map()
+    for label, raw_values in reverse.items():
+        if label.lower() == needle:
+            return raw_values
+    for raw in _OPERATING_STATUS_LABELS:
+        if raw.lower() == needle:
+            return [raw]
+    accepted = sorted(set(_OPERATING_STATUS_LABELS) | set(reverse))
+    raise ValueError(
+        f"unrecognized operating_status {operating_status!r}; accepted values: "
+        f"{', '.join(accepted)}"
+    )
+
+
 def find_places(
     lat: float,
     lon: float,
     radius_m: float = 1000,
     category: str | None = None,
     name: str | None = None,
+    min_confidence: float | None = None,
+    operating_status: str | None = None,
     limit: int = 10,
 ) -> list[dict]:
     """Places near a point, nearest first, compact rows.
+
+    min_confidence (0.0-1.0) filters to rows with confidence >= that
+    threshold; raises ValueError if out of range. operating_status filters
+    to rows matching either a relabeled value ("in business", "permanently
+    closed", "temporarily closed") or a raw Overture value ("open",
+    "closed", "closed_permanently", "closed_temporarily"), matched
+    case-insensitively; raises ValueError if unrecognized. Both are a no-op
+    (not an error) if the underlying column is missing from the active
+    dataset — see degraded_fields().
 
     Raises SchemaDegraded if bbox is missing from the active dataset (the
     tool can't answer at all without it), or UpstreamUnavailable if the
@@ -339,6 +381,22 @@ def find_places(
         if "names" not in missing:
             filters.append("names.primary ILIKE $name")
             params["name"] = f"%{name}%"
+    if min_confidence is not None:
+        if not 0.0 <= min_confidence <= 1.0:
+            raise ValueError("min_confidence must be between 0.0 and 1.0")
+        if "confidence" not in missing:
+            filters.append("confidence >= $min_confidence")
+            params["min_confidence"] = min_confidence
+    if operating_status is not None and "operating_status" not in missing:
+        raw_values = _resolve_operating_status(operating_status)
+        if len(raw_values) == 1:
+            filters.append("operating_status = $operating_status0")
+            params["operating_status0"] = raw_values[0]
+        else:
+            placeholders = [f"$operating_status{i}" for i in range(len(raw_values))]
+            filters.append(f"operating_status IN ({', '.join(placeholders)})")
+            for i, v in enumerate(raw_values):
+                params[f"operating_status{i}"] = v
 
     name_expr = "NULL" if "names" in missing else "names.primary"
     category_expr = "NULL" if "taxonomy" in missing else "taxonomy.primary"

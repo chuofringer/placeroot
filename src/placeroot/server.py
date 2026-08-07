@@ -76,6 +76,8 @@ def find_places(
     radius_m: float = 1000,
     category: str | None = None,
     name: str | None = None,
+    min_confidence: float | None = None,
+    operating_status: str | None = None,
     limit: int = 10,
 ) -> dict:
     """Find named places near a point, nearest first.
@@ -85,13 +87,31 @@ def find_places(
     operating_status ("in business" / "permanently closed" / null when
     unknown) — a business-lifecycle signal, NOT opening hours; this data has
     no open-now information.
+
+    min_confidence (0.0-1.0) keeps only rows whose confidence score is at
+    least that value; out-of-range values return a bad_request error.
+    operating_status filters to a single status, accepting either the
+    relabeled value ("in business", "permanently closed", "temporarily
+    closed") or the raw Overture value ("open", "closed",
+    "closed_permanently", "closed_temporarily"), matched case-insensitively
+    — "permanently closed"/"closed" also match Overture's separate
+    "closed_permanently" raw value, since both relabel the same way.
+    Unrecognized values return a bad_request error. Both filters are a
+    silent no-op (not an error) if the underlying column (confidence /
+    operating_status) is absent from the active dataset — see
+    degraded_fields() on the response.
+
     Returns {"results": [...]}, plus truncated/omitted_count if the answer
     didn't fit the token budget. If the upstream dataset is unavailable or
     missing columns this tool depends on, returns a structured {"error":
     ...} instead of raising.
     """
     try:
-        rows = overture.find_places(lat, lon, radius_m, category, name, limit)
+        rows = overture.find_places(
+            lat, lon, radius_m, category, name, min_confidence, operating_status, limit
+        )
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
