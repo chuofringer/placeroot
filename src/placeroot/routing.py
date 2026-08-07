@@ -191,6 +191,17 @@ MODE_CONFIG = {
     },
 }
 
+# route(): a per-mode straight-line-distance cap, rejected before any graph
+# extraction is attempted. Deliberately conservative — real road distance is
+# always >= straight-line distance, so a straight-line distance beyond a
+# mode's cap can never produce a route worth extracting a graph for. These
+# are independent of (and larger than) MODE_CONFIG's max_radius_m caps,
+# which bound the *extraction radius* (typically ~half the two-point
+# distance plus buffer), not the two-point distance itself.
+ROUTE_MAX_STRAIGHT_LINE_M = {"walk": 25_000, "cycle": 75_000, "drive": 300_000}
+ROUTE_MIN_RADIUS_M = 500.0  # extraction radius floor, so very-close points still get a real graph
+ROUTE_RADIUS_RETRY_FACTOR = 1.6  # widen-and-retry factor when the first extraction misses a path
+
 CONCAVE_MIN_NODES = 8  # fewer reached nodes than this: convex hull is used directly
 CONCAVE_CELL_MIN_M = 60.0
 CONCAVE_CELL_DIVISOR = 40.0  # cell size ~= max(CONCAVE_CELL_MIN_M, reached_radius_m / this)
@@ -243,6 +254,25 @@ class RadiusTooLarge(Exception):
         self.detail = detail
         self.radius_m = radius_m
         self.max_radius_m = max_radius_m
+
+
+class RouteTooLong(Exception):
+    """The straight-line distance between the two points exceeds the mode's cap.
+
+    Real road distance is always >= straight-line distance, so this is a
+    conservative reject: a straight-line distance beyond the cap can never
+    produce a route we'd be willing to extract a graph for anyway.
+    """
+
+    def __init__(self, distance_m: float, max_distance_m: float):
+        detail = (
+            f"straight-line distance {distance_m:.0f}m exceeds the "
+            f"{max_distance_m:.0f}m cap for this mode"
+        )
+        super().__init__(detail)
+        self.detail = detail
+        self.distance_m = distance_m
+        self.max_distance_m = max_distance_m
 
 
 def set_data_path(path: str | None) -> None:
@@ -355,7 +385,13 @@ def _from_source(bbox: tuple[float, float, float, float]) -> str:
 
 
 class Graph:
-    """Weighted graph: node_id -> [(neighbor_id, weight), ...].
+    """Weighted graph: node_id -> [(neighbor_id, weight, length_m), ...].
+
+    length_m is the edge's true physical length regardless of weight's
+    units — for constant-speed modes (walk/cycle) weight == length_m, but
+    for drive weight is baked seconds (length_m / edge_speed_m_s), so
+    length_m is carried separately so route() can report exact distance
+    even for drive-mode (time-weighted) graphs. dijkstra() ignores it.
 
     Undirected by default; one-way segments (#38) add a directed edge via
     add_edge(..., directed=True), which only links a -> b. weight_is_time
@@ -367,7 +403,7 @@ class Graph:
     """
 
     def __init__(self):
-        self.adjacency: dict[str, list[tuple[str, float]]] = {}
+        self.adjacency: dict[str, list[tuple[str, float, float]]] = {}
         self.coords: dict[str, tuple[float, float]] = {}  # node_id -> (lat, lon)
         self.weight_is_time: bool = False
         # True when build_graph's segment extraction hit MAX_GRAPH_SEGMENTS
@@ -386,14 +422,16 @@ class Graph:
         self._undirected_neighbors.setdefault(node_id, set())
         self.coords.setdefault(node_id, (lat, lon))
 
-    def add_edge(self, a: str, b: str, weight: float, directed: bool = False) -> None:
+    def add_edge(
+        self, a: str, b: str, weight: float, length_m: float, directed: bool = False
+    ) -> None:
         if a == b:
             return
-        self.adjacency[a].append((b, weight))
+        self.adjacency[a].append((b, weight, length_m))
         self._undirected_neighbors[a].add(b)
         self._undirected_neighbors[b].add(a)
         if not directed:
-            self.adjacency[b].append((a, weight))
+            self.adjacency[b].append((a, weight, length_m))
 
     def node_count(self) -> int:
         return len(self.adjacency)
@@ -407,7 +445,7 @@ class Graph:
         tell them apart cheaply."""
         counts: dict[tuple[str, str], int] = {}
         for a, neighbors in self.adjacency.items():
-            for b, _ in neighbors:
+            for b, _weight, _length in neighbors:
                 key = (min(a, b), max(a, b))
                 counts[key] = counts.get(key, 0) + 1
         return sum(1 if c == 1 else c // 2 for c in counts.values())
@@ -679,11 +717,11 @@ def build_graph(
             edge_length_m = (at_b - at_a) * total_length_m
             weight = edge_length_m / edge_speed_m_s if bake_time else edge_length_m
             if forward_allowed and backward_allowed:
-                graph.add_edge(id_a, id_b, weight, directed=False)
+                graph.add_edge(id_a, id_b, weight, edge_length_m, directed=False)
             elif forward_allowed:
-                graph.add_edge(id_a, id_b, weight, directed=True)
+                graph.add_edge(id_a, id_b, weight, edge_length_m, directed=True)
             else:
-                graph.add_edge(id_b, id_a, weight, directed=True)
+                graph.add_edge(id_b, id_a, weight, edge_length_m, directed=True)
 
     return graph
 
@@ -698,8 +736,8 @@ def dijkstra(graph: Graph, source: str, max_seconds: float, speed_m_s: float) ->
             continue
         if d > max_seconds:
             continue
-        for neighbor, length_m in graph.adjacency[node]:
-            nd = d + length_m / speed_m_s
+        for neighbor, weight, _length_m in graph.adjacency[node]:
+            nd = d + weight / speed_m_s
             if nd <= max_seconds and nd < dist.get(neighbor, math.inf):
                 dist[neighbor] = nd
                 heapq.heappush(heap, (nd, neighbor))
@@ -1199,4 +1237,158 @@ def isochrone(
     }
     if truncated or graph.truncated:
         result["truncated"] = True
+    return result
+
+
+def _is_finite_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _dijkstra_to_target(
+    graph: Graph, source: str, target: str, speed_m_s: float
+) -> tuple[float, float] | None:
+    """(elapsed_seconds, distance_m) of the min-time path source->target, or None.
+
+    Target-terminated Dijkstra: identical relaxation to dijkstra() (only
+    outgoing adjacency entries are followed, so directed/one-way edges are
+    respected the same way), but tracks a second, distance_m accumulator in
+    lockstep with the time accumulator, and returns as soon as `target` is
+    popped off the heap (i.e. settled — its shortest time is final, same
+    early-exit correctness argument as any single-target Dijkstra). Returns
+    None if the heap empties before `target` is reached, meaning target is
+    unreachable from source in this graph (different component, or a
+    one-way maze that only lets traffic flow away from it).
+    """
+    if source == target:
+        return 0.0, 0.0
+    time_to: dict[str, float] = {source: 0.0}
+    dist_to: dict[str, float] = {source: 0.0}
+    heap = [(0.0, source)]
+    while heap:
+        t, node = heapq.heappop(heap)
+        if t > time_to.get(node, math.inf):
+            continue
+        if node == target:
+            return t, dist_to[node]
+        for neighbor, weight, length_m in graph.adjacency[node]:
+            nt = t + weight / speed_m_s
+            if nt < time_to.get(neighbor, math.inf):
+                time_to[neighbor] = nt
+                dist_to[neighbor] = dist_to[node] + length_m
+                heapq.heappush(heap, (nt, neighbor))
+    return None
+
+
+def route(
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+    mode: str = "drive",
+) -> dict:
+    """Shortest-path distance + duration between two points, by mode. No geometry (#161).
+
+    Extracts a bounded street graph around the midpoint of the two points
+    (radius derived from their straight-line distance, same RADIUS_BUFFER
+    padding as isochrone's own extraction) and runs a target-terminated
+    Dijkstra from the origin's snapped node to the destination's, tracking
+    both cumulative time and cumulative true edge length (Graph.adjacency's
+    length_m, distinct from a drive graph's baked-seconds weight — see
+    Graph's docstring) so distance_m is exact even for drive mode.
+
+    Raises UnsupportedMode for an unknown mode string, ValueError if any
+    coordinate isn't a finite number, and RouteTooLong if the two points'
+    straight-line distance exceeds ROUTE_MAX_STRAIGHT_LINE_M[mode] (real
+    road distance is always >= straight-line, so this is a conservative
+    reject before any graph extraction is attempted) or if the extraction
+    radius it implies would exceed the mode's max_radius_m. Raises
+    NoGraphNearby if the extraction area has no usable graph, or either
+    point fails to snap to one (mirrors isochrone's snap_to_graph
+    behavior). If both points snap but no path connects them, the
+    extraction radius is widened once (ROUTE_RADIUS_RETRY_FACTOR) and
+    retried; if that also fails, returns a structured
+    {"error": "no_route"} result rather than raising.
+
+    On success returns {"distance_m", "duration_s", "mode", "from", "to"},
+    plus "truncated"/"note" if the extraction graph hit MAX_GRAPH_SEGMENTS.
+    For walk/cycle (constant speed per mode), distance_m and duration_s
+    always satisfy distance_m == duration_s * mode_speed_m_s exactly (both
+    are derived from the same edges along the same min-time path); for
+    drive, duration_s comes from baked per-edge time weights while
+    distance_m is summed length_m independently, so no such identity holds.
+    """
+    if mode not in MODE_CONFIG:
+        raise UnsupportedMode(mode)
+    for value in (from_lat, from_lon, to_lat, to_lon):
+        if not _is_finite_number(value):
+            raise ValueError("from_lat/from_lon/to_lat/to_lon must be finite numbers")
+
+    config = MODE_CONFIG[mode]
+    max_radius_m = config["max_radius_m"]
+    const_speed = config["default_speed_m_s"]  # None => drive's per-edge/baked-time model
+
+    cap_m = ROUTE_MAX_STRAIGHT_LINE_M[mode]
+    straight_line_m = _haversine_m(from_lat, from_lon, to_lat, to_lon)
+    if straight_line_m > cap_m:
+        raise RouteTooLong(straight_line_m, cap_m)
+
+    center_lat = (from_lat + to_lat) / 2.0
+    center_lon = (from_lon + to_lon) / 2.0
+    base_radius_m = max(
+        straight_line_m / 2.0 * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M
+    )
+    if base_radius_m > max_radius_m:
+        # The straight-line cap alone didn't catch this (a short cap with a
+        # generous buffer, or a very tight mode radius cap) — same
+        # "conservatively reject rather than let build_graph's
+        # RadiusTooLarge leak a confusing error" reasoning as the cap check
+        # above.
+        raise RouteTooLong(straight_line_m, cap_m)
+
+    radii_m = [base_radius_m]
+    retry_radius_m = min(base_radius_m * ROUTE_RADIUS_RETRY_FACTOR, max_radius_m)
+    if retry_radius_m > base_radius_m:
+        radii_m.append(retry_radius_m)
+
+    found = None
+    graph = None
+    for radius_m in radii_m:
+        graph = build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None)
+        if graph.node_count() == 0:
+            raise NoGraphNearby(center_lat, center_lon, radius_m)
+
+        source = snap_to_graph(graph, from_lat, from_lon)
+        if source is None:
+            raise NoGraphNearby(from_lat, from_lon, radius_m)
+        target = snap_to_graph(graph, to_lat, to_lon)
+        if target is None:
+            raise NoGraphNearby(to_lat, to_lon, radius_m)
+
+        speed = 1.0 if graph.weight_is_time else const_speed
+        found = _dijkstra_to_target(graph, source, target, speed)
+        if found is not None:
+            break
+
+    if found is None:
+        return {
+            "error": "no_route",
+            "detail": "no path found between the points in the searched area",
+            "mode": mode,
+            "from": {"lat": from_lat, "lon": from_lon},
+            "to": {"lat": to_lat, "lon": to_lon},
+        }
+
+    duration_s, distance_m = found
+    result = {
+        "distance_m": round(distance_m, 1),
+        "duration_s": round(duration_s, 1),
+        "mode": mode,
+        "from": {"lat": from_lat, "lon": from_lon},
+        "to": {"lat": to_lat, "lon": to_lon},
+    }
+    if graph.truncated:
+        result["truncated"] = True
+        result["note"] = (
+            "the street graph hit its size cap; this route may be suboptimal or incomplete"
+        )
     return result
