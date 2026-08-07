@@ -837,6 +837,48 @@ _DOC = """<!doctype html>
 """
 
 
+def _unwrap_longitudes(points: list[dict], shapes: list[dict]) -> None:
+    """Shift longitudes onto a continuous range when a feature set straddles
+    the antimeridian, so the JS renderer's local-tangent-plane projection
+    (plain Math.min/Math.max over raw longitudes, see _JS) doesn't mistake a
+    small dateline-crossing gap for a ~360-degree span (#137).
+
+    Only RELATIVE longitude positions matter for that projection — it is not
+    a global map, just a local view — so a single global shift (every
+    longitude < 0 gets +360) preserves every point's position relative to
+    every other point while turning e.g. [179.9, -179.9] into
+    [179.9, 180.1] (a ~0.2 degree span instead of ~359.8).
+
+    Heuristic: a >180 degree raw span is treated as antimeridian-crossing
+    (true for the local-area views render_map is for). A genuinely
+    globe-spanning feature set would also trigger this and get shifted
+    pointlessly, but such input isn't a realistic render_map use case, and
+    the shift is harmless (still just a relabeling of longitude) even then.
+    Mutates points/shapes in place; a <=180 degree span (the common case) is
+    left untouched entirely, so ordinary non-dateline data is unaffected.
+    """
+    lons: list[float] = [p["lon"] for p in points]
+    for s in shapes:
+        coord_lists = s.get("rings") if s.get("kind") == "polygon" else s.get("lines")
+        for coords in coord_lists or []:
+            lons.extend(c[0] for c in coords)
+
+    if not lons:
+        return
+    if max(lons) - min(lons) <= 180:
+        return
+
+    for p in points:
+        if p["lon"] < 0:
+            p["lon"] += 360
+    for s in shapes:
+        coord_lists = s.get("rings") if s.get("kind") == "polygon" else s.get("lines")
+        for coords in coord_lists or []:
+            for c in coords:
+                if c[0] < 0:
+                    c[0] += 360
+
+
 def render_html(
     points: list[dict], title: str | None = None, shapes: list[dict] | None = None
 ) -> str:
@@ -868,6 +910,12 @@ def render_html(
         else:
             entry["lines"] = s.get("lines") or []
         shapes_for_js.append(entry)
+
+    # Antimeridian handling (#137): unwrap longitudes onto a continuous
+    # range in place before they're serialized, so the JS projection's plain
+    # min/max over raw longitudes below doesn't blow up on dateline-crossing
+    # data. No-op for the common (non-dateline) case.
+    _unwrap_longitudes(points_for_js, shapes_for_js)
 
     # default=str: props may carry values (e.g. Decimal-ish) json can't natively
     # serialize; "</script>" guard prevents the embedded JSON from closing the tag early.
