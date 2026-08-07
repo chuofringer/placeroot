@@ -420,7 +420,8 @@ def isochrone(
     (capped per mode: 5km walk, 15km cycle, 60km drive); passing something
     larger than the cap returns a structured error instead of silently
     truncating. An unrecognized mode string returns a structured
-    {"error": "unsupported_mode"}.
+    {"error": "unsupported_mode"}. minutes must be > 0 and radius_m (if
+    given) must be >= 0, else returns {"error": "bad_request"}.
     """
     try:
         return routing.isochrone(
@@ -440,6 +441,8 @@ def isochrone(
             "detail": e.detail,
             "max_radius_m": e.max_radius_m,
         }
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
 
 
 def _warm_start() -> None:

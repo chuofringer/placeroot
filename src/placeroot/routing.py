@@ -1130,7 +1130,8 @@ def isochrone(
     minutes/speed and silently capped — long isochrones may then
     undercount reachable nodes beyond the cap (documented follow-up:
     chained/paged graph extraction). Raises UnsupportedMode for an unknown
-    mode string.
+    mode string. minutes must be > 0 and radius_m (if given) must be >= 0,
+    else raises ValueError.
 
     The polygon is a concave grid-boundary trace of reached nodes (#36),
     falling back to a convex hull when there are too few reached nodes to
@@ -1138,6 +1139,10 @@ def isochrone(
     shape approximates. The built graph is cached across calls (#39) —
     see _get_or_build_graph.
     """
+    if minutes <= 0:
+        raise ValueError("minutes must be greater than 0")
+    if radius_m is not None and radius_m < 0:
+        raise ValueError("radius_m must be non-negative")
     if mode not in MODE_CONFIG:
         raise UnsupportedMode(mode)
     config = MODE_CONFIG[mode]
