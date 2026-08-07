@@ -79,6 +79,7 @@ import logging
 import math
 import os
 import threading
+import time
 from pathlib import Path
 
 from placeroot import db
@@ -306,8 +307,64 @@ def cached_tile_paths(release: str, theme: str, upstream_glob: str) -> list[Path
     return sorted(d.glob("*.parquet"))
 
 
+
+# --- #142: protecting in-flight tiles from eviction ------------------------
+#
+# A query resolves its cache-hit tile paths (local_paths_for_query, under
+# db.conn_lock), releases the lock, and only then runs the SELECT that reads
+# them. In that gap a concurrent request that misses a different tile can
+# call ensure_tile -> evict_if_needed, which walks the cache by mtime and
+# deletes files to fit the size cap -- potentially the very tiles the first
+# query just resolved. Its read then fails on a missing file and surfaces as
+# a hard UpstreamUnavailable even though upstream is perfectly reachable.
+#
+# Rather than widening db.conn_lock across resolve-and-read (a lock-scope
+# change with real deadlock and latency risk), resolved paths are recorded
+# here with an expiry, and evict_if_needed skips any path whose claim is
+# still live. No release call is needed -- and so nothing leaks if a query
+# raises midway -- because the claim simply expires.
+#
+# Only cache HITS handed back to a caller are claimed. A tile freshly
+# created by ensure_tile isn't claimed by its creation, so the LRU cap
+# still behaves exactly as before for the warm/populate path.
+_CLAIM_TTL_S = 60.0
+
+_claims: dict[str, float] = {}
+_claims_lock = threading.Lock()
+
+
+def claim_paths(paths: list[str], ttl_s: float = _CLAIM_TTL_S) -> None:
+    """Mark `paths` as in-flight, protecting them from eviction for ttl_s."""
+    if not paths:
+        return
+    deadline = time.monotonic() + ttl_s
+    with _claims_lock:
+        for p in paths:
+            # Extend, never shorten: a concurrent longer claim wins.
+            if _claims.get(p, 0.0) < deadline:
+                _claims[p] = deadline
+
+
+def _claimed_paths() -> set[str]:
+    """Paths with a live claim, pruning expired ones on the way through."""
+    now = time.monotonic()
+    with _claims_lock:
+        for p in [p for p, deadline in _claims.items() if deadline <= now]:
+            del _claims[p]
+        return set(_claims)
+
+
 def evict_if_needed() -> None:
-    """Delete least-recently-used cached tiles until under the size cap."""
+    """Delete least-recently-used cached tiles until under the size cap.
+
+    Tiles currently claimed by an in-flight query (see claim_paths, #142)
+    are skipped rather than deleted: evicting one out from under a query
+    that already resolved it turns a healthy cache hit into a spurious
+    UpstreamUnavailable. Their size still counts toward the total, so if
+    claims alone keep the cache over cap this pass simply frees what it can
+    -- the cap is a target, not a hard bound, and the next pass (after the
+    claims expire) collects the rest.
+    """
     root = cache_dir()
     if not root.exists():
         return
@@ -315,15 +372,27 @@ def evict_if_needed() -> None:
     files.sort(key=lambda p: p.stat().st_mtime)
     total = sum(f.stat().st_size for f in files)
     cap = max_bytes()
+    claimed = _claimed_paths()
+    skipped = 0
     i = 0
     while total > cap and i < len(files):
         f = files[i]
+        i += 1
+        if str(f) in claimed:
+            skipped += 1
+            continue
         try:
             total -= f.stat().st_size
             f.unlink()
         except OSError:
             pass
-        i += 1
+    if total > cap and skipped:
+        logger.info(
+            "cache still %d bytes over cap after eviction: %d in-flight tile(s) "
+            "were skipped to avoid evicting them mid-query; they become "
+            "evictable once their claims expire",
+            total - cap, skipped,
+        )
 
 
 def _materialize_in_background(
@@ -422,12 +491,16 @@ def local_paths_for_query(
             missing.append(t)
 
     if not missing:
-        return [str(p) for p in cached]
+        paths = [str(p) for p in cached]
+        claim_paths(paths)
+        return paths
 
     if sync_mode():
         for t in missing:
             cached.append(ensure_tile(con, release, theme, t, upstream_glob, fingerprint))
-        return [str(p) for p in cached]
+        paths = [str(p) for p in cached]
+        claim_paths(paths)
+        return paths
 
     for t in missing:
         _materialize_in_background(release, theme, t, upstream_glob, fingerprint, new_connection)

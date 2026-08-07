@@ -18,6 +18,10 @@ def cache_dir(tmp_path, monkeypatch):
     d = tmp_path / "placeroot-cache"
     monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(d))
     monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
+    # #142's claim registry is module-global; clear it so a claim left by an
+    # earlier test can't shield a later test's tiles from eviction.
+    with cache._claims_lock:
+        cache._claims.clear()
     return d
 
 
@@ -423,3 +427,73 @@ def test_parse_warm_region_malformed_returns_none():
     assert cache.parse_warm_region("not,a,region,at,all") is None
     assert cache.parse_warm_region("abc,def") is None
     assert cache.parse_warm_region("abc,def,ghi") is None
+
+
+# --- #142: eviction must not delete a tile an in-flight query resolved ------
+
+
+def test_resolved_tiles_survive_a_concurrent_eviction(con, cache_dir, sync_cache, monkeypatch):
+    """The exact race: a query resolves its cache-hit paths and releases the
+    lock, then a concurrent miss triggers eviction under a tiny cap before
+    the first query's SELECT runs. The resolved tiles must still be there.
+    """
+    bbox = (-74.0, 40.0, -73.0, 41.0)
+    paths = cache.local_paths_for_query(
+        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con
+    )
+    assert paths
+
+    # Cap of ~0 bytes: without the claim guard, eviction walks the whole
+    # cache and deletes everything, including what we just resolved.
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", "0")
+    cache.evict_if_needed()
+
+    for p in paths:
+        assert os.path.exists(p), "an in-flight query's tile was evicted mid-query"
+
+    # And the read that the real query would run still succeeds.
+    joined = ", ".join(f"'{p}'" for p in paths)
+    (n,) = con.execute(f"SELECT count(*) FROM read_parquet([{joined}])").fetchone()
+    assert n > 0
+
+
+def test_unclaimed_tiles_are_still_evicted_normally(con, cache_dir, monkeypatch):
+    """The guard is narrow: tiles nobody is mid-query on evict as before, so
+    the size cap still does its job."""
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", str(5000 / 1024 / 1024))
+    tiles = [(-74, 40), (-75, 40), (-76, 40), (15, 78)]
+    paths = [cache.ensure_tile(con, RELEASE, THEME, t, str(FIXTURE_PATH)) for t in tiles]
+    remaining = list(cache.cache_dir().rglob("*.parquet"))
+    assert len(remaining) < len(paths)
+
+
+def test_claims_expire_so_tiles_do_not_pin_the_cache_forever(con, cache_dir, sync_cache):
+    """A claim is a short lease, not a permanent pin — otherwise a crashed or
+    abandoned query would keep its tiles un-evictable for the process's life.
+    """
+    bbox = (-74.0, 40.0, -73.0, 41.0)
+    paths = cache.local_paths_for_query(
+        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con
+    )
+    assert paths
+    assert cache._claimed_paths() & set(paths)
+
+    # Re-claim with an already-elapsed lease, standing in for the passage of
+    # _CLAIM_TTL_S without sleeping through it.
+    with cache._claims_lock:
+        for p in paths:
+            cache._claims[p] = time.monotonic() - 1.0
+
+    assert not (cache._claimed_paths() & set(paths))
+
+
+def test_claim_paths_never_shortens_an_existing_claim():
+    path = "/tmp/placeroot-test-tile.parquet"
+    with cache._claims_lock:
+        cache._claims.clear()
+    cache.claim_paths([path], ttl_s=300.0)
+    long_deadline = cache._claims[path]
+    cache.claim_paths([path], ttl_s=1.0)  # a shorter concurrent claim
+    assert cache._claims[path] == long_deadline
+    with cache._claims_lock:
+        cache._claims.clear()
