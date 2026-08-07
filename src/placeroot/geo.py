@@ -43,6 +43,20 @@ def clamp_radius_m(radius_m: float) -> float:
     return min(max(radius_m, 0.0), MAX_QUERY_RADIUS_M)
 
 
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in meters (R=6371000), matching overture.DISTANCE_EXPR.
+
+    Pure-Python counterpart to that SQL expression, for callers (like
+    distance_matrix) that compute over caller-supplied points rather than
+    rows already in a DuckDB query.
+    """
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlon / 2) ** 2
+    return 2 * 6371000 * math.asin(math.sqrt(a))
+
+
 def bbox_around(lat: float, lon: float, radius_m: float) -> tuple[float, float, float, float]:
     """Square bounding box guaranteed to contain the radius_m circle around (lat, lon).
 
