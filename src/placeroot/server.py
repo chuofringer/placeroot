@@ -475,6 +475,38 @@ def _warm_metadata_async() -> None:
     threading.Thread(target=overture.warm_metadata, daemon=True).start()
 
 
+def _warm_divisions() -> None:
+    """Thread target for _warm_divisions_async: build (or reuse) the #43
+    local divisions name table, logging and swallowing anything that goes
+    wrong rather than letting it become an unhandled exception on a daemon
+    thread. geocode._local_divisions_table() already logs and degrades
+    internally for the failure modes it recognizes (duckdb.Error,
+    UpstreamUnavailable); this is a last-resort backstop for anything else.
+    """
+    try:
+        geocoding._local_divisions_table()
+    except Exception as e:  # noqa: BLE001 - warm-on-start must never break startup
+        logger.warning("divisions-table pre-warm failed (continuing): %s", e)
+
+
+def _warm_divisions_async() -> None:
+    """Kick off geocode.py's #43 local divisions name-table materialization
+    (issue #93) on a daemon thread at startup, mirroring
+    _warm_metadata_async — so the ~20-30s one-time build (cold extension
+    load plus a full COPY of the divisions theme) is already done, or at
+    least underway, before the first real geocode()/resolve_place() call
+    pays for it silently.
+
+    A no-op when caching is off (PLACEROOT_CACHE=off) — checked here,
+    before a thread is even spawned, rather than relying on
+    _local_divisions_table's own cache.enabled() check, so this function's
+    behavior is visible without reading into geocode.py.
+    """
+    if not cache.enabled():
+        return
+    threading.Thread(target=_warm_divisions, daemon=True).start()
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="placeroot",
@@ -516,6 +548,7 @@ def main() -> None:
         f"{BASE_INSTRUCTIONS} Backed by Overture Maps release {active_release}."
     )
     _warm_metadata_async()
+    _warm_divisions_async()
     _warm_start()
     if args.http:
         logger.info("placeroot: streamable-HTTP on http://%s:%s/mcp", args.host, args.port)
