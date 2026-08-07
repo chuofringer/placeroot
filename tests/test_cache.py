@@ -39,13 +39,48 @@ def test_tiles_for_bbox_single_tile():
     assert cache.tiles_for_bbox(-73.95, 40.65, -73.85, 40.75) == [(-74, 40)]
 
 
+def test_offline_fallback_picks_most_recently_used_not_most_recently_created(
+    cache_dir, monkeypatch
+):
+    # #141: a cache hit bumps tile-*file* mtimes but not the containing
+    # dir's mtime, so ranking fingerprint dirs by dir mtime picks the
+    # most-recently-created dir, not the most-recently-used one. During an
+    # outage that can drop the whole active cache for a barely-populated
+    # newer dir. Rank by newest contained tile instead.
+    base = cache_dir / RELEASE / THEME
+    fp_active = base / "aaaaaaaaaaaa"   # the real working set
+    fp_stray = base / "bbbbbbbbbbbb"    # a later one-off, near-empty
+    fp_active.mkdir(parents=True)
+    for i in range(5):
+        (fp_active / f"tile_{i}_0.parquet").write_bytes(b"x")
+
+    # fp_stray is created LATER, so its *directory* mtime is newer than
+    # fp_active's — the old (buggy) code would pick it.
+    time.sleep(0.01)
+    fp_stray.mkdir(parents=True)
+    (fp_stray / "tile_9_9.parquet").write_bytes(b"x")
+
+    now = time.time()
+    # Simulate: fp_active's tiles were just used (recent file mtimes);
+    # fp_stray's single tile is older than that.
+    for t in fp_active.glob("*.parquet"):
+        os.utime(t, (now, now))
+    os.utime(fp_stray / "tile_9_9.parquet", (now - 3600, now - 3600))
+    # Sanity: the buggy dir-mtime ranking would prefer fp_stray.
+    assert fp_stray.stat().st_mtime >= fp_active.stat().st_mtime
+
+    # Force the offline branch (upstream unreachable → no fresh fingerprint).
+    monkeypatch.setattr(cache, "schema_fingerprint", lambda _glob: None)
+    assert cache.resolve_fingerprint(RELEASE, THEME, "unused-glob") == "aaaaaaaaaaaa"
+
+
 def test_conn_lock_is_reentrant_for_the_cache_path_probe(cache_dir):
     # #145: the cache path holds db.conn_lock (in _from_source) and then, on
     # an lru-miss, re-enters it via probe_schema's own `with conn_lock`. A
     # plain (non-reentrant) Lock self-deadlocks that thread; RLock allows the
     # same-thread re-acquire. Force the inner probe to MISS (clear its cache),
     # then reproduce the nesting and assert it completes rather than hangs.
-    db.probe_schema.cache_clear()
+    db._probe_schema_cached.cache_clear()
     glob = str(FIXTURE_PATH)
     result: dict = {}
 
@@ -58,7 +93,7 @@ def test_conn_lock_is_reentrant_for_the_cache_path_probe(cache_dir):
     t.join(timeout=5)
     assert not t.is_alive(), "conn_lock self-deadlocked on same-thread re-entry"
     assert result["schema"] is not None and len(result["schema"]) > 0
-    db.probe_schema.cache_clear()
+    db._probe_schema_cached.cache_clear()
 
 
 def test_tiles_for_bbox_spans_multiple_tiles():

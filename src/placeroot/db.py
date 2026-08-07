@@ -143,19 +143,33 @@ def ensure_spatial() -> None:
 
 
 @lru_cache(maxsize=8)
+def _probe_schema_cached(glob: str) -> frozenset:
+    """Column names present in glob's dataset. Raises duckdb.Error if the probe fails.
+
+    lru_cache memoizes only successful returns — a raised exception is NOT
+    cached — so a transient probe failure is retried on the next call rather
+    than poisoning the cache for the process lifetime (#144). Successful
+    schemas stay cached (LRU, maxsize=8) since the LIMIT 0 metadata read,
+    while cheap, isn't free to redo on every query.
+    """
+    with conn_lock:
+        cols = shared_conn().execute(
+            f"SELECT * FROM read_parquet('{glob}') LIMIT 0"
+        ).description
+    return frozenset(c[0] for c in cols)
+
+
 def probe_schema(glob: str) -> frozenset | None:
     """Column names present in glob's dataset, or None if the probe itself failed.
 
     A failed probe (upstream down, glob unreadable) is treated as "unknown,
     assume nothing missing" — the actual query that follows hits the same
-    problem and surfaces it as UpstreamUnavailable instead.
+    problem and surfaces it as UpstreamUnavailable instead. Failures are NOT
+    cached (see _probe_schema_cached): a later call retries, so a transient
+    blip can't permanently blind degraded_fields()/schema-drift detection.
     """
     try:
-        with conn_lock:
-            cols = shared_conn().execute(
-                f"SELECT * FROM read_parquet('{glob}') LIMIT 0"
-            ).description
-        return frozenset(c[0] for c in cols)
+        return _probe_schema_cached(glob)
     except duckdb.Error as e:
         logger.warning("Schema probe failed for %s: %s", glob, e)
         return None
