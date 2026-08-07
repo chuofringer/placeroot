@@ -26,7 +26,7 @@ Tile cache and a two-type theme: cache.py's tile cache is keyed by
 so passing plain THEME="base" for both land_use and land_cover would only
 accidentally avoid a collision if their two schemas happen to hash
 differently. Rather than depend on that coincidence, this module keys the
-cache by a composite "base:land_use" / "base:land_cover" string (cache.py's
+cache by a composite "base_land_use" / "base_land_cover" string (cache.py's
 theme parameter is opaque — any string works) so the two types can never
 land tile files in the same directory even if a future schema change made
 their columns identical.
@@ -102,8 +102,13 @@ def _geom_expr(upstream: str) -> str:
 
 
 def _cache_theme(type_: str) -> str:
-    """Composite cache theme key, distinct per base-theme type — see module docstring."""
-    return f"{THEME}:{type_}"
+    """Composite cache theme key, distinct per base-theme type — see module docstring.
+
+    Underscore separator, not ':': cache.tile_path uses this string verbatim
+    as a directory component, and ':' is illegal in a Windows path component
+    (the mkdir would raise WinError 123 on the first cached query).
+    """
+    return f"{THEME}_{type_}"
 
 
 def set_data_path(path: str | None, type_: str) -> None:

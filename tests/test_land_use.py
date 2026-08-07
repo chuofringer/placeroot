@@ -204,6 +204,15 @@ def test_missing_geometry_raises_schema_degraded(tmp_path):
 # --- server wiring -----------------------------------------------------
 
 
+def test_cache_theme_is_a_portable_path_component():
+    # cache.tile_path uses the theme string verbatim as a directory
+    # component; ':' (the original separator) is illegal on Windows.
+    for type_ in (land_use.TYPE_LAND_USE, land_use.TYPE_LAND_COVER):
+        theme = land_use._cache_theme(type_)
+        assert theme  # non-empty
+        assert not any(c in theme for c in ':\\/'), theme
+
+
 def test_server_land_use_at_happy_path(land_use_fixture):
     result = server.land_use_at(CENTER_LAT, CENTER_LON)
     assert "error" not in result
