@@ -71,6 +71,20 @@ def test_tiles_for_bbox_huge_bbox_rejected_before_building_full_range():
     assert len(tiles) < 100_000
 
 
+def test_tiles_for_bbox_oversize_early_out_returns_real_tiles():
+    """The oversize early-out must return a truncated prefix of the REAL
+    enumeration, not fabricated filler ids: (0, 0) is a legitimate tile
+    (Gulf of Guinea), so a caller that iterates the result — a cache-warm
+    loop, a log line — must see genuine tiles of this bbox, and a wrong
+    result must not be indistinguishable from a real one."""
+    tiles = cache.tiles_for_bbox(-179.5, -89.5, 179.5, 89.5)
+    assert len(tiles) > cache.MAX_TILES_PER_QUERY
+    assert len(set(tiles)) == len(tiles)  # distinct ids, not N copies of one
+    assert tiles[0] == (-180, -90)  # the bbox's own corner tile
+    assert all(t in {(x, y) for x in range(-180, 180) for y in range(-90, 90)}
+               for t in tiles)
+
+
 def test_offline_fallback_picks_most_recently_used_not_most_recently_created(
     cache_dir, monkeypatch
 ):

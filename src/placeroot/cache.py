@@ -75,6 +75,7 @@ tell us any different.
 """
 
 import hashlib
+import itertools
 import logging
 import math
 import os
@@ -182,16 +183,32 @@ def tiles_for_bbox(
     # caller's real cap — local_paths_for_query still does the authoritative
     # `len(tiles) > MAX_TILES_PER_QUERY` check and takes its existing
     # "too many tiles, scan upstream directly" branch either way.
+    def wrap_x(tx: int) -> int:
+        return ((tx + half) % span) - half
+
     x_span = x1 - x0 + 1
     y_span = y1 - y0 + 1
     if x_span * y_span > OVERSIZE_TILE_SPAN_GUARD:
-        # Return a list already too big for MAX_TILES_PER_QUERY without
-        # allocating one: local_paths_for_query only ever inspects len(),
-        # never the contents, once it exceeds the cap.
-        return [(0, 0)] * (MAX_TILES_PER_QUERY + 1)
-
-    def wrap_x(tx: int) -> int:
-        return ((tx + half) % span) - half
+        # Too big to materialise: enumerate only the first
+        # MAX_TILES_PER_QUERY + 1 tiles — already more than any caller's
+        # `len(tiles) > MAX_TILES_PER_QUERY` cap accepts, without building
+        # the full cross product. These are REAL tiles of the bbox (a
+        # prefix of the full enumeration), not a fabricated filler: a
+        # caller that iterates the result — a warm loop, a log line —
+        # sees genuine ids rather than repeated copies of the
+        # perfectly-valid tile (0, 0). Dedup can't shrink the prefix
+        # under the cap: ty is never wrapped and two raw columns only
+        # collide when they are a full 360° apart, far beyond this many
+        # consecutive tx values.
+        logger.warning(
+            "bbox projects to ~%d tiles; truncating enumeration at %d",
+            x_span * y_span, MAX_TILES_PER_QUERY + 1,
+        )
+        prefix = itertools.islice(
+            ((wrap_x(tx), ty) for tx in range(x0, x1 + 1) for ty in range(y0, y1 + 1)),
+            MAX_TILES_PER_QUERY + 1,
+        )
+        return list(dict.fromkeys(prefix))
 
     tiles = [(wrap_x(tx), ty) for tx in range(x0, x1 + 1) for ty in range(y0, y1 + 1)]
     # Preserve first-seen order while deduping: wrapping can only fold two

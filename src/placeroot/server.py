@@ -654,6 +654,10 @@ def resolve_place(
     structured {"error": ...} instead of raising if the remote scan fails
     or the places dataset is missing columns this tool depends on.
     """
+    if near_lat is not None and near_lon is not None:
+        coord_error = _invalid_coord(near_lat, near_lon)
+        if coord_error is not None:
+            return coord_error
     try:
         rows = geocoding.resolve_place(query, near_lat, near_lon, limit)
     except overture.UpstreamUnavailable as e:

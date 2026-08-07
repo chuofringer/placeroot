@@ -88,6 +88,15 @@ def test_summarize_area_rejects_out_of_range_coord():
     assert result["error"] == "bad_request"
 
 
+def test_resolve_place_rejects_swapped_near_lat_lon():
+    # resolve_place was the one coordinate-taking tool left unguarded: a
+    # swapped near_lat/near_lon fed bbox_around an inverted box that matched
+    # zero rows, returning "no such place" instead of bad_request.
+    result = server.resolve_place(query="Rustan's", near_lat=120.98, near_lon=14.60)
+    assert result["error"] == "bad_request"
+    assert "swap" in result["detail"]
+
+
 def test_distance_matrix_rejects_out_of_range_origin():
     result = server.distance_matrix(
         origins=[{"lat": 91.0, "lon": CENTER_LON}],
