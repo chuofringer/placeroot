@@ -1,4 +1,4 @@
-from placeroot import overture
+from placeroot import overture, server
 
 from ._geo import haversine_m
 from .conftest import CENTER_LAT, CENTER_LON, raw_rows
@@ -99,3 +99,37 @@ def test_ids_match_ground_truth():
     expected = {row["id"] for row in raw_rows()}
     results = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=25)
     assert all(r["id"] in expected for r in results)
+
+
+def test_bogus_category_gets_hint_note():
+    """Regression for #117: a wrong/invalid Overture category slug should
+    not look identical to "this area genuinely has none of that category" —
+    the server tool adds a non-fatal note pointing at search_categories."""
+    result = server.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000, category="definitely_not_a_category_xyz", limit=10
+    )
+    assert result["results"] == []
+    assert "note" in result
+    assert "search_categories" in result["note"]
+
+
+def test_valid_category_with_matches_has_no_note():
+    result = server.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000, category="coffee_shop", limit=25
+    )
+    assert result["results"]
+    assert "note" not in result
+
+
+def test_no_category_with_matches_has_no_note():
+    result = server.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=25)
+    assert result["results"]
+    assert "note" not in result
+
+
+def test_no_category_empty_area_has_no_note():
+    """The hint is scoped to the category-filter case only — an empty area
+    with no category filter at all is a plain empty result, not a hint."""
+    result = server.find_places(0.0, 0.0, radius_m=1000, limit=10)
+    assert result["results"] == []
+    assert "note" not in result
