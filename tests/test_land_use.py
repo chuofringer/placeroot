@@ -204,6 +204,16 @@ def test_missing_geometry_raises_schema_degraded(tmp_path):
 # --- server wiring -----------------------------------------------------
 
 
+def test_server_land_use_at_rejects_out_of_range_coordinate(land_use_fixture):
+    # #163 pattern: out-of-range (or swapped) coordinates are a bad_request
+    # at the tool boundary, before any base-theme scan runs.
+    result = server.land_use_at(lat=91.0, lon=0.0)
+    assert result["error"] == "bad_request"
+    result = server.land_use_at(lat=120.98, lon=14.60)
+    assert result["error"] == "bad_request"
+    assert "swap" in result["detail"]
+
+
 def test_cache_theme_is_a_portable_path_component():
     # cache.tile_path uses the theme string verbatim as a directory
     # component; ':' (the original separator) is illegal on Windows.

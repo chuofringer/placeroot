@@ -555,8 +555,12 @@ def land_use_at(lat: float, lon: float) -> dict:
     a residential parcel), the smallest/most specific one is returned and
     a "note" flags that the pick was made among several valid candidates.
     Returns a structured {"error": ...} if upstream is unavailable or a
-    base-theme dataset is missing geometry/bbox.
+    base-theme dataset is missing geometry/bbox, and {"error":
+    "bad_request"} for a non-finite or out-of-range coordinate.
     """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
     try:
         result = land_use.land_use_at(lat, lon)
     except overture.UpstreamUnavailable as e:
