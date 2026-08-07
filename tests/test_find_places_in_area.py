@@ -21,7 +21,7 @@ existing admin_lookup fixture can't:
 import duckdb
 import pytest
 
-from placeroot import overture, server
+from placeroot import cache, overture, server
 
 NOTCH_WKT = "POLYGON((0 0, 0 10, 10 10, 10 0, 6 0, 6 4, 4 4, 4 0, 0 0))"
 SQUARE_A_WKT = "POLYGON((100 40, 100 45, 105 45, 105 40, 100 40))"
@@ -378,3 +378,72 @@ def test_a_polygon_larger_than_the_whole_budget_is_not_cached(polygon_fixtures, 
 def test_a_cached_miss_costs_no_bytes(polygon_fixtures):
     """An unknown-id miss is worth caching and holds nothing."""
     assert overture._division_geometry_bytes(None) == 0
+
+
+# --- #153: on-disk cache of resolved division polygons ---
+
+
+def test_resolve_geometry_persists_to_disk_and_reloads_without_rescan(
+    polygon_fixtures, tmp_path, monkeypatch
+):
+    """First resolve scans + persists; a later "process" (in-process cache
+    cleared) reloads the identical merged polygon from disk without touching
+    the divisions theme again — proving the ~73s scan is once-per-release, not
+    once-per-process, AND that the union is byte-for-byte unchanged (a coastal
+    land+maritime union can't silently shrink)."""
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "pcache"))
+    monkeypatch.setenv("PLACEROOT_CACHE", "on")
+    overture.clear_division_geometry_cache()
+
+    first = overture._resolve_division_geometry(DIV_MULTI)  # multi-variant union
+    assert first is not None
+
+    # Simulate a fresh process: drop only the in-process cache, then forbid any
+    # divisions rescan. The resolve MUST come from the persisted polygon.
+    overture.clear_division_geometry_cache()
+
+    def _no_rescan(*a, **k):
+        raise AssertionError("a disk hit must not rescan the divisions theme")
+
+    monkeypatch.setattr(overture, "missing_columns", _no_rescan)
+    second = overture._resolve_division_geometry(DIV_MULTI)
+
+    assert second is not None
+    assert second[0] == first[0]      # WKB identical -> union preserved
+    assert second[1:] == first[1:]    # bbox identical
+    # (End-to-end union across both variants is covered by
+    # test_multi_row_division_unions_both_polygon_variants; the identical WKB
+    # above proves the disk round-trip can't shrink that union.)
+
+
+def test_disk_cache_writes_nothing_when_cache_disabled(
+    polygon_fixtures, tmp_path, monkeypatch
+):
+    """With PLACEROOT_CACHE=off (conftest's default), resolving must not create
+    the on-disk polygon dir."""
+    cache_dir = tmp_path / "pcache"
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(cache_dir))
+    # PLACEROOT_CACHE=off is set by the autouse offline_data fixture.
+    assert not cache.enabled()
+    overture.clear_division_geometry_cache()
+
+    assert overture._resolve_division_geometry(DIV_NOTCH) is not None
+    assert not (cache_dir / "division_polygons").exists()
+
+
+def test_corrupt_disk_cache_falls_back_to_rescan(
+    polygon_fixtures, tmp_path, monkeypatch
+):
+    """A truncated/garbage cache file must not be trusted or crash — the
+    resolve falls back to the real scan and still returns the right polygon."""
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "pcache"))
+    monkeypatch.setenv("PLACEROOT_CACHE", "on")
+    overture.clear_division_geometry_cache()
+
+    div_upstream = overture._upstream_glob(theme="divisions", type_="division_area")
+    path = overture._division_polygon_disk_path(div_upstream, DIV_NOTCH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\x01garbage-too-short")  # flag=found but truncated bbox
+
+    resolved = overture._resolve_division_geometry(DIV_NOTCH)
+    assert resolved is not None and resolved[1] is not None  # re-resolved cleanly
