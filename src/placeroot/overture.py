@@ -277,6 +277,25 @@ def area_geometry(
     return bbox_filter, distance_filter, params, (xmin, ymin, xmax, ymax)
 
 
+# Overture's operating_status is a business-lifecycle field (is this place a
+# going concern?), NOT opening hours. Its raw value "open" reads as "open right
+# now" to anyone glancing at a results table, which we can't answer — we surface
+# no hours data. Relabel the ambiguous values to lifecycle language and pass any
+# unrecognised value through unchanged so we never misrepresent the source.
+_OPERATING_STATUS_LABELS = {
+    "open": "in business",
+    "closed": "permanently closed",
+    "closed_permanently": "permanently closed",
+    "closed_temporarily": "temporarily closed",
+}
+
+
+def _label_operating_status(value):
+    if value is None:
+        return None
+    return _OPERATING_STATUS_LABELS.get(value, value)
+
+
 def find_places(
     lat: float,
     lon: float,
@@ -353,7 +372,10 @@ def find_places(
         "id", "name", "category", "basic_category", "operating_status",
         "confidence", "lat", "lon", "distance_m",
     ]
-    return [dict(zip(cols, r)) for r in rows]
+    results = [dict(zip(cols, r)) for r in rows]
+    for d in results:
+        d["operating_status"] = _label_operating_status(d["operating_status"])
+    return results
 
 
 def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
@@ -567,6 +589,7 @@ def place_details(
     if row is None:
         return None
     result = dict(zip(_PLACE_DETAIL_RESULT_COLS, row))
+    result["operating_status"] = _label_operating_status(result["operating_status"])
     for field in _PLACE_DETAIL_LIST_FIELDS:
         kept, omitted = budget.truncate_list(result[field])
         result[field] = kept
