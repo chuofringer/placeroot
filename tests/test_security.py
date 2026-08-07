@@ -87,9 +87,10 @@ def test_clamp_radius_bounds_and_handles_non_finite():
 
 
 def test_area_geometry_clamps_oversized_radius():
-    _bbox_f, _dist_f, params, bbox = overture.area_geometry(0.0, 0.0, 1e9)
+    _bbox_f, _dist_f, params, bbox, effective_radius_m = overture.area_geometry(0.0, 0.0, 1e9)
     # The distance parameter and the bbox both reflect the clamped radius.
     assert params["radius_m"] == geo.MAX_QUERY_RADIUS_M
+    assert effective_radius_m == geo.MAX_QUERY_RADIUS_M
     xmin, ymin, xmax, ymax = bbox
     assert (xmax - xmin) < 360  # not a world-spanning box
 

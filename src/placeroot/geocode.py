@@ -733,7 +733,7 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
     params: dict = {"pattern": f"%{query}%"}
     if anchor is not None:
         lat, lon = anchor
-        bbox_filter, distance_filter, geo_params, _bbox = overture.area_geometry(
+        bbox_filter, distance_filter, geo_params, _bbox, _radius_m = overture.area_geometry(
             lat, lon, _PLACES_FALLBACK_RADIUS_M
         )
         filters += [bbox_filter, distance_filter]
@@ -1064,7 +1064,9 @@ def _nearest_address(lat: float, lon: float) -> dict | None:
     if cols is not None and "street" not in cols:
         return None
     for radius_m in (200, 1000, 5000):
-        bbox_filter, distance_filter, params, _bbox = overture.area_geometry(lat, lon, radius_m)
+        bbox_filter, distance_filter, params, _bbox, _radius_m = overture.area_geometry(
+            lat, lon, radius_m
+        )
         sql = f"""
             SELECT street, number, postcode, bbox.ymin AS lat, bbox.xmin AS lon,
                    round({overture.DISTANCE_EXPR}, 1) AS distance_m
@@ -1093,7 +1095,9 @@ def _nearest_division(lat: float, lon: float) -> dict | None:
     if cols is not None and "names" not in cols:
         return None
     for radius_m in (2000, 20000, 100000):
-        bbox_filter, distance_filter, params, _bbox = overture.area_geometry(lat, lon, radius_m)
+        bbox_filter, distance_filter, params, _bbox, _radius_m = overture.area_geometry(
+            lat, lon, radius_m
+        )
         sql = f"""
             SELECT names.primary AS name, subtype, hierarchies,
                    round({overture.DISTANCE_EXPR}, 1) AS distance_m

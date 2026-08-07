@@ -69,6 +69,24 @@ def _with_buildings_degraded_fields(result: dict) -> dict:
     return result
 
 
+def _with_category_hint(payload: dict, category: str | None, widen_hint: str) -> dict:
+    """Add a non-fatal "note" when a category filter matched nothing (#117).
+
+    find_places matches category by substring, so a wrong or invalid
+    Overture slug just returns zero rows — indistinguishable from "this
+    area really has none". The note points at search_categories and at
+    whichever widening move fits the mode the caller used (a bigger
+    radius for the point path, a bigger division for the polygon path).
+    """
+    if category and not payload.get("results"):
+        payload["note"] = (
+            f"no places matched category '{category}' here; if that may not be a "
+            "valid Overture category slug, use search_categories to find the right "
+            f"one, or {widen_hint} / drop the category filter."
+        )
+    return payload
+
+
 @mcp.tool()
 def find_places(
     lat: float | None = None,
@@ -101,7 +119,9 @@ def find_places(
     ...} if neither mode's inputs are given (or both are), {"error":
     "not_found", ...} if division_id doesn't match any known division, or
     a structured {"error": ...} if the upstream dataset is unavailable or
-    missing columns this tool depends on.
+    missing columns this tool depends on. If a category filter was given and
+    it matched nothing (in either mode), a non-fatal "note" field hints that
+    the category slug may be wrong and points at search_categories.
     """
     point_given = lat is not None or lon is not None
     if division_id is not None and point_given:
@@ -123,7 +143,8 @@ def find_places(
             return _schema_error(e)
         if rows is None:
             return {"error": "not_found", "detail": "no division matched division_id"}
-        return _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+        payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+        return _with_category_hint(payload, category, widen_hint="try a larger division")
 
     if lat is None or lon is None:
         return {"error": "bad_request", "detail": "pass both lat and lon"}
@@ -133,7 +154,8 @@ def find_places(
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
         return _schema_error(e)
-    return _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+    payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+    return _with_category_hint(payload, category, widen_hint="widen radius_m")
 
 
 @mcp.tool()
@@ -457,7 +479,8 @@ def isochrone(
     (capped per mode: 5km walk, 15km cycle, 60km drive); passing something
     larger than the cap returns a structured error instead of silently
     truncating. An unrecognized mode string returns a structured
-    {"error": "unsupported_mode"}.
+    {"error": "unsupported_mode"}. minutes must be > 0 and radius_m (if
+    given) must be >= 0, else returns {"error": "bad_request"}.
     """
     try:
         return routing.isochrone(
@@ -477,6 +500,8 @@ def isochrone(
             "detail": e.detail,
             "max_radius_m": e.max_radius_m,
         }
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
 
 
 def _warm_start() -> None:
