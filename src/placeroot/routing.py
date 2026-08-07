@@ -194,11 +194,27 @@ MODE_CONFIG = {
 # route(): a per-mode straight-line-distance cap, rejected before any graph
 # extraction is attempted. Deliberately conservative — real road distance is
 # always >= straight-line distance, so a straight-line distance beyond a
-# mode's cap can never produce a route worth extracting a graph for. These
-# are independent of (and larger than) MODE_CONFIG's max_radius_m caps,
-# which bound the *extraction radius* (typically ~half the two-point
-# distance plus buffer), not the two-point distance itself.
-ROUTE_MAX_STRAIGHT_LINE_M = {"walk": 25_000, "cycle": 75_000, "drive": 300_000}
+# mode's cap can never produce a route worth extracting a graph for.
+#
+# This cap must be the TRUE, enforced limit, not just an advertised one:
+# route()'s extraction radius is base_radius_m = max(straight_line_m / 2 *
+# RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M), and build_graph refuses
+# any radius beyond MODE_CONFIG[mode]["max_radius_m"] (the isochrone
+# extraction cap). That radius cap binds *before* a hard-coded straight-line
+# cap would if the two aren't derived from the same relation — e.g. walk's
+# radius cap of 5km already rejects two points 7.6km apart, well under a
+# naively-chosen 25km "cap". So instead of an independent constant, invert
+# the radius relation to get the largest straight-line distance that stays
+# within max_radius_m: straight_line_max = 2 * (max_radius_m - SNAP_RADIUS_M)
+# / RADIUS_BUFFER. Deriving it this way keeps the two caps in sync
+# automatically if MODE_CONFIG's radii ever change, and makes the
+# straight-line check below and the base_radius_m > max_radius_m check
+# below it equivalent (the latter becomes a redundant safety net that
+# should essentially never fire, modulo floating point).
+ROUTE_MAX_STRAIGHT_LINE_M = {
+    mode: 2.0 * (cfg["max_radius_m"] - SNAP_RADIUS_M) / RADIUS_BUFFER
+    for mode, cfg in MODE_CONFIG.items()
+}
 ROUTE_MIN_RADIUS_M = 500.0  # extraction radius floor, so very-close points still get a real graph
 ROUTE_RADIUS_RETRY_FACTOR = 1.6  # widen-and-retry factor when the first extraction misses a path
 
@@ -1244,6 +1260,33 @@ def _is_finite_number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def _midpoint(
+    from_lat: float, from_lon: float, to_lat: float, to_lon: float
+) -> tuple[float, float]:
+    """(lat, lon) midpoint of two points, antimeridian-aware.
+
+    A plain (from_lon + to_lon) / 2.0 is wrong near the +/-180 seam: for
+    from_lon=179.99, to_lon=-179.99 (true midpoint ~180/-180) it gives
+    ~0.0, on the opposite side of the globe. When the two longitudes are
+    more than 180 degrees apart (the shorter path between them must cross
+    the seam), unwrap by adding 360 to the smaller one before averaging,
+    then re-wrap the result back into [-180, 180]. Latitude never needs
+    this treatment. This is only the *center point* build_graph extracts
+    around — _haversine_m (used for straight-line distance and dijkstra
+    edge lengths) is already seam-correct on its own.
+    """
+    lat_mid = (from_lat + to_lat) / 2.0
+    lon_a, lon_b = from_lon, to_lon
+    if abs(lon_a - lon_b) > 180.0:
+        if lon_a < lon_b:
+            lon_a += 360.0
+        else:
+            lon_b += 360.0
+    lon_mid = (lon_a + lon_b) / 2.0
+    lon_mid = ((lon_mid + 180.0) % 360.0) - 180.0
+    return lat_mid, lon_mid
+
+
 def _dijkstra_to_target(
     graph: Graph, source: str, target: str, speed_m_s: float
 ) -> tuple[float, float] | None:
@@ -1300,14 +1343,25 @@ def route(
     coordinate isn't a finite number, and RouteTooLong if the two points'
     straight-line distance exceeds ROUTE_MAX_STRAIGHT_LINE_M[mode] (real
     road distance is always >= straight-line, so this is a conservative
-    reject before any graph extraction is attempted) or if the extraction
-    radius it implies would exceed the mode's max_radius_m. Raises
-    NoGraphNearby if the extraction area has no usable graph, or either
-    point fails to snap to one (mirrors isochrone's snap_to_graph
-    behavior). If both points snap but no path connects them, the
-    extraction radius is widened once (ROUTE_RADIUS_RETRY_FACTOR) and
-    retried; if that also fails, returns a structured
-    {"error": "no_route"} result rather than raising.
+    reject before any graph extraction is attempted). ROUTE_MAX_STRAIGHT_LINE_M
+    is derived per-mode from MODE_CONFIG[mode]["max_radius_m"] (the same cap
+    isochrone's graph extraction enforces) via straight_line_max = 2 *
+    (max_radius_m - SNAP_RADIUS_M) / RADIUS_BUFFER, so it's always the true,
+    enforced limit rather than an independently-chosen number that could be
+    looser than what extraction actually allows. Raises
+    NoGraphNearby if no radius (including the widened retry —
+    ROUTE_RADIUS_RETRY_FACTOR) ever produces a usable graph with both
+    points snapped. A non-final radius never raises on its own — an empty
+    graph or a failed snap at that radius just moves on to the next, larger
+    radius rather than giving up early; only the outcome of the *last*
+    radius tried decides between NoGraphNearby and returning {"error":
+    "no_route"}. If both points snap at some radius but no path connects
+    them, the extraction radius is widened once and retried; once both
+    points have snapped successfully at any radius, a later radius's snap
+    failure or empty graph no longer raises NoGraphNearby — it falls
+    through to the structured {"error": "no_route"} result instead, since
+    both points are known to be on real street graphs and simply
+    disconnected, which is the accurate answer.
 
     On success returns {"distance_m", "duration_s", "mode", "from", "to"},
     plus "truncated"/"note" if the extraction graph hit MAX_GRAPH_SEGMENTS.
@@ -1332,17 +1386,16 @@ def route(
     if straight_line_m > cap_m:
         raise RouteTooLong(straight_line_m, cap_m)
 
-    center_lat = (from_lat + to_lat) / 2.0
-    center_lon = (from_lon + to_lon) / 2.0
+    center_lat, center_lon = _midpoint(from_lat, from_lon, to_lat, to_lon)
     base_radius_m = max(
         straight_line_m / 2.0 * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M
     )
     if base_radius_m > max_radius_m:
-        # The straight-line cap alone didn't catch this (a short cap with a
-        # generous buffer, or a very tight mode radius cap) — same
-        # "conservatively reject rather than let build_graph's
-        # RadiusTooLarge leak a confusing error" reasoning as the cap check
-        # above.
+        # ROUTE_MAX_STRAIGHT_LINE_M is derived directly from max_radius_m
+        # (see its definition above), so this should essentially never fire
+        # — it's a redundant safety net against floating-point edge cases
+        # only. Reports the same (already-correct) cap_m so the number in
+        # the error always matches the true, enforced limit.
         raise RouteTooLong(straight_line_m, cap_m)
 
     radii_m = [base_radius_m]
@@ -1350,26 +1403,51 @@ def route(
     if retry_radius_m > base_radius_m:
         radii_m.append(retry_radius_m)
 
+    # A non-final radius never raises here — it only records why this
+    # attempt didn't work and continues to the next (larger) radius. Only
+    # once every radius has been tried do we decide the failure kind:
+    # NoGraphNearby if the points (or the area) never produced a usable
+    # graph with both endpoints snapped, or a structured no_route result if
+    # they did snap at some radius but no path connected them (snapped_both
+    # — Bug 4: a *later*, larger-radius snap failure must not override an
+    # earlier successful snapped_both and raise NoGraphNearby instead of
+    # falling through to no_route).
     found = None
     graph = None
-    for radius_m in radii_m:
+    snapped_both = False
+    for i, radius_m in enumerate(radii_m):
+        is_last = i == len(radii_m) - 1
         graph = build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None)
         if graph.node_count() == 0:
-            raise NoGraphNearby(center_lat, center_lon, radius_m)
+            if is_last and not snapped_both:
+                raise NoGraphNearby(center_lat, center_lon, radius_m)
+            continue
 
         source = snap_to_graph(graph, from_lat, from_lon)
         if source is None:
-            raise NoGraphNearby(from_lat, from_lon, radius_m)
+            if is_last and not snapped_both:
+                raise NoGraphNearby(from_lat, from_lon, radius_m)
+            continue
         target = snap_to_graph(graph, to_lat, to_lon)
         if target is None:
-            raise NoGraphNearby(to_lat, to_lon, radius_m)
+            if is_last and not snapped_both:
+                raise NoGraphNearby(to_lat, to_lon, radius_m)
+            continue
 
+        snapped_both = True
         speed = 1.0 if graph.weight_is_time else const_speed
         found = _dijkstra_to_target(graph, source, target, speed)
         if found is not None:
             break
 
     if found is None:
+        # snapped_both is guaranteed True here: the loop above raises
+        # NoGraphNearby before falling through on the last radius whenever
+        # snapped_both is still False, so reaching this point with found
+        # still None means both endpoints snapped at some radius (Bug 4:
+        # even if a *later*, larger retry radius then failed to snap, that
+        # later failure just `continue`s rather than raising and clobbering
+        # this — the accurate answer here is no_route, not NoGraphNearby).
         return {
             "error": "no_route",
             "detail": "no path found between the points in the searched area",

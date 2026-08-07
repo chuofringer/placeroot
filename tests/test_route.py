@@ -70,6 +70,70 @@ def test_route_straight_line_beyond_cap_raises_route_too_long():
         routing.route(0.0, 0.0, 10.0, 10.0, mode="walk")
 
 
+def test_route_max_straight_line_derived_cap_magnitudes():
+    """ROUTE_MAX_STRAIGHT_LINE_M is derived from each mode's max_radius_m
+    (2 * (max_radius_m - SNAP_RADIUS_M) / RADIUS_BUFFER), not an
+    independently-chosen constant — assert the actual derived numbers so a
+    future change to MODE_CONFIG's radii (or RADIUS_BUFFER/SNAP_RADIUS_M)
+    that silently drifts the two apart gets caught here."""
+    assert routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"] == pytest.approx(7520.0)
+    assert routing.ROUTE_MAX_STRAIGHT_LINE_M["cycle"] == pytest.approx(23520.0)
+    assert routing.ROUTE_MAX_STRAIGHT_LINE_M["drive"] == pytest.approx(95520.0)
+
+
+def test_route_straight_line_just_beyond_derived_cap_raises_route_too_long():
+    """A pair just past walk's *derived* cap (~7.52km) must raise
+    RouteTooLong reporting that same derived cap as max_distance_m — before
+    the fix, walk's advertised 25km cap never actually fired here because
+    the isochrone extraction-radius check (base_radius_m > max_radius_m)
+    bound first, at ~7.5km, and reported a mismatched number."""
+    cap_m = routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"]
+    delta_deg = (cap_m * 1.02) / 110_540.0  # ~2% beyond the cap, pure-latitude offset
+    far_lat, far_lon = FROM_LAT + delta_deg, FROM_LON
+    straight_line_m = routing._haversine_m(FROM_LAT, FROM_LON, far_lat, far_lon)
+    assert straight_line_m > cap_m
+
+    with pytest.raises(routing.RouteTooLong) as exc_info:
+        routing.route(FROM_LAT, FROM_LON, far_lat, far_lon, mode="walk")
+    assert exc_info.value.max_distance_m == pytest.approx(cap_m)
+
+
+def test_route_straight_line_just_within_derived_cap_does_not_raise_route_too_long():
+    """A pair just inside walk's derived cap must not raise RouteTooLong —
+    it may still legitimately raise NoGraphNearby (this point sits outside
+    the routing fixture's grid) but must get past the straight-line/radius
+    gate first."""
+    cap_m = routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"]
+    delta_deg = (cap_m * 0.98) / 110_540.0  # ~2% inside the cap
+    near_lat, near_lon = FROM_LAT + delta_deg, FROM_LON
+    straight_line_m = routing._haversine_m(FROM_LAT, FROM_LON, near_lat, near_lon)
+    assert straight_line_m < cap_m
+
+    try:
+        routing.route(FROM_LAT, FROM_LON, near_lat, near_lon, mode="walk")
+    except routing.RouteTooLong:
+        pytest.fail("RouteTooLong raised for a pair inside the derived cap")
+    except (routing.NoGraphNearby, routing.UpstreamUnavailable):
+        pass  # fine — the fixture doesn't have graph data out there
+
+
+def test_midpoint_ordinary_pair_is_plain_average():
+    lat, lon = routing._midpoint(0.0, 0.0, 0.0, 10.0)
+    assert lat == pytest.approx(0.0)
+    assert lon == pytest.approx(5.0)
+
+
+def test_midpoint_antimeridian_pair_wraps_near_180():
+    """A plain (lon1 + lon2) / 2 gives ~0.0 for this pair (wrong side of the
+    globe — true midpoint is near +/-180). The antimeridian-aware midpoint
+    must land near +/-180 instead."""
+    lat, lon = routing._midpoint(0.0, 179.99, 0.0, -179.99)
+    assert lat == pytest.approx(0.0)
+    assert abs(lon) == pytest.approx(180.0, abs=0.02)
+    naive_lon = (179.99 + -179.99) / 2.0
+    assert abs(lon - naive_lon) > 100  # confirms the wrap actually did something
+
+
 def test_route_no_path_returns_structured_no_route_result():
     """Drive mode excludes the footway bridge — the only river crossing — so
     a near-bank and far-bank node are in permanently disconnected components
@@ -84,6 +148,106 @@ def test_route_no_path_returns_structured_no_route_result():
 
     assert result["error"] == "no_route"
     assert "detail" in result
+
+
+def test_route_retry_radius_used_after_empty_first_graph():
+    """Bug 3: the first radius's empty graph (node_count() == 0) must not
+    raise NoGraphNearby outright — it should move on and try the widened
+    retry radius, which here succeeds."""
+    calls: list[float] = []
+
+    def fake_build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None):
+        calls.append(radius_m)
+        if len(calls) == 1:
+            return routing.Graph()  # empty: node_count() == 0
+        g = routing.Graph()
+        g.add_node("src", FROM_LAT, FROM_LON)
+        g.add_node("dst", TO_LAT, TO_LON)
+        return g
+
+    def fake_snap_to_graph(graph, lat, lon, *args, **kwargs):
+        if graph.node_count() == 0:
+            return None
+        return "src" if (lat, lon) == (FROM_LAT, FROM_LON) else "dst"
+
+    def fake_dijkstra_to_target(graph, source, target, speed):
+        return (10.0, 5.0)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(routing, "build_graph", fake_build_graph)
+        mp.setattr(routing, "snap_to_graph", fake_snap_to_graph)
+        mp.setattr(routing, "_dijkstra_to_target", fake_dijkstra_to_target)
+        result = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
+
+    assert len(calls) == 2  # first radius attempted, then the retry
+    assert result["distance_m"] == 5.0
+    assert result["duration_s"] == 10.0
+
+
+def test_route_retry_radius_used_after_snap_failure():
+    """Bug 3: a snap failure at the first radius must not raise
+    NoGraphNearby outright either — same widen-and-continue behavior as an
+    empty graph."""
+    calls: list[float] = []
+
+    def fake_build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None):
+        calls.append(radius_m)
+        g = routing.Graph()
+        g.add_node("src", FROM_LAT, FROM_LON)
+        g.add_node("dst", TO_LAT, TO_LON)
+        return g
+
+    def fake_snap_to_graph(graph, lat, lon, *args, **kwargs):
+        if len(calls) == 1:
+            return None  # first radius: this endpoint fails to snap
+        return "src" if (lat, lon) == (FROM_LAT, FROM_LON) else "dst"
+
+    def fake_dijkstra_to_target(graph, source, target, speed):
+        return (10.0, 5.0)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(routing, "build_graph", fake_build_graph)
+        mp.setattr(routing, "snap_to_graph", fake_snap_to_graph)
+        mp.setattr(routing, "_dijkstra_to_target", fake_dijkstra_to_target)
+        result = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
+
+    assert len(calls) == 2
+    assert result["distance_m"] == 5.0
+
+
+def test_route_prefers_no_route_when_retry_radius_fails_after_earlier_snap_success():
+    """Bug 4: once both endpoints have snapped successfully at some radius
+    (snapped_both), a *later*, larger retry radius that fails to build a
+    usable graph must not raise NoGraphNearby and clobber that — it should
+    fall through to the structured no_route result, since both points are
+    known to be on real street graphs and simply disconnected."""
+    calls: list[float] = []
+
+    def fake_build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None):
+        calls.append(radius_m)
+        if len(calls) == 1:
+            g = routing.Graph()
+            g.add_node("src", FROM_LAT, FROM_LON)
+            g.add_node("dst", TO_LAT, TO_LON)
+            return g
+        return routing.Graph()  # retry radius: empty graph
+
+    def fake_snap_to_graph(graph, lat, lon, *args, **kwargs):
+        if graph.node_count() == 0:
+            return None
+        return "src" if (lat, lon) == (FROM_LAT, FROM_LON) else "dst"
+
+    def fake_dijkstra_to_target(graph, source, target, speed):
+        return None  # no path found on the successfully-snapped first graph
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(routing, "build_graph", fake_build_graph)
+        mp.setattr(routing, "snap_to_graph", fake_snap_to_graph)
+        mp.setattr(routing, "_dijkstra_to_target", fake_dijkstra_to_target)
+        result = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
+
+    assert len(calls) == 2
+    assert result["error"] == "no_route"
 
 
 def test_route_unsupported_mode_raises():

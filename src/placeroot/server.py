@@ -807,10 +807,12 @@ def route(
     segment).
 
     Each mode has a straight-line-distance cap on the two points, rejected
-    before any graph is built: walk 25km, cycle 75km, drive 300km — real
-    road distance only ever exceeds straight-line, so anything past the cap
-    can't produce a route worth extracting for anyway; returns
-    {"error": "route_too_long"}. An unrecognized mode string returns
+    before any graph is built (see routing.ROUTE_MAX_STRAIGHT_LINE_M, derived
+    per-mode from the same extraction-radius cap isochrone uses — roughly
+    walk 7.5km, cycle 23.5km, drive 95.5km) — real road distance only ever
+    exceeds straight-line, so anything past the cap can't produce a route
+    worth extracting for anyway; returns {"error": "route_too_long"} with
+    the exact cap in "max_distance_m". An unrecognized mode string returns
     {"error": "unsupported_mode"}; non-finite coordinates return
     {"error": "bad_request"}. If no usable graph or street node is found
     near either point, returns {"error": "no_graph_nearby"}. If both points
