@@ -77,7 +77,7 @@ def test_area_geometry_returns_raw_bbox_for_tile_lookups():
     """The 4th return value is the raw (possibly out-of-range) box from
     _bbox_around, not derived from the SQL filter's own params — those
     diverge once the box crosses the seam (see _bbox_filter_sql)."""
-    _, _, _, bbox = overture.area_geometry(10.0, 179.99, 5000)
+    _, _, _, bbox, _radius_m = overture.area_geometry(10.0, 179.99, 5000)
     xmin, ymin, xmax, ymax = bbox
     assert xmax > 180  # unwrapped, as _bbox_around produced it
 
