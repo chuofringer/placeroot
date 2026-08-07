@@ -1,0 +1,69 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.chuofringer/placeroot",
+  "title": "PlaceRoot",
+  "description": "22 tools, no API key — grounds AI agents in Overture Maps open data.",
+  "version": "0.5.0",
+  "websiteUrl": "https://placeroot.dev",
+  "repository": {
+    "url": "https://github.com/chuofringer/placeroot",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "placeroot",
+      "version": "0.5.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "PLACEROOT_CACHE",
+          "description": "Set to 'off' to disable the local on-disk tile cache. Optional; caching is on by default.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    },
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "placeroot",
+      "version": "0.5.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "PLACEROOT_CACHE",
+          "description": "Set to 'off' to disable the local on-disk tile cache. Optional; caching is on by default.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    },
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "placeroot",
+      "version": "0.5.0",
+      "runtimeHint": "uvx",
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--http",
+          "description": "Serve streamable-HTTP on 127.0.0.1:8321/mcp instead of stdio.",
+          "isRequired": true
+        }
+      ],
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://127.0.0.1:8321/mcp"
+      }
+    }
+  ]
+}
