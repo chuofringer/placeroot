@@ -14,3 +14,6 @@ design_handoff_placeroot_website/
 # Local secrets — never commit
 .env
 .env.*
+
+# wrangler local cache
+.wrangler/
