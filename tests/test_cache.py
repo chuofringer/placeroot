@@ -39,6 +39,28 @@ def test_tiles_for_bbox_single_tile():
     assert cache.tiles_for_bbox(-73.95, 40.65, -73.85, 40.75) == [(-74, 40)]
 
 
+def test_conn_lock_is_reentrant_for_the_cache_path_probe(cache_dir):
+    # #145: the cache path holds db.conn_lock (in _from_source) and then, on
+    # an lru-miss, re-enters it via probe_schema's own `with conn_lock`. A
+    # plain (non-reentrant) Lock self-deadlocks that thread; RLock allows the
+    # same-thread re-acquire. Force the inner probe to MISS (clear its cache),
+    # then reproduce the nesting and assert it completes rather than hangs.
+    db.probe_schema.cache_clear()
+    glob = str(FIXTURE_PATH)
+    result: dict = {}
+
+    def worker():
+        with db.conn_lock:  # outer hold, as _from_source does
+            result["schema"] = db.probe_schema(glob)  # re-acquires conn_lock
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(timeout=5)
+    assert not t.is_alive(), "conn_lock self-deadlocked on same-thread re-entry"
+    assert result["schema"] is not None and len(result["schema"]) > 0
+    db.probe_schema.cache_clear()
+
+
 def test_tiles_for_bbox_spans_multiple_tiles():
     tiles = cache.tiles_for_bbox(-74.5, 40.5, -73.5, 41.5)
     assert set(tiles) == {(-75, 40), (-75, 41), (-74, 40), (-74, 41)}

@@ -24,7 +24,16 @@ import duckdb
 logger = logging.getLogger(__name__)
 
 # Guards every use of shared_conn(). See the module docstring above.
-conn_lock = threading.Lock()
+#
+# Reentrant (RLock, #145): the cache-path schema probe re-enters this lock
+# from the same thread — _from_source holds conn_lock, then calls into
+# cache.resolve_fingerprint -> db.probe_schema, which itself takes conn_lock.
+# A plain Lock self-deadlocks that thread whenever the inner probe isn't a
+# cache hit (e.g. its lru entry was evicted under concurrent load). RLock
+# allows the same-thread re-acquire while still fully serializing *across*
+# threads — which is all the invariant needs, since a single thread never
+# runs two shared_conn().execute() calls at once (they're sequential).
+conn_lock = threading.RLock()
 
 _spatial_loaded = False
 
