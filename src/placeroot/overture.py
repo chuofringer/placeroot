@@ -395,6 +395,39 @@ def _place_attribute_filters(
     return filters
 
 
+def _place_presence_filters(
+    missing: set[str],
+    brand: str | None,
+    has_website: bool | None,
+    has_phone: bool | None,
+    params: dict,
+) -> list[str]:
+    """brand/has_website/has_phone filter clauses (params added in place),
+    shared by find_places and find_places_in_division so both modes of the
+    find_places tool honor them.
+
+    brand is a substring match on the place's brand name; has_website and
+    has_phone filter on whether the place has any entries at all, not on
+    their content. Each is a no-op (not an error) when its column is
+    absent from the active dataset, matching category/name.
+    """
+    filters = []
+    if brand is not None and "brand" not in missing:
+        filters.append("brand.names.primary ILIKE $brand")
+        params["brand"] = f"%{brand}%"
+    if has_website is not None and "websites" not in missing:
+        if has_website:
+            filters.append("(websites IS NOT NULL AND len(websites) > 0)")
+        else:
+            filters.append("(websites IS NULL OR len(websites) = 0)")
+    if has_phone is not None and "phones" not in missing:
+        if has_phone:
+            filters.append("(phones IS NOT NULL AND len(phones) > 0)")
+        else:
+            filters.append("(phones IS NULL OR len(phones) = 0)")
+    return filters
+
+
 def _place_select_exprs(missing: set[str]) -> dict[str, str]:
     """SQL expressions for a place row's compact-result columns, degrading
     to NULL for any column absent from the active dataset — shared by
@@ -407,6 +440,14 @@ def _place_select_exprs(missing: set[str]) -> dict[str, str]:
         "basic_category": "NULL" if "basic_category" in missing else "basic_category",
         "operating_status": "NULL" if "operating_status" in missing else "operating_status",
         "confidence": "NULL" if "confidence" in missing else "round(confidence, 2)",
+        "brand": "NULL" if "brand" in missing else "brand.names.primary",
+        "has_website": (
+            "FALSE" if "websites" in missing
+            else "(websites IS NOT NULL AND len(websites) > 0)"
+        ),
+        "has_phone": (
+            "FALSE" if "phones" in missing else "(phones IS NOT NULL AND len(phones) > 0)"
+        ),
     }
 
 
@@ -418,6 +459,9 @@ def find_places(
     name: str | None = None,
     min_confidence: float | None = None,
     operating_status: str | None = None,
+    brand: str | None = None,
+    has_website: bool | None = None,
+    has_phone: bool | None = None,
     limit: int = 10,
 ) -> list[dict]:
     """Places near a point, nearest first, compact rows.
@@ -430,6 +474,14 @@ def find_places(
     case-insensitively; raises ValueError if unrecognized. Both are a no-op
     (not an error) if the underlying column is missing from the active
     dataset — see degraded_fields().
+
+    brand is a substring match on the place's brand name (e.g. a chain);
+    has_website/has_phone filter on whether a place has any website/phone
+    entries at all, not on their content. Rows carry brand (str or None)
+    and has_website/has_phone (bool presence flags) — not the raw
+    websites/phones arrays, which stay compact and are only exposed in
+    full by place_details. Note brand is sparse (chains only): a null
+    brand does NOT mean "not that chain".
 
     Raises SchemaDegraded if bbox is missing from the active dataset (the
     tool can't answer at all without it), or UpstreamUnavailable if the
@@ -451,6 +503,9 @@ def find_places(
     filters.extend(
         _place_attribute_filters(missing, min_confidence, operating_status, params)
     )
+    filters.extend(
+        _place_presence_filters(missing, brand, has_website, has_phone, params)
+    )
 
     exprs = _place_select_exprs(missing)
 
@@ -462,6 +517,9 @@ def find_places(
             {exprs["basic_category"]}             AS basic_category,
             {exprs["operating_status"]}           AS operating_status,
             {exprs["confidence"]}                AS confidence,
+            {exprs["brand"]}                     AS brand,
+            {exprs["has_website"]}               AS has_website,
+            {exprs["has_phone"]}                 AS has_phone,
             round(bbox.ymin, 6)                 AS lat,
             round(bbox.xmin, 6)                 AS lon,
             round({_DISTANCE_EXPR}, 0)          AS distance_m
@@ -477,7 +535,7 @@ def find_places(
         raise UpstreamUnavailable(str(e)) from e
     cols = [
         "id", "name", "category", "basic_category", "operating_status",
-        "confidence", "lat", "lon", "distance_m",
+        "confidence", "brand", "has_website", "has_phone", "lat", "lon", "distance_m",
     ]
     results = [dict(zip(cols, r)) for r in rows]
     for d in results:
@@ -574,6 +632,9 @@ def find_places_in_division(
     name: str | None = None,
     min_confidence: float | None = None,
     operating_status: str | None = None,
+    brand: str | None = None,
+    has_website: bool | None = None,
+    has_phone: bool | None = None,
     limit: int = 10,
 ) -> list[dict] | None:
     """Places whose point falls inside a division's boundary polygon.
@@ -590,7 +651,8 @@ def find_places_in_division(
     ST_Contains over the full places dataset is a full-table scan) and then
     exactly tested with ST_Contains against the merged polygon. category/name
     narrow the search exactly as they do for find_places, as do
-    min_confidence/operating_status. Results are
+    min_confidence/operating_status and brand/has_website/has_phone.
+    Results are
     ordered by name then id (there's no reference point to rank by distance
     from, unlike find_places) and rows come back in the same shape as
     find_places' minus distance_m.
@@ -636,6 +698,9 @@ def find_places_in_division(
     filters.extend(
         _place_attribute_filters(missing, min_confidence, operating_status, params)
     )
+    filters.extend(
+        _place_presence_filters(missing, brand, has_website, has_phone, params)
+    )
 
     exprs = _place_select_exprs(missing)
     bbox = (div_xmin, div_ymin, div_xmax, div_ymax)
@@ -648,6 +713,9 @@ def find_places_in_division(
             {exprs["basic_category"]}             AS basic_category,
             {exprs["operating_status"]}           AS operating_status,
             {exprs["confidence"]}                AS confidence,
+            {exprs["brand"]}                     AS brand,
+            {exprs["has_website"]}               AS has_website,
+            {exprs["has_phone"]}                 AS has_phone,
             round(bbox.ymin, 6)                 AS lat,
             round(bbox.xmin, 6)                 AS lon
         FROM {_from_source(bbox)}
@@ -662,7 +730,7 @@ def find_places_in_division(
         raise UpstreamUnavailable(str(e)) from e
     cols = [
         "id", "name", "category", "basic_category", "operating_status",
-        "confidence", "lat", "lon",
+        "confidence", "brand", "has_website", "has_phone", "lat", "lon",
     ]
     results = [dict(zip(cols, r)) for r in rows]
     for d in results:
