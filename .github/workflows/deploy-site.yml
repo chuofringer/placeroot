@@ -62,7 +62,13 @@ jobs:
 
           # Capture the exact alias URL wrangler prints, rather than
           # reconstructing Cloudflare's branch-name sanitization ourselves.
-          ALIAS_URL=$(grep -o 'Deployment alias URL: .*' wrangler-deploy.log | sed 's/^Deployment alias URL: //' | tr -d '\r')
+          # A production (main) deploy prints no "Deployment alias URL:" line,
+          # so grep finds nothing and exits 1 — the trailing `|| true` keeps
+          # that expected no-match from failing the step under `set -e`/pipefail
+          # (the deploy itself already succeeded above). The PR-comment step is
+          # gated on a non-main ref + non-empty alias_url, so an empty value
+          # here is fine.
+          ALIAS_URL=$(grep -o 'Deployment alias URL: .*' wrangler-deploy.log | sed 's/^Deployment alias URL: //' | tr -d '\r' || true)
           echo "alias_url=$ALIAS_URL" >> "$GITHUB_OUTPUT"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
