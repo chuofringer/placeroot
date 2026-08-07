@@ -62,7 +62,7 @@ jobs:
       # OIDC token, so there is no token to leak and no one-time-password
       # prompt (which is what blocked the automation-token path, EOTP).
       # Requires a configured trusted publisher on npmjs.com for this repo +
-      # workflow; see docs/PUBLISHING notes.
+      # workflow; see docs/PUBLISHING.md.
       - name: Upgrade npm for trusted publishing
         run: npm install -g npm@latest
 
