@@ -609,6 +609,46 @@ def reverse_geocode(lat: float, lon: float) -> dict:
 
 
 @mcp.tool()
+def reverse_geocode_batch(points: list[dict]) -> dict:
+    """Reverse-geocode many points in one call, to cut N round-trips down to one.
+
+    Accepts at most 20 points; a longer list returns a structured
+    {"error": "bad_request"} instead of processing anything. Returns one
+    row per point in `points`, in the same order — each row is whatever
+    reverse_geocode(lat, lon) returns (address/divisions chain, or a
+    "divisions_only" degrade — see reverse_geocode's docstring). A
+    malformed point (missing or non-numeric lat/lon) doesn't fail the
+    whole batch — it yields a per-row {"error": ...} in its slot instead.
+    """
+    if len(points) > 20:
+        return {
+            "error": "bad_request",
+            "detail": f"reverse_geocode_batch accepts at most 20 points, got {len(points)}",
+        }
+
+    rows = []
+    try:
+        for p in points:
+            try:
+                lat = float(p["lat"])
+                lon = float(p["lon"])
+            except (KeyError, TypeError, ValueError):
+                rows.append(
+                    {
+                        "lat": p.get("lat") if isinstance(p, dict) else None,
+                        "lon": p.get("lon") if isinstance(p, dict) else None,
+                        "error": "each point needs numeric lat and lon",
+                    }
+                )
+                continue
+            rows.append(geocoding.reverse_geocode(lat, lon))
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+
+    return budget.apply_budget({"results": rows}, "results")
+
+
+@mcp.tool()
 def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
     """Simplify a GeoJSON geometry to fit a token budget, reporting what was lost.
 
