@@ -1,13 +1,12 @@
 {
   "name": "placeroot",
   "version": "0.3.0",
-  "description": "Ground AI agents in open map data. MCP server for Overture Maps — compact answers, no API key. Placeholder for the placeroot project; the server is distributed on PyPI (uvx placeroot).",
+  "description": "Ground AI agents in open map data. MCP server for Overture Maps — compact answers, no API key. This launcher runs the Python server via `uvx placeroot` under the hood, so `npx placeroot` works out of the box.",
   "bin": { "placeroot": "index.js" },
   "files": ["index.js"],
+  "engines": { "node": ">=18" },
   "keywords": ["mcp", "overture-maps", "geospatial", "ai-agents", "maps"],
   "license": "MIT",
   "author": "Vibe Mapper <chuo.fringer@gmail.com>",
-  "homepage": "https://placeroot.dev",
-  "repository": { "type": "git", "url": "git+https://github.com/chuofringer/placeroot.git" },
-  "bugs": { "url": "https://github.com/chuofringer/placeroot/issues" }
+  "homepage": "https://placeroot.dev"
 }
