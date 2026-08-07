@@ -60,9 +60,13 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       # Trusted publishing needs npm >= 11.5.1; setup-node's Node 20 ships an
-      # older npm. Upgrade, then publish with provenance — auth is via the
-      # OIDC token, so there is no token to leak and no one-time-password
-      # prompt (which is what blocked the automation-token path, EOTP).
+      # older npm. Upgrade, then publish — auth is via the OIDC token, so there
+      # is no token to leak and no one-time-password prompt (which is what
+      # blocked the automation-token path, EOTP).
+      # NOTE: no --provenance. Sigstore provenance requires a PUBLIC source
+      # repository ("Unsupported GitHub Actions source repository visibility:
+      # private"); this repo is private, so provenance is impossible and the
+      # flag hard-fails the publish. 0.3.0 shipped this same way, sans flag.
       # Requires a configured trusted publisher on npmjs.com for this repo +
       # workflow; see docs/PUBLISHING.md.
       - name: Upgrade npm for trusted publishing
@@ -79,5 +83,5 @@ jobs:
           if npm view "placeroot@${VERSION}" version >/dev/null 2>&1; then
             echo "placeroot@${VERSION} is already on npm — nothing to publish."
           else
-            npm publish --provenance --access public
+            npm publish --access public
           fi
