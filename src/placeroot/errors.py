@@ -33,3 +33,22 @@ class SchemaDegraded(Exception):
         super().__init__(detail)
         self.detail = detail
         self.missing = missing
+
+
+class AmbiguousArea(Exception):
+    """A free-text area name matched several equally-ranked divisions.
+
+    Raised by geocode.resolve_area rather than silently picking one, so the
+    caller can hand the agent the actual candidates to choose between.
+    candidates is a list of {"division_id", "name", "admin_context"}.
+    """
+
+    def __init__(self, area: str, candidates: list[dict]):
+        detail = (
+            f"{area!r} matches {len(candidates)} equally-ranked divisions; "
+            "pass one of the listed division_id values instead"
+        )
+        super().__init__(detail)
+        self.detail = detail
+        self.area = area
+        self.candidates = candidates
