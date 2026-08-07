@@ -1195,7 +1195,13 @@ def resolve_area(area: str) -> dict | None:
     if not area:
         return None
 
-    divisions = [r for r in geocode(area, limit=_RESOLVE_OVERFETCH) if r["type"] != "place"]
+    # Rows without an id can't be handed to the polygon search at all, so
+    # they're dropped here rather than surfacing as a confusing downstream
+    # error (id is only ever absent from a degraded dataset).
+    divisions = [
+        r for r in geocode(area, limit=_RESOLVE_OVERFETCH)
+        if r["type"] != "place" and r["id"]
+    ]
     if not divisions:
         return None
 

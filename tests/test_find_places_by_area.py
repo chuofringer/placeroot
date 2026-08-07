@@ -231,3 +231,23 @@ def test_filters_compose_with_area(linked_area_fixtures):
     assert empty["results"] == []
     # The unknown-category hint still fires on the area path.
     assert "search_categories" in empty["note"]
+
+
+def test_server_rejects_a_blank_area():
+    """A blank area is a malformed call, not an unresolvable place."""
+    assert server.find_places(area="   ")["error"] == "bad_request"
+
+
+def test_resolve_area_skips_divisions_without_an_id(monkeypatch):
+    """A degraded dataset can yield a division row with no id; it can't be
+    passed to the polygon search, so it must not become the chosen area."""
+    monkeypatch.setattr(
+        geocode, "geocode",
+        lambda q, limit=None: [
+            {"id": None, "name": "Ghost", "type": "locality",
+             "admin_context": [], "rank_score": 0.99, "lat": 0.0, "lon": 0.0},
+            {"id": "gers-real", "name": "Ghost", "type": "locality",
+             "admin_context": ["Somewhere"], "rank_score": 0.5, "lat": 0.0, "lon": 0.0},
+        ],
+    )
+    assert geocode.resolve_area("Ghost")["division_id"] == "gers-real"

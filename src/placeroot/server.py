@@ -183,6 +183,8 @@ def find_places(
     # division, then fall through to exactly the same polygon search.
     resolved_area = None
     if area is not None:
+        if not area.strip():
+            return {"error": "bad_request", "detail": "area must be a non-empty name"}
         try:
             resolved_area = geocoding.resolve_area(area)
         except errors.AmbiguousArea as e:
