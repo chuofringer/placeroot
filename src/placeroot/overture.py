@@ -23,6 +23,7 @@ module's call sites and the tests — import db directly in new code.
 import logging
 import math
 import os
+import threading
 
 import duckdb
 
@@ -565,6 +566,35 @@ def _ensure_spatial() -> None:
         raise UpstreamUnavailable(f"could not load spatial extension: {e}") from e
 
 
+# Resolved division polygons, keyed by (division_area glob, division_id).
+# Step 1 of the polygon search scans the divisions theme for one id, which
+# is NOT partition- or row-group-prunable (there's no point to prune by, and
+# the ids aren't sorted), so it costs a full column scan of a large theme --
+# measured at tens of seconds against live Overture data (#148). The result
+# is immutable for a given release, and an agent exploring one area
+# typically issues several queries against the same division, so caching it
+# turns every call after the first into a local dict hit.
+#
+# Keyed by glob so a set_data_path() switch (tests, a mirror swap, a new
+# release) can never serve a polygon resolved against the previous dataset.
+#
+# Bounded by total WKB bytes rather than entry count: division polygons vary
+# enormously (a neighborhood is a few KB, a country with islands can be tens
+# of MB), so an entry-count cap would either be useless for small ones or
+# hold hundreds of MB of large ones. A single polygon bigger than the whole
+# budget is simply not cached — it still resolves, it just doesn't evict
+# everything else to sit there alone.
+_DIVISION_GEOMETRY_CACHE_MAX_BYTES = 64 * 1024 * 1024
+_division_geometry_cache: dict[tuple[str, str], tuple | None] = {}
+_division_geometry_lock = threading.Lock()
+
+
+def clear_division_geometry_cache() -> None:
+    """Drop every cached division polygon. For tests and hot-reloads."""
+    with _division_geometry_lock:
+        _division_geometry_cache.clear()
+
+
 def _resolve_division_geometry(
     division_id: str,
 ) -> tuple[bytes, float, float, float, float] | None:
@@ -590,6 +620,10 @@ def _resolve_division_geometry(
     """
     _ensure_spatial()
     div_upstream = _upstream_glob(theme="divisions", type_="division_area")
+    cache_key = (div_upstream, division_id)
+    with _division_geometry_lock:
+        if cache_key in _division_geometry_cache:
+            return _division_geometry_cache[cache_key]
     missing = set(missing_columns(div_upstream, _DIVISION_AREA_REQUIRED_COLUMNS))
     essential_missing = [c for c in missing if c in _DIVISION_AREA_ESSENTIAL_COLUMNS]
     if essential_missing:
@@ -621,9 +655,32 @@ def _resolve_division_geometry(
     # (ST_AsWKB(...) on it is non-NULL, just empty), but ST_XMin/etc. on an
     # empty geometry are NULL -- check the bbox extent, not the WKB, to
     # detect "division_id matched nothing."
-    if row is None or row[1] is None:
-        return None
-    return row
+    resolved = None if (row is None or row[1] is None) else row
+    _cache_division_geometry(cache_key, resolved)
+    return resolved
+
+
+def _division_geometry_bytes(entry: tuple | None) -> int:
+    """Approximate memory held by a cache entry (its WKB blob)."""
+    return 0 if entry is None else len(entry[0])
+
+
+def _cache_division_geometry(cache_key: tuple[str, str], resolved: tuple | None) -> None:
+    """Store a resolved polygon, evicting oldest-first to stay under budget.
+
+    A miss (unknown id) is cached too — it costs the same full scan to
+    re-derive, and repeating a bad id shouldn't buy another one.
+    """
+    size = _division_geometry_bytes(resolved)
+    if size > _DIVISION_GEOMETRY_CACHE_MAX_BYTES:
+        return
+    with _division_geometry_lock:
+        _division_geometry_cache[cache_key] = resolved
+        total = sum(_division_geometry_bytes(v) for v in _division_geometry_cache.values())
+        while total > _DIVISION_GEOMETRY_CACHE_MAX_BYTES and len(_division_geometry_cache) > 1:
+            # dicts preserve insertion order, so this is oldest-first.
+            oldest = next(iter(_division_geometry_cache))
+            total -= _division_geometry_bytes(_division_geometry_cache.pop(oldest))
 
 
 def find_places_in_division(
