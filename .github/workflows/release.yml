@@ -46,31 +46,26 @@ jobs:
     # a no-op — so npm can publish independently of a fresh PyPI upload.
     if: ${{ !cancelled() && needs.pypi.result == 'success' }}
     permissions:
-      contents: read  # explicit so checkout works regardless of the repo's
-                      # default-token-permission setting (private repo).
+      contents: read   # checkout on a private repo
+      id-token: write  # npm trusted publishing (OIDC) — no NPM_TOKEN, no 2FA
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check NPM_TOKEN secret is configured
-        id: check_token
-        run: |
-          if [ -n "${{ secrets.NPM_TOKEN }}" ]; then
-            echo "has_token=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_token=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::NPM_TOKEN secret not set — skipping npm publish"
-          fi
-
       - name: Set up Node
-        if: steps.check_token.outputs.has_token == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Publish to npm
-        if: steps.check_token.outputs.has_token == 'true'
+      # Trusted publishing needs npm >= 11.5.1; setup-node's Node 20 ships an
+      # older npm. Upgrade, then publish with provenance — auth is via the
+      # OIDC token, so there is no token to leak and no one-time-password
+      # prompt (which is what blocked the automation-token path, EOTP).
+      # Requires a configured trusted publisher on npmjs.com for this repo +
+      # workflow; see docs/PUBLISHING notes.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Publish to npm (trusted publishing)
         working-directory: npm
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
