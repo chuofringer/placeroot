@@ -68,4 +68,14 @@ jobs:
 
       - name: Publish to npm (trusted publishing)
         working-directory: npm
-        run: npm publish --provenance --access public
+        run: |
+          # Idempotent, mirroring the PyPI job's skip-existing: publish only if
+          # this version isn't already on npm, so a re-run of an already-shipped
+          # version is a clean no-op instead of a "cannot publish over the
+          # previously published version" failure.
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "placeroot@${VERSION}" version >/dev/null 2>&1; then
+            echo "placeroot@${VERSION} is already on npm — nothing to publish."
+          else
+            npm publish --provenance --access public
+          fi
