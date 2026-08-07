@@ -249,3 +249,146 @@ def test_min_confidence_and_operating_status_are_noop_when_columns_missing(tmp_p
         assert all(r["operating_status"] is None for r in results)
     finally:
         overture.set_data_path(str(FIXTURE_PATH))
+
+
+def test_rows_carry_brand_and_presence_flags():
+    """Issue #128: every row now carries brand (str-or-None) and the
+    has_website/has_phone presence booleans, even when they're all absent."""
+    results = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=25)
+    assert results
+    for r in results:
+        assert "brand" in r
+        assert r["brand"] is None or isinstance(r["brand"], str)
+        assert isinstance(r["has_website"], bool)
+        assert isinstance(r["has_phone"], bool)
+    # The fixture's one fully-populated row (Blue Bottle Roastery) proves the
+    # flags/brand aren't just always-empty stand-ins. It's part of a 200-row
+    # dense cluster, so a name filter (not a bare top-25 by distance) is
+    # needed to guarantee it's the row that comes back.
+    roastery = overture.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000, name="Roastery", limit=25
+    )[0]
+    assert roastery["name"] == "Blue Bottle Roastery"
+    assert roastery["brand"] == "Blue Bottle Coffee"
+    assert roastery["has_website"] is True
+    assert roastery["has_phone"] is True
+
+
+def test_brand_filter_matches_only_that_brand():
+    results = overture.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000, brand="Blue Bottle Coffee", limit=25
+    )
+    assert len(results) == 1
+    assert results[0]["name"] == "Blue Bottle Roastery"
+    assert results[0]["brand"] == "Blue Bottle Coffee"
+
+
+def test_brand_filter_no_match_returns_empty():
+    results = overture.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000, brand="Nonexistent Chain Inc", limit=25
+    )
+    assert results == []
+
+
+def test_has_website_true_returns_only_places_with_a_website():
+    results = overture.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000, has_website=True, limit=25
+    )
+    names = {r["name"] for r in results}
+    assert names == {"Blue Bottle Roastery", "Cluster Place 010"}
+    assert all(r["has_website"] is True for r in results)
+
+
+def test_has_website_false_excludes_places_with_a_website():
+    results = overture.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000, has_website=False, limit=25
+    )
+    names = {r["name"] for r in results}
+    assert "Blue Bottle Roastery" not in names
+    assert "Cluster Place 010" not in names
+    assert all(r["has_website"] is False for r in results)
+
+
+def test_has_phone_true_returns_only_places_with_a_phone():
+    results = overture.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000, has_phone=True, limit=25
+    )
+    assert len(results) == 1
+    assert results[0]["name"] == "Blue Bottle Roastery"
+    assert results[0]["has_phone"] is True
+
+
+def test_has_phone_false_excludes_places_with_a_phone():
+    results = overture.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000, has_phone=False, limit=25
+    )
+    assert all(r["name"] != "Blue Bottle Roastery" for r in results)
+    # Cluster Place 010 has a website but no phone, so has_phone=False
+    # (narrowed with a name filter — it's one of 200 in a dense cluster,
+    # not guaranteed to land in a bare top-25-by-distance) still includes it.
+    narrowed = overture.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000,
+        name="Cluster Place 010", has_phone=False, limit=25,
+    )
+    assert len(narrowed) == 1
+    assert narrowed[0]["name"] == "Cluster Place 010"
+
+
+def test_brand_composes_with_category():
+    """brand + category both apply — Blue Bottle Roastery's basic_category
+    is 'bar' in the fixture (synthetic data), so pairing brand with the
+    right category narrows to it, and the wrong category excludes it."""
+    matching = overture.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000,
+        brand="Blue Bottle Coffee", category="bar", limit=25,
+    )
+    assert len(matching) == 1
+    assert matching[0]["name"] == "Blue Bottle Roastery"
+
+    non_matching = overture.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000,
+        brand="Blue Bottle Coffee", category="coffee_shop", limit=25,
+    )
+    assert non_matching == []
+
+
+def test_has_website_composes_with_category():
+    """has_website + category both apply — only Cluster Place 010
+    (grocery_store, has a website) should match; Blue Bottle Roastery is
+    excluded here because its category is 'bar', not 'grocery_store'."""
+    results = overture.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000,
+        has_website=True, category="grocery_store", limit=25,
+    )
+    assert len(results) == 1
+    assert results[0]["name"] == "Cluster Place 010"
+
+
+def test_brand_and_presence_filters_noop_when_columns_missing(tmp_path):
+    """Issue #128: with brand/websites/phones missing from the dataset, the
+    filters no-op (never raise/exclude everything) and rows come back with
+    brand=None / has_website=False / has_phone=False rather than erroring —
+    mirrors the degraded-column pattern in test_resilience.py."""
+    con = duckdb.connect()
+    degraded = tmp_path / "missing_brand_websites_phones.parquet"
+    con.execute(
+        "COPY (SELECT * EXCLUDE (brand, websites, phones) "
+        f"FROM read_parquet('{FIXTURE_PATH}')) TO '{degraded}' (FORMAT PARQUET)"
+    )
+    overture.set_data_path(str(degraded))
+    try:
+        results = overture.find_places(
+            CENTER_LAT, CENTER_LON, radius_m=1000,
+            brand="Blue Bottle Coffee", has_website=True, has_phone=True, limit=25,
+        )
+        # The filters no-op on missing columns, so the radius search still
+        # returns its normal full set of matches rather than an empty list.
+        assert results
+        assert all(r["brand"] is None for r in results)
+        assert all(r["has_website"] is False for r in results)
+        assert all(r["has_phone"] is False for r in results)
+        assert overture.degraded_fields() == ["websites", "phones", "brand"] or set(
+            overture.degraded_fields()
+        ) == {"brand", "websites", "phones"}
+    finally:
+        overture.set_data_path(None)

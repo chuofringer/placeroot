@@ -98,6 +98,9 @@ def find_places(
     min_confidence: float | None = None,
     operating_status: str | None = None,
     limit: int = 10,
+    brand: str | None = None,
+    has_website: bool | None = None,
+    has_phone: bool | None = None,
     division_id: str | None = None,
 ) -> dict:
     """Find named places, either near a point or inside a division's boundary.
@@ -126,10 +129,22 @@ def find_places(
     "closed_permanently", "closed_temporarily"), matched case-insensitively
     — "permanently closed"/"closed" also match Overture's separate
     "closed_permanently" raw value, since both relabel the same way.
-    Unrecognized values return a bad_request error. Both compose with
-    either mode, and both are a silent no-op (not an error) if the
-    underlying column (confidence / operating_status) is absent from the
-    active dataset — see degraded_fields() on the response.
+    Unrecognized values return a bad_request error.
+
+    brand is a substring match on the place's brand name (e.g. 'Starbucks').
+    Brand data is sparse — most independent businesses have no brand at all,
+    so brand=X narrows results down to that chain only; the absence of a
+    result does NOT mean "not a Starbucks", it may just mean brand isn't
+    populated for that place. has_website/has_phone filter on whether a
+    place has any website/phone entries at all (presence, not content) —
+    each result row carries brand (string or null) and has_website/has_phone
+    (booleans) so an agent can see why a place matched, but the full
+    websites/phones arrays are only returned by place_details.
+
+    Every filter above composes with either mode, and each is a silent
+    no-op (not an error) if the column it needs (confidence /
+    operating_status / brand / websites / phones) is absent from the active
+    dataset — see degraded_fields() on the response.
     Returns {"results": [...]}, plus truncated/omitted_count if the answer
     didn't fit the token budget. Returns a structured {"error": "bad_request",
     ...} if neither mode's inputs are given (or both are), {"error":
@@ -153,7 +168,8 @@ def find_places(
     if division_id is not None:
         try:
             rows = overture.find_places_in_division(
-                division_id, category, name, min_confidence, operating_status, limit
+                division_id, category, name,
+                min_confidence, operating_status, brand, has_website, has_phone, limit,
             )
         except ValueError as e:
             return {"error": "bad_request", "detail": str(e)}
@@ -170,7 +186,8 @@ def find_places(
         return {"error": "bad_request", "detail": "pass both lat and lon"}
     try:
         rows = overture.find_places(
-            lat, lon, radius_m, category, name, min_confidence, operating_status, limit
+            lat, lon, radius_m, category, name,
+            min_confidence, operating_status, brand, has_website, has_phone, limit,
         )
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
