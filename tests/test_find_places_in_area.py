@@ -342,3 +342,39 @@ def test_division_geometry_cache_is_keyed_by_dataset(polygon_fixtures, tmp_path)
     overture.set_data_path(str(other), theme="divisions")
 
     assert overture._resolve_division_geometry(DIV_NOTCH) is None
+
+
+def test_division_geometry_cache_is_bounded_by_bytes(polygon_fixtures, monkeypatch):
+    """Division polygons vary from a few KB to tens of MB, so the cache is
+    capped by total WKB bytes; the oldest entries go first."""
+    overture.clear_division_geometry_cache()
+    monkeypatch.setattr(overture, "_DIVISION_GEOMETRY_CACHE_MAX_BYTES", 100)
+
+    small = (b"x" * 40, 0.0, 1.0, 0.0, 1.0)
+    overture._cache_division_geometry(("glob", "a"), small)
+    overture._cache_division_geometry(("glob", "b"), small)
+    assert set(overture._division_geometry_cache) == {("glob", "a"), ("glob", "b")}
+
+    # Third entry pushes past the budget: the oldest is dropped.
+    overture._cache_division_geometry(("glob", "c"), small)
+    assert ("glob", "a") not in overture._division_geometry_cache
+    assert ("glob", "c") in overture._division_geometry_cache
+
+
+def test_a_polygon_larger_than_the_whole_budget_is_not_cached(polygon_fixtures, monkeypatch):
+    """It still resolves — it just doesn't evict everything else to sit
+    there alone."""
+    overture.clear_division_geometry_cache()
+    monkeypatch.setattr(overture, "_DIVISION_GEOMETRY_CACHE_MAX_BYTES", 100)
+
+    keeper = (b"x" * 40, 0.0, 1.0, 0.0, 1.0)
+    overture._cache_division_geometry(("glob", "keep"), keeper)
+    overture._cache_division_geometry(("glob", "huge"), (b"x" * 5000, 0.0, 1.0, 0.0, 1.0))
+
+    assert ("glob", "huge") not in overture._division_geometry_cache
+    assert ("glob", "keep") in overture._division_geometry_cache
+
+
+def test_a_cached_miss_costs_no_bytes(polygon_fixtures):
+    """An unknown-id miss is worth caching and holds nothing."""
+    assert overture._division_geometry_bytes(None) == 0

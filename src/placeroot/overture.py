@@ -575,10 +575,16 @@ def _ensure_spatial() -> None:
 # typically issues several queries against the same division, so caching it
 # turns every call after the first into a local dict hit.
 #
-# Bounded and keyed by glob so a set_data_path() switch (tests, a mirror
-# swap, a new release) can never serve a polygon resolved against the
-# previous dataset. WKB polygons can be large, so the cap is small.
-_DIVISION_GEOMETRY_CACHE_MAX = 16
+# Keyed by glob so a set_data_path() switch (tests, a mirror swap, a new
+# release) can never serve a polygon resolved against the previous dataset.
+#
+# Bounded by total WKB bytes rather than entry count: division polygons vary
+# enormously (a neighborhood is a few KB, a country with islands can be tens
+# of MB), so an entry-count cap would either be useless for small ones or
+# hold hundreds of MB of large ones. A single polygon bigger than the whole
+# budget is simply not cached — it still resolves, it just doesn't evict
+# everything else to sit there alone.
+_DIVISION_GEOMETRY_CACHE_MAX_BYTES = 64 * 1024 * 1024
 _division_geometry_cache: dict[tuple[str, str], tuple | None] = {}
 _division_geometry_lock = threading.Lock()
 
@@ -650,13 +656,31 @@ def _resolve_division_geometry(
     # empty geometry are NULL -- check the bbox extent, not the WKB, to
     # detect "division_id matched nothing."
     resolved = None if (row is None or row[1] is None) else row
-    with _division_geometry_lock:
-        # A miss (unknown id) is cached too: it's just as expensive to
-        # re-derive, and repeating a bad id shouldn't cost another full scan.
-        if len(_division_geometry_cache) >= _DIVISION_GEOMETRY_CACHE_MAX:
-            _division_geometry_cache.pop(next(iter(_division_geometry_cache)), None)
-        _division_geometry_cache[cache_key] = resolved
+    _cache_division_geometry(cache_key, resolved)
     return resolved
+
+
+def _division_geometry_bytes(entry: tuple | None) -> int:
+    """Approximate memory held by a cache entry (its WKB blob)."""
+    return 0 if entry is None else len(entry[0])
+
+
+def _cache_division_geometry(cache_key: tuple[str, str], resolved: tuple | None) -> None:
+    """Store a resolved polygon, evicting oldest-first to stay under budget.
+
+    A miss (unknown id) is cached too — it costs the same full scan to
+    re-derive, and repeating a bad id shouldn't buy another one.
+    """
+    size = _division_geometry_bytes(resolved)
+    if size > _DIVISION_GEOMETRY_CACHE_MAX_BYTES:
+        return
+    with _division_geometry_lock:
+        _division_geometry_cache[cache_key] = resolved
+        total = sum(_division_geometry_bytes(v) for v in _division_geometry_cache.values())
+        while total > _DIVISION_GEOMETRY_CACHE_MAX_BYTES and len(_division_geometry_cache) > 1:
+            # dicts preserve insertion order, so this is oldest-first.
+            oldest = next(iter(_division_geometry_cache))
+            total -= _division_geometry_bytes(_division_geometry_cache.pop(oldest))
 
 
 def find_places_in_division(
