@@ -203,6 +203,53 @@ def test_server_isochrone_no_graph_nearby_error():
     assert result["error"] == "no_graph_nearby"
 
 
+# --- Issue #133: negative minutes/radius_m must be rejected up front, not ---
+# --- silently turned into an inverted bbox that yields a misleading       ---
+# --- "no graph nearby" error. --------------------------------------------
+
+
+def test_server_isochrone_negative_minutes_is_bad_request():
+    lat, lon = fx.node_latlon(10, 10)
+    result = server.isochrone(lat, lon, minutes=-5)
+    assert result["error"] == "bad_request"
+    # Not the misleading "no walkable segments found within -Nm" message.
+    assert "no_graph_nearby" not in str(result)
+    assert "must be greater than 0" in result["detail"]
+
+
+def test_server_isochrone_negative_radius_m_is_bad_request():
+    lat, lon = fx.node_latlon(10, 10)
+    result = server.isochrone(lat, lon, minutes=5, radius_m=-100)
+    assert result["error"] == "bad_request"
+
+
+def test_server_isochrone_zero_minutes_is_bad_request():
+    lat, lon = fx.node_latlon(10, 10)
+    result = server.isochrone(lat, lon, minutes=0)
+    assert result["error"] == "bad_request"
+
+
+def test_isochrone_negative_minutes_raises_value_error():
+    lat, lon = fx.node_latlon(10, 10)
+    with pytest.raises(ValueError):
+        routing.isochrone(lat, lon, minutes=-5)
+
+
+def test_isochrone_negative_radius_m_raises_value_error():
+    lat, lon = fx.node_latlon(10, 10)
+    with pytest.raises(ValueError):
+        routing.isochrone(lat, lon, minutes=5, radius_m=-100)
+
+
+def test_server_isochrone_valid_minutes_still_works():
+    """No regression: a normal, valid call must still return a polygon/stats,
+    not get caught by the new bad_request guard."""
+    lat, lon = fx.node_latlon(10, 10)
+    result = server.isochrone(lat, lon, minutes=5)
+    assert "polygon" in result
+    assert result["stats"]["reachable_nodes"] > 0
+
+
 # --- Issue #37: interior-connector splitting + component-aware snapping ---
 
 
