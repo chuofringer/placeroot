@@ -10,3 +10,7 @@ dist/
 # Local website design handoff + prototype (not shipped)
 design_handoff_placeroot_website/
 *.zip
+
+# Local secrets — never commit
+.env
+.env.*
