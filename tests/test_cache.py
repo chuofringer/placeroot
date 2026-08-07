@@ -476,7 +476,9 @@ def test_claims_expire_so_tiles_do_not_pin_the_cache_forever(con, cache_dir, syn
         con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con
     )
     assert paths
-    assert cache._claimed_paths() & set(paths)
+    now = time.monotonic()
+    with cache._claims_lock:
+        assert all(cache._is_claimed_locked(p, now) for p in paths)
 
     # Re-claim with an already-elapsed lease, standing in for the passage of
     # _CLAIM_TTL_S without sleeping through it.
@@ -484,7 +486,10 @@ def test_claims_expire_so_tiles_do_not_pin_the_cache_forever(con, cache_dir, syn
         for p in paths:
             cache._claims[p] = time.monotonic() - 1.0
 
-    assert not (cache._claimed_paths() & set(paths))
+    # Expired claims no longer protect anything, and eviction clears them.
+    now = time.monotonic()
+    with cache._claims_lock:
+        assert not any(cache._is_claimed_locked(p, now) for p in paths)
 
 
 def test_claim_paths_never_shortens_an_existing_claim():
@@ -497,3 +502,58 @@ def test_claim_paths_never_shortens_an_existing_claim():
     assert cache._claims[path] == long_deadline
     with cache._claims_lock:
         cache._claims.clear()
+
+
+def test_eviction_blocked_while_a_query_is_resolving_its_tiles(con, cache_dir, sync_cache):
+    """An eviction pass that starts *while* a query is resolving its tiles
+    must not take those tiles.
+
+    Drives eviction from another thread from inside the scan (hooking
+    os.utime, which runs within the scan's critical section) rather than
+    before or after it, so the two genuinely overlap.
+
+    Scope note: this pins the end-to-end property against the pre-fix
+    behavior (no claims at all). It does NOT discriminate between claiming
+    inside the scan's critical section and claiming immediately after it --
+    the lock serializes both, and which one wins the handoff is a timing
+    detail. The claim is made inside the section because that ordering is
+    correct by construction, not because this test can observe it.
+    """
+    bbox = (-74.0, 40.0, -73.0, 41.0)
+    assert cache.local_paths_for_query(
+        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con
+    )
+    # Forget the populate step's claims: this test is about whether the
+    # cache-HIT path protects what it resolves.
+    with cache._claims_lock:
+        cache._claims.clear()
+
+    evictions: list[threading.Thread] = []
+    real_utime = os.utime
+
+    def utime_then_evict(path, times):
+        real_utime(path, times)
+        if evictions:  # only interleave once, on the first tile scanned
+            return
+        # Cap of 0: this pass would delete every unclaimed tile in the cache.
+        os.environ["PLACEROOT_CACHE_MAX_MB"] = "0"
+        t = threading.Thread(target=cache.evict_if_needed, daemon=True)
+        evictions.append(t)
+        t.start()
+        time.sleep(0.05)  # let it reach (and block on) the claims lock
+
+    os.utime = utime_then_evict
+    try:
+        paths = cache.local_paths_for_query(
+            con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con
+        )
+    finally:
+        os.utime = real_utime
+        for t in evictions:
+            t.join(timeout=5)
+            assert not t.is_alive(), "eviction thread never released the claims lock"
+        os.environ.pop("PLACEROOT_CACHE_MAX_MB", None)
+
+    assert paths
+    missing = [p for p in paths if not os.path.exists(p)]
+    assert not missing, f"eviction deleted {len(missing)} tile(s) mid-resolve: {missing}"
