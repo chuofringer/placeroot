@@ -277,7 +277,11 @@ def summarize_buildings(
 
     result = {
         "center": {"lat": lat, "lon": lon},
-        "radius_m": radius_m,
+        # Report the *effective* radius actually searched: _bbox_filter clamps
+        # radius_m to geo.MAX_QUERY_RADIUS_M and drives the query with that
+        # (params["radius_m"]), so echoing the raw input would misdescribe the
+        # search — same fix as summarize_area (#131/#132).
+        "radius_m": params["radius_m"],
         "count": n,
     }
     if areas_m2:

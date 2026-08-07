@@ -21,7 +21,9 @@ from placeroot import (
     budget,
     buildings,
     cache,
+    categories,
     divisions,
+    geo,
     mapview,
     overture,
     release,
@@ -69,34 +71,133 @@ def _with_buildings_degraded_fields(result: dict) -> dict:
     return result
 
 
+def _with_category_hint(payload: dict, category: str | None, widen_hint: str) -> dict:
+    """Add a non-fatal "note" when a category filter matched nothing (#117).
+
+    find_places matches category by substring, so a wrong or invalid
+    Overture slug just returns zero rows — indistinguishable from "this
+    area really has none". The note points at search_categories and at
+    whichever widening move fits the mode the caller used (a bigger
+    radius for the point path, a bigger division for the polygon path).
+    """
+    if category and not payload.get("results"):
+        payload["note"] = (
+            f"no places matched category '{category}' here; if that may not be a "
+            "valid Overture category slug, use search_categories to find the right "
+            f"one, or {widen_hint} / drop the category filter."
+        )
+    return payload
+
+
 @mcp.tool()
 def find_places(
-    lat: float,
-    lon: float,
+    lat: float | None = None,
+    lon: float | None = None,
     radius_m: float = 1000,
     category: str | None = None,
     name: str | None = None,
+    min_confidence: float | None = None,
+    operating_status: str | None = None,
     limit: int = 10,
+    brand: str | None = None,
+    has_website: bool | None = None,
+    has_phone: bool | None = None,
+    division_id: str | None = None,
 ) -> dict:
-    """Find named places near a point, nearest first.
+    """Find named places, either near a point or inside a division's boundary.
+
+    Two mutually exclusive modes:
+    - Point + radius: pass lat and lon (radius_m defaults to 1000m).
+      Results are nearest-first, within a circle around (lat, lon).
+    - Division polygon: pass division_id (a GERS id, e.g. from admin_lookup's
+      chain) instead of lat/lon. Results are every matching place whose
+      point falls inside that division's true boundary polygon — no radius
+      to guess, and no circle clipping a coastline or straddling a border.
+      Results are ordered by name (there's no reference point to rank
+      distance from).
 
     category matches Overture's taxonomy (e.g. 'coffee_shop', 'restaurant',
-    'grocery'); name is a substring match on the place name. Results include
-    operating_status ("in business" / "permanently closed" / null when
-    unknown) — a business-lifecycle signal, NOT opening hours; this data has
-    no open-now information.
+    'grocery'); name is a substring match on the place name — both compose
+    with either mode. Results include operating_status ("in business" /
+    "permanently closed" / null when unknown) — a business-lifecycle
+    signal, NOT opening hours; this data has no open-now information.
+
+    min_confidence (0.0-1.0) keeps only rows whose confidence score is at
+    least that value; out-of-range values return a bad_request error.
+    operating_status filters to a single status, accepting either the
+    relabeled value ("in business", "permanently closed", "temporarily
+    closed") or the raw Overture value ("open", "closed",
+    "closed_permanently", "closed_temporarily"), matched case-insensitively
+    — "permanently closed"/"closed" also match Overture's separate
+    "closed_permanently" raw value, since both relabel the same way.
+    Unrecognized values return a bad_request error.
+
+    brand is a substring match on the place's brand name (e.g. 'Starbucks').
+    Brand data is sparse — most independent businesses have no brand at all,
+    so brand=X narrows results down to that chain only; the absence of a
+    result does NOT mean "not a Starbucks", it may just mean brand isn't
+    populated for that place. has_website/has_phone filter on whether a
+    place has any website/phone entries at all (presence, not content) —
+    each result row carries brand (string or null) and has_website/has_phone
+    (booleans) so an agent can see why a place matched, but the full
+    websites/phones arrays are only returned by place_details.
+
+    Every filter above composes with either mode, and each is a silent
+    no-op (not an error) if the column it needs (confidence /
+    operating_status / brand / websites / phones) is absent from the active
+    dataset — see degraded_fields() on the response.
     Returns {"results": [...]}, plus truncated/omitted_count if the answer
-    didn't fit the token budget. If the upstream dataset is unavailable or
-    missing columns this tool depends on, returns a structured {"error":
-    ...} instead of raising.
+    didn't fit the token budget. Returns a structured {"error": "bad_request",
+    ...} if neither mode's inputs are given (or both are), {"error":
+    "not_found", ...} if division_id doesn't match any known division, or
+    a structured {"error": ...} if the upstream dataset is unavailable or
+    missing columns this tool depends on. If a category filter was given and
+    it matched nothing (in either mode), a non-fatal "note" field hints that
+    the category slug may be wrong and points at search_categories.
     """
+    point_given = lat is not None or lon is not None
+    if division_id is not None and point_given:
+        return {
+            "error": "bad_request",
+            "detail": "pass either lat/lon (+radius_m) or division_id, not both",
+        }
+    if division_id is None and not point_given:
+        return {
+            "error": "bad_request",
+            "detail": "pass either lat/lon (+radius_m) or division_id",
+        }
+    if division_id is not None:
+        try:
+            rows = overture.find_places_in_division(
+                division_id, category, name,
+                min_confidence, operating_status, brand, has_website, has_phone, limit,
+            )
+        except ValueError as e:
+            return {"error": "bad_request", "detail": str(e)}
+        except overture.UpstreamUnavailable as e:
+            return _upstream_error(e)
+        except overture.SchemaDegraded as e:
+            return _schema_error(e)
+        if rows is None:
+            return {"error": "not_found", "detail": "no division matched division_id"}
+        payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+        return _with_category_hint(payload, category, widen_hint="try a larger division")
+
+    if lat is None or lon is None:
+        return {"error": "bad_request", "detail": "pass both lat and lon"}
     try:
-        rows = overture.find_places(lat, lon, radius_m, category, name, limit)
+        rows = overture.find_places(
+            lat, lon, radius_m, category, name,
+            min_confidence, operating_status, brand, has_website, has_phone, limit,
+        )
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
         return _schema_error(e)
-    return _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+    payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+    return _with_category_hint(payload, category, widen_hint="widen radius_m")
 
 
 @mcp.tool()
@@ -180,6 +281,48 @@ def within_distance(
     except overture.SchemaDegraded as e:
         return _schema_error(e)
     return _with_degraded_fields(result)
+
+
+@mcp.tool()
+def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
+    """Straight-line (great-circle) distance in meters between every origin and destination.
+
+    origins and destinations are each a list of {"lat": ..., "lon": ...}
+    points, capped at 10 each (100 pairs max) — this is a plain haversine
+    calculation, not a routed distance or travel time, so it's cheap but it
+    is NOT what Google/Mapbox distance-matrix APIs return: no roads, no
+    turns, no travel time. For "how far can I get in N minutes" use
+    isochrone() instead.
+
+    Returns {"elements": [{"origin_idx": 0, "dest_idx": 0, "distance_m":
+    812}, ...]}, flat and origin-major (all destinations for origin 0,
+    then origin 1, ...), budgeted like every other tool. Empty origins or
+    destinations returns {"elements": []}. Returns a structured {"error":
+    "bad_request", ...} instead of raising if either list exceeds 10
+    points or a point is missing/non-numeric lat or lon.
+    """
+    if len(origins) > 10 or len(destinations) > 10:
+        return {
+            "error": "bad_request",
+            "detail": "at most 10 origins and 10 destinations are allowed",
+        }
+    if not origins or not destinations:
+        return {"elements": []}
+    try:
+        o_pts = [(float(p["lat"]), float(p["lon"])) for p in origins]
+        d_pts = [(float(p["lat"]), float(p["lon"])) for p in destinations]
+    except (KeyError, TypeError, ValueError) as e:
+        return {"error": "bad_request", "detail": f"each point needs numeric lat and lon: {e}"}
+    elements = [
+        {
+            "origin_idx": oi,
+            "dest_idx": di,
+            "distance_m": round(geo.haversine_m(olat, olon, dlat, dlon)),
+        }
+        for oi, (olat, olon) in enumerate(o_pts)
+        for di, (dlat, dlon) in enumerate(d_pts)
+    ]
+    return budget.apply_budget({"elements": elements}, "elements")
 
 
 @mcp.tool()
@@ -305,6 +448,71 @@ def geocode(query: str, limit: int = 5) -> dict:
 
 
 @mcp.tool()
+def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
+    """Geocode up to 20 free-text queries in one call, one best match each.
+
+    Cuts N round-trips of geocode() into one: for each query, runs
+    geocode(query, limit_per_query) and keeps only the top candidate.
+    Returns {"results": [{"query", "name", "type", "lat", "lon", "id"
+    (GERS), "rank_score"}, ...]}, one row per query, in input order — a
+    query with no match gets {"query", "error": "no match"} instead, and
+    does not fail the rest of the batch. queries is capped at 20; a longer
+    list returns a structured {"error": ...} rather than truncating
+    silently. Budgeted like every other tool. Returns a structured
+    {"error": ...} instead of raising if the remote scan itself fails.
+    """
+    if len(queries) > 20:
+        return {
+            "error": "bad_request",
+            "detail": f"geocode_batch accepts at most 20 queries, got {len(queries)}",
+        }
+    rows = []
+    try:
+        for query in queries:
+            candidates = geocoding.geocode(query, limit_per_query)
+            if not candidates:
+                rows.append({"query": query, "error": "no match"})
+                continue
+            top = candidates[0]
+            rows.append(
+                {
+                    "query": query,
+                    "name": top["name"],
+                    "type": top["type"],
+                    "lat": top["lat"],
+                    "lon": top["lon"],
+                    "id": top["id"],
+                    "rank_score": top["rank_score"],
+                }
+            )
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    return budget.apply_budget({"results": rows}, "results")
+
+
+@mcp.tool()
+def search_categories(query: str, limit: int = 8) -> dict:
+    """Free text -> valid Overture category slugs, for find_places'/
+    summarize_area's `category` param.
+
+    Lookup only — no geo filtering, no upstream dataset dependency; matches
+    against a bundled snapshot of Overture's places taxonomy (pinned to
+    schema v1.9.0). Ranks exact slug match > slug prefix > slug substring >
+    a match on any taxonomy path segment, so close siblings like "cafe" vs
+    "coffee_shop" both surface rather than one silently winning. Returns
+    {"results": [{"slug", "path"}, ...]} — path is the root-to-leaf
+    taxonomy (e.g. ["eat_and_drink", "cafe", "coffee_shop"]), budgeted like
+    every other tool. An empty/whitespace query returns {"results": []}.
+    limit must be 1-50; out of range returns a structured
+    {"error": "bad_request", ...}.
+    """
+    if limit < 1 or limit > 50:
+        return {"error": "bad_request", "detail": "limit must be between 1 and 50"}
+    rows = categories.search_categories(query, limit)
+    return budget.apply_budget({"results": rows}, "results")
+
+
+@mcp.tool()
 def resolve_place(
     query: str,
     near_lat: float | None = None,
@@ -331,6 +539,52 @@ def resolve_place(
     """
     try:
         rows = geocoding.resolve_place(query, near_lat, near_lon, limit)
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    return budget.apply_budget({"results": rows}, "results")
+
+
+@mcp.tool()
+def resolve_place_batch(gers_ids: list[str]) -> dict:
+    """Resolve up to 25 GERS ids to compact place rows in one call.
+
+    Collapses N place_details(id=...) round-trips into one: for each id,
+    resolves it via the same lookup place_details uses and keeps only a
+    compact row — {"gers_id", "name", "category", "lat", "lon"} — not the
+    full place_details payload (addresses, websites, phones, socials,
+    sources, brand, confidence, ...). Use place_details for full detail on
+    a single id. Results are returned in input order; an id that doesn't
+    resolve gets {"gers_id", "error": "not found"} instead and does not
+    fail the rest of the batch. gers_ids is capped at 25; a longer list
+    returns a structured {"error": ...} rather than truncating silently.
+    An empty list returns {"results": []}. Budgeted like every other tool.
+    Returns a structured {"error": ...} instead of raising if the remote
+    scan fails or the places dataset is missing columns this tool depends
+    on.
+    """
+    if len(gers_ids) > 25:
+        return {
+            "error": "bad_request",
+            "detail": f"resolve_place_batch accepts at most 25 ids, got {len(gers_ids)}",
+        }
+    rows = []
+    try:
+        for gers_id in gers_ids:
+            place = overture.place_details(id=gers_id)
+            if place is None:
+                rows.append({"gers_id": gers_id, "error": "not found"})
+                continue
+            rows.append(
+                {
+                    "gers_id": gers_id,
+                    "name": place.get("name"),
+                    "category": place.get("category"),
+                    "lat": place.get("lat"),
+                    "lon": place.get("lon"),
+                }
+            )
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
@@ -460,7 +714,8 @@ def isochrone(
     (capped per mode: 5km walk, 15km cycle, 60km drive); passing something
     larger than the cap returns a structured error instead of silently
     truncating. An unrecognized mode string returns a structured
-    {"error": "unsupported_mode"}.
+    {"error": "unsupported_mode"}. minutes must be > 0 and radius_m (if
+    given) must be >= 0, else returns {"error": "bad_request"}.
     """
     try:
         return routing.isochrone(
@@ -480,6 +735,32 @@ def isochrone(
             "detail": e.detail,
             "max_radius_m": e.max_radius_m,
         }
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
+
+
+@mcp.tool()
+def data_version() -> dict:
+    """Which Overture Maps release backs the answers from every other tool.
+
+    Reports the active release string, its date, and whether it came from
+    live S3 discovery, an operator env override, or the pinned fallback
+    baked into this build. Resolved once at process start and cached for
+    the process lifetime — this tool just reports that cached value, it
+    doesn't re-check upstream, so it's small and has no upstream DB
+    dependency.
+    """
+    info = release.resolve_release_info()
+    release_str = info["release"]
+    return {
+        "release": release_str,
+        "release_date": release_str.rsplit(".", 1)[0],
+        "source": info["source"],
+        "note": (
+            "Overture ships ~monthly; resolved once at server start and "
+            "cached for the process."
+        ),
+    }
 
 
 def _warm_start() -> None:

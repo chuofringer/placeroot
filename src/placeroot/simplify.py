@@ -134,16 +134,42 @@ def _project(coord, mpd_lon: float, mpd_lat: float) -> tuple[float, float]:
     return coord[0] * mpd_lon, coord[1] * mpd_lat
 
 
-def _simplify_line(coords: list, epsilon_m: float, mpd_lon: float, mpd_lat: float, budget=None):
+def _simplify_line(
+    coords: list,
+    epsilon_m: float,
+    mpd_lon: float,
+    mpd_lat: float,
+    budget=None,
+    is_ring: bool = False,
+):
     """Simplify one coordinate list (a LineString or a polygon ring).
 
     Returns (new_coords, max_deviation_m). Ring closure is preserved for
     free: index 0 and index -1 are always kept by _rdp_keep_indices.
+
+    When is_ring is True, RDP alone can collapse a closed ring down to just
+    its two (identical) endpoints if every interior point lies within
+    epsilon of the start->end chord -- that's invalid GeoJSON (a ring needs
+    >=4 positions and >=3 distinct vertices). In that case we pad the kept
+    set back out to 4 points by pulling in the interior points that deviate
+    most from the chord, which best preserves the ring's shape.
     """
     if len(coords) < 3:
         return list(coords), 0.0
     points_m = [_project(c, mpd_lon, mpd_lat) for c in coords]
     kept = _rdp_keep_indices(points_m, epsilon_m, budget)
+    n = len(points_m)
+    if is_ring and n >= 4 and len(kept) < 4:
+        kept_set = set(kept)
+        candidates = [i for i in range(1, n - 1) if i not in kept_set]
+        candidates.sort(
+            key=lambda i: (-_perp_dist_m(points_m[i], points_m[0], points_m[n - 1]), i)
+        )
+        for i in candidates:
+            if len(kept_set) >= 4:
+                break
+            kept_set.add(i)
+        kept = sorted(kept_set)
     dev = _max_deviation_m(points_m, kept)
     return [coords[i] for i in kept], dev
 
@@ -161,7 +187,10 @@ def _walk(gtype: str, coords, epsilon_m: float, mpd_lon: float, mpd_lat: float, 
         dev = max((r[1] for r in results), default=0.0)
         return new_coords, orig, kept, dev
     if gtype == "Polygon":
-        results = [_simplify_line(ring, epsilon_m, mpd_lon, mpd_lat, budget) for ring in coords]
+        results = [
+            _simplify_line(ring, epsilon_m, mpd_lon, mpd_lat, budget, is_ring=True)
+            for ring in coords
+        ]
         new_coords = [r[0] for r in results]
         orig = sum(len(ring) for ring in coords)
         kept = sum(len(r[0]) for r in results)
@@ -170,7 +199,10 @@ def _walk(gtype: str, coords, epsilon_m: float, mpd_lon: float, mpd_lat: float, 
     if gtype == "MultiPolygon":
         new_polys, orig, kept, dev = [], 0, 0, 0.0
         for poly in coords:
-            results = [_simplify_line(ring, epsilon_m, mpd_lon, mpd_lat, budget) for ring in poly]
+            results = [
+                _simplify_line(ring, epsilon_m, mpd_lon, mpd_lat, budget, is_ring=True)
+                for ring in poly
+            ]
             new_polys.append([r[0] for r in results])
             orig += sum(len(ring) for ring in poly)
             kept += sum(len(r[0]) for r in results)
