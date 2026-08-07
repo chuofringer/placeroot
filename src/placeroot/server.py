@@ -339,6 +339,52 @@ def resolve_place(
 
 
 @mcp.tool()
+def resolve_place_batch(gers_ids: list[str]) -> dict:
+    """Resolve up to 25 GERS ids to compact place rows in one call.
+
+    Collapses N place_details(id=...) round-trips into one: for each id,
+    resolves it via the same lookup place_details uses and keeps only a
+    compact row — {"gers_id", "name", "category", "lat", "lon"} — not the
+    full place_details payload (addresses, websites, phones, socials,
+    sources, brand, confidence, ...). Use place_details for full detail on
+    a single id. Results are returned in input order; an id that doesn't
+    resolve gets {"gers_id", "error": "not found"} instead and does not
+    fail the rest of the batch. gers_ids is capped at 25; a longer list
+    returns a structured {"error": ...} rather than truncating silently.
+    An empty list returns {"results": []}. Budgeted like every other tool.
+    Returns a structured {"error": ...} instead of raising if the remote
+    scan fails or the places dataset is missing columns this tool depends
+    on.
+    """
+    if len(gers_ids) > 25:
+        return {
+            "error": "bad_request",
+            "detail": f"resolve_place_batch accepts at most 25 ids, got {len(gers_ids)}",
+        }
+    rows = []
+    try:
+        for gers_id in gers_ids:
+            place = overture.place_details(id=gers_id)
+            if place is None:
+                rows.append({"gers_id": gers_id, "error": "not found"})
+                continue
+            rows.append(
+                {
+                    "gers_id": gers_id,
+                    "name": place.get("name"),
+                    "category": place.get("category"),
+                    "lat": place.get("lat"),
+                    "lon": place.get("lon"),
+                }
+            )
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    return budget.apply_budget({"results": rows}, "results")
+
+
+@mcp.tool()
 def reverse_geocode(lat: float, lon: float) -> dict:
     """Point -> nearest address (street/number/postcode) and its containing division chain.
 
