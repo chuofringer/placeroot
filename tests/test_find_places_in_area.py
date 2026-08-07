@@ -40,6 +40,9 @@ NOTCH_LON, NOTCH_LAT = 5.0, 2.0
 FAR_LON, FAR_LAT = 50.0, 50.0
 COFFEE_LON, COFFEE_LAT = 3.0, 3.0
 BANK_LON, BANK_LAT = 2.0, 8.0
+# Inside the polygon body, but low-confidence and permanently closed -- the
+# only row min_confidence/operating_status can discriminate on.
+FAINT_LON, FAINT_LAT = 1.0, 9.0
 # Inside SQUARE_A only.
 MULTI_A_LON, MULTI_A_LAT = 102.0, 42.0
 # Inside SQUARE_B only -- far from SQUARE_A, provable only if both rows unioned.
@@ -51,15 +54,18 @@ def _wkb(con: duckdb.DuckDBPyConnection, wkt: str) -> bytes:
     return b
 
 
-def _place_row(id_, name, lon, lat, category="shop", basic_category="shop"):
+def _place_row(
+    id_, name, lon, lat, category="shop", basic_category="shop",
+    operating_status="open", confidence=0.9,
+):
     return (
         id_,
         {"xmin": lon, "ymin": lat, "xmax": lon, "ymax": lat},
         {"primary": name},
         {"primary": category, "alternates": []},
         basic_category,
-        "open",
-        0.9,
+        operating_status,
+        confidence,
         [], [], [], [], None, [],
     )
 
@@ -100,6 +106,8 @@ def polygon_fixtures(tmp_path):
                     category="coffee_shop", basic_category="coffee_shop"),
         _place_row("place-bank", "Inside Bank", BANK_LON, BANK_LAT,
                     category="bank", basic_category="bank"),
+        _place_row("place-faint", "Faint Place", FAINT_LON, FAINT_LAT,
+                    operating_status="closed_permanently", confidence=0.2),
         _place_row("place-multi-a", "Multi A", MULTI_A_LON, MULTI_A_LAT),
         _place_row("place-multi-b", "Multi B", MULTI_B_LON, MULTI_B_LAT),
     ]
@@ -191,3 +199,35 @@ def test_server_rejects_neither_point_nor_division_id():
 def test_server_rejects_lat_without_lon():
     result = server.find_places(lat=1.0)
     assert result["error"] == "bad_request"
+
+
+def test_min_confidence_composes_with_division_id(polygon_fixtures):
+    """The find_places tool exposes one signature for both modes, so a
+    filter passed with division_id has to actually apply — silently
+    ignoring it on the polygon path would be worse than rejecting it."""
+    unfiltered = {r["name"] for r in overture.find_places_in_division(DIV_NOTCH)}
+    assert "Faint Place" in unfiltered
+
+    rows = overture.find_places_in_division(DIV_NOTCH, min_confidence=0.5)
+    names = {r["name"] for r in rows}
+    assert "Faint Place" not in names
+    assert "Inside Place" in names
+
+
+def test_operating_status_composes_with_division_id(polygon_fixtures):
+    rows = overture.find_places_in_division(DIV_NOTCH, operating_status="permanently closed")
+    assert {r["name"] for r in rows} == {"Faint Place"}
+
+
+def test_server_division_id_honors_min_confidence(polygon_fixtures):
+    result = server.find_places(division_id=DIV_NOTCH, min_confidence=0.5)
+    assert "error" not in result
+    assert "Faint Place" not in {r["name"] for r in result["results"]}
+
+
+def test_server_division_id_rejects_bad_filter_values(polygon_fixtures):
+    assert server.find_places(division_id=DIV_NOTCH, min_confidence=1.5)["error"] == "bad_request"
+    assert (
+        server.find_places(division_id=DIV_NOTCH, operating_status="banana")["error"]
+        == "bad_request"
+    )
