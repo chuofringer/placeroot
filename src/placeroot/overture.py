@@ -246,18 +246,19 @@ _DISTANCE_EXPR = DISTANCE_EXPR  # noqa: N816 - kept as an alias for existing in-
 
 def area_geometry(
     lat: float, lon: float, radius_m: float
-) -> tuple[str, str, dict, tuple[float, float, float, float]]:
+) -> tuple[str, str, dict, tuple[float, float, float, float], float]:
     """Shared "is this place within radius_m of (lat, lon)" predicate.
 
-    Returns (bbox_filter_sql, distance_filter_sql, params, bbox) — the bbox
-    filter is a cheap row-group prefilter using intersection semantics (so
-    it doesn't drop non-point geometry the way full-containment would); the
-    distance filter is the exact circle (already antimeridian-safe: it's
-    built from sin/cos, which are periodic, so a raw longitude difference
-    across the seam still comes out small) and is what actually decides
-    membership. Both find_places and summarize_area use this so they agree
-    on what's "in" an area. params is a dict of named parameters shared by
-    both filters plus any additional query-specific ones the caller adds.
+    Returns (bbox_filter_sql, distance_filter_sql, params, bbox,
+    effective_radius_m) — the bbox filter is a cheap row-group prefilter
+    using intersection semantics (so it doesn't drop non-point geometry the
+    way full-containment would); the distance filter is the exact circle
+    (already antimeridian-safe: it's built from sin/cos, which are periodic,
+    so a raw longitude difference across the seam still comes out small) and
+    is what actually decides membership. Both find_places and summarize_area
+    use this so they agree on what's "in" an area. params is a dict of named
+    parameters shared by both filters plus any additional query-specific
+    ones the caller adds.
 
     bbox is the raw (xmin, ymin, xmax, ymax) box from _bbox_around — pass it
     straight to _from_source()/cache lookups, not the bbox_filter's own
@@ -267,14 +268,18 @@ def area_geometry(
 
     radius_m is clamped to geo.MAX_QUERY_RADIUS_M (an abuse guard against a
     world-spanning bbox — see geo.clamp_radius_m) and the clamped value is
-    used for both the bbox and the $radius_m distance parameter so they agree.
+    used for both the bbox and the $radius_m distance parameter so they
+    agree. That same clamped value is returned as effective_radius_m so
+    callers that report or reason about the radius they searched (rather
+    than just building the SQL) use what actually ran, not the caller's
+    unclamped input — see issue #131.
     """
     radius_m = geo.clamp_radius_m(radius_m)
     xmin, ymin, xmax, ymax = _bbox_around(lat, lon, radius_m)
     bbox_filter, bbox_params = _bbox_filter_sql(xmin, ymin, xmax, ymax)
     distance_filter = f"{_DISTANCE_EXPR} <= $radius_m"
     params = {**bbox_params, "lat": lat, "lon": lon, "radius_m": radius_m}
-    return bbox_filter, distance_filter, params, (xmin, ymin, xmax, ymax)
+    return bbox_filter, distance_filter, params, (xmin, ymin, xmax, ymax), radius_m
 
 
 # Overture's operating_status is a business-lifecycle field (is this place a
@@ -294,6 +299,48 @@ def _label_operating_status(value):
     if value is None:
         return None
     return _OPERATING_STATUS_LABELS.get(value, value)
+
+
+def _place_category_name_filters(
+    missing: set[str], category: str | None, name: str | None, params: dict
+) -> list[str]:
+    """category/name filter clauses (and their params, added to params in
+    place) shared by find_places and find_places_in_division so both narrow
+    results identically."""
+    filters = []
+    if category:
+        cat_clauses = []
+        if "basic_category" not in missing:
+            cat_clauses.append("basic_category ILIKE $category")
+        if "taxonomy" not in missing:
+            cat_clauses.append(
+                "(taxonomy.primary ILIKE $category"
+                " OR list_contains(taxonomy.alternates, $category_exact))"
+            )
+        if cat_clauses:
+            filters.append(f"({' OR '.join(cat_clauses)})")
+            params["category"] = f"%{category}%"
+            params["category_exact"] = category
+    if name:
+        if "names" not in missing:
+            filters.append("names.primary ILIKE $name")
+            params["name"] = f"%{name}%"
+    return filters
+
+
+def _place_select_exprs(missing: set[str]) -> dict[str, str]:
+    """SQL expressions for a place row's compact-result columns, degrading
+    to NULL for any column absent from the active dataset — shared by
+    find_places and find_places_in_division so both rows have the same
+    shape and degrade the same way."""
+    return {
+        "id": "NULL" if "id" in missing else "id",
+        "name": "NULL" if "names" in missing else "names.primary",
+        "category": "NULL" if "taxonomy" in missing else "taxonomy.primary",
+        "basic_category": "NULL" if "basic_category" in missing else "basic_category",
+        "operating_status": "NULL" if "operating_status" in missing else "operating_status",
+        "confidence": "NULL" if "confidence" in missing else "round(confidence, 2)",
+    }
 
 
 def find_places(
@@ -318,43 +365,22 @@ def find_places(
     limit = max(0, min(int(limit), MAX_ROWS))
     upstream = _upstream_glob()
     missing = set(_check_schema(upstream))
-    bbox_filter, distance_filter, params, bbox = area_geometry(lat, lon, radius_m)
+    bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(lat, lon, radius_m)
     filters = [bbox_filter, distance_filter]
     if "names" not in missing:
         filters.append("names.primary IS NOT NULL")
-    if category:
-        cat_clauses = []
-        if "basic_category" not in missing:
-            cat_clauses.append("basic_category ILIKE $category")
-        if "taxonomy" not in missing:
-            cat_clauses.append(
-                "(taxonomy.primary ILIKE $category"
-                " OR list_contains(taxonomy.alternates, $category_exact))"
-            )
-        if cat_clauses:
-            filters.append(f"({' OR '.join(cat_clauses)})")
-            params["category"] = f"%{category}%"
-            params["category_exact"] = category
-    if name:
-        if "names" not in missing:
-            filters.append("names.primary ILIKE $name")
-            params["name"] = f"%{name}%"
+    filters.extend(_place_category_name_filters(missing, category, name, params))
 
-    name_expr = "NULL" if "names" in missing else "names.primary"
-    category_expr = "NULL" if "taxonomy" in missing else "taxonomy.primary"
-    basic_category_expr = "NULL" if "basic_category" in missing else "basic_category"
-    operating_status_expr = "NULL" if "operating_status" in missing else "operating_status"
-    confidence_expr = "NULL" if "confidence" in missing else "round(confidence, 2)"
-    id_expr = "NULL" if "id" in missing else "id"
+    exprs = _place_select_exprs(missing)
 
     sql = f"""
         SELECT
-            {id_expr}                           AS id,
-            {name_expr}                         AS name,
-            {category_expr}                     AS category,
-            {basic_category_expr}               AS basic_category,
-            {operating_status_expr}             AS operating_status,
-            {confidence_expr}                   AS confidence,
+            {exprs["id"]}                       AS id,
+            {exprs["name"]}                      AS name,
+            {exprs["category"]}                  AS category,
+            {exprs["basic_category"]}             AS basic_category,
+            {exprs["operating_status"]}           AS operating_status,
+            {exprs["confidence"]}                AS confidence,
             round(bbox.ymin, 6)                 AS lat,
             round(bbox.xmin, 6)                 AS lon,
             round({_DISTANCE_EXPR}, 0)          AS distance_m
@@ -378,6 +404,185 @@ def find_places(
     return results
 
 
+# division_area (divisions theme) columns find_places_in_division depends on
+# to resolve a division's polygon by id. geometry is essential (mirrors
+# divisions.py's admin_lookup) — without it there's no containment test to
+# run. division_id is soft: falls back to id (see _resolve_division_geometry)
+# the same way admin_lookup does.
+_DIVISION_AREA_REQUIRED_COLUMNS = ["id", "geometry", "division_id"]
+_DIVISION_AREA_ESSENTIAL_COLUMNS = {"geometry"}
+
+
+def _ensure_spatial() -> None:
+    """Load DuckDB's spatial extension on the shared connection, once.
+
+    Thin wrapper over db.ensure_spatial(), mirroring divisions.py's own
+    (kept separate rather than imported from there to avoid a
+    divisions<->overture import cycle: divisions.py already imports overture).
+    """
+    try:
+        db.ensure_spatial()
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(f"could not load spatial extension: {e}") from e
+
+
+def _resolve_division_geometry(
+    division_id: str,
+) -> tuple[bytes, float, float, float, float] | None:
+    """A division's merged boundary polygon (WKB) and its bbox, by GERS id.
+
+    division_area carries multiple polygon rows per division (e.g. land and
+    maritime variants — see divisions.py's admin_lookup docstring) sharing
+    one division_id; ST_Union_Agg merges every matching row into a single
+    geometry so a place inside ANY variant counts as inside the division,
+    not just its first (smallest-area) row. The bbox is derived straight
+    from that merged geometry (ST_XMin/XMax/YMin/YMax) rather than read off
+    a bbox column on division_area — real Overture division_area rows don't
+    reliably carry one the way place rows do.
+
+    Returns None if no division_area row's id matches (division_id is
+    unknown in the active dataset — the caller/server turns that into a
+    not_found error), never an empty-but-valid geometry (ST_Union_Agg over
+    zero rows is NULL, which this treats the same as "no match").
+
+    Raises SchemaDegraded if geometry is missing from the active divisions
+    dataset (mirrors admin_lookup), or UpstreamUnavailable if the remote
+    scan (or the one-time spatial extension load) fails.
+    """
+    _ensure_spatial()
+    div_upstream = _upstream_glob(theme="divisions", type_="division_area")
+    missing = set(missing_columns(div_upstream, _DIVISION_AREA_REQUIRED_COLUMNS))
+    essential_missing = [c for c in missing if c in _DIVISION_AREA_ESSENTIAL_COLUMNS]
+    if essential_missing:
+        raise SchemaDegraded(essential_missing)
+
+    if "division_id" not in missing:
+        id_filter_expr = "coalesce(division_id, id)"
+    elif "id" not in missing:
+        id_filter_expr = "id"
+    else:
+        id_filter_expr = "NULL"
+    geom_expr = geo.geom_expr(div_upstream)
+
+    sql = f"""
+        WITH merged AS (
+            SELECT ST_Union_Agg({geom_expr}) AS geom
+            FROM read_parquet('{div_upstream}', hive_partitioning=1)
+            WHERE {id_filter_expr} = $division_id
+        )
+        SELECT ST_AsWKB(geom), ST_XMin(geom), ST_XMax(geom), ST_YMin(geom), ST_YMax(geom)
+        FROM merged
+    """
+    try:
+        with db.conn_lock:
+            row = db.shared_conn().execute(sql, {"division_id": division_id}).fetchone()
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(str(e)) from e
+    # ST_Union_Agg over zero matching rows yields an empty GEOMETRYCOLLECTION
+    # (ST_AsWKB(...) on it is non-NULL, just empty), but ST_XMin/etc. on an
+    # empty geometry are NULL -- check the bbox extent, not the WKB, to
+    # detect "division_id matched nothing."
+    if row is None or row[1] is None:
+        return None
+    return row
+
+
+def find_places_in_division(
+    division_id: str,
+    category: str | None = None,
+    name: str | None = None,
+    limit: int = 10,
+) -> list[dict] | None:
+    """Places whose point falls inside a division's boundary polygon.
+
+    Boundary-accurate alternative to find_places' point+radius circle: pass
+    a division's GERS id (e.g. from admin_lookup's chain) instead of a
+    guessed radius, and get back only places truly inside that division's
+    shape — not a circle that may clip a coastline or straddle a border.
+
+    Two-step query mirroring divisions.py's admin_lookup + find_places: (1)
+    resolve the division's merged polygon and bbox by id
+    (_resolve_division_geometry); (2) scan places, prefiltered by a bbox
+    intersection against the division's bbox (mandatory — an unfiltered
+    ST_Contains over the full places dataset is a full-table scan) and then
+    exactly tested with ST_Contains against the merged polygon. category/name
+    narrow the search exactly as they do for find_places. Results are
+    ordered by name then id (there's no reference point to rank by distance
+    from, unlike find_places) and rows come back in the same shape as
+    find_places' minus distance_m.
+
+    Returns None if division_id doesn't match any division_area row (the
+    server tool turns that into a {"error": "not_found", ...}) — distinct
+    from an empty list, which means the division resolved but has no
+    matching places inside it.
+
+    Raises SchemaDegraded if bbox is missing from the active places dataset,
+    or if geometry is missing from the active divisions dataset (either way,
+    there's no way to answer), or UpstreamUnavailable if either remote scan
+    fails after retries. Non-essential place columns missing from the
+    dataset come back as None in their field — see degraded_fields().
+    """
+    limit = max(0, min(int(limit), MAX_ROWS))
+    resolved = _resolve_division_geometry(division_id)
+    if resolved is None:
+        return None
+    geom_wkb, div_xmin, div_xmax, div_ymin, div_ymax = resolved
+
+    upstream = _upstream_glob()
+    missing = set(_check_schema(upstream))
+
+    # Mandatory bbox prefilter (place bbox intersects the division's bbox)
+    # before the expensive exact ST_Contains test — same reasoning as
+    # admin_lookup's bbox_prefilter: unfiltered, this is a polygon test
+    # against every place on Earth.
+    bbox_filter = (
+        "bbox.xmin <= $div_xmax AND bbox.xmax >= $div_xmin"
+        " AND bbox.ymin <= $div_ymax AND bbox.ymax >= $div_ymin"
+    )
+    contains_filter = "ST_Contains(ST_GeomFromWKB($geom_wkb), ST_Point(bbox.xmin, bbox.ymin))"
+    params = {
+        "div_xmin": div_xmin, "div_xmax": div_xmax,
+        "div_ymin": div_ymin, "div_ymax": div_ymax,
+        "geom_wkb": geom_wkb,
+    }
+    filters = [bbox_filter, contains_filter]
+    if "names" not in missing:
+        filters.append("names.primary IS NOT NULL")
+    filters.extend(_place_category_name_filters(missing, category, name, params))
+
+    exprs = _place_select_exprs(missing)
+    bbox = (div_xmin, div_ymin, div_xmax, div_ymax)
+
+    sql = f"""
+        SELECT
+            {exprs["id"]}                       AS id,
+            {exprs["name"]}                      AS name,
+            {exprs["category"]}                  AS category,
+            {exprs["basic_category"]}             AS basic_category,
+            {exprs["operating_status"]}           AS operating_status,
+            {exprs["confidence"]}                AS confidence,
+            round(bbox.ymin, 6)                 AS lat,
+            round(bbox.xmin, 6)                 AS lon
+        FROM {_from_source(bbox)}
+        WHERE {' AND '.join(filters)}
+        ORDER BY name, id
+        LIMIT {limit}
+    """
+    try:
+        with _conn_lock:
+            rows = _conn().execute(sql, params).fetchall()
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(str(e)) from e
+    cols = [
+        "id", "name", "category", "basic_category", "operating_status",
+        "confidence", "lat", "lon",
+    ]
+    results = [dict(zip(cols, r)) for r in rows]
+    for d in results:
+        d["operating_status"] = _label_operating_status(d["operating_status"])
+    return results
+
+
 def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
     """Category mix for an area — an answer, not a data dump.
 
@@ -388,7 +593,9 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
     """
     upstream = _upstream_glob()
     missing = set(_check_schema(upstream))
-    bbox_filter, distance_filter, params, bbox = area_geometry(lat, lon, radius_m)
+    bbox_filter, distance_filter, params, bbox, effective_radius_m = area_geometry(
+        lat, lon, radius_m
+    )
     category_expr = "NULL" if "basic_category" in missing else "basic_category"
     sql = f"""
         SELECT
@@ -414,7 +621,7 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
     other_categories_count = sum(n for _, n, _, _ in categorized[MAX_ROWS:])
     return {
         "center": {"lat": lat, "lon": lon},
-        "radius_m": radius_m,
+        "radius_m": effective_radius_m,
         "total_places": total_places,
         "top_categories": [{"category": c, "count": n} for c, n, _, _ in top],
         "other_categories_count": other_categories_count,
@@ -578,7 +785,9 @@ def place_details(
     if id:
         row = _place_details_by_id(id, near_lat, near_lon, upstream, missing)
     else:
-        bbox_filter, distance_filter, params, bbox = area_geometry(lat, lon, radius_m)
+        bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(
+            lat, lon, radius_m
+        )
         filters = [bbox_filter, distance_filter]
         if "names" not in missing:
             filters.append("names.primary ILIKE $name")
@@ -612,11 +821,29 @@ def within_distance(
     doesn't degrade into an unbounded scan — a real nearest match beyond
     that window comes back as nearest: None rather than its true distance.
     Raises the same SchemaDegraded/UpstreamUnavailable as find_places.
+
+    The search radius passed to find_places is itself clamped there to
+    geo.MAX_QUERY_RADIUS_M (see area_geometry). When max_distance_m exceeds
+    that cap, the search physically cannot reach max_distance_m, so a "no
+    match found" outcome does NOT mean "not within max_distance_m" — it only
+    means "not within geo.MAX_QUERY_RADIUS_M". In that case within is left
+    False (the honest floor: no match was found within what we could
+    search) but a "note" is added flagging that this isn't a guaranteed
+    negative — see issue #131. A match found at or under max_distance_m is
+    still reported as within: True with no caveat.
     """
     search_radius_m = max_distance_m * 2
     rows = find_places(lat, lon, search_radius_m, category=category, name=name, limit=1)
     if not rows:
-        return {"within": False, "nearest": None, "distance_m": None}
+        result = {"within": False, "nearest": None, "distance_m": None}
+        if max_distance_m > geo.MAX_QUERY_RADIUS_M:
+            result["note"] = (
+                f"max_distance_m ({max_distance_m}m) exceeds the maximum searchable "
+                f"radius ({geo.MAX_QUERY_RADIUS_M}m); no match was found within "
+                f"{geo.MAX_QUERY_RADIUS_M}m, but 'within: False' cannot be guaranteed "
+                "beyond that radius."
+            )
+        return result
     nearest = rows[0]
     return {
         "within": nearest["distance_m"] <= max_distance_m,
@@ -650,7 +877,8 @@ def compare_areas(areas: list[tuple[float, float]], radius_m: float = 1000) -> d
             combined_counts[cat] = combined_counts.get(cat, 0) + n
     top_categories = sorted(combined_counts, key=lambda c: combined_counts[c], reverse=True)[:10]
 
-    area_km2 = math.pi * (radius_m / 1000) ** 2
+    effective_radius_m = geo.clamp_radius_m(radius_m)
+    area_km2 = math.pi * (effective_radius_m / 1000) ** 2
     per_area = []
     for (lat, lon), s in zip(areas, summaries):
         counts = {row["category"]: row["count"] for row in s["top_categories"]}
