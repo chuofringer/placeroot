@@ -54,7 +54,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
       # Trusted publishing needs npm >= 11.5.1; setup-node's Node 20 ships an
@@ -64,7 +64,7 @@ jobs:
       # Requires a configured trusted publisher on npmjs.com for this repo +
       # workflow; see docs/PUBLISHING.md.
       - name: Upgrade npm for trusted publishing
-        run: npm install -g npm@latest
+        run: npm install -g npm@11
 
       - name: Publish to npm (trusted publishing)
         working-directory: npm
