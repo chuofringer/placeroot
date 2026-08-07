@@ -88,7 +88,9 @@ def find_places(
     Returns {"results": [...]}, plus truncated/omitted_count if the answer
     didn't fit the token budget. If the upstream dataset is unavailable or
     missing columns this tool depends on, returns a structured {"error":
-    ...} instead of raising.
+    ...} instead of raising. If a category filter was given and it matched
+    nothing, a non-fatal "note" field hints that the category slug may be
+    wrong and points at search_categories.
     """
     try:
         rows = overture.find_places(lat, lon, radius_m, category, name, limit)
@@ -96,7 +98,14 @@ def find_places(
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
         return _schema_error(e)
-    return _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+    payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+    if category and not payload["results"]:
+        payload["note"] = (
+            f"no places matched category '{category}' here; if that may not be a "
+            "valid Overture category slug, use search_categories to find the right "
+            "one, or widen radius_m / drop the category filter."
+        )
+    return payload
 
 
 @mcp.tool()
