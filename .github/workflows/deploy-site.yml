@@ -26,6 +26,15 @@ on:
     paths:
       - 'site/**'
       - '.github/workflows/deploy-site.yml'
+  # A published release always redeploys production from the tagged tree,
+  # even if that release's merge didn't touch site/ (or its deploy failed).
+  # Belt and braces for "a release ships the website": the version bump lands
+  # via the Prepare Release PR, and this guarantees what's live matches the
+  # release regardless. Note the ref here is the *tag*, so the deploy step
+  # maps it to the production branch rather than deploying a tag-named
+  # preview.
+  release:
+    types: [published]
   workflow_dispatch:
 
 # Serialize per branch: two pushes to the same branch queue; different
@@ -36,6 +45,9 @@ concurrency:
 
 env:
   PROJECT: placeroot
+  # Cloudflare Pages production branch. A deploy claiming any other branch
+  # name is a preview.
+  PRODUCTION_BRANCH: main
 
 jobs:
   deploy:
@@ -55,9 +67,20 @@ jobs:
         run: |
           # pipefail so a wrangler failure isn't masked by tee's exit 0.
           set -o pipefail
+
+          # On a release event GITHUB_REF_NAME is the tag (v0.6.0), and
+          # passing that as --branch would publish a tag-named *preview*
+          # instead of production. A release always deploys production.
+          if [ "$GITHUB_EVENT_NAME" = "release" ]; then
+            DEPLOY_BRANCH="$PRODUCTION_BRANCH"
+          else
+            DEPLOY_BRANCH="$GITHUB_REF_NAME"
+          fi
+          echo "Deploying ref $GITHUB_REF_NAME as branch $DEPLOY_BRANCH"
+
           npx --yes wrangler@latest pages deploy site \
             --project-name="$PROJECT" \
-            --branch="$GITHUB_REF_NAME" \
+            --branch="$DEPLOY_BRANCH" \
             --commit-dirty=true | tee wrangler-deploy.log
 
           # Capture the exact alias URL wrangler prints, rather than
