@@ -144,6 +144,7 @@ from pathlib import Path
 import duckdb
 
 from placeroot import cache, overture, release
+from placeroot.errors import AmbiguousArea
 
 logger = logging.getLogger(__name__)
 
@@ -1152,4 +1153,72 @@ def reverse_geocode(lat: float, lon: float) -> dict:
         "admin_context": admin_context,
         "source": "divisions_only",
         "note": "no nearby address found (addresses theme unavailable, missing, or sparse here)",
+    }
+
+
+# --- #123: free-text area name -> a division to constrain a search to -------
+
+# Two candidates count as "equally ranked" when their rank_scores differ by
+# less than this. rank_score is a computed float, so exact equality is the
+# wrong test — but the tolerance stays tiny on purpose: geocode already
+# breaks same-name ties by population and match tier (#47/#53), so a
+# genuinely more prominent namesake outranks the rest by a wide margin and
+# resolves cleanly. What survives at this tolerance is the real ambiguity
+# the issue is about: same-tier, same-name divisions the dataset gives us
+# no signal to choose between (e.g. two population-less "Springfield"s).
+_AREA_RANK_EPSILON = 1e-6
+
+# Cap on candidates reported back for an ambiguous area — enough to choose
+# from, not a data dump.
+_AREA_MAX_CANDIDATES = 5
+
+
+def resolve_area(area: str) -> dict | None:
+    """Free-text area name -> the single division to constrain a search to.
+
+    Thin resolution layer over geocode()'s division ranking — deliberately
+    NOT a second ranking implementation. geocode() already handles the
+    "City, ST" suffix, diacritic/abbreviation variants, and the
+    population-weighted tie-breaks; this just takes its division results
+    (type != "place"; a business named "Palo Alto Cafe" is not an area) and
+    decides whether the top one is a safe pick.
+
+    Returns {"division_id", "name", "admin_context"} for a confident match,
+    or None if nothing matched at all. Raises AmbiguousArea when several
+    equally-ranked divisions share the top name, so the caller can surface
+    the candidates instead of silently searching one arbitrary "Springfield"
+    and reporting its places as though the question had one answer.
+
+    Raises overture.UpstreamUnavailable if the underlying scan fails.
+    """
+    area = area.strip()
+    if not area:
+        return None
+
+    divisions = [r for r in geocode(area, limit=_RESOLVE_OVERFETCH) if r["type"] != "place"]
+    if not divisions:
+        return None
+
+    top = divisions[0]
+    # Ambiguity is specifically "same name, no way to rank them" — a
+    # differently-named division that merely scored close (a neighborhood
+    # inside the city you asked for) is not ambiguity, so compare names too.
+    top_name = _normalize_for_match(top["name"])
+    tied = [
+        d for d in divisions
+        if _normalize_for_match(d["name"]) == top_name
+        and abs(d["rank_score"] - top["rank_score"]) < _AREA_RANK_EPSILON
+    ]
+    if len(tied) > 1:
+        raise AmbiguousArea(area, [_area_candidate(d) for d in tied[:_AREA_MAX_CANDIDATES]])
+
+    return _area_candidate(top)
+
+
+def _area_candidate(row: dict) -> dict:
+    """A division row, projected to just what an area choice needs."""
+    return {
+        "division_id": row["id"],
+        "name": row["name"],
+        "admin_context": row["admin_context"],
     }

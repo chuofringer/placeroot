@@ -23,6 +23,7 @@ from placeroot import (
     cache,
     categories,
     divisions,
+    errors,
     geo,
     mapview,
     overture,
@@ -103,10 +104,11 @@ def find_places(
     has_website: bool | None = None,
     has_phone: bool | None = None,
     division_id: str | None = None,
+    area: str | None = None,
 ) -> dict:
-    """Find named places, either near a point or inside a division's boundary.
+    """Find named places, either near a point or inside an area's boundary.
 
-    Two mutually exclusive modes:
+    Three mutually exclusive modes:
     - Point + radius: pass lat and lon (radius_m defaults to 1000m).
       Results are nearest-first, within a circle around (lat, lon).
     - Division polygon: pass division_id (a GERS id, e.g. from admin_lookup's
@@ -115,6 +117,15 @@ def find_places(
       to guess, and no circle clipping a coastline or straddling a border.
       Results are ordered by name (there's no reference point to rank
       distance from).
+    - Area by name: pass area ("Palo Alto") to get the division-polygon mode
+      without first resolving the id yourself. The name is resolved with the
+      same ranking geocode/resolve_place use; the resolved division is
+      echoed back as "area" on the response so it's clear which one was
+      searched. A name matching several equally-ranked divisions returns
+      {"error": "ambiguous_area", "candidates": [...]} listing their
+      division_ids rather than silently picking one, and an unresolvable
+      name returns {"error": "not_found"} rather than an empty result that
+      would read as "this place has no coffee shops".
 
     category matches Overture's taxonomy (e.g. 'coffee_shop', 'restaurant',
     'grocery'); name is a substring match on the place name — both compose
@@ -148,24 +159,44 @@ def find_places(
     dataset — see degraded_fields() on the response.
     Returns {"results": [...]}, plus truncated/omitted_count if the answer
     didn't fit the token budget. Returns a structured {"error": "bad_request",
-    ...} if neither mode's inputs are given (or both are), {"error":
-    "not_found", ...} if division_id doesn't match any known division, or
+    ...} if no mode's inputs are given (or more than one is), {"error":
+    "not_found", ...} if division_id/area doesn't match any known division, or
     a structured {"error": ...} if the upstream dataset is unavailable or
     missing columns this tool depends on. If a category filter was given and
     it matched nothing (in either mode), a non-fatal "note" field hints that
     the category slug may be wrong and points at search_categories.
     """
     point_given = lat is not None or lon is not None
-    if division_id is not None and point_given:
+    modes_given = sum([point_given, division_id is not None, area is not None])
+    if modes_given > 1:
         return {
             "error": "bad_request",
-            "detail": "pass either lat/lon (+radius_m) or division_id, not both",
+            "detail": "pass exactly one of lat/lon (+radius_m), division_id, or area",
         }
-    if division_id is None and not point_given:
+    if modes_given == 0:
         return {
             "error": "bad_request",
-            "detail": "pass either lat/lon (+radius_m) or division_id",
+            "detail": "pass one of lat/lon (+radius_m), division_id, or area",
         }
+
+    # area is sugar over the division_id path: resolve the name to a
+    # division, then fall through to exactly the same polygon search.
+    resolved_area = None
+    if area is not None:
+        try:
+            resolved_area = geocoding.resolve_area(area)
+        except errors.AmbiguousArea as e:
+            return {
+                "error": "ambiguous_area",
+                "detail": e.detail,
+                "candidates": e.candidates,
+            }
+        except overture.UpstreamUnavailable as e:
+            return _upstream_error(e)
+        if resolved_area is None:
+            return {"error": "not_found", "detail": f"no division matched area {area!r}"}
+        division_id = resolved_area["division_id"]
+
     if division_id is not None:
         try:
             rows = overture.find_places_in_division(
@@ -181,6 +212,10 @@ def find_places(
         if rows is None:
             return {"error": "not_found", "detail": "no division matched division_id"}
         payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+        if resolved_area is not None:
+            # Which division the name landed on — an agent that asked for
+            # "Springfield" needs to see which one it got.
+            payload["area"] = resolved_area
         return _with_category_hint(payload, category, widen_hint="try a larger division")
 
     if lat is None or lon is None:
