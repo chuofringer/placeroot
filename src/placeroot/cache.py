@@ -79,6 +79,7 @@ import logging
 import math
 import os
 import threading
+import time
 from pathlib import Path
 
 from placeroot import db
@@ -306,8 +307,91 @@ def cached_tile_paths(release: str, theme: str, upstream_glob: str) -> list[Path
     return sorted(d.glob("*.parquet"))
 
 
+
+# --- #142: protecting in-flight tiles from eviction ------------------------
+#
+# A query resolves its cache-hit tile paths (local_paths_for_query, under
+# db.conn_lock), releases the lock, and only then runs the SELECT that reads
+# them. In that gap a concurrent request that misses a different tile can
+# call ensure_tile -> evict_if_needed, which walks the cache by mtime and
+# deletes files to fit the size cap -- potentially the very tiles the first
+# query just resolved. Its read then fails on a missing file and surfaces as
+# a hard UpstreamUnavailable even though upstream is perfectly reachable.
+#
+# Rather than widening db.conn_lock across resolve-and-read (a lock-scope
+# change with real deadlock and latency risk), resolved paths are recorded
+# here with an expiry, and evict_if_needed skips any path whose claim is
+# still live. No release call is needed -- and so nothing leaks if a query
+# raises midway -- because the claim simply expires.
+#
+# Only cache HITS handed back to a caller are claimed. A tile freshly
+# created by ensure_tile isn't claimed by its creation, so the LRU cap
+# still behaves exactly as before for the warm/populate path.
+_CLAIM_TTL_S = 60.0
+
+_claims: dict[str, float] = {}
+# Guards _claims AND serializes it against the eviction delete loop, so
+# "this tile exists, claim it" and "this tile is unclaimed, delete it" can't
+# interleave -- a snapshot-then-delete check would still leave a (small)
+# window where a tile is claimed after the snapshot and deleted anyway.
+#
+# RLock, and deliberately never held across a DB call: local_paths_for_query
+# runs under db.conn_lock, so the only lock order that ever occurs is
+# conn_lock -> _claims_lock. Nothing takes conn_lock while holding this one
+# (the tile COPY in ensure_tile happens outside it), so the two can't
+# deadlock against each other -- cf. #145, where a non-reentrant lock
+# re-entered on one thread hung a worker.
+_claims_lock = threading.RLock()
+
+
+def _prune_expired_locked(now: float) -> None:
+    """Drop lapsed claims. Caller holds _claims_lock."""
+    for p in [p for p, deadline in _claims.items() if deadline <= now]:
+        del _claims[p]
+
+
+def _claim_locked(path: str, deadline: float) -> None:
+    """Record one claim. Caller holds _claims_lock.
+
+    Extends, never shortens: if a concurrent claim on the same tile runs
+    longer, that longer lease wins.
+    """
+    if _claims.get(path, 0.0) < deadline:
+        _claims[path] = deadline
+
+
+def claim_paths(paths: list[str], ttl_s: float = _CLAIM_TTL_S) -> None:
+    """Mark `paths` as in-flight, protecting them from eviction for ttl_s."""
+    if not paths:
+        return
+    now = time.monotonic()
+    deadline = now + ttl_s
+    with _claims_lock:
+        # Prune here too, not just during eviction: on a cache comfortably
+        # under cap, eviction may never run, and _claims would otherwise
+        # accumulate an entry per distinct tile ever queried.
+        _prune_expired_locked(now)
+        for p in paths:
+            _claim_locked(p, deadline)
+
+
+def _is_claimed_locked(path: str, now: float) -> bool:
+    """Whether `path` has a live claim. Caller holds _claims_lock."""
+    deadline = _claims.get(path)
+    return deadline is not None and deadline > now
+
+
 def evict_if_needed() -> None:
-    """Delete least-recently-used cached tiles until under the size cap."""
+    """Delete least-recently-used cached tiles until under the size cap.
+
+    Tiles currently claimed by an in-flight query (see claim_paths, #142)
+    are skipped rather than deleted: evicting one out from under a query
+    that already resolved it turns a healthy cache hit into a spurious
+    UpstreamUnavailable. Their size still counts toward the total, so if
+    claims alone keep the cache over cap this pass simply frees what it can
+    -- the cap is a target, not a hard bound, and the next pass (after the
+    claims expire) collects the rest.
+    """
     root = cache_dir()
     if not root.exists():
         return
@@ -315,15 +399,33 @@ def evict_if_needed() -> None:
     files.sort(key=lambda p: p.stat().st_mtime)
     total = sum(f.stat().st_size for f in files)
     cap = max_bytes()
-    i = 0
-    while total > cap and i < len(files):
-        f = files[i]
-        try:
-            total -= f.stat().st_size
-            f.unlink()
-        except OSError:
-            pass
-        i += 1
+    skipped = 0
+    # The claim check and the unlink have to be atomic against a query
+    # claiming a tile it just found on disk, so the delete loop runs under
+    # _claims_lock. Only filesystem work happens inside -- the scan and sort
+    # above are already done, and no DB call is made here.
+    with _claims_lock:
+        now = time.monotonic()
+        _prune_expired_locked(now)
+        i = 0
+        while total > cap and i < len(files):
+            f = files[i]
+            i += 1
+            if _is_claimed_locked(str(f), now):
+                skipped += 1
+                continue
+            try:
+                total -= f.stat().st_size
+                f.unlink()
+            except OSError:
+                pass
+    if total > cap and skipped:
+        logger.info(
+            "cache still %d bytes over cap after eviction: %d in-flight tile(s) "
+            "were skipped to avoid evicting them mid-query; they become "
+            "evictable once their claims expire",
+            total - cap, skipped,
+        )
 
 
 def _materialize_in_background(
@@ -413,13 +515,23 @@ def local_paths_for_query(
         return None
 
     cached, missing = [], []
-    for t in tiles:
-        path = tile_path(release, theme, fingerprint, t)
-        if path.exists():
-            os.utime(path, None)  # bump mtime: this tile is recently used
-            cached.append(path)
-        else:
-            missing.append(t)
+    # Claim each hit in the same critical section that finds it on disk, so
+    # eviction can't delete a tile between this existence check and the
+    # claim that is supposed to protect it (#142). ensure_tile is called
+    # *outside* this block: it runs a DB COPY and its own eviction pass, and
+    # holding the claims lock across either would be asking for trouble.
+    with _claims_lock:
+        now = time.monotonic()
+        _prune_expired_locked(now)
+        deadline = now + _CLAIM_TTL_S
+        for t in tiles:
+            path = tile_path(release, theme, fingerprint, t)
+            if path.exists():
+                os.utime(path, None)  # bump mtime: this tile is recently used
+                _claim_locked(str(path), deadline)
+                cached.append(path)
+            else:
+                missing.append(t)
 
     if not missing:
         return [str(p) for p in cached]
@@ -427,7 +539,9 @@ def local_paths_for_query(
     if sync_mode():
         for t in missing:
             cached.append(ensure_tile(con, release, theme, t, upstream_glob, fingerprint))
-        return [str(p) for p in cached]
+        paths = [str(p) for p in cached]
+        claim_paths(paths)
+        return paths
 
     for t in missing:
         _materialize_in_background(release, theme, t, upstream_glob, fingerprint, new_connection)
