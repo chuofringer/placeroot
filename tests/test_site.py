@@ -1,8 +1,11 @@
-"""Offline guardrails for the static landing page (issue #28).
+"""Offline guardrails for the marketing site (site/, issue #84).
 
-Keeps site/index.html from silently rotting or growing a CDN/analytics/font
-dependency: it must exist, parse as HTML, carry zero external src/href
-references, and still show the copy-paste onboarding config from README.md.
+The three-page marketing site (index, how-it-works, add-to-your-ai) is a
+static, no-build-step site recreated from the design handoff. These tests
+keep it from silently rotting: every page must exist and parse, the only
+permitted external references are Google Fonts (the design's typefaces) and
+known link destinations, the onboarding config must stay present, and the
+verbatim install commands on the installer page must not drift.
 """
 
 import re
@@ -10,26 +13,38 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 SITE_DIR = Path(__file__).parent.parent / "site"
-INDEX_PATH = SITE_DIR / "index.html"
+PAGES = ["index.html", "how-it-works.html", "add-to-your-ai.html"]
 
-# An actual src="..."/href="..." attribute value the browser would fetch
-# over the network — not bare "https://" text sitting in a code sample or
-# attribution copy. Same pattern tests/test_mapview.py uses for the map
-# artifact itself.
-_EXTERNAL_REF_RE = re.compile(r'(?:src|href)\s*=\s*["\']https?://', re.IGNORECASE)
+# External hosts the design legitimately references: Google Fonts for the
+# typefaces, and documentation/repo links. Anything else fetched over the
+# network (a CDN script, an analytics beacon, an external image host) is a
+# regression — the design ships no external images.
+_ALLOWED_EXTERNAL_HOSTS = (
+    "fonts.googleapis.com",
+    "fonts.gstatic.com",
+    "github.com",
+    "docs.astral.sh",
+    "placeroot.dev",  # og:image / canonical absolute URLs in meta tags
+)
+
+# src=/href= values pointing at an external origin.
+_EXTERNAL_REF_RE = re.compile(r'(?:src|href)\s*=\s*["\'](https?://[^"\']+)["\']', re.IGNORECASE)
 _PROTOCOL_RELATIVE_RE = re.compile(r'(?:src|href)\s*=\s*["\']//', re.IGNORECASE)
 
-CONFIG_SNIPPET_FRAGMENTS = [
-    '"mcpServers"',
-    '"placeroot"',
-    '"command": "uvx"',
-    '"args": ["placeroot"]',
+CONFIG_SNIPPET_FRAGMENTS = ['"mcpServers"', '"placeroot"', '"command": "uvx"', '["placeroot"]']
+
+# Verified install instructions that must stay verbatim on the installer page.
+VERBATIM_INSTALL = [
+    "claude mcp add placeroot -- uvx placeroot",
+    "uvx placeroot",
+    "claude_desktop_config.json",
+    "~/.gemini/settings.json",
+    ".cursor/mcp.json",
+    "codex mcp add placeroot -- uvx placeroot",
 ]
 
 
-class _StructureCheckingParser(HTMLParser):
-    """Confirms the document parses as a sane HTML skeleton."""
-
+class _StructureParser(HTMLParser):
     def __init__(self):
         super().__init__()
         self.tags_seen = []
@@ -38,62 +53,82 @@ class _StructureCheckingParser(HTMLParser):
         self.tags_seen.append(tag)
 
 
-def _parse_ok(doc: str) -> _StructureCheckingParser:
-    parser = _StructureCheckingParser()
-    parser.feed(doc)
-    parser.close()
-    return parser
+def _parse(doc: str) -> _StructureParser:
+    p = _StructureParser()
+    p.feed(doc)
+    p.close()
+    return p
 
 
-def test_index_html_exists():
-    assert INDEX_PATH.is_file()
+def test_all_pages_exist():
+    for name in PAGES:
+        assert (SITE_DIR / name).is_file(), f"missing site/{name}"
 
 
-def test_index_html_parses_as_html():
-    doc = INDEX_PATH.read_text(encoding="utf-8")
-    parser = _parse_ok(doc)
-    for tag in ("html", "head", "body", "title"):
-        assert tag in parser.tags_seen, f"missing <{tag}>"
+def test_all_pages_parse_as_html():
+    for name in PAGES:
+        parser = _parse((SITE_DIR / name).read_text(encoding="utf-8"))
+        for tag in ("html", "head", "body", "title"):
+            assert tag in parser.tags_seen, f"{name}: missing <{tag}>"
 
 
-def test_index_html_has_no_external_references():
-    doc = INDEX_PATH.read_text(encoding="utf-8")
-    assert not _EXTERNAL_REF_RE.search(doc), "found an external http(s) src/href"
-    assert not _PROTOCOL_RELATIVE_RE.search(doc), "found a protocol-relative src/href"
+def test_pages_declare_title_and_description():
+    for name in PAGES:
+        doc = (SITE_DIR / name).read_text(encoding="utf-8")
+        assert "<title>" in doc, f"{name}: no <title>"
+        assert 'name="description"' in doc, f"{name}: no meta description"
+        assert 'property="og:image"' in doc, f"{name}: no og:image"
+        assert 'name="twitter:card"' in doc, f"{name}: no twitter:card"
 
 
-def test_index_html_includes_config_snippet():
-    doc = INDEX_PATH.read_text(encoding="utf-8")
+def test_no_unexpected_external_references():
+    for name in PAGES:
+        doc = (SITE_DIR / name).read_text(encoding="utf-8")
+        assert not _PROTOCOL_RELATIVE_RE.search(doc), f"{name}: protocol-relative ref"
+        for url in _EXTERNAL_REF_RE.findall(doc):
+            host = url.split("/")[2]
+            assert host in _ALLOWED_EXTERNAL_HOSTS, f"{name}: unexpected external ref {url}"
+
+
+def test_pages_use_local_favicon_and_assets():
+    for name in PAGES:
+        doc = (SITE_DIR / name).read_text(encoding="utf-8")
+        assert 'href="logo-mark.svg"' in doc, f"{name}: favicon not the local logo mark"
+    for asset in ("logo-mark.svg", "logo-lockup.png", "og-image.png"):
+        assert (SITE_DIR / asset).is_file(), f"missing asset site/{asset}"
+
+
+def test_index_has_onboarding_config_and_copy_button():
+    doc = (SITE_DIR / "index.html").read_text(encoding="utf-8")
     for fragment in CONFIG_SNIPPET_FRAGMENTS:
-        assert fragment in doc, f"missing onboarding config fragment: {fragment}"
+        assert fragment in doc, f"index.html: missing config fragment {fragment}"
+    assert 'id="copyBtn"' in doc and "clipboard" in doc
 
 
-def test_index_html_has_copy_button():
-    doc = INDEX_PATH.read_text(encoding="utf-8")
-    assert 'id="copy-config"' in doc
-    assert "clipboard" in doc
-
-
-def test_no_forbidden_words_or_emoji():
-    doc = INDEX_PATH.read_text(encoding="utf-8").lower()
-    for word in ("revolutionary", "blazingly", "game-changing", "game changing"):
-        assert word not in doc, f"forbidden word present: {word}"
-    # Common emoji ranges; a plain engineering landing page shouldn't need any.
-    assert not re.search(
-        "[\U0001f300-\U0001faff\U00002600-\U000027bf\U0001f1e6-\U0001f1ff]", doc
+def test_installer_page_keeps_verbatim_install_commands():
+    doc = (SITE_DIR / "add-to-your-ai.html").read_text(encoding="utf-8")
+    for cmd in VERBATIM_INSTALL:
+        assert cmd in doc, f"add-to-your-ai.html: install instruction drifted: {cmd!r}"
+    # All six tools/tabs present.
+    tabs = (
+        "Claude Desktop", "Claude Code", "ChatGPT Desktop",
+        "Gemini CLI", "Cursor", "any MCP agent",
     )
+    for tool in tabs:
+        assert tool in doc, f"add-to-your-ai.html: missing tab {tool}"
 
 
-def test_demo_map_html_exists_and_is_self_contained():
-    demo_path = SITE_DIR / "demo-map.html"
-    assert demo_path.is_file(), "site/demo-map.html must be a generated map artifact"
-    doc = demo_path.read_text(encoding="utf-8")
-    assert not _EXTERNAL_REF_RE.search(doc)
-    assert not _PROTOCOL_RELATIVE_RE.search(doc)
+def test_pages_cross_link_and_point_github_at_the_repo():
+    for name in PAGES:
+        doc = (SITE_DIR / name).read_text(encoding="utf-8")
+        assert "github.com/chuofringer/placeroot" in doc, f"{name}: no repo link"
+    for name in ("how-it-works.html", "add-to-your-ai.html"):
+        doc = (SITE_DIR / name).read_text(encoding="utf-8")
+        assert 'href="index.html"' in doc, f"{name}: no link back to landing"
 
 
-def test_style_css_exists_and_is_referenced_locally():
-    css_path = SITE_DIR / "style.css"
-    assert css_path.is_file()
-    doc = INDEX_PATH.read_text(encoding="utf-8")
-    assert 'href="style.css"' in doc
+def test_no_forbidden_marketing_words():
+    for name in PAGES:
+        doc = (SITE_DIR / name).read_text(encoding="utf-8").lower()
+        for word in ("revolutionary", "blazingly", "game-changing", "game changing"):
+            assert word not in doc, f"{name}: forbidden word {word!r}"

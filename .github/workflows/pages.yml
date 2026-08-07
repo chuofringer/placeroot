@@ -1,0 +1,42 @@
+name: Deploy to GitHub Pages
+# Publishes the static marketing site (site/) to GitHub Pages.
+#
+# This is the GitHub-Pages alternative to deploy-site.yml (Cloudflare Pages).
+# It is manual-only (workflow_dispatch) so it never double-deploys alongside
+# the Cloudflare workflow on a push; enable it as your primary by adding a
+# `push: { branches: [main], paths: ['site/**'] }` trigger if you'd rather
+# host on Pages.
+#
+# One-time setup (owner): repo Settings → Pages → Build and deployment →
+# Source: "GitHub Actions". Then run this workflow from the Actions tab; the
+# site publishes at https://<owner>.github.io/<repo>/ (or your Pages custom
+# domain).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deploy at a time.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - name: Upload site/ as the Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
