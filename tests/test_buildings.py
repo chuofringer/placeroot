@@ -10,7 +10,7 @@ fixture" section for why that's exact rather than approximate.
 import duckdb
 import pytest
 
-from placeroot import budget, buildings, overture, server
+from placeroot import budget, buildings, geo, overture, server
 
 from .conftest import BUILDINGS_FIXTURE_PATH, CENTER_LAT, CENTER_LON
 
@@ -38,6 +38,16 @@ FULL_GRID_RADIUS_M = 300
 
 
 # --- summarize_buildings -----------------------------------------------
+
+def test_radius_m_reports_the_effective_clamped_radius():
+    # #136 (buildings sibling of #131): _bbox_filter clamps radius_m to
+    # geo.MAX_QUERY_RADIUS_M and searches with that, so the response must
+    # report the effective radius, not the caller's un-clamped input.
+    over = buildings.summarize_buildings(CENTER_LAT, CENTER_LON, radius_m=5_000_000)
+    assert over["radius_m"] == geo.MAX_QUERY_RADIUS_M
+    normal = buildings.summarize_buildings(CENTER_LAT, CENTER_LON, radius_m=FULL_GRID_RADIUS_M)
+    assert normal["radius_m"] == FULL_GRID_RADIUS_M
+
 
 def test_count_matches_fixture_ground_truth():
     result = buildings.summarize_buildings(CENTER_LAT, CENTER_LON, radius_m=FULL_GRID_RADIUS_M)

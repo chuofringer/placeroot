@@ -213,3 +213,58 @@ def test_server_not_found_shape_unchanged_with_hint(cached_id_lookup):
         "error": "not_found",
         "detail": "no place matched id, or name near lat/lon",
     }
+
+
+# --- #112: resolve_place_batch ---------------------------------------------
+
+
+def test_resolve_place_batch_happy_path_returns_compact_rows_in_order():
+    roastery_id = _roastery_id()
+    arctic_id = _arctic_place_0()["id"]
+    result = server.resolve_place_batch([roastery_id, arctic_id])
+    assert "results" in result
+    rows = result["results"]
+    assert len(rows) == 2
+    assert [r["gers_id"] for r in rows] == [roastery_id, arctic_id]
+    for r in rows:
+        assert "error" not in r
+        assert r["name"]
+        assert isinstance(r["lat"], float)
+        assert isinstance(r["lon"], float)
+        # Compact shape: no full place_details fields leaked in.
+        assert "addresses" not in r
+        assert "websites" not in r
+        assert "phones" not in r
+        assert "socials" not in r
+        assert "sources" not in r
+        assert "brand" not in r
+        assert "confidence" not in r
+    assert rows[0]["name"] == "Blue Bottle Roastery"
+
+
+def test_resolve_place_batch_mixed_resolvable_and_not_found():
+    roastery_id = _roastery_id()
+    result = server.resolve_place_batch([roastery_id, "does-not-exist"])
+    rows = result["results"]
+    assert len(rows) == 2
+    assert rows[0]["gers_id"] == roastery_id
+    assert "error" not in rows[0]
+    assert rows[0]["name"] == "Blue Bottle Roastery"
+    assert rows[1] == {"gers_id": "does-not-exist", "error": "not found"}
+
+
+def test_resolve_place_batch_over_cap_returns_error_not_partial_results():
+    result = server.resolve_place_batch(["whatever"] * 26)
+    assert "error" in result
+    assert "results" not in result
+
+
+def test_resolve_place_batch_empty_list_returns_empty_results():
+    assert server.resolve_place_batch([]) == {"results": []}
+
+
+def test_resolve_place_batch_structured_error_on_unreachable_upstream(tmp_path):
+    overture.set_data_path(str(tmp_path / "does-not-exist" / "*.parquet"))
+    result = server.resolve_place_batch(["whatever"])
+    assert result["error"] == "upstream_unavailable"
+    overture.set_data_path(str(FIXTURE_PATH))

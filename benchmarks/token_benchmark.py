@@ -129,7 +129,9 @@ def _raw_places_rows(
     """Every place in radius_m, every column Overture's places theme carries
     (find_places' raw-rows equivalent: full unprocessed data, not the
     curated id/name/category/distance rows the tool returns)."""
-    bbox_filter, distance_filter, params, bbox = overture.area_geometry(lat, lon, radius_m)
+    bbox_filter, distance_filter, params, bbox, _radius_m = overture.area_geometry(
+        lat, lon, radius_m
+    )
     filters = [bbox_filter, distance_filter]
     if category:
         filters.append("(basic_category ILIKE $category OR taxonomy.primary ILIKE $category)")
