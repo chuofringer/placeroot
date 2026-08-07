@@ -262,3 +262,83 @@ def test_brand_filter_composes_with_division_id(polygon_fixtures):
 def test_has_website_filter_composes_with_division_id(polygon_fixtures):
     rows = overture.find_places_in_division(DIV_NOTCH, has_website=True)
     assert {r["name"] for r in rows} == {"Chain Bakery"}
+
+
+# --- #148: the division polygon resolve is cached ---------------------------
+
+
+class _CountingConn:
+    """Forwards to the real connection, recording the polygon-resolve query.
+
+    DuckDBPyConnection.execute is read-only, so the count is taken by
+    swapping db.shared_conn for a factory returning this proxy.
+    """
+
+    def __init__(self, real, calls):
+        self._real = real
+        self._calls = calls
+
+    def execute(self, sql, *a, **k):
+        if "ST_Union_Agg" in sql:
+            self._calls.append(sql)
+        return self._real.execute(sql, *a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _count_polygon_resolves(monkeypatch):
+    calls: list[str] = []
+    real = overture.db.shared_conn()
+    monkeypatch.setattr(overture.db, "shared_conn", lambda: _CountingConn(real, calls))
+    return calls
+
+
+def test_division_geometry_is_resolved_once_and_reused(polygon_fixtures, monkeypatch):
+    """Step 1 scans the divisions theme for one id, which can't be
+    partition- or row-group-pruned (there's no point to prune by) -- tens of
+    seconds against live Overture. It's immutable for a release, so a repeat
+    query for the same division must not pay for it twice.
+    """
+    overture.clear_division_geometry_cache()
+    calls = _count_polygon_resolves(monkeypatch)
+
+    first = overture.find_places_in_division(DIV_NOTCH)
+    assert len(calls) == 1
+    second = overture.find_places_in_division(DIV_NOTCH)
+    assert len(calls) == 1, "the division polygon was re-resolved on the second query"
+    assert {r["name"] for r in first} == {r["name"] for r in second}
+
+
+def test_unknown_division_id_is_cached_too(polygon_fixtures, monkeypatch):
+    """Repeating a bad id shouldn't cost another full scan either."""
+    overture.clear_division_geometry_cache()
+    calls = _count_polygon_resolves(monkeypatch)
+
+    assert overture.find_places_in_division(DIV_UNKNOWN) is None
+    assert overture.find_places_in_division(DIV_UNKNOWN) is None
+    assert len(calls) == 1
+
+
+def test_division_geometry_cache_is_keyed_by_dataset(polygon_fixtures, tmp_path):
+    """A cached polygon must never leak across a set_data_path switch: the
+    key includes the active divisions glob, so pointing at another dataset
+    re-resolves instead of serving the previous one's geometry.
+    """
+    overture.clear_division_geometry_cache()
+    assert overture._resolve_division_geometry(DIV_NOTCH) is not None
+
+    # Point the divisions theme somewhere with no matching division.
+    con = duckdb.connect()
+    con.execute("INSTALL spatial; LOAD spatial;")
+    con.execute("""
+        CREATE TABLE empty_areas (
+            id VARCHAR, names STRUCT("primary" VARCHAR), subtype VARCHAR,
+            geometry BLOB, division_id VARCHAR
+        )
+    """)
+    other = tmp_path / "other_division_areas.parquet"
+    con.execute(f"COPY empty_areas TO '{other}' (FORMAT PARQUET)")
+    overture.set_data_path(str(other), theme="divisions")
+
+    assert overture._resolve_division_geometry(DIV_NOTCH) is None
