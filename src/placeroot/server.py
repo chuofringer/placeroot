@@ -476,12 +476,21 @@ def geocode(query: str, limit: int = 5) -> dict:
     Returns {"results": [{name, type, lat, lon, id (GERS), admin_context,
     rank_score}, ...]}, budgeted like every other tool. Returns a structured
     {"error": ...} instead of raising if the remote scan fails.
+
+    A query with no location context in it at all (a bare place name that
+    matches no division, e.g. "Blue Bottle Roastery") can't be bounded to a
+    region, so the places half of the search is skipped rather than
+    scanning the global places dataset — minutes, not seconds (#105). That
+    case comes back empty with a "note" saying so and what to do instead.
     """
     try:
-        rows = geocoding.geocode(query, limit)
+        result = geocoding.geocode_detailed(query, limit)
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
-    return budget.apply_budget({"results": rows}, "results")
+    payload = budget.apply_budget({"results": result["results"]}, "results")
+    if "note" in result:
+        payload["note"] = result["note"]
+    return payload
 
 
 @mcp.tool()

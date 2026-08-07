@@ -449,3 +449,89 @@ def test_abbreviation_variant_queries_are_bidirectional_and_leading_only():
     assert not any(
         "West" in v for v in geocode._abbreviation_variant_queries("Fort W")
     )
+
+
+# --- #105: the anchorless places scan is skipped against a REMOTE dataset ---
+# Measured live (2026-07-22.0): an anchorless name query took 216s end-to-end
+# and returned nothing, because there's no bbox to prune the global places
+# theme by. Removing the ORDER BY didn't help (219s) -- a LIMIT can't
+# short-circuit a scan that matches few or no rows.
+
+
+def _pretend_places_are_remote(monkeypatch):
+    """Make only the places glob look like S3; leave every other theme local."""
+    real = geocode.overture.upstream_glob
+
+    def fake(theme=None, type_=None, **kw):
+        if theme == "places":
+            return "s3://overturemaps-us-west-2/release/x/theme=places/type=place/*"
+        return real(theme=theme, type_=type_, **kw) if theme else real(**kw)
+
+    monkeypatch.setattr(geocode.overture, "upstream_glob", fake)
+
+
+def _forbid_places_fallback(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("the unbounded places scan ran against a remote dataset")
+
+    monkeypatch.setattr(geocode, "_query_places_fallback", boom)
+
+
+def test_anchorless_query_skips_the_global_scan_when_upstream_is_remote(monkeypatch):
+    _pretend_places_are_remote(monkeypatch)
+    _forbid_places_fallback(monkeypatch)
+
+    result = geocode.geocode_detailed("Blue Bottle Roastery", limit=5)
+
+    assert result["results"] == []
+    assert "note" in result
+    assert "location" in result["note"].lower()
+
+
+def test_the_skip_note_reaches_the_geocode_tool(monkeypatch):
+    _pretend_places_are_remote(monkeypatch)
+    _forbid_places_fallback(monkeypatch)
+
+    result = server.geocode("Blue Bottle Roastery", limit=5)
+
+    assert result["results"] == []
+    assert "search_categories" not in result.get("note", "")
+    assert "find_places" in result["note"]
+
+
+def test_anchored_query_still_searches_places_when_upstream_is_remote(monkeypatch):
+    """The skip is only for queries with NO location context — an anchored
+    one still gets its (bbox-pruned, cheap) places search."""
+    _pretend_places_are_remote(monkeypatch)
+    called = []
+    # Record the anchor rather than running the query: the glob above is a
+    # stand-in for S3 and isn't readable from a test.
+    monkeypatch.setattr(
+        geocode, "_query_places_fallback",
+        lambda q, anchor=None: called.append(anchor) or [],
+    )
+    # "Brooklyn" matches a division, so an anchor is derivable.
+    geocode.geocode_detailed("Blue Bottle Roastery Brooklyn", limit=5)
+    assert called, "an anchored query must still run the places search"
+    assert called[0] is not None, "and it must be bounded by that anchor"
+
+
+def test_local_dataset_keeps_the_unbounded_name_search(monkeypatch):
+    """#83's name-only search is preserved wherever it's actually cheap: the
+    cost is the remote full-theme read, not the query shape."""
+    result = geocode.geocode_detailed("Blue Bottle Roastery", limit=5)
+    assert "Blue Bottle Roastery" in [r["name"] for r in result["results"]]
+    assert "note" not in result
+
+
+def test_env_override_forces_the_scan_even_when_remote(monkeypatch):
+    monkeypatch.setenv("PLACEROOT_UNBOUNDED_NAME_SEARCH", "1")
+    monkeypatch.setattr(geocode, "_is_remote", lambda glob: True)
+    assert geocode._skip_unanchored_places_scan() is False
+
+
+def test_remote_scheme_detection():
+    assert geocode._is_remote("s3://bucket/key/*")
+    assert geocode._is_remote("https://example.com/x/*")
+    assert not geocode._is_remote("/tmp/fixtures/places.parquet")
+    assert not geocode._is_remote("tests/fixtures/places.parquet")
