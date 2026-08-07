@@ -88,7 +88,9 @@ def find_places(
     Returns {"results": [...]}, plus truncated/omitted_count if the answer
     didn't fit the token budget. If the upstream dataset is unavailable or
     missing columns this tool depends on, returns a structured {"error":
-    ...} instead of raising.
+    ...} instead of raising. If a category filter was given and it matched
+    nothing, a non-fatal "note" field hints that the category slug may be
+    wrong and points at search_categories.
     """
     try:
         rows = overture.find_places(lat, lon, radius_m, category, name, limit)
@@ -96,7 +98,14 @@ def find_places(
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
         return _schema_error(e)
-    return _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+    payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+    if category and not payload["results"]:
+        payload["note"] = (
+            f"no places matched category '{category}' here; if that may not be a "
+            "valid Overture category slug, use search_categories to find the right "
+            "one, or widen radius_m / drop the category filter."
+        )
+    return payload
 
 
 @mcp.tool()
@@ -305,6 +314,49 @@ def geocode(query: str, limit: int = 5) -> dict:
 
 
 @mcp.tool()
+def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
+    """Geocode up to 20 free-text queries in one call, one best match each.
+
+    Cuts N round-trips of geocode() into one: for each query, runs
+    geocode(query, limit_per_query) and keeps only the top candidate.
+    Returns {"results": [{"query", "name", "type", "lat", "lon", "id"
+    (GERS), "rank_score"}, ...]}, one row per query, in input order — a
+    query with no match gets {"query", "error": "no match"} instead, and
+    does not fail the rest of the batch. queries is capped at 20; a longer
+    list returns a structured {"error": ...} rather than truncating
+    silently. Budgeted like every other tool. Returns a structured
+    {"error": ...} instead of raising if the remote scan itself fails.
+    """
+    if len(queries) > 20:
+        return {
+            "error": "bad_request",
+            "detail": f"geocode_batch accepts at most 20 queries, got {len(queries)}",
+        }
+    rows = []
+    try:
+        for query in queries:
+            candidates = geocoding.geocode(query, limit_per_query)
+            if not candidates:
+                rows.append({"query": query, "error": "no match"})
+                continue
+            top = candidates[0]
+            rows.append(
+                {
+                    "query": query,
+                    "name": top["name"],
+                    "type": top["type"],
+                    "lat": top["lat"],
+                    "lon": top["lon"],
+                    "id": top["id"],
+                    "rank_score": top["rank_score"],
+                }
+            )
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    return budget.apply_budget({"results": rows}, "results")
+
+
+@mcp.tool()
 def resolve_place(
     query: str,
     near_lat: float | None = None,
@@ -466,7 +518,8 @@ def isochrone(
     (capped per mode: 5km walk, 15km cycle, 60km drive); passing something
     larger than the cap returns a structured error instead of silently
     truncating. An unrecognized mode string returns a structured
-    {"error": "unsupported_mode"}.
+    {"error": "unsupported_mode"}. minutes must be > 0 and radius_m (if
+    given) must be >= 0, else returns {"error": "bad_request"}.
     """
     try:
         return routing.isochrone(
@@ -486,6 +539,8 @@ def isochrone(
             "detail": e.detail,
             "max_radius_m": e.max_radius_m,
         }
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
 
 
 def _warm_start() -> None:
