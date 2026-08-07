@@ -132,3 +132,23 @@ def test_no_forbidden_marketing_words():
         doc = (SITE_DIR / name).read_text(encoding="utf-8").lower()
         for word in ("revolutionary", "blazingly", "game-changing", "game changing"):
             assert word not in doc, f"{name}: forbidden word {word!r}"
+
+
+def test_pages_have_canonical_urls():
+    canon = {
+        "index.html": 'href="https://placeroot.dev/"',
+        "how-it-works.html": 'href="https://placeroot.dev/how-it-works.html"',
+        "add-to-your-ai.html": 'href="https://placeroot.dev/add-to-your-ai.html"',
+    }
+    for name, href in canon.items():
+        doc = (SITE_DIR / name).read_text(encoding="utf-8")
+        assert 'rel="canonical"' in doc and href in doc, f"{name}: missing/wrong canonical"
+
+
+def test_robots_and_sitemap_present():
+    assert (SITE_DIR / "robots.txt").is_file()
+    sm = SITE_DIR / "sitemap.xml"
+    assert sm.is_file()
+    doc = sm.read_text(encoding="utf-8")
+    for page in ("placeroot.dev/", "how-it-works.html", "add-to-your-ai.html"):
+        assert page in doc, f"sitemap missing {page}"
