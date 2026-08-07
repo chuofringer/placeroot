@@ -871,6 +871,67 @@ def isochrone(
 
 
 @mcp.tool()
+def route(
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+    mode: str = "drive",
+) -> dict:
+    """Route: shortest-path distance and duration between two points, by mode.
+
+    Compact directions, not turn-by-turn: builds a street graph from
+    Overture's transportation theme around the two points and returns
+    {"distance_m", "duration_s", "mode", "from", "to"} for the fastest path
+    — no polyline/geometry (that's a separate tool). mode is "walk",
+    "cycle", or "drive" (default), same cost model as isochrone (walk 1.4
+    m/s, cycle 4.2 m/s, drive per-edge from Overture's speed_limits or a
+    class-based default table). drive's duration is a posted-speed model
+    with no live traffic; all modes snap each endpoint to the nearest
+    usable street-graph node (real routes rarely start/end exactly on a
+    segment).
+
+    Each mode has a straight-line-distance cap on the two points, rejected
+    before any graph is built (see routing.ROUTE_MAX_STRAIGHT_LINE_M, derived
+    per-mode from the same extraction-radius cap isochrone uses — roughly
+    walk 7.5km, cycle 23.5km, drive 95.5km) — real road distance only ever
+    exceeds straight-line, so anything past the cap can't produce a route
+    worth extracting for anyway; returns {"error": "route_too_long"} with
+    the exact cap in "max_distance_m". An unrecognized mode string returns
+    {"error": "unsupported_mode"}; non-finite or out-of-range coordinates
+    (lat outside [-90, 90], lon outside [-180, 180]) return
+    {"error": "bad_request"}. If no usable graph or street node is found
+    near either point, returns {"error": "no_graph_nearby"}. If both points
+    snap into the graph but no path connects them (e.g. disconnected
+    islands of road data), returns {"error": "no_route"} rather than
+    raising. If the extraction graph hit its internal size cap, the result
+    carries "truncated": true — the route may be suboptimal or incomplete.
+    """
+    for lat, lon in ((from_lat, from_lon), (to_lat, to_lon)):
+        coord_error = _invalid_coord(lat, lon)
+        if coord_error is not None:
+            return coord_error
+    try:
+        return routing.route(from_lat, from_lon, to_lat, to_lon, mode=mode)
+    except routing.UnsupportedMode:
+        return {"error": "unsupported_mode", "supported": sorted(routing.MODE_CONFIG)}
+    except routing.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except routing.SchemaDegraded as e:
+        return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
+    except routing.NoGraphNearby as e:
+        return {"error": "no_graph_nearby", "detail": e.detail}
+    except routing.RouteTooLong as e:
+        return {
+            "error": "route_too_long",
+            "detail": e.detail,
+            "max_distance_m": e.max_distance_m,
+        }
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
+
+
+@mcp.tool()
 def data_version() -> dict:
     """Which Overture Maps release backs the answers from every other tool.
 

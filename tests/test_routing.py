@@ -69,7 +69,7 @@ def test_graph_builds_with_expected_node_and_edge_counts():
 def test_walkable_filter_excludes_motorway_shortcut():
     graph = routing.build_graph(ORIGIN_LAT, ORIGIN_LON, WHOLE_GRID_RADIUS_M)
     a, b = fx.node_id(*fx.SHORTCUT["from"]), fx.node_id(*fx.SHORTCUT["to"])
-    neighbors_of_a = {n for n, _ in graph.adjacency[a]}
+    neighbors_of_a = {n for n, _, _ in graph.adjacency[a]}
     assert b not in neighbors_of_a
 
 
@@ -263,9 +263,9 @@ def test_interior_connector_links_two_segments_at_a_shared_crossing():
     graph = routing.build_graph(clat, clon, 100)
 
     assert fx.CROSS_CONNECTOR_ID in graph.adjacency
-    neighbor_ids = {n for n, _ in graph.adjacency[fx.CROSS_CONNECTOR_ID]}
+    neighbor_ids = {n for n, _, _ in graph.adjacency[fx.CROSS_CONNECTOR_ID]}
     assert neighbor_ids == {"x_a0", "x_a1", "x_b0", "x_b1"}
-    for _, length_m in graph.adjacency[fx.CROSS_CONNECTOR_ID]:
+    for _, _weight, length_m in graph.adjacency[fx.CROSS_CONNECTOR_ID]:
         assert length_m == pytest.approx(fx.CROSS_HALF_LEN_M, rel=1e-3)
 
     dist = routing.dijkstra(graph, "x_a0", max_seconds=1000, speed_m_s=1.0)
@@ -366,7 +366,7 @@ def test_point_in_ring_basic_square():
 def test_cycle_class_filter_excludes_motorway_shortcut():
     graph = routing.build_graph(ORIGIN_LAT, ORIGIN_LON, WHOLE_GRID_RADIUS_M, mode="cycle")
     a, b = fx.node_id(*fx.SHORTCUT["from"]), fx.node_id(*fx.SHORTCUT["to"])
-    neighbors_of_a = {n for n, _ in graph.adjacency[a]}
+    neighbors_of_a = {n for n, _, _ in graph.adjacency[a]}
     assert b not in neighbors_of_a
 
 
@@ -385,7 +385,7 @@ def test_drive_speed_limit_overrides_class_default_on_shortcut():
     graph = routing.build_graph(ORIGIN_LAT, ORIGIN_LON, WHOLE_GRID_RADIUS_M, mode="drive")
     assert graph.weight_is_time
     a, b = fx.node_id(*fx.SHORTCUT["from"]), fx.node_id(*fx.SHORTCUT["to"])
-    weight = next(w for n, w in graph.adjacency[a] if n == b)
+    weight = next(w for n, w, _length in graph.adjacency[a] if n == b)
 
     shortcut_length_m = _path_length(fx.SHORTCUT["from"], fx.SHORTCUT["to"])
     expected_seconds = shortcut_length_m / fx.SHORTCUT_SPEED_LIMIT_M_S
@@ -398,8 +398,8 @@ def test_drive_speed_limit_overrides_class_default_on_shortcut():
 def test_oneway_segment_is_directed_for_drive_mode():
     clat, clon = fx.oneway_center_latlon()
     graph = routing.build_graph(clat, clon, 100, mode="drive")
-    a_neighbors = {n for n, _ in graph.adjacency[fx.ONEWAY_A_ID]}
-    b_neighbors = {n for n, _ in graph.adjacency[fx.ONEWAY_B_ID]}
+    a_neighbors = {n for n, _, _ in graph.adjacency[fx.ONEWAY_A_ID]}
+    b_neighbors = {n for n, _, _ in graph.adjacency[fx.ONEWAY_B_ID]}
     assert fx.ONEWAY_B_ID in a_neighbors  # A -> B reachable
     assert fx.ONEWAY_A_ID not in b_neighbors  # B -> A not reachable
 
@@ -407,8 +407,8 @@ def test_oneway_segment_is_directed_for_drive_mode():
 def test_oneway_segment_is_directed_for_cycle_mode():
     clat, clon = fx.oneway_center_latlon()
     graph = routing.build_graph(clat, clon, 100, mode="cycle")
-    a_neighbors = {n for n, _ in graph.adjacency[fx.ONEWAY_A_ID]}
-    b_neighbors = {n for n, _ in graph.adjacency[fx.ONEWAY_B_ID]}
+    a_neighbors = {n for n, _, _ in graph.adjacency[fx.ONEWAY_A_ID]}
+    b_neighbors = {n for n, _, _ in graph.adjacency[fx.ONEWAY_B_ID]}
     assert fx.ONEWAY_B_ID in a_neighbors
     assert fx.ONEWAY_A_ID not in b_neighbors
 
@@ -416,8 +416,8 @@ def test_oneway_segment_is_directed_for_cycle_mode():
 def test_oneway_segment_is_undirected_for_walk_mode():
     clat, clon = fx.oneway_center_latlon()
     graph = routing.build_graph(clat, clon, 100, mode="walk")
-    a_neighbors = {n for n, _ in graph.adjacency[fx.ONEWAY_A_ID]}
-    b_neighbors = {n for n, _ in graph.adjacency[fx.ONEWAY_B_ID]}
+    a_neighbors = {n for n, _, _ in graph.adjacency[fx.ONEWAY_A_ID]}
+    b_neighbors = {n for n, _, _ in graph.adjacency[fx.ONEWAY_B_ID]}
     assert fx.ONEWAY_B_ID in a_neighbors
     assert fx.ONEWAY_A_ID in b_neighbors
 
