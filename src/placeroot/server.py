@@ -379,11 +379,12 @@ def render_map(result: dict | list, title: str | None = None, inline: bool = Fal
     requests when opened — to PLACEROOT_ARTIFACT_DIR (default: alongside the
     tile cache directory). The file itself is the artifact; this tool's
     response stays small on purpose. Returns {"path", "bytes",
-    "features_rendered", "skipped_features"} — skipped_features counts
-    rows/features that couldn't be rendered (missing coordinates, malformed
-    geometry) rather than failing the call outright. Pass inline=true to
-    also get the HTML back in the response when it's small enough to be
-    worth it.
+    "features_rendered", "skipped_features"} (plus "truncated": True when
+    applicable) — skipped_features counts rows/features that couldn't be
+    rendered (missing coordinates, malformed geometry, or dropped past
+    mapview.MAX_RENDER_VERTICES) rather than failing the call outright. Pass
+    inline=true to also get the HTML back in the response when it's small
+    enough to be worth it.
     """
     return mapview.write_artifact(result, title=title, inline=inline)
 
