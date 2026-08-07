@@ -311,6 +311,18 @@ def test_server_route_bad_request_for_non_numeric_coordinate():
     assert result["error"] == "bad_request"
 
 
+def test_server_route_rejects_out_of_range_coordinate():
+    # #163: an out-of-range endpoint (e.g. lat 91, or a swapped lat/lon
+    # pair) must be a bad_request at the tool boundary, not a planet-wide
+    # transportation scan ending in no_graph_nearby.
+    result = server.route(from_lat=91.0, from_lon=0.0, to_lat=91.001, to_lon=0.0, mode="walk")
+    assert result["error"] == "bad_request"
+    result = server.route(
+        from_lat=FROM_LAT, from_lon=FROM_LON, to_lat=14.60, to_lon=120.98 + 180.0, mode="walk"
+    )
+    assert result["error"] == "bad_request"
+
+
 def test_server_route_no_graph_nearby_far_from_the_grid():
     result = server.route(0.0, 0.0, 0.001, 0.001, mode="walk")
     assert result["error"] == "no_graph_nearby"

@@ -898,7 +898,8 @@ def route(
     exceeds straight-line, so anything past the cap can't produce a route
     worth extracting for anyway; returns {"error": "route_too_long"} with
     the exact cap in "max_distance_m". An unrecognized mode string returns
-    {"error": "unsupported_mode"}; non-finite coordinates return
+    {"error": "unsupported_mode"}; non-finite or out-of-range coordinates
+    (lat outside [-90, 90], lon outside [-180, 180]) return
     {"error": "bad_request"}. If no usable graph or street node is found
     near either point, returns {"error": "no_graph_nearby"}. If both points
     snap into the graph but no path connects them (e.g. disconnected
@@ -906,6 +907,10 @@ def route(
     raising. If the extraction graph hit its internal size cap, the result
     carries "truncated": true — the route may be suboptimal or incomplete.
     """
+    for lat, lon in ((from_lat, from_lon), (to_lat, to_lon)):
+        coord_error = _invalid_coord(lat, lon)
+        if coord_error is not None:
+            return coord_error
     try:
         return routing.route(from_lat, from_lon, to_lat, to_lon, mode=mode)
     except routing.UnsupportedMode:
