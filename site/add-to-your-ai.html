@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Add PlaceRoot to your AI</title>
+<meta name="description" content="Add PlaceRoot to Claude Desktop, Claude Code, ChatGPT Desktop, Gemini CLI, Cursor, or any MCP agent. Pick your tool — two minutes, no account, $0.">
+<link rel="icon" type="image/svg+xml" href="logo-mark.svg">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Add PlaceRoot to your AI">
+<meta property="og:description" content="Add PlaceRoot to Claude, ChatGPT, Gemini, Cursor, or any MCP agent. Two minutes, no account, $0.">
+<meta property="og:url" content="https://placeroot.dev/add-to-your-ai.html">
+<meta property="og:image" content="https://placeroot.dev/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Add PlaceRoot to your AI">
+<meta name="twitter:description" content="Add PlaceRoot to Claude, ChatGPT, Gemini, Cursor, or any MCP agent. Two minutes, no account, $0.">
+<meta name="twitter:image" content="https://placeroot.dev/og-image.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  body{margin:0;background:#fbfaf5;font-family:Sora,system-ui,sans-serif}
+  a{color:#5c8a63;text-decoration:none}a:hover{color:#4c7a54}
+  @media (max-width:980px){
+    .pr-wrap{padding-left:24px!important;padding-right:24px!important}
+    .pr-grid4{grid-template-columns:1fr 1fr!important}
+  }
+  @media (max-width:720px){
+    .pr-nav{flex-wrap:wrap!important;gap:12px!important;justify-content:center!important}
+    .pr-navlinks{gap:14px!important;font-size:13px!important;flex-wrap:wrap!important;justify-content:center!important}
+    .pr-wrap{padding-left:18px!important;padding-right:18px!important}
+    .pr-grid2,.pr-grid2-hero,.pr-grid4,.pr-pipeline,.pr-chips,.pr-installgrid{grid-template-columns:1fr!important}
+    .pr-pipeline,.pr-chips{gap:12px!important}
+    .pr-conn{display:none!important}
+    .pr-h1hero{white-space:normal!important;font-size:33px!important}
+    .pr-devhead,.pr-footrow{flex-direction:column!important;align-items:flex-start!important;gap:14px!important}
+    .pr-toolgrid{grid-template-columns:1fr!important}
+  }
+</style>
+</head>
+<body>
+<div style="min-height:100vh">
+  <div class="pr-nav pr-wrap" style="display:flex;align-items:center;justify-content:space-between;padding:20px 48px;max-width:1240px;margin:0 auto;width:100%;box-sizing:border-box">
+    <a href="index.html" style="display:flex;align-items:center;gap:7px"><svg width="32" height="30" viewBox="0 0 96 92"><rect x="8" y="8" width="80" height="58" rx="18" fill="#5c8a63"></rect><path d="M28 66 L28 86 L48 66 Z" fill="#5c8a63"></path><circle cx="48" cy="33" r="10" fill="#fbfaf5"></circle><circle cx="48" cy="33" r="4" fill="#e8b04b"></circle><path d="M48 43 L48 52" stroke="#fbfaf5" stroke-width="4" stroke-linecap="round"></path></svg><span style="font-weight:800;font-size:18px;letter-spacing:-.02em;color:#2a332b">placeroot</span></a>
+    <div class="pr-navlinks" style="display:flex;gap:26px;align-items:center;font-size:14px;font-weight:600">
+      <a href="how-it-works.html" style="color:#55604f">How it works</a>
+      <a href="https://github.com/chuofringer/placeroot" style="color:#55604f">GitHub ↗</a>
+      <span style="color:#fbfaf5;background:#5c8a63;padding:10px 20px;border-radius:99px;white-space:nowrap">Add to your AI — free</span>
+    </div>
+  </div>
+  <div style="max-width:760px;margin:0 auto;padding:44px 48px 0;text-align:center">
+    <h1 style="margin:0;font-size:40px;font-weight:800;letter-spacing:-.03em;color:#2a332b">Add PlaceRoot to your AI</h1>
+    <p style="margin:12px auto 0;font-size:15px;color:#55604f">Pick your tool. Two minutes, no account, $0.</p>
+  </div>
+  <div id="tabs" style="display:flex;gap:8px;justify-content:center;margin:28px auto 0;padding:0 48px;flex-wrap:wrap"></div>
+  <div style="max-width:1040px;margin:28px auto 0;padding:0 48px 24px;width:100%;box-sizing:border-box">
+    <div class="pr-installgrid" style="background:#171c17;border-radius:18px;padding:36px 40px;display:grid;grid-template-columns:1.05fr 1fr;gap:40px;align-items:start">
+      <div>
+        <div style="font:600 11px 'Fira Code',monospace;color:#e8b04b;margin-bottom:16px">INSTALL · <span id="activeName1"></span></div>
+        <div style="display:flex;flex-direction:column;gap:14px;font-size:14px;line-height:1.6;color:#c9d4c4">
+          <div style="display:flex;gap:12px"><span style="font:600 12px 'Fira Code',monospace;color:#8fbf96;flex:none;padding-top:2px">1</span><span id="step1"></span></div>
+          <div style="display:flex;gap:12px"><span style="font:600 12px 'Fira Code',monospace;color:#8fbf96;flex:none;padding-top:2px">2</span><span id="step2"></span></div>
+        </div>
+        <div style="margin:14px 0 0;background:#0f140f;border-radius:10px;overflow:hidden;border:1px solid rgba(251,250,245,.08)">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px;border-bottom:1px solid rgba(251,250,245,.07)"><span id="configFile" style="font:500 10.5px 'Fira Code',monospace;color:#8a9482"></span><button id="copyBtn" type="button" style="cursor:pointer;font:600 10.5px 'Fira Code',monospace;color:#171c17;background:#e8b04b;padding:4px 11px;border-radius:5px;border:none">copy</button></div>
+          <pre id="configText" style="margin:0;padding:14px 18px;font:400 12.5px/1.7 'Fira Code',monospace;color:#e8ead9;white-space:pre-wrap"></pre>
+        </div>
+        <div style="display:flex;gap:12px;margin-top:14px;font-size:14px;line-height:1.6;color:#c9d4c4"><span style="font:600 12px 'Fira Code',monospace;color:#8fbf96;flex:none;padding-top:2px">3</span><span id="step3"></span></div>
+        <div style="margin-top:18px;font:500 11.5px 'Fira Code',monospace;color:#8a9482">requires <a href="https://docs.astral.sh/uv/" style="color:#8fbf96">uv</a> · stdio transport · <a href="https://github.com/chuofringer/placeroot" style="color:#8fbf96">full options on GitHub →</a></div>
+      </div>
+      <div>
+        <div style="background:#242d24;border-radius:12px;overflow:hidden;border:1px solid rgba(251,250,245,.1)">
+          <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid rgba(251,250,245,.08)">
+            <span style="width:9px;height:9px;border-radius:50%;background:#c2552a"></span><span style="width:9px;height:9px;border-radius:50%;background:#e8b04b"></span><span style="width:9px;height:9px;border-radius:50%;background:#6faa77"></span>
+            <span style="margin-left:8px;font:500 11px 'Fira Code',monospace;color:#8a9482"><span id="activeName2"></span> · placeroot connected</span>
+          </div>
+          <div style="padding:18px 16px;display:flex;flex-direction:column;gap:10px">
+            <div style="align-self:flex-end;max-width:85%;background:#5c8a63;color:#fbfaf5;border-radius:12px 12px 4px 12px;padding:10px 14px;font-size:12.5px;line-height:1.5">What's around downtown Palo Alto?</div>
+            <div style="align-self:flex-start;display:flex;align-items:center;gap:7px;background:rgba(251,250,245,.06);border:1px solid rgba(251,250,245,.1);border-radius:7px;padding:6px 10px;font:500 10.5px 'Fira Code',monospace;color:#8fbf96"><span style="width:6px;height:6px;border-radius:50%;background:#e8b04b"></span>placeroot · summarize_area</div>
+            <div style="align-self:flex-start;max-width:92%;background:rgba(251,250,245,.08);border-radius:12px 12px 12px 4px;padding:10px 14px;font-size:12.5px;line-height:1.55;color:#e8ead9">Lively around University Ave — about 190 places within 500 m: 54 restaurants, 22 cafés, 11 bookstores.</div>
+          </div>
+        </div>
+        <div style="margin-top:12px;text-align:center;font-size:11.5px;color:#8a9482">works the same in every MCP-capable app</div>
+      </div>
+    </div>
+  </div>
+  <div style="max-width:960px;margin:0 auto;padding:0 48px 64px;text-align:center">
+    <div style="display:flex;justify-content:center;gap:26px;font-size:13px;font-weight:700;color:#5c8a63"><span>No account</span><span>·</span><span>No API key</span><span>·</span><span>$0 forever</span></div>
+    <div style="margin-top:10px;font-size:12.5px;color:#8a9482">Once added, just ask — <a href="how-it-works.html" style="font-weight:700">see how it answers →</a></div>
+  </div>
+</div>
+<script>
+  (function () {
+    var JSON_SNIPPET = '"mcpServers": {\n  "placeroot": { "command": "uvx", "args": ["placeroot"] }\n}';
+    var JSON_FULL = '{\n  "mcpServers": {\n    "placeroot": {\n      "command": "uvx",\n      "args": ["placeroot"]\n    }\n  }\n}';
+    var apps = [
+      { name: "Claude Desktop", step1: "In the Claude Desktop app, open Settings → Developer → Edit Config. This opens claude_desktop_config.json.", step2: "Add the server config:", file: "claude_desktop_config.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Quit and reopen Claude Desktop, then ask: \"What's around downtown Palo Alto?\"" },
+      { name: "Claude Code", step1: "In a terminal, from any project directory:", step2: "Run one command:", file: "terminal", snippet: "claude mcp add placeroot -- uvx placeroot", copy: "claude mcp add placeroot -- uvx placeroot", step3: "Check with /mcp inside a session — then just ask. (Add --scope user to enable it in every project.)" },
+      { name: "ChatGPT Desktop", step1: "In the ChatGPT desktop app, add an MCP server in settings: enter a name, choose STDIO, and give it the command \"uvx placeroot\". (ChatGPT on the web takes remote servers only — or use Codex: codex mcp add placeroot -- uvx placeroot.)", step2: "Command to paste:", file: "server command · STDIO", snippet: "uvx placeroot", copy: "uvx placeroot", step3: "Save, restart, then type /mcp in the composer to confirm placeroot is connected." },
+      { name: "Gemini CLI", step1: "MCP servers work in Gemini CLI (the consumer Gemini app doesn't take custom servers). Open ~/.gemini/settings.json — create it if it doesn't exist.", step2: "Add the server config:", file: "~/.gemini/settings.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Restart gemini and type /mcp — placeroot should be listed. Then just ask." },
+      { name: "Cursor", step1: "Open Cursor Settings → MCP → Add new server, or create .cursor/mcp.json in your project.", step2: "Add the server config:", file: ".cursor/mcp.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Ask the agent about places around any address in your code or docs." },
+      { name: "any MCP agent", step1: "Register a stdio MCP server pointing at the command below.", step2: "Server config (stdio transport):", file: "mcp config", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Call find_places or summarize_area from your agent loop." }
+    ];
+
+    var state = { tab: 0, copied: false };
+    var copyTimer;
+    var tabsEl = document.getElementById("tabs");
+
+    function renderTabs() {
+      tabsEl.innerHTML = "";
+      apps.forEach(function (app, i) {
+        var active = i === state.tab;
+        var el = document.createElement("span");
+        el.textContent = app.name;
+        el.style.cssText =
+          "cursor:pointer;font:600 13px 'Fira Code',monospace;padding:10px 18px;border-radius:99px;white-space:nowrap;border:1.5px solid " +
+          (active ? "#5c8a63" : "rgba(42,51,43,.18)") +
+          ";background:" + (active ? "#5c8a63" : "transparent") +
+          ";color:" + (active ? "#fbfaf5" : "#55604f");
+        el.addEventListener("click", function () {
+          state.tab = i;
+          state.copied = false;
+          clearTimeout(copyTimer);
+          render();
+        });
+        tabsEl.appendChild(el);
+      });
+    }
+
+    function render() {
+      var a = apps[state.tab];
+      renderTabs();
+      document.getElementById("activeName1").textContent = a.name;
+      document.getElementById("activeName2").textContent = a.name;
+      document.getElementById("step1").textContent = a.step1;
+      document.getElementById("step2").textContent = a.step2;
+      document.getElementById("step3").textContent = a.step3;
+      document.getElementById("configFile").textContent = a.file;
+      document.getElementById("configText").textContent = a.snippet;
+      document.getElementById("copyBtn").textContent = state.copied ? "copied ✓" : "copy";
+    }
+
+    document.getElementById("copyBtn").addEventListener("click", function () {
+      var a = apps[state.tab];
+      if (navigator.clipboard) navigator.clipboard.writeText(a.copy);
+      state.copied = true;
+      render();
+      clearTimeout(copyTimer);
+      copyTimer = setTimeout(function () { state.copied = false; render(); }, 1500);
+    });
+
+    render();
+  })();
+</script>
+</body>
+</html>
