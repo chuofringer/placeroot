@@ -43,6 +43,48 @@ def test_tiles_for_bbox_single_tile():
     assert cache.tiles_for_bbox(-73.95, 40.65, -73.85, 40.75) == [(-74, 40)]
 
 
+def test_tiles_for_bbox_pole_query_stays_bounded():
+    """Issue #163 (A1): bbox_around(90, 0, 500000) is clamped to a
+    (still full-globe-width) box, but tiles_for_bbox must not materialize
+    the full (tx, ty) cross product for it — the count returned must be
+    small enough that local_paths_for_query's MAX_TILES_PER_QUERY cap takes
+    its existing oversize branch without ever needing to build (or throw
+    away) tens of millions of tuples."""
+    from placeroot import geo
+
+    bbox = geo.bbox_around(90.0, 0.0, 500_000)
+    tiles = cache.tiles_for_bbox(*bbox)
+    # Structural assertion, not a timing one: whatever tiles_for_bbox
+    # returns here must already be over the cap (so local_paths_for_query
+    # rejects it), and bounded — nowhere near the tens of millions a naive
+    # range(x0, x1+1) x range(y0, y1+1) would have produced.
+    assert len(tiles) > cache.MAX_TILES_PER_QUERY
+    assert len(tiles) < 100_000
+
+
+def test_tiles_for_bbox_huge_bbox_rejected_before_building_full_range():
+    """A deliberately oversized bbox (independent of bbox_around/geo.py)
+    must be caught by tiles_for_bbox's own early span-guard, not just rely
+    on the caller's cap after the fact."""
+    tiles = cache.tiles_for_bbox(-1_000_000.0, -1_000_000.0, 1_000_000.0, 1_000_000.0)
+    assert len(tiles) > cache.MAX_TILES_PER_QUERY
+    assert len(tiles) < 100_000
+
+
+def test_tiles_for_bbox_oversize_early_out_returns_real_tiles():
+    """The oversize early-out must return a truncated prefix of the REAL
+    enumeration, not fabricated filler ids: (0, 0) is a legitimate tile
+    (Gulf of Guinea), so a caller that iterates the result — a cache-warm
+    loop, a log line — must see genuine tiles of this bbox, and a wrong
+    result must not be indistinguishable from a real one."""
+    tiles = cache.tiles_for_bbox(-179.5, -89.5, 179.5, 89.5)
+    assert len(tiles) > cache.MAX_TILES_PER_QUERY
+    assert len(set(tiles)) == len(tiles)  # distinct ids, not N copies of one
+    assert tiles[0] == (-180, -90)  # the bbox's own corner tile
+    assert all(t in {(x, y) for x in range(-180, 180) for y in range(-90, 90)}
+               for t in tiles)
+
+
 def test_offline_fallback_picks_most_recently_used_not_most_recently_created(
     cache_dir, monkeypatch
 ):
@@ -251,6 +293,60 @@ def test_lru_eviction_removes_oldest_tiles_when_over_cap(con, cache_dir, monkeyp
     assert len(remaining) < len(paths)
     # The most recently fetched tile should still be present (LRU keeps the newest).
     assert paths[-1].exists()
+
+
+def test_sync_multi_tile_query_does_not_evict_its_own_tiles(
+    con, cache_dir, sync_cache, monkeypatch
+):
+    """#158: a sync-mode query that fans out to more missing tiles than fit
+    under PLACEROOT_CACHE_MAX_MB must not evict the tiles it just fetched
+    before returning them. On the pre-fix code the tiles were claimed only
+    after the whole loop, while ensure_tile evicts after each write, so
+    earlier-fetched (unclaimed) tiles got deleted mid-loop and the returned
+    paths pointed at files that no longer existed -> UpstreamUnavailable."""
+    # ~3 KB cap: a couple of tiles overflow it, forcing eviction mid-loop.
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", str(3000 / 1024 / 1024))
+    bbox = (-74.5, 40.5, -73.5, 41.5)  # spans 4 tiles (one dense, three sparse)
+    tiles = cache.tiles_for_bbox(*bbox)
+    assert len(tiles) >= 3  # need a fan-out for the bug to bite
+
+    paths = cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con)
+    assert paths is not None
+    assert len(paths) == len(tiles)
+    gone = [p for p in paths if not os.path.exists(p)]
+    assert gone == [], f"query returned paths to tiles it self-evicted: {gone}"
+
+
+def test_sync_loop_outlasting_claim_ttl_does_not_evict_its_own_tiles(
+    con, cache_dir, sync_cache, monkeypatch
+):
+    """#158 follow-up: a sync fetch loop that runs longer than _CLAIM_TTL_S
+    must still not evict this query's own tiles. A claim taken once (at
+    discovery for hits, at that tile's own fetch for misses) expires mid-loop
+    when sequential upstream COPYs outlast the TTL, leaving early tiles
+    evictable again — so the loop must refresh every held claim before each
+    fetch. Simulated by aging all live claims by half the TTL inside each
+    ensure_tile call, as if each fetch took ~30s of wall clock."""
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", str(3000 / 1024 / 1024))
+    bbox = (-74.5, 40.5, -73.5, 41.5)  # spans 4 tiles (one dense, three sparse)
+    tiles = cache.tiles_for_bbox(*bbox)
+    assert len(tiles) >= 3  # need a fan-out longer than 2*TTL/aging for the bug
+
+    real_ensure_tile = cache.ensure_tile
+
+    def slow_ensure_tile(*args, **kwargs):
+        with cache._claims_lock:
+            for p in list(cache._claims):
+                cache._claims[p] -= cache._CLAIM_TTL_S / 2
+        return real_ensure_tile(*args, **kwargs)
+
+    monkeypatch.setattr(cache, "ensure_tile", slow_ensure_tile)
+
+    paths = cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con)
+    assert paths is not None
+    assert len(paths) == len(tiles)
+    gone = [p for p in paths if not os.path.exists(p)]
+    assert gone == [], f"claims expired mid-loop; query self-evicted: {gone}"
 
 
 # --- Issue #63: schema-fingerprinted tile layout --- #
