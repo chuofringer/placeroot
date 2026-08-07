@@ -77,6 +77,9 @@ def find_places(
     category: str | None = None,
     name: str | None = None,
     limit: int = 10,
+    brand: str | None = None,
+    has_website: bool | None = None,
+    has_phone: bool | None = None,
 ) -> dict:
     """Find named places near a point, nearest first.
 
@@ -85,13 +88,26 @@ def find_places(
     operating_status ("in business" / "permanently closed" / null when
     unknown) — a business-lifecycle signal, NOT opening hours; this data has
     no open-now information.
+
+    brand is a substring match on the place's brand name (e.g. 'Starbucks').
+    Brand data is sparse — most independent businesses have no brand at all,
+    so brand=X narrows results down to that chain only; the absence of a
+    result does NOT mean "not a Starbucks", it may just mean brand isn't
+    populated for that place. has_website/has_phone filter on whether a
+    place has any website/phone entries at all (presence, not content) —
+    each result row carries brand (string or null) and has_website/has_phone
+    (booleans) so an agent can see why a place matched, but the full
+    websites/phones arrays are only returned by place_details.
+
     Returns {"results": [...]}, plus truncated/omitted_count if the answer
     didn't fit the token budget. If the upstream dataset is unavailable or
     missing columns this tool depends on, returns a structured {"error":
     ...} instead of raising.
     """
     try:
-        rows = overture.find_places(lat, lon, radius_m, category, name, limit)
+        rows = overture.find_places(
+            lat, lon, radius_m, category, name, limit, brand, has_website, has_phone
+        )
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     except overture.SchemaDegraded as e:

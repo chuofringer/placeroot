@@ -303,8 +303,17 @@ def find_places(
     category: str | None = None,
     name: str | None = None,
     limit: int = 10,
+    brand: str | None = None,
+    has_website: bool | None = None,
+    has_phone: bool | None = None,
 ) -> list[dict]:
     """Places near a point, nearest first, compact rows.
+
+    brand is a substring match on the place's brand name (e.g. a chain);
+    has_website/has_phone filter on whether a place has any website/phone
+    entries at all (not their content). Rows carry brand (str or None) and
+    has_website/has_phone (bool presence flags) — not the raw websites/phones
+    arrays, which stay compact and are only exposed in full by place_details.
 
     Raises SchemaDegraded if bbox is missing from the active dataset (the
     tool can't answer at all without it), or UpstreamUnavailable if the
@@ -339,6 +348,19 @@ def find_places(
         if "names" not in missing:
             filters.append("names.primary ILIKE $name")
             params["name"] = f"%{name}%"
+    if brand is not None and "brand" not in missing:
+        filters.append("brand.names.primary ILIKE $brand")
+        params["brand"] = f"%{brand}%"
+    if has_website is not None and "websites" not in missing:
+        if has_website:
+            filters.append("(websites IS NOT NULL AND len(websites) > 0)")
+        else:
+            filters.append("(websites IS NULL OR len(websites) = 0)")
+    if has_phone is not None and "phones" not in missing:
+        if has_phone:
+            filters.append("(phones IS NOT NULL AND len(phones) > 0)")
+        else:
+            filters.append("(phones IS NULL OR len(phones) = 0)")
 
     name_expr = "NULL" if "names" in missing else "names.primary"
     category_expr = "NULL" if "taxonomy" in missing else "taxonomy.primary"
@@ -346,6 +368,13 @@ def find_places(
     operating_status_expr = "NULL" if "operating_status" in missing else "operating_status"
     confidence_expr = "NULL" if "confidence" in missing else "round(confidence, 2)"
     id_expr = "NULL" if "id" in missing else "id"
+    brand_expr = "NULL" if "brand" in missing else "brand.names.primary"
+    has_website_expr = (
+        "FALSE" if "websites" in missing else "(websites IS NOT NULL AND len(websites) > 0)"
+    )
+    has_phone_expr = (
+        "FALSE" if "phones" in missing else "(phones IS NOT NULL AND len(phones) > 0)"
+    )
 
     sql = f"""
         SELECT
@@ -355,6 +384,9 @@ def find_places(
             {basic_category_expr}               AS basic_category,
             {operating_status_expr}             AS operating_status,
             {confidence_expr}                   AS confidence,
+            {brand_expr}                        AS brand,
+            {has_website_expr}                  AS has_website,
+            {has_phone_expr}                    AS has_phone,
             round(bbox.ymin, 6)                 AS lat,
             round(bbox.xmin, 6)                 AS lon,
             round({_DISTANCE_EXPR}, 0)          AS distance_m
@@ -370,7 +402,7 @@ def find_places(
         raise UpstreamUnavailable(str(e)) from e
     cols = [
         "id", "name", "category", "basic_category", "operating_status",
-        "confidence", "lat", "lon", "distance_m",
+        "confidence", "brand", "has_website", "has_phone", "lat", "lon", "distance_m",
     ]
     results = [dict(zip(cols, r)) for r in rows]
     for d in results:
