@@ -968,6 +968,80 @@ def route(
 
 
 @mcp.tool()
+def places_along_route(
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+    mode: str = "drive",
+    category: str | None = None,
+    name: str | None = None,
+    max_detour_m: float = routing.CORRIDOR_DEFAULT_DETOUR_M,
+    limit: int = 10,
+) -> dict:
+    """Places on the way from A to B: corridor search along the route.
+
+    Answers "find a coffee shop on my drive to the airport" — the route tool
+    plus find_places in one call. Builds the same street-graph shortest path
+    `route` returns, then finds places whose nearest point on that path is
+    within max_detour_m (default 1000m, capped at 5000m; larger values
+    return a bad_request error rather than being silently clamped).
+
+    Each result row is a find_places row plus two numbers: detour_m, the
+    straight-line distance to the route doubled — an approximation of the
+    round trip off and back on, not a re-routed detour — and along_m, how
+    far along the route from the origin that place sits, so "roughly
+    halfway" is answerable. Results are ordered by along_m (route order,
+    reading as an itinerary) rather than by detour cost, and capped at
+    limit. The response also carries {"route": {"distance_m", "duration_s",
+    "mode"}} for the underlying route.
+
+    category and name narrow the search exactly as they do in find_places
+    (category matches Overture's taxonomy, e.g. 'coffee_shop'; name is a
+    substring match) — worth passing on a long route, since an unfiltered
+    corridor through a dense area can hold more places than the search
+    considers, in which case the response carries "truncated": true and a
+    note saying so.
+
+    mode is "walk", "cycle", or "drive" (default), with the same cost model
+    and the same straight-line-distance caps as `route`, and the same
+    structured errors: route_too_long, no_graph_nearby, no_route,
+    unsupported_mode, and bad_request for non-finite/out-of-range
+    coordinates or an invalid max_detour_m.
+    """
+    for lat, lon in ((from_lat, from_lon), (to_lat, to_lon)):
+        coord_error = _invalid_coord(lat, lon)
+        if coord_error is not None:
+            return coord_error
+    try:
+        result = routing.places_along_route(
+            from_lat, from_lon, to_lat, to_lon,
+            mode=mode, category=category, name=name,
+            max_detour_m=max_detour_m, limit=limit,
+        )
+    except routing.UnsupportedMode:
+        return {"error": "unsupported_mode", "supported": sorted(routing.MODE_CONFIG)}
+    except routing.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except (routing.SchemaDegraded, overture.SchemaDegraded) as e:
+        return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
+    except routing.NoGraphNearby as e:
+        return {"error": "no_graph_nearby", "detail": e.detail}
+    except routing.RouteTooLong as e:
+        return {
+            "error": "route_too_long",
+            "detail": e.detail,
+            "max_distance_m": e.max_distance_m,
+        }
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
+    if "error" in result:
+        return result
+    payload = _with_degraded_fields(budget.apply_budget(result, "results"))
+    return _with_category_hint(payload, category, widen_hint="widen max_detour_m")
+
+
+@mcp.tool()
 def data_version() -> dict:
     """Which Overture Maps release backs the answers from every other tool.
 
