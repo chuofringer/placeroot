@@ -296,6 +296,48 @@ def _label_operating_status(value):
     return _OPERATING_STATUS_LABELS.get(value, value)
 
 
+def _place_category_name_filters(
+    missing: set[str], category: str | None, name: str | None, params: dict
+) -> list[str]:
+    """category/name filter clauses (and their params, added to params in
+    place) shared by find_places and find_places_in_division so both narrow
+    results identically."""
+    filters = []
+    if category:
+        cat_clauses = []
+        if "basic_category" not in missing:
+            cat_clauses.append("basic_category ILIKE $category")
+        if "taxonomy" not in missing:
+            cat_clauses.append(
+                "(taxonomy.primary ILIKE $category"
+                " OR list_contains(taxonomy.alternates, $category_exact))"
+            )
+        if cat_clauses:
+            filters.append(f"({' OR '.join(cat_clauses)})")
+            params["category"] = f"%{category}%"
+            params["category_exact"] = category
+    if name:
+        if "names" not in missing:
+            filters.append("names.primary ILIKE $name")
+            params["name"] = f"%{name}%"
+    return filters
+
+
+def _place_select_exprs(missing: set[str]) -> dict[str, str]:
+    """SQL expressions for a place row's compact-result columns, degrading
+    to NULL for any column absent from the active dataset — shared by
+    find_places and find_places_in_division so both rows have the same
+    shape and degrade the same way."""
+    return {
+        "id": "NULL" if "id" in missing else "id",
+        "name": "NULL" if "names" in missing else "names.primary",
+        "category": "NULL" if "taxonomy" in missing else "taxonomy.primary",
+        "basic_category": "NULL" if "basic_category" in missing else "basic_category",
+        "operating_status": "NULL" if "operating_status" in missing else "operating_status",
+        "confidence": "NULL" if "confidence" in missing else "round(confidence, 2)",
+    }
+
+
 def find_places(
     lat: float,
     lon: float,
@@ -322,39 +364,18 @@ def find_places(
     filters = [bbox_filter, distance_filter]
     if "names" not in missing:
         filters.append("names.primary IS NOT NULL")
-    if category:
-        cat_clauses = []
-        if "basic_category" not in missing:
-            cat_clauses.append("basic_category ILIKE $category")
-        if "taxonomy" not in missing:
-            cat_clauses.append(
-                "(taxonomy.primary ILIKE $category"
-                " OR list_contains(taxonomy.alternates, $category_exact))"
-            )
-        if cat_clauses:
-            filters.append(f"({' OR '.join(cat_clauses)})")
-            params["category"] = f"%{category}%"
-            params["category_exact"] = category
-    if name:
-        if "names" not in missing:
-            filters.append("names.primary ILIKE $name")
-            params["name"] = f"%{name}%"
+    filters.extend(_place_category_name_filters(missing, category, name, params))
 
-    name_expr = "NULL" if "names" in missing else "names.primary"
-    category_expr = "NULL" if "taxonomy" in missing else "taxonomy.primary"
-    basic_category_expr = "NULL" if "basic_category" in missing else "basic_category"
-    operating_status_expr = "NULL" if "operating_status" in missing else "operating_status"
-    confidence_expr = "NULL" if "confidence" in missing else "round(confidence, 2)"
-    id_expr = "NULL" if "id" in missing else "id"
+    exprs = _place_select_exprs(missing)
 
     sql = f"""
         SELECT
-            {id_expr}                           AS id,
-            {name_expr}                         AS name,
-            {category_expr}                     AS category,
-            {basic_category_expr}               AS basic_category,
-            {operating_status_expr}             AS operating_status,
-            {confidence_expr}                   AS confidence,
+            {exprs["id"]}                       AS id,
+            {exprs["name"]}                      AS name,
+            {exprs["category"]}                  AS category,
+            {exprs["basic_category"]}             AS basic_category,
+            {exprs["operating_status"]}           AS operating_status,
+            {exprs["confidence"]}                AS confidence,
             round(bbox.ymin, 6)                 AS lat,
             round(bbox.xmin, 6)                 AS lon,
             round({_DISTANCE_EXPR}, 0)          AS distance_m
@@ -371,6 +392,185 @@ def find_places(
     cols = [
         "id", "name", "category", "basic_category", "operating_status",
         "confidence", "lat", "lon", "distance_m",
+    ]
+    results = [dict(zip(cols, r)) for r in rows]
+    for d in results:
+        d["operating_status"] = _label_operating_status(d["operating_status"])
+    return results
+
+
+# division_area (divisions theme) columns find_places_in_division depends on
+# to resolve a division's polygon by id. geometry is essential (mirrors
+# divisions.py's admin_lookup) — without it there's no containment test to
+# run. division_id is soft: falls back to id (see _resolve_division_geometry)
+# the same way admin_lookup does.
+_DIVISION_AREA_REQUIRED_COLUMNS = ["id", "geometry", "division_id"]
+_DIVISION_AREA_ESSENTIAL_COLUMNS = {"geometry"}
+
+
+def _ensure_spatial() -> None:
+    """Load DuckDB's spatial extension on the shared connection, once.
+
+    Thin wrapper over db.ensure_spatial(), mirroring divisions.py's own
+    (kept separate rather than imported from there to avoid a
+    divisions<->overture import cycle: divisions.py already imports overture).
+    """
+    try:
+        db.ensure_spatial()
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(f"could not load spatial extension: {e}") from e
+
+
+def _resolve_division_geometry(
+    division_id: str,
+) -> tuple[bytes, float, float, float, float] | None:
+    """A division's merged boundary polygon (WKB) and its bbox, by GERS id.
+
+    division_area carries multiple polygon rows per division (e.g. land and
+    maritime variants — see divisions.py's admin_lookup docstring) sharing
+    one division_id; ST_Union_Agg merges every matching row into a single
+    geometry so a place inside ANY variant counts as inside the division,
+    not just its first (smallest-area) row. The bbox is derived straight
+    from that merged geometry (ST_XMin/XMax/YMin/YMax) rather than read off
+    a bbox column on division_area — real Overture division_area rows don't
+    reliably carry one the way place rows do.
+
+    Returns None if no division_area row's id matches (division_id is
+    unknown in the active dataset — the caller/server turns that into a
+    not_found error), never an empty-but-valid geometry (ST_Union_Agg over
+    zero rows is NULL, which this treats the same as "no match").
+
+    Raises SchemaDegraded if geometry is missing from the active divisions
+    dataset (mirrors admin_lookup), or UpstreamUnavailable if the remote
+    scan (or the one-time spatial extension load) fails.
+    """
+    _ensure_spatial()
+    div_upstream = _upstream_glob(theme="divisions", type_="division_area")
+    missing = set(missing_columns(div_upstream, _DIVISION_AREA_REQUIRED_COLUMNS))
+    essential_missing = [c for c in missing if c in _DIVISION_AREA_ESSENTIAL_COLUMNS]
+    if essential_missing:
+        raise SchemaDegraded(essential_missing)
+
+    if "division_id" not in missing:
+        id_filter_expr = "coalesce(division_id, id)"
+    elif "id" not in missing:
+        id_filter_expr = "id"
+    else:
+        id_filter_expr = "NULL"
+    geom_expr = geo.geom_expr(div_upstream)
+
+    sql = f"""
+        WITH merged AS (
+            SELECT ST_Union_Agg({geom_expr}) AS geom
+            FROM read_parquet('{div_upstream}', hive_partitioning=1)
+            WHERE {id_filter_expr} = $division_id
+        )
+        SELECT ST_AsWKB(geom), ST_XMin(geom), ST_XMax(geom), ST_YMin(geom), ST_YMax(geom)
+        FROM merged
+    """
+    try:
+        with db.conn_lock:
+            row = db.shared_conn().execute(sql, {"division_id": division_id}).fetchone()
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(str(e)) from e
+    # ST_Union_Agg over zero matching rows yields an empty GEOMETRYCOLLECTION
+    # (ST_AsWKB(...) on it is non-NULL, just empty), but ST_XMin/etc. on an
+    # empty geometry are NULL -- check the bbox extent, not the WKB, to
+    # detect "division_id matched nothing."
+    if row is None or row[1] is None:
+        return None
+    return row
+
+
+def find_places_in_division(
+    division_id: str,
+    category: str | None = None,
+    name: str | None = None,
+    limit: int = 10,
+) -> list[dict] | None:
+    """Places whose point falls inside a division's boundary polygon.
+
+    Boundary-accurate alternative to find_places' point+radius circle: pass
+    a division's GERS id (e.g. from admin_lookup's chain) instead of a
+    guessed radius, and get back only places truly inside that division's
+    shape — not a circle that may clip a coastline or straddle a border.
+
+    Two-step query mirroring divisions.py's admin_lookup + find_places: (1)
+    resolve the division's merged polygon and bbox by id
+    (_resolve_division_geometry); (2) scan places, prefiltered by a bbox
+    intersection against the division's bbox (mandatory — an unfiltered
+    ST_Contains over the full places dataset is a full-table scan) and then
+    exactly tested with ST_Contains against the merged polygon. category/name
+    narrow the search exactly as they do for find_places. Results are
+    ordered by name then id (there's no reference point to rank by distance
+    from, unlike find_places) and rows come back in the same shape as
+    find_places' minus distance_m.
+
+    Returns None if division_id doesn't match any division_area row (the
+    server tool turns that into a {"error": "not_found", ...}) — distinct
+    from an empty list, which means the division resolved but has no
+    matching places inside it.
+
+    Raises SchemaDegraded if bbox is missing from the active places dataset,
+    or if geometry is missing from the active divisions dataset (either way,
+    there's no way to answer), or UpstreamUnavailable if either remote scan
+    fails after retries. Non-essential place columns missing from the
+    dataset come back as None in their field — see degraded_fields().
+    """
+    limit = max(0, min(int(limit), MAX_ROWS))
+    resolved = _resolve_division_geometry(division_id)
+    if resolved is None:
+        return None
+    geom_wkb, div_xmin, div_xmax, div_ymin, div_ymax = resolved
+
+    upstream = _upstream_glob()
+    missing = set(_check_schema(upstream))
+
+    # Mandatory bbox prefilter (place bbox intersects the division's bbox)
+    # before the expensive exact ST_Contains test — same reasoning as
+    # admin_lookup's bbox_prefilter: unfiltered, this is a polygon test
+    # against every place on Earth.
+    bbox_filter = (
+        "bbox.xmin <= $div_xmax AND bbox.xmax >= $div_xmin"
+        " AND bbox.ymin <= $div_ymax AND bbox.ymax >= $div_ymin"
+    )
+    contains_filter = "ST_Contains(ST_GeomFromWKB($geom_wkb), ST_Point(bbox.xmin, bbox.ymin))"
+    params = {
+        "div_xmin": div_xmin, "div_xmax": div_xmax,
+        "div_ymin": div_ymin, "div_ymax": div_ymax,
+        "geom_wkb": geom_wkb,
+    }
+    filters = [bbox_filter, contains_filter]
+    if "names" not in missing:
+        filters.append("names.primary IS NOT NULL")
+    filters.extend(_place_category_name_filters(missing, category, name, params))
+
+    exprs = _place_select_exprs(missing)
+    bbox = (div_xmin, div_ymin, div_xmax, div_ymax)
+
+    sql = f"""
+        SELECT
+            {exprs["id"]}                       AS id,
+            {exprs["name"]}                      AS name,
+            {exprs["category"]}                  AS category,
+            {exprs["basic_category"]}             AS basic_category,
+            {exprs["operating_status"]}           AS operating_status,
+            {exprs["confidence"]}                AS confidence,
+            round(bbox.ymin, 6)                 AS lat,
+            round(bbox.xmin, 6)                 AS lon
+        FROM {_from_source(bbox)}
+        WHERE {' AND '.join(filters)}
+        ORDER BY name, id
+        LIMIT {limit}
+    """
+    try:
+        with _conn_lock:
+            rows = _conn().execute(sql, params).fetchall()
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(str(e)) from e
+    cols = [
+        "id", "name", "category", "basic_category", "operating_status",
+        "confidence", "lat", "lon",
     ]
     results = [dict(zip(cols, r)) for r in rows]
     for d in results:
