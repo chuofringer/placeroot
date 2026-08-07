@@ -35,7 +35,7 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 
 ## What it can do
 
-**20 tools**, all returning compact, budgeted answers. Several single-item tools have a `*_batch` sibling that collapses many calls into one round-trip.
+**21 tools**, all returning compact, budgeted answers. Several single-item tools have a `*_batch` sibling that collapses many calls into one round-trip.
 
 | Tool | Answers |
 |---|---|
@@ -53,6 +53,7 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 | `reverse_geocode` | Point → nearest address plus its containing admin areas (`reverse_geocode_batch`) |
 | `search_categories` | Free text → the right Overture category slug to filter `find_places` by |
 | `isochrone` | The area reachable within N minutes on foot, bike, or car |
+| `route` | Shortest-path distance and duration between two points, on foot, bike, or car |
 | `render_map` | Any result → a self-contained interactive HTML map |
 | `simplify_geometry` | Any geometry → simplified to fit a token budget |
 | `data_version` | Which Overture release the answers are drawn from |
