@@ -364,6 +364,202 @@ def test_has_website_composes_with_category():
     assert results[0]["name"] == "Cluster Place 010"
 
 
+# --- ILIKE wildcard escaping / operating_status validation (issue #165) ----
+
+
+def _build_wildcard_fixture(tmp_path, rows):
+    """A minimal places.parquet-shaped fixture at CENTER_LAT/CENTER_LON,
+    schema-identical to tests/fixtures/places.parquet (see
+    scripts/build_fixture.py), for asserting on literal '_'/'%' matching
+    without disturbing the shared dense-cluster fixture other tests rely on.
+
+    rows is a list of (id, name, basic_category) tuples; every row sits
+    exactly at (CENTER_LAT, CENTER_LON) so radius/name filters are the only
+    thing under test.
+    """
+    out = tmp_path / "wildcard_fixture.parquet"
+    con = duckdb.connect()
+    values_sql = ", ".join(
+        f"""(
+            '{row_id}',
+            {{'xmin': {CENTER_LON}, 'ymin': {CENTER_LAT},
+              'xmax': {CENTER_LON}, 'ymax': {CENTER_LAT}}},
+            {{'primary': '{name}'}},
+            {{'primary': '{basic_category}', 'alternates': []}},
+            '{basic_category}',
+            'open',
+            0.9,
+            CAST([] AS STRUCT(freeform VARCHAR, locality VARCHAR, region VARCHAR,
+                               postcode VARCHAR, country VARCHAR)[]),
+            CAST([] AS VARCHAR[]),
+            CAST([] AS VARCHAR[]),
+            CAST([] AS VARCHAR[]),
+            CAST(NULL AS STRUCT("names" STRUCT("primary" VARCHAR))),
+            CAST([] AS STRUCT(dataset VARCHAR, record_id VARCHAR)[])
+        )"""
+        for row_id, name, basic_category in rows
+    )
+    con.execute(f"""
+        COPY (
+            SELECT
+                id::VARCHAR AS id,
+                bbox::STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE) AS bbox,
+                names::STRUCT("primary" VARCHAR) AS names,
+                taxonomy::STRUCT("primary" VARCHAR, alternates VARCHAR[]) AS taxonomy,
+                basic_category::VARCHAR AS basic_category,
+                operating_status::VARCHAR AS operating_status,
+                confidence::DOUBLE AS confidence,
+                addresses, websites, phones, socials, brand, sources
+            FROM (VALUES {values_sql}) AS t(
+                id, bbox, names, taxonomy, basic_category, operating_status,
+                confidence, addresses, websites, phones, socials, brand, sources
+            )
+        ) TO '{out}' (FORMAT PARQUET)
+    """)
+    return out
+
+
+def test_name_filter_literal_underscore_does_not_wildcard_match(tmp_path):
+    """Regression for issue #165 Bug I: a literal '_' in name must not act
+    as an ILIKE single-char wildcard, or name="A_B" would also match "AXB"."""
+    fixture = _build_wildcard_fixture(
+        tmp_path, [("id1", "A_B", "coffee_shop"), ("id2", "AXB", "coffee_shop")]
+    )
+    overture.set_data_path(str(fixture))
+    try:
+        results = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=10, name="A_B", limit=25)
+        names = {r["name"] for r in results}
+        assert names == {"A_B"}
+    finally:
+        overture.set_data_path(str(FIXTURE_PATH))
+
+
+def test_place_details_name_literal_underscore_does_not_wildcard_match(tmp_path):
+    """Regression for issue #165 Bug I extended to place_details, whose own
+    name-match ILIKE had the same unescaped-wildcard bug: name="A_B" must
+    resolve to the literal "A_B" row, never "AXB"."""
+    fixture = _build_wildcard_fixture(
+        tmp_path, [("id1", "A_B", "coffee_shop"), ("id2", "AXB", "coffee_shop")]
+    )
+    overture.set_data_path(str(fixture))
+    try:
+        result = overture.place_details(
+            name="A_B", lat=CENTER_LAT, lon=CENTER_LON, radius_m=10
+        )
+        assert result is not None
+        assert result["name"] == "A_B"
+    finally:
+        overture.set_data_path(str(FIXTURE_PATH))
+
+
+def test_name_filter_literal_percent_does_not_wildcard_match(tmp_path):
+    """Regression for issue #165 Bug I: a literal '%' in name must not act
+    as an ILIKE any-run wildcard."""
+    fixture = _build_wildcard_fixture(
+        tmp_path,
+        [("id1", "50%OFF", "coffee_shop"), ("id2", "50XXOFF", "coffee_shop")],
+    )
+    overture.set_data_path(str(fixture))
+    try:
+        results = overture.find_places(
+            CENTER_LAT, CENTER_LON, radius_m=10, name="50%OFF", limit=25
+        )
+        names = {r["name"] for r in results}
+        assert names == {"50%OFF"}
+    finally:
+        overture.set_data_path(str(FIXTURE_PATH))
+
+
+def test_category_filter_literal_underscore_still_matches_snake_case(tmp_path):
+    """Regression for issue #165 Bug I: escaping '_' must not break the
+    ordinary case of a snake_case category value (Overture categories are
+    all snake_case, e.g. coffee_shop) — every '_' in the category itself
+    still has to match literally against the stored value's own '_'."""
+    fixture = _build_wildcard_fixture(
+        tmp_path,
+        [("id1", "Place A", "coffee_shop"), ("id2", "Place B", "grocery_store")],
+    )
+    overture.set_data_path(str(fixture))
+    try:
+        results = overture.find_places(
+            CENTER_LAT, CENTER_LON, radius_m=10, category="coffee_shop", limit=25
+        )
+        names = {r["name"] for r in results}
+        assert names == {"Place A"}
+    finally:
+        overture.set_data_path(str(FIXTURE_PATH))
+
+
+def test_category_filter_snake_case_still_matches_ground_truth():
+    """Same assertion as test_category_filter_matches_ground_truth, kept
+    here as a companion to the escaping fix: coffee_shop (snake_case, one
+    escaped '_') must still match every coffee_shop row in the shared fixture."""
+    radius_m = 1000
+    results = overture.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=radius_m, category="coffee_shop", limit=25
+    )
+    expected = [
+        row for row in raw_rows()
+        if row["basic_category"] == "coffee_shop"
+        and haversine_m(CENTER_LAT, CENTER_LON, row["lat"], row["lon"]) <= radius_m
+    ]
+    assert results
+    assert len(results) == len(expected)
+    assert all(r["basic_category"] == "coffee_shop" for r in results)
+
+
+def test_operating_status_garbage_value_is_bad_request_even_when_column_missing(tmp_path):
+    """Regression for issue #165 Bug J: operating_status validation must run
+    even when the operating_status column is absent from the dataset — a
+    garbage value should still raise (not silently no-op), mirroring
+    min_confidence's unconditional range check."""
+    out = tmp_path / "missing_operating_status.parquet"
+    con = duckdb.connect()
+    con.execute(
+        f"COPY (SELECT * EXCLUDE (operating_status) "
+        f"FROM read_parquet('{FIXTURE_PATH}')) TO '{out}' (FORMAT PARQUET)"
+    )
+    overture.set_data_path(str(out))
+    try:
+        try:
+            overture.find_places(
+                CENTER_LAT, CENTER_LON, radius_m=1000,
+                operating_status="totally_bogus_value", limit=25,
+            )
+            assert False, "expected ValueError for an unrecognized operating_status"
+        except ValueError:
+            pass
+
+        result = server.find_places(
+            CENTER_LAT, CENTER_LON, radius_m=1000,
+            operating_status="totally_bogus_value",
+        )
+        assert result["error"] == "bad_request"
+    finally:
+        overture.set_data_path(str(FIXTURE_PATH))
+
+
+def test_operating_status_still_noop_filters_rows_when_column_missing_and_value_valid(tmp_path):
+    """Companion to the Bug J fix: a *valid* operating_status value against a
+    dataset missing the column still no-ops (no error, no filtering) exactly
+    as before — only garbage values now raise."""
+    out = tmp_path / "missing_operating_status_valid.parquet"
+    con = duckdb.connect()
+    con.execute(
+        f"COPY (SELECT * EXCLUDE (operating_status) "
+        f"FROM read_parquet('{FIXTURE_PATH}')) TO '{out}' (FORMAT PARQUET)"
+    )
+    overture.set_data_path(str(out))
+    try:
+        results = overture.find_places(
+            CENTER_LAT, CENTER_LON, radius_m=100, operating_status="in business", limit=25,
+        )
+        assert len(results) == 13  # every row within 100m — filter is a no-op
+        assert all(r["operating_status"] is None for r in results)
+    finally:
+        overture.set_data_path(str(FIXTURE_PATH))
+
+
 def test_brand_and_presence_filters_noop_when_columns_missing(tmp_path):
     """Issue #128: with brand/websites/phones missing from the dataset, the
     filters no-op (never raise/exclude everything) and rows come back with

@@ -61,6 +61,22 @@ def test_no_match_returns_empty_list():
     assert geocode.geocode("Nonexistentplacexyz123", limit=5) == []
 
 
+def test_wildcards_in_query_are_literal():
+    # #165: find_places(name=) escapes ILIKE metacharacters; geocode must
+    # treat the same string the same way. Pre-fix, 'Brook%' ranked
+    # 'Brooklyn' as an *exact* (tier 0) match and 'Brook_yn' matched it via
+    # the single-char wildcard; both must be literal and match nothing.
+    assert geocode.geocode("Brook%", limit=5) == []
+    assert geocode.geocode("Brook_yn", limit=5) == []
+
+
+def test_wildcards_in_query_are_literal_on_local_divisions_table(geocode_cache):
+    # Same contract on the #43 local-table path, which builds its SQL in
+    # _query_divisions_from_local rather than the direct-fixture scan.
+    assert geocode.geocode("Brook%", limit=5) == []
+    assert geocode.geocode("Brook_yn", limit=5) == []
+
+
 def test_falls_back_to_places_when_divisions_dont_fill_limit():
     # "Blue Bottle Roastery" only exists in the places fixture, not divisions.
     results = geocode.geocode("Blue Bottle Roastery", limit=5)
