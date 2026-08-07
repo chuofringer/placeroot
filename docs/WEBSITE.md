@@ -4,7 +4,8 @@ The three-page marketing site is plain static HTML/CSS/JS — no framework, no
 build step. Recreated from the design handoff (issue #84).
 
 - `site/index.html` — landing (hero typewriter, use cases, positioning,
-  under-the-hood, developer section with all 14 tools)
+  under-the-hood, developer section with every registered tool — kept in
+  sync with `server.py` by `tests/test_site_tools_sync.py`)
 - `site/how-it-works.html` — the animated four-node pipeline
 - `site/add-to-your-ai.html` — the tabbed per-tool installer
 - assets: `logo-mark.svg` (also the favicon), `logo-lockup.png`, `og-image.png`
