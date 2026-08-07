@@ -335,6 +335,18 @@ def _resolve_operating_status(operating_status: str) -> list[str]:
     )
 
 
+def _like_escape(value: str) -> str:
+    """Escape LIKE/ILIKE wildcards so a user substring matches literally.
+
+    Backslash is the ESCAPE char (see the ESCAPE '\\' clauses at each call
+    site) — escape it first, then the two DuckDB ILIKE metacharacters (%
+    matches any run, _ matches any single char). Without this, a caller's
+    own % or _ (routine for Overture's snake_case category values, e.g.
+    coffee_shop) silently turns into a wildcard and over-matches.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _place_category_name_filters(
     missing: set[str], category: str | None, name: str | None, params: dict
 ) -> list[str]:
@@ -345,20 +357,20 @@ def _place_category_name_filters(
     if category:
         cat_clauses = []
         if "basic_category" not in missing:
-            cat_clauses.append("basic_category ILIKE $category")
+            cat_clauses.append("basic_category ILIKE $category ESCAPE '\\'")
         if "taxonomy" not in missing:
             cat_clauses.append(
-                "(taxonomy.primary ILIKE $category"
+                "(taxonomy.primary ILIKE $category ESCAPE '\\'"
                 " OR list_contains(taxonomy.alternates, $category_exact))"
             )
         if cat_clauses:
             filters.append(f"({' OR '.join(cat_clauses)})")
-            params["category"] = f"%{category}%"
+            params["category"] = f"%{_like_escape(category)}%"
             params["category_exact"] = category
     if name:
         if "names" not in missing:
-            filters.append("names.primary ILIKE $name")
-            params["name"] = f"%{name}%"
+            filters.append("names.primary ILIKE $name ESCAPE '\\'")
+            params["name"] = f"%{_like_escape(name)}%"
     return filters
 
 
@@ -385,16 +397,17 @@ def _place_attribute_filters(
         if "confidence" not in missing:
             filters.append("confidence >= $min_confidence")
             params["min_confidence"] = min_confidence
-    if operating_status is not None and "operating_status" not in missing:
+    if operating_status is not None:
         raw_values = _resolve_operating_status(operating_status)
-        if len(raw_values) == 1:
-            filters.append("operating_status = $operating_status0")
-            params["operating_status0"] = raw_values[0]
-        else:
-            placeholders = [f"$operating_status{i}" for i in range(len(raw_values))]
-            filters.append(f"operating_status IN ({', '.join(placeholders)})")
-            for i, v in enumerate(raw_values):
-                params[f"operating_status{i}"] = v
+        if "operating_status" not in missing:
+            if len(raw_values) == 1:
+                filters.append("operating_status = $operating_status0")
+                params["operating_status0"] = raw_values[0]
+            else:
+                placeholders = [f"$operating_status{i}" for i in range(len(raw_values))]
+                filters.append(f"operating_status IN ({', '.join(placeholders)})")
+                for i, v in enumerate(raw_values):
+                    params[f"operating_status{i}"] = v
     return filters
 
 
@@ -416,8 +429,8 @@ def _place_presence_filters(
     """
     filters = []
     if brand is not None and "brand" not in missing:
-        filters.append("brand.names.primary ILIKE $brand")
-        params["brand"] = f"%{brand}%"
+        filters.append("brand.names.primary ILIKE $brand ESCAPE '\\'")
+        params["brand"] = f"%{_like_escape(brand)}%"
     if has_website is not None and "websites" not in missing:
         if has_website:
             filters.append("(websites IS NOT NULL AND len(websites) > 0)")
@@ -1072,8 +1085,8 @@ def place_details(
         )
         filters = [bbox_filter, distance_filter]
         if "names" not in missing:
-            filters.append("names.primary ILIKE $name")
-            params["name"] = f"%{name}%"
+            filters.append("names.primary ILIKE $name ESCAPE '\\'")
+            params["name"] = f"%{_like_escape(name)}%"
         from_source = _from_source(bbox)
         row = _run_place_details_query(from_source, filters, _DISTANCE_EXPR, params, missing)
 

@@ -450,12 +450,14 @@ def _resolve_region_from_table(candidate: str, local_table: str) -> tuple[str, s
     """
     sql = f"""
         SELECT name, region FROM read_parquet('{local_table}')
-        WHERE subtype = 'region' AND region IS NOT NULL AND name ILIKE $name
+        WHERE subtype = 'region' AND region IS NOT NULL AND name ILIKE $name ESCAPE '\\'
         LIMIT 1
     """
     try:
         with overture._conn_lock:
-            row = overture.conn().execute(sql, {"name": candidate}).fetchone()
+            row = overture.conn().execute(
+                sql, {"name": overture._like_escape(candidate)}
+            ).fetchone()
     except duckdb.Error:
         return None
     if row is None:
@@ -565,8 +567,8 @@ def _match_tier_order_sql(name_expr: str) -> str:
     about.
     """
     tier_expr = (
-        f"CASE WHEN {name_expr} ILIKE $exact THEN 0 "
-        f"WHEN {name_expr} ILIKE $prefix THEN 1 ELSE 2 END"
+        f"CASE WHEN {name_expr} ILIKE $exact ESCAPE '\\' THEN 0 "
+        f"WHEN {name_expr} ILIKE $prefix ESCAPE '\\' THEN 1 ELSE 2 END"
     )
     return f"{tier_expr}, population DESC NULLS LAST"
 
@@ -579,13 +581,14 @@ def _query_divisions_from_local(
     "strip_accents(name)" for the diacritic-folded second-pass query (caller
     passes an already diacritic-stripped `query` to match against it)."""
     region_filter = "AND region = $region_code" if region_code else ""
-    params: dict = {"pattern": f"%{query}%", "exact": query, "prefix": f"{query}%"}
+    q = overture._like_escape(query)
+    params: dict = {"pattern": f"%{q}%", "exact": q, "prefix": f"{q}%"}
     if region_code:
         params["region_code"] = region_code
     sql = f"""
         SELECT id, name, subtype, country, region, lat, lon, admin_chain, population
         FROM read_parquet('{table_path}')
-        WHERE {name_match_expr} ILIKE $pattern
+        WHERE {name_match_expr} ILIKE $pattern ESCAPE '\\'
         {region_filter}
         ORDER BY {_match_tier_order_sql(name_match_expr)}
         LIMIT {DIVISION_OVERFETCH}
@@ -622,7 +625,8 @@ def _query_divisions_from_upstream(
         return []
     population_expr = "population" if cols is None or "population" in cols else "NULL AS population"
     region_filter = ""
-    params: dict = {"pattern": f"%{query}%", "exact": query, "prefix": f"{query}%"}
+    q = overture._like_escape(query)
+    params: dict = {"pattern": f"%{q}%", "exact": q, "prefix": f"{q}%"}
     if region_code and (cols is None or "region" in cols):
         region_filter = "AND region = $region_code"
         params["region_code"] = region_code
@@ -630,7 +634,7 @@ def _query_divisions_from_upstream(
         SELECT id, names.primary AS name, subtype, country, region,
                bbox.ymin AS lat, bbox.xmin AS lon, hierarchies, {population_expr}
         FROM read_parquet('{glob}', hive_partitioning=1)
-        WHERE {name_match_expr} ILIKE $pattern
+        WHERE {name_match_expr} ILIKE $pattern ESCAPE '\\'
         {region_filter}
         ORDER BY {_match_tier_order_sql(name_match_expr)}
         LIMIT {DIVISION_OVERFETCH}
@@ -731,8 +735,8 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
     cols = overture.probe_schema(glob)
     if cols is not None and "names" not in cols:
         return []
-    filters = ["names.primary ILIKE $pattern"]
-    params: dict = {"pattern": f"%{query}%"}
+    filters = ["names.primary ILIKE $pattern ESCAPE '\\'"]
+    params: dict = {"pattern": f"%{overture._like_escape(query)}%"}
     if anchor is not None:
         lat, lon = anchor
         bbox_filter, distance_filter, geo_params, _bbox, _radius_m = overture.area_geometry(
