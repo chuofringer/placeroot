@@ -26,6 +26,7 @@ from placeroot import (
     divisions,
     errors,
     geo,
+    infrastructure,
     land_use,
     mapview,
     overture,
@@ -568,6 +569,56 @@ def land_use_at(lat: float, lon: float) -> dict:
     except overture.SchemaDegraded as e:
         return _schema_error(e)
     degraded = land_use.degraded_fields()
+    if degraded:
+        result["degraded_fields"] = degraded
+    return result
+
+
+@mcp.tool()
+def infrastructure_at(
+    lat: float,
+    lon: float,
+    radius_m: float = infrastructure.DEFAULT_RADIUS_M,
+    limit: int = infrastructure.DEFAULT_LIMIT,
+) -> dict:
+    """Infrastructure near a point, nearest first: bridges, airports, towers, power lines.
+
+    From Overture's base theme (issue #179), type=infrastructure — the
+    built things that are neither buildings nor POIs (bridges, runways and
+    terminals, aerialways, communication towers, power lines and pylons,
+    piers, dams). Returns {"center", "radius_m", "results": [{"subtype",
+    "class", "name", "distance_m"}, ...]}. No raw geometry (design rule:
+    answers, not data).
+
+    Radius search, not containment: most infrastructure is linear or a
+    bare point, so "what's within radius_m" is the answerable question.
+    distance_m is measured to the closest point on the feature, not its
+    centroid — a bridge you are standing on reads ~0 m, not "distance to
+    the middle of the bridge". radius_m echoes the effective radius, which
+    may be lower than requested (large values are clamped).
+
+    An empty results list is a valid answer, not an error: base-theme
+    coverage is OSM-derived and patchy, and "no infrastructure within
+    500 m" is a real finding. Returns a structured {"error": ...} if
+    upstream is unavailable or the dataset is missing geometry/bbox, and
+    {"error": "bad_request"} for a non-finite or out-of-range coordinate.
+    """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
+    try:
+        rows, effective_radius_m = infrastructure.infrastructure_at(lat, lon, radius_m, limit)
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    result = {
+        "center": {"lat": lat, "lon": lon},
+        "radius_m": effective_radius_m,
+        "results": rows,
+    }
+    result = budget.apply_budget(result, "results")
+    degraded = infrastructure.degraded_fields()
     if degraded:
         result["degraded_fields"] = degraded
     return result
