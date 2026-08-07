@@ -490,6 +490,53 @@ def test_graph_cache_misses_on_different_release(monkeypatch):
     assert len(calls) == 2
 
 
+# --- Issue #73: MAX_GRAPH_SEGMENTS cap (defense in depth) ------------------
+
+
+def test_build_graph_not_truncated_under_normal_cap():
+    """The fixture's whole grid (769 segments) sits far under the real
+    MAX_GRAPH_SEGMENTS default — normal-sized graphs must not be flagged."""
+    graph = routing.build_graph(ORIGIN_LAT, ORIGIN_LON, WHOLE_GRID_RADIUS_M)
+    assert graph.truncated is False
+    assert graph.node_count() == EXPECTED_NODE_COUNT
+
+
+def test_build_graph_truncates_when_segment_cap_is_exceeded(monkeypatch):
+    """With a cap far below the fixture's 769 segments, build_graph must stop
+    early, flag the graph truncated, and still return a usable (smaller)
+    graph rather than raising or silently building the full thing."""
+    monkeypatch.setattr(routing, "MAX_GRAPH_SEGMENTS", 50)
+    graph = routing.build_graph(ORIGIN_LAT, ORIGIN_LON, WHOLE_GRID_RADIUS_M)
+    assert graph.truncated is True
+    # Fewer segments read -> a strictly smaller graph than the untruncated one.
+    assert graph.node_count() < EXPECTED_NODE_COUNT
+    assert graph.node_count() > 0
+
+
+def test_isochrone_flags_truncated_result_when_graph_cap_is_exceeded(monkeypatch):
+    """cap=70 keeps just enough of the fixture's row-ordered horizontal edges
+    (columns 0-4 for low-numbered rows) to form one small usable component
+    around node (1, 3) — enough for snap_to_graph/dijkstra to succeed, while
+    still being a small fraction of the fixture's 769 segments, so the
+    truncation signal is unambiguous."""
+    monkeypatch.setattr(routing, "MAX_GRAPH_SEGMENTS", 70)
+    lat, lon = fx.node_latlon(1, 3)
+    result = routing.isochrone(lat, lon, minutes=15, radius_m=WHOLE_GRID_RADIUS_M)
+    assert result["truncated"] is True
+    assert result["stats"]["graph_truncated"] is True
+    assert "note" in result["stats"]
+
+
+def test_isochrone_not_flagged_graph_truncated_under_normal_cap():
+    """Distinct from the polygon-simplification `truncated` flag (which can
+    legitimately fire on its own, see test_isochrone_polygon_is_valid_...):
+    this only checks the graph-cap-specific signal stays absent for a normal
+    small graph."""
+    lat, lon = fx.node_latlon(10, 10)
+    result = routing.isochrone(lat, lon, minutes=15)
+    assert "graph_truncated" not in result["stats"]
+
+
 def test_graph_cache_max_size_evicts_least_recently_used():
     routing.clear_graph_cache()
     lat, lon = fx.node_latlon(10, 10)

@@ -16,10 +16,17 @@ evenodd — the ring winding order Overture/GeoJSON producers use doesn't
 matter, only that holes are listed as additional rings.
 
 The MCP tool boundary (server.render_map) returns only a tiny
-{"path", "bytes", "features_rendered", "skipped_features"} envelope so the
-(potentially large) HTML never counts against the token budget in
-ROADMAP.md's "answers, not data dumps" rule — the file on disk is the
-artifact.
+{"path", "bytes", "features_rendered", "skipped_features"} envelope (plus
+"truncated": True when applicable) so the (potentially large) HTML never
+counts against the token budget in ROADMAP.md's "answers, not data dumps"
+rule — the file on disk is the artifact.
+
+Vertex cap (#74, defense in depth): render_map's cost is linear in feature/
+vertex count, so a caller-supplied GeoJSON with no inherent size limit could
+still produce an unbounded HTML file. write_artifact truncates points+shapes
+to MAX_RENDER_VERTICES total vertices (_cap_vertices), folding any dropped
+items into skipped_features and setting "truncated": True — see
+MAX_RENDER_VERTICES's docstring.
 """
 
 import html
@@ -36,6 +43,18 @@ ATTRIBUTION = "© Overture Maps Foundation contributors"
 # Returning the HTML inline (inline=True) is only offered under this size —
 # above it the point of keeping the tool response small is defeated.
 INLINE_MAX_BYTES = 300_000
+
+# Defense in depth (#74): render_map is linear in feature/vertex count (more
+# points/rings -> a proportionally bigger HTML file and a slower browser-side
+# SVG render), so this is low severity, not a fix for an observed cost — but
+# caller-supplied GeoJSON has no inherent size limit the way find_places/
+# summarize_area/isochrone results do. MAX_RENDER_VERTICES caps the total
+# vertex count write_artifact will draw (points count as 1 each; a shape
+# counts its ring/line coordinate total) before it truncates rather than
+# writing an unbounded artifact. Chosen generously above any realistic tool
+# output (isochrone polygons are capped to MAX_POLYGON_POINTS ~= 100 in
+# routing.py; find_places results are page-sized) but finite.
+MAX_RENDER_VERTICES = 50_000
 
 _ARTIFACT_DIRNAME = "artifacts"
 
@@ -867,6 +886,46 @@ def render_html(
     return doc
 
 
+def _shape_vertex_count(shape: dict) -> int:
+    """Coordinate count of a shape as produced by extract_features: the sum
+    of ring lengths for a polygon, or line lengths for a line."""
+    if shape.get("kind") == "polygon":
+        return sum(len(ring) for ring in shape.get("rings") or [])
+    return sum(len(line) for line in shape.get("lines") or [])
+
+
+def _cap_vertices(
+    points: list[dict], shapes: list[dict], max_vertices: int
+) -> tuple[list[dict], list[dict], int]:
+    """Truncate points+shapes to a total vertex budget (#74, defense in depth).
+
+    Points count as 1 vertex each; a shape counts its ring/line coordinate
+    total (_shape_vertex_count). Points are kept before shapes, both in
+    their original order, up to the first item that would push the running
+    total over max_vertices — everything from that item onward (including
+    the item itself) is dropped, so the result is always a clean prefix of
+    the input rather than a scattered subset. Returns
+    (kept_points, kept_shapes, dropped_count).
+    """
+    total = 0
+    kept_points: list[dict] = []
+    for i, p in enumerate(points):
+        if total + 1 > max_vertices:
+            return kept_points, [], (len(points) - i) + len(shapes)
+        kept_points.append(p)
+        total += 1
+
+    kept_shapes: list[dict] = []
+    for i, s in enumerate(shapes):
+        vertex_count = _shape_vertex_count(s)
+        if total + vertex_count > max_vertices:
+            return kept_points, kept_shapes, len(shapes) - i
+        kept_shapes.append(s)
+        total += vertex_count
+
+    return kept_points, kept_shapes, 0
+
+
 def _slug(title: str | None) -> str:
     base = (title or "map").strip().lower()
     out = "".join(c if c.isalnum() else "-" for c in base)
@@ -884,13 +943,17 @@ def write_artifact(
 
     Returns {"path": str, "bytes": int, "features_rendered": int,
     "skipped_features": int}, plus "html" when inline=True and the document
-    is under INLINE_MAX_BYTES. skipped_features counts rows/features present
-    in `data` that couldn't be rendered (missing coordinates, malformed or
-    unsupported geometry) — render_map degrades rather than failing.
+    is under INLINE_MAX_BYTES, and "truncated": True when the input exceeded
+    MAX_RENDER_VERTICES. skipped_features counts rows/features present in
+    `data` that couldn't be rendered — either malformed/unsupported geometry
+    (extract_features) or dropped for exceeding MAX_RENDER_VERTICES
+    (_cap_vertices) — render_map degrades rather than failing or writing an
+    unbounded artifact.
     """
     extracted = extract_features(data)
-    points = extracted["points"]
-    shapes = extracted["shapes"]
+    points, shapes, dropped = _cap_vertices(
+        extracted["points"], extracted["shapes"], MAX_RENDER_VERTICES
+    )
     doc = render_html(points, title=title, shapes=shapes)
     encoded = doc.encode("utf-8")
 
@@ -904,8 +967,10 @@ def write_artifact(
         "path": str(path),
         "bytes": len(encoded),
         "features_rendered": len(points) + len(shapes),
-        "skipped_features": extracted["skipped_features"],
+        "skipped_features": extracted["skipped_features"] + dropped,
     }
+    if dropped:
+        result["truncated"] = True
     if inline and len(encoded) <= INLINE_MAX_BYTES:
         result["html"] = doc
     return result
