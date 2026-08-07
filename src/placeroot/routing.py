@@ -69,6 +69,17 @@ newly-needed extraction area is fully contained within a cached graph's
 (deliberately over-fetched) area, keyed by (release, upstream source,
 mode, drive-speed-baking) — see _get_or_build_graph.
 
+Graph size cap (#73, defense in depth): DRIVE_MAX_RADIUS_M bounds the
+extraction *radius*, not the graph's node/edge count — a dense-enough urban
+core within that radius can still pull a very large graph. build_graph caps
+the number of segment rows it reads from upstream via MAX_GRAPH_SEGMENTS (a
+LIMIT on the extraction query, so the cap stops the scan itself rather than
+letting an unbounded result set be pulled and only noticing after the fact).
+When the cap is hit, the returned Graph is marked truncated=True and
+isochrone() surfaces that as a `truncated: true` top-level flag plus a note
+in `stats`, so the result is honestly a partial graph rather than either an
+unbounded one or a silent undercount.
+
 Query layer: this module shares the package-wide connection, bbox
 helpers, and schema probe (via db.py/geo.py); db.ensure_spatial() is
 called explicitly here since this module needs the spatial extension.
@@ -99,6 +110,21 @@ MAX_POLYGON_POINTS = 100  # decimation cap before the token-budget pass (convex 
 
 SNAP_RADIUS_M = 300.0  # how far the origin may snap to reach a usable graph node
 MIN_USABLE_COMPONENT_NODES = 5  # components smaller than this are treated as fragments
+
+# Defense in depth against a dense-urban drive-mode extraction pulling an
+# unbounded graph (radius alone doesn't bound density — a 60km DRIVE_MAX_RADIUS_M
+# circle over a dense city core can contain far more street network than the
+# same radius in a sparse area; a measured 10-minute drive already pulled
+# ~40k nodes). MAX_GRAPH_SEGMENTS caps the number of segment rows build_graph
+# will read from upstream via a LIMIT on the extraction query — cheaper than
+# letting an unbounded scan build an unbounded in-memory graph and only
+# noticing afterward. Chosen well above any real query (a segment yields at
+# most a handful of nodes/edges, so 200k segments is a very large graph, on
+# the order of a small metro area) but finite, so a pathological area can't
+# grow the graph without limit. When the cap is hit, build_graph marks the
+# resulting Graph truncated=True rather than silently returning a partial
+# graph as if it were complete.
+MAX_GRAPH_SEGMENTS = 200_000
 
 # Overture road classes a pedestrian cannot use. Everything else (footway,
 # path, residential, service, tertiary, living_street, cycleway, steps,
@@ -344,6 +370,10 @@ class Graph:
         self.adjacency: dict[str, list[tuple[str, float]]] = {}
         self.coords: dict[str, tuple[float, float]] = {}  # node_id -> (lat, lon)
         self.weight_is_time: bool = False
+        # True when build_graph's segment extraction hit MAX_GRAPH_SEGMENTS
+        # and stopped early — this graph (and any isochrone built from it) is
+        # a partial view of the actual street network in the query area.
+        self.truncated: bool = False
         # Both directions of every edge, regardless of `directed` — used only
         # for connected_components()/snapping, which should treat a fragment
         # linked exclusively by one-way edges as connected either way (a
@@ -508,6 +538,13 @@ def build_graph(
     (Graph.weight_is_time stays False) and the caller divides by speed_m_s
     at dijkstra time, same as the original walk-only design. Only a
     speed_m_s-less "drive" call bakes per-edge time weights.
+
+    Defense in depth against a dense-urban extraction pulling an unbounded
+    graph within an otherwise-valid radius: the segment extraction query
+    carries a LIMIT of MAX_GRAPH_SEGMENTS + 1 rows. When that limit is hit,
+    only the first MAX_GRAPH_SEGMENTS rows are used to build the graph and
+    the returned Graph's `truncated` flag is set True — a partial-but-honest
+    graph rather than an unbounded one, or a silent undercount.
     """
     if mode not in MODE_CONFIG:
         raise UnsupportedMode(mode)
@@ -541,6 +578,10 @@ def build_graph(
         if present is not None and "subtype" in present
         else ""
     )
+    # LIMIT to one past the cap: fetching exactly MAX_GRAPH_SEGMENTS would
+    # look identical whether the true result set was exactly that size or
+    # much larger, so the extra row is how truncation is detected below
+    # without a separate COUNT(*) query.
     sql = f"""
         SELECT
             id,
@@ -552,6 +593,7 @@ def build_graph(
         FROM {_from_source(bbox)}
         WHERE {bbox_filter}
           {subtype_filter}
+        LIMIT {MAX_GRAPH_SEGMENTS + 1}
     """
     params = bbox_params
     try:
@@ -568,8 +610,18 @@ def build_graph(
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
 
+    truncated = len(rows) > MAX_GRAPH_SEGMENTS
+    if truncated:
+        rows = rows[:MAX_GRAPH_SEGMENTS]
+        logger.warning(
+            "build_graph: segment extraction hit MAX_GRAPH_SEGMENTS=%d within "
+            "%.0fm of (%s, %s); graph is truncated",
+            MAX_GRAPH_SEGMENTS, radius_m, lat, lon,
+        )
+
     graph = Graph()
     graph.weight_is_time = bake_time
+    graph.truncated = truncated
     excluded_classes = config["excluded_classes"]
     respects_oneway = config["respects_oneway"]
     for _id, cls, connectors, speed_limits, access_restrictions, wkt in rows:
@@ -1119,6 +1171,18 @@ def isochrone(
     ring, polygon_method, truncated = _build_polygon(reached_coords, lat, lon, max_radius_reached_m)
     area_km2 = _polygon_area_m2(ring, lat, lon) / 1_000_000.0
 
+    stats = {
+        "reachable_nodes": len(reached),
+        "max_radius_m": round(max_radius_reached_m, 1),
+        "area_km2": round(area_km2, 4),
+    }
+    if graph.truncated:
+        stats["graph_truncated"] = True
+        stats["note"] = (
+            f"graph extraction capped at {MAX_GRAPH_SEGMENTS} segments; "
+            "reachable area may be undercounted"
+        )
+
     result = {
         "center": {"lat": lat, "lon": lon},
         "minutes": minutes,
@@ -1126,12 +1190,8 @@ def isochrone(
         "speed_m_s": const_speed,
         "polygon": _ring_to_geojson(ring),
         "polygon_method": polygon_method,
-        "stats": {
-            "reachable_nodes": len(reached),
-            "max_radius_m": round(max_radius_reached_m, 1),
-            "area_km2": round(area_km2, 4),
-        },
+        "stats": stats,
     }
-    if truncated:
+    if truncated or graph.truncated:
         result["truncated"] = True
     return result

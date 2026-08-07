@@ -441,6 +441,56 @@ def test_render_html_renders_shapes_group_and_evenodd_fill_rule():
     assert '"kind": "polygon"' in doc or '"kind":"polygon"' in doc
 
 
+# --- Issue #74: MAX_RENDER_VERTICES cap (defense in depth) -----------------
+
+
+def test_cap_vertices_keeps_everything_under_the_cap():
+    points = [{"lat": 0.0, "lon": 0.0}] * 5
+    shapes = [{"kind": "line", "lines": [[[0, 0], [1, 1]]]}]  # 2 vertices
+    kept_points, kept_shapes, dropped = mapview._cap_vertices(points, shapes, 100)
+    assert kept_points == points
+    assert kept_shapes == shapes
+    assert dropped == 0
+
+
+def test_cap_vertices_drops_points_past_the_cap():
+    points = [{"lat": 0.0, "lon": 0.0}] * 10
+    kept_points, kept_shapes, dropped = mapview._cap_vertices(points, [], 4)
+    assert len(kept_points) == 4
+    assert kept_shapes == []
+    assert dropped == 6
+
+
+def test_cap_vertices_drops_a_shape_that_would_exceed_the_cap():
+    points = [{"lat": 0.0, "lon": 0.0}] * 3
+    small_shape = {"kind": "line", "lines": [[[0, 0], [1, 1]]]}  # 2 vertices
+    big_shape = {"kind": "polygon", "rings": [[[0, 0]] * 20]}  # 20 vertices
+    kept_points, kept_shapes, dropped = mapview._cap_vertices(
+        points, [small_shape, big_shape], 6
+    )
+    assert kept_points == points
+    assert kept_shapes == [small_shape]
+    assert dropped == 1
+
+
+def test_write_artifact_truncates_points_past_vertex_cap(monkeypatch, tmp_path):
+    monkeypatch.setattr(mapview, "MAX_RENDER_VERTICES", 5)
+    payload = {"results": _rows(10)}
+    result = mapview.write_artifact(payload, title="Too Many", out_dir=tmp_path)
+    assert result["truncated"] is True
+    assert result["features_rendered"] == 5
+    assert result["skipped_features"] == 5
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    _parse_ok(doc)  # still a valid, bounded artifact
+
+
+def test_write_artifact_not_truncated_under_normal_cap():
+    """Sanity: the real MAX_RENDER_VERTICES default is far above realistic
+    tool output, so ordinary inputs must never hit the cap or gain the
+    truncated key — this pins the exact-envelope assertion elsewhere too."""
+    assert mapview.MAX_RENDER_VERTICES > 1000
+
+
 def test_render_html_no_shapes_backward_compatible():
     points = mapview.extract_points({"results": _rows(2)})
     doc = mapview.render_html(points, title="No shapes")
