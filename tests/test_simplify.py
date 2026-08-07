@@ -104,6 +104,65 @@ def test_token_target_honored_across_a_range_of_budgets():
         assert budget.estimate_tokens({"geometry": out["geometry"]}) <= max_tokens
 
 
+def _assert_valid_ring(coords):
+    """A valid GeoJSON polygon ring: >=4 positions, >=3 distinct vertices, closed."""
+    assert len(coords) >= 4
+    assert coords[0] == coords[-1]
+    distinct = {tuple(c) for c in coords}
+    assert len(distinct) >= 3
+
+
+def test_simplify_geometry_never_collapses_a_ring_to_two_points():
+    # issue #135 repro: every interior point lies within epsilon of the
+    # start->end chord, so unpadded RDP would keep only the two (identical)
+    # endpoints -- an invalid ring.
+    ring = [[0.0, 0.0], [0.0001, 0.00001], [0.0001, 0.0001], [0.00001, 0.0001], [0.0, 0.0]]
+    out = simplify.simplify_geometry({"type": "Polygon", "coordinates": [ring]}, max_tokens=20)
+    coords = out["geometry"]["coordinates"][0]
+    assert coords != [[0.0, 0.0], [0.0, 0.0]]
+    _assert_valid_ring(coords)
+
+
+def test_noisy_circle_polygon_stays_valid_ring_at_tiny_budget():
+    ring = _noisy_circle(n=500)
+    geom = {"type": "Polygon", "coordinates": [ring]}
+    out = simplify.simplify_geometry(geom, max_tokens=15)
+    coords = out["geometry"]["coordinates"][0]
+    _assert_valid_ring(coords)
+    # Bounded deviation relative to the circle's own scale (~1100m radius).
+    assert out["max_deviation_m"] < 2000
+
+
+def test_multipolygon_rings_stay_valid_at_tiny_budget():
+    ring_a = [[0.0, 0.0], [0.0001, 0.00001], [0.0001, 0.0001], [0.00001, 0.0001], [0.0, 0.0]]
+    ring_b = _noisy_circle(n=200, cx=-73.8, cy=40.8, seed=3)
+    geom = {"type": "MultiPolygon", "coordinates": [[ring_a], [ring_b]]}
+    out = simplify.simplify_geometry(geom, max_tokens=20)
+    for poly in out["geometry"]["coordinates"]:
+        for ring in poly:
+            _assert_valid_ring(ring)
+
+
+def test_closed_linestring_is_not_padded_like_a_ring():
+    # A LineString that happens to be closed (coords[0] == coords[-1]) is
+    # still a LineString, not a polygon ring -- it's valid GeoJSON with as
+    # few as 2 points, so it must not be force-padded to 4.
+    n = 200
+    line = [[i * 0.0001, 0.0] for i in range(n)]
+    line.append([0.0, 0.0])  # closes it, collinear with everything else
+    out = simplify.simplify_geometry({"type": "LineString", "coordinates": line}, max_tokens=10)
+    assert out["geometry"]["coordinates"][0] == out["geometry"]["coordinates"][-1]
+    assert out["kept_points"] < 4
+
+
+def test_polygon_simplification_unchanged_with_generous_budget():
+    ring = _noisy_circle(n=500)
+    geom = {"type": "Polygon", "coordinates": [ring]}
+    out = simplify.simplify_geometry(geom, max_tokens=100_000)
+    assert out["kept_points"] == out["original_points"]
+    assert out["geometry"]["coordinates"][0] == ring
+
+
 # --- server tool ---
 
 

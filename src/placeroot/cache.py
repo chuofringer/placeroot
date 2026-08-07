@@ -185,6 +185,23 @@ def _fingerprint_dirs(release: str, theme: str) -> list[Path]:
     return [p for p in d.iterdir() if p.is_dir()]
 
 
+def _fingerprint_last_use(fp_dir: Path) -> float:
+    """Newest tile-file mtime under fp_dir — its true last-*use* time.
+
+    A cache hit bumps each tile file's mtime (os.utime in ensure_tile /
+    local_paths_for_query), but NOT the containing directory's mtime (a
+    dir's mtime only moves when an entry is added/removed). So ranking
+    fingerprint dirs by dir mtime picks the most-recently-*created* one, not
+    the most-recently-*used* — during an outage that can drop the whole
+    active cache for a barely-populated newer dir (#141). Rank by the newest
+    contained tile instead, falling back to the dir's own mtime if empty.
+    """
+    tiles = list(fp_dir.glob("*.parquet"))
+    if tiles:
+        return max(t.stat().st_mtime for t in tiles)
+    return fp_dir.stat().st_mtime
+
+
 def resolve_fingerprint(release: str, theme: str, upstream_glob: str) -> str | None:
     """The schema fingerprint to read/write release/theme tiles under.
 
@@ -204,7 +221,7 @@ def resolve_fingerprint(release: str, theme: str, upstream_glob: str) -> str | N
     dirs = _fingerprint_dirs(release, theme)
     if not dirs:
         return None
-    newest = max(dirs, key=lambda p: p.stat().st_mtime)
+    newest = max(dirs, key=_fingerprint_last_use)
     return newest.name
 
 
