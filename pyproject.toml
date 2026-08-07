@@ -1,6 +1,6 @@
 [project]
 name = "placeroot"
-version = "0.3.1"
+version = "0.3.2"
 description = "Ground AI agents in open map data. MCP server for Overture Maps — compact answers, no API key."
 readme = "README.md"
 license = "MIT"
