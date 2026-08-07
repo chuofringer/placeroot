@@ -1,25 +1,37 @@
 name: Deploy Site
-# Direct-upload the static marketing site (site/) to Cloudflare Pages on every
-# push to main that touches it. Same pattern as the sibling funradar/flood
-# repos: wrangler pages deploy from CI, authenticated with the account's
-# CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID secrets — no Pages
-# Git-integration build (the site is plain HTML, there's nothing to build).
+# Direct-upload the static marketing site (site/) to Cloudflare Pages. Same
+# pattern as the sibling funradar/flood repos: wrangler pages deploy from CI,
+# authenticated with the account's CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID
+# secrets — no Pages Git-integration build (the site is plain HTML).
+#
+# Branch-aware:
+#   - push to main            -> production deploy (placeroot.pages.dev, and any
+#                                custom domains like placeroot.dev)
+#   - push to any OTHER branch -> a Cloudflare Pages *preview* deploy, reachable
+#                                at https://<branch>.placeroot.pages.dev (the
+#                                exact URL is printed in this job's log and
+#                                listed under the project's Deployments in the
+#                                dashboard). This is how any branch's site
+#                                changes get previewed before they reach main.
 #
 # Prerequisites (owner, one-time):
-#   - A Cloudflare Pages project exists; its name must match PROJECT below.
+#   - A Cloudflare Pages project exists; its name must match PROJECT below, and
+#     its production branch is `main`.
 #   - Repo secrets CLOUDFLARE_API_TOKEN (Pages:Edit) and CLOUDFLARE_ACCOUNT_ID.
-#   - Custom domain placeroot.dev attached to the Pages project in the dashboard.
+#   - Custom domains placeroot.dev / placeroot.com attached to the project.
 on:
   push:
-    branches: [main]
+    # No branch filter: every branch that touches the site gets deployed —
+    # main as production, everything else as a preview.
     paths:
       - 'site/**'
       - '.github/workflows/deploy-site.yml'
   workflow_dispatch:
 
-# Serialize deploys so overlapping runs queue instead of racing.
+# Serialize per branch: two pushes to the same branch queue; different
+# branches deploy in parallel (each is its own preview).
 concurrency:
-  group: deploy-site
+  group: deploy-site-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -34,12 +46,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
+          # wrangler v4 (npx …@latest) requires Node >= 22.
           node-version: '22'
-      - name: Deploy site/ to Cloudflare Pages
+      - name: Deploy site/ to Cloudflare Pages (production on main, else preview)
         run: >
           npx --yes wrangler@latest pages deploy site
           --project-name="$PROJECT"
-          --branch=main
+          --branch="$GITHUB_REF_NAME"
           --commit-dirty=true
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
