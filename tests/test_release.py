@@ -106,6 +106,34 @@ def test_resolve_release_uses_discovery_when_no_override(monkeypatch):
     assert release.resolve_release() == "2026-08-01.0"
 
 
+def test_resolve_release_info_env_override(monkeypatch):
+    monkeypatch.setenv("PLACEROOT_OVERTURE_RELEASE", "1999-01-01.0")
+    monkeypatch.setattr(release, "_discover", lambda: "2026-07-22.1")
+    assert release.resolve_release_info() == {
+        "release": "1999-01-01.0", "source": "env-override",
+    }
+    # resolve_release() must delegate to the same resolution, not re-derive.
+    assert release.resolve_release() == "1999-01-01.0"
+
+
+def test_resolve_release_info_discovered(monkeypatch):
+    monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
+    monkeypatch.setattr(release, "_discover", lambda: "2026-08-01.0")
+    assert release.resolve_release_info() == {
+        "release": "2026-08-01.0", "source": "discovered",
+    }
+    assert release.resolve_release() == "2026-08-01.0"
+
+
+def test_resolve_release_info_pinned_fallback(monkeypatch):
+    monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
+    monkeypatch.setattr(release, "_discover", lambda: None)
+    assert release.resolve_release_info() == {
+        "release": release.PINNED_RELEASE, "source": "pinned-fallback",
+    }
+    assert release.resolve_release() == release.PINNED_RELEASE
+
+
 def test_discover_compares_patch_numerically(monkeypatch):
     """Regression: plain max() would rank 2026-07-22.9 above 2026-07-22.10."""
     listing = """<?xml version="1.0"?>

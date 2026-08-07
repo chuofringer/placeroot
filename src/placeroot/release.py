@@ -67,9 +67,10 @@ def _discover(timeout_s: float = 5.0) -> str | None:
 
 
 @lru_cache(maxsize=1)
-def resolve_release() -> str:
-    """Active Overture release: env override, then discovery, then the pin.
+def resolve_release_info() -> dict:
+    """Active release + how it was resolved: {"release": str, "source": ...}.
 
+    source is one of: "env-override", "discovered", "pinned-fallback".
     Cached for the process lifetime (discovery is a network call we don't
     want repeated on every query) — call reset_cache() to force a re-check.
     """
@@ -81,15 +82,29 @@ def resolve_release() -> str:
         # would otherwise flow straight into an S3 glob. Not agent-reachable
         # today (no tool takes a release arg), but cheap defense in depth.
         if _RELEASE_RE.match(env_release):
-            return env_release
+            return {"release": env_release, "source": "env-override"}
         logger.warning(
             "PLACEROOT_OVERTURE_RELEASE=%r doesn't look like a release "
             "(YYYY-MM-DD.N); ignoring it and falling back to discovery/pin.",
             env_release,
         )
-    return _discover() or PINNED_RELEASE
+    discovered = _discover()
+    if discovered:
+        return {"release": discovered, "source": "discovered"}
+    return {"release": PINNED_RELEASE, "source": "pinned-fallback"}
+
+
+@lru_cache(maxsize=1)
+def resolve_release() -> str:
+    """Active Overture release: env override, then discovery, then the pin.
+
+    Cached for the process lifetime (discovery is a network call we don't
+    want repeated on every query) — call reset_cache() to force a re-check.
+    """
+    return resolve_release_info()["release"]
 
 
 def reset_cache() -> None:
     """Clear the process-lifetime cache. Used by tests and rare hot-reload."""
     resolve_release.cache_clear()
+    resolve_release_info.cache_clear()

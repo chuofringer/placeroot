@@ -699,6 +699,30 @@ def isochrone(
         return {"error": "bad_request", "detail": str(e)}
 
 
+@mcp.tool()
+def data_version() -> dict:
+    """Which Overture Maps release backs the answers from every other tool.
+
+    Reports the active release string, its date, and whether it came from
+    live S3 discovery, an operator env override, or the pinned fallback
+    baked into this build. Resolved once at process start and cached for
+    the process lifetime — this tool just reports that cached value, it
+    doesn't re-check upstream, so it's small and has no upstream DB
+    dependency.
+    """
+    info = release.resolve_release_info()
+    release_str = info["release"]
+    return {
+        "release": release_str,
+        "release_date": release_str.rsplit(".", 1)[0],
+        "source": info["source"],
+        "note": (
+            "Overture ships ~monthly; resolved once at server start and "
+            "cached for the process."
+        ),
+    }
+
+
 def _warm_start() -> None:
     """Best-effort cache pre-warm for PLACEROOT_WARM_REGION. Never blocks or raises.
 
