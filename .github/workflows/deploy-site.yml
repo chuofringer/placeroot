@@ -53,6 +53,8 @@ jobs:
       - name: Deploy site/ to Cloudflare Pages (production on main, else preview)
         id: deploy
         run: |
+          # pipefail so a wrangler failure isn't masked by tee's exit 0.
+          set -o pipefail
           npx --yes wrangler@latest pages deploy site \
             --project-name="$PROJECT" \
             --branch="$GITHUB_REF_NAME" \
