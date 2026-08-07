@@ -246,18 +246,19 @@ _DISTANCE_EXPR = DISTANCE_EXPR  # noqa: N816 - kept as an alias for existing in-
 
 def area_geometry(
     lat: float, lon: float, radius_m: float
-) -> tuple[str, str, dict, tuple[float, float, float, float]]:
+) -> tuple[str, str, dict, tuple[float, float, float, float], float]:
     """Shared "is this place within radius_m of (lat, lon)" predicate.
 
-    Returns (bbox_filter_sql, distance_filter_sql, params, bbox) — the bbox
-    filter is a cheap row-group prefilter using intersection semantics (so
-    it doesn't drop non-point geometry the way full-containment would); the
-    distance filter is the exact circle (already antimeridian-safe: it's
-    built from sin/cos, which are periodic, so a raw longitude difference
-    across the seam still comes out small) and is what actually decides
-    membership. Both find_places and summarize_area use this so they agree
-    on what's "in" an area. params is a dict of named parameters shared by
-    both filters plus any additional query-specific ones the caller adds.
+    Returns (bbox_filter_sql, distance_filter_sql, params, bbox,
+    effective_radius_m) — the bbox filter is a cheap row-group prefilter
+    using intersection semantics (so it doesn't drop non-point geometry the
+    way full-containment would); the distance filter is the exact circle
+    (already antimeridian-safe: it's built from sin/cos, which are periodic,
+    so a raw longitude difference across the seam still comes out small) and
+    is what actually decides membership. Both find_places and summarize_area
+    use this so they agree on what's "in" an area. params is a dict of named
+    parameters shared by both filters plus any additional query-specific
+    ones the caller adds.
 
     bbox is the raw (xmin, ymin, xmax, ymax) box from _bbox_around — pass it
     straight to _from_source()/cache lookups, not the bbox_filter's own
@@ -267,14 +268,18 @@ def area_geometry(
 
     radius_m is clamped to geo.MAX_QUERY_RADIUS_M (an abuse guard against a
     world-spanning bbox — see geo.clamp_radius_m) and the clamped value is
-    used for both the bbox and the $radius_m distance parameter so they agree.
+    used for both the bbox and the $radius_m distance parameter so they
+    agree. That same clamped value is returned as effective_radius_m so
+    callers that report or reason about the radius they searched (rather
+    than just building the SQL) use what actually ran, not the caller's
+    unclamped input — see issue #131.
     """
     radius_m = geo.clamp_radius_m(radius_m)
     xmin, ymin, xmax, ymax = _bbox_around(lat, lon, radius_m)
     bbox_filter, bbox_params = _bbox_filter_sql(xmin, ymin, xmax, ymax)
     distance_filter = f"{_DISTANCE_EXPR} <= $radius_m"
     params = {**bbox_params, "lat": lat, "lon": lon, "radius_m": radius_m}
-    return bbox_filter, distance_filter, params, (xmin, ymin, xmax, ymax)
+    return bbox_filter, distance_filter, params, (xmin, ymin, xmax, ymax), radius_m
 
 
 # Overture's operating_status is a business-lifecycle field (is this place a
@@ -318,7 +323,7 @@ def find_places(
     limit = max(0, min(int(limit), MAX_ROWS))
     upstream = _upstream_glob()
     missing = set(_check_schema(upstream))
-    bbox_filter, distance_filter, params, bbox = area_geometry(lat, lon, radius_m)
+    bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(lat, lon, radius_m)
     filters = [bbox_filter, distance_filter]
     if "names" not in missing:
         filters.append("names.primary IS NOT NULL")
@@ -388,7 +393,9 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
     """
     upstream = _upstream_glob()
     missing = set(_check_schema(upstream))
-    bbox_filter, distance_filter, params, bbox = area_geometry(lat, lon, radius_m)
+    bbox_filter, distance_filter, params, bbox, effective_radius_m = area_geometry(
+        lat, lon, radius_m
+    )
     category_expr = "NULL" if "basic_category" in missing else "basic_category"
     sql = f"""
         SELECT
@@ -414,7 +421,7 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
     other_categories_count = sum(n for _, n, _, _ in categorized[MAX_ROWS:])
     return {
         "center": {"lat": lat, "lon": lon},
-        "radius_m": radius_m,
+        "radius_m": effective_radius_m,
         "total_places": total_places,
         "top_categories": [{"category": c, "count": n} for c, n, _, _ in top],
         "other_categories_count": other_categories_count,
@@ -578,7 +585,9 @@ def place_details(
     if id:
         row = _place_details_by_id(id, near_lat, near_lon, upstream, missing)
     else:
-        bbox_filter, distance_filter, params, bbox = area_geometry(lat, lon, radius_m)
+        bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(
+            lat, lon, radius_m
+        )
         filters = [bbox_filter, distance_filter]
         if "names" not in missing:
             filters.append("names.primary ILIKE $name")
@@ -612,11 +621,29 @@ def within_distance(
     doesn't degrade into an unbounded scan — a real nearest match beyond
     that window comes back as nearest: None rather than its true distance.
     Raises the same SchemaDegraded/UpstreamUnavailable as find_places.
+
+    The search radius passed to find_places is itself clamped there to
+    geo.MAX_QUERY_RADIUS_M (see area_geometry). When max_distance_m exceeds
+    that cap, the search physically cannot reach max_distance_m, so a "no
+    match found" outcome does NOT mean "not within max_distance_m" — it only
+    means "not within geo.MAX_QUERY_RADIUS_M". In that case within is left
+    False (the honest floor: no match was found within what we could
+    search) but a "note" is added flagging that this isn't a guaranteed
+    negative — see issue #131. A match found at or under max_distance_m is
+    still reported as within: True with no caveat.
     """
     search_radius_m = max_distance_m * 2
     rows = find_places(lat, lon, search_radius_m, category=category, name=name, limit=1)
     if not rows:
-        return {"within": False, "nearest": None, "distance_m": None}
+        result = {"within": False, "nearest": None, "distance_m": None}
+        if max_distance_m > geo.MAX_QUERY_RADIUS_M:
+            result["note"] = (
+                f"max_distance_m ({max_distance_m}m) exceeds the maximum searchable "
+                f"radius ({geo.MAX_QUERY_RADIUS_M}m); no match was found within "
+                f"{geo.MAX_QUERY_RADIUS_M}m, but 'within: False' cannot be guaranteed "
+                "beyond that radius."
+            )
+        return result
     nearest = rows[0]
     return {
         "within": nearest["distance_m"] <= max_distance_m,
@@ -650,7 +677,8 @@ def compare_areas(areas: list[tuple[float, float]], radius_m: float = 1000) -> d
             combined_counts[cat] = combined_counts.get(cat, 0) + n
     top_categories = sorted(combined_counts, key=lambda c: combined_counts[c], reverse=True)[:10]
 
-    area_km2 = math.pi * (radius_m / 1000) ** 2
+    effective_radius_m = geo.clamp_radius_m(radius_m)
+    area_km2 = math.pi * (effective_radius_m / 1000) ** 2
     per_area = []
     for (lat, lon), s in zip(areas, summaries):
         counts = {row["category"]: row["count"] for row in s["top_categories"]}
