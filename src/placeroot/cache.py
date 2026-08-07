@@ -538,10 +538,19 @@ def local_paths_for_query(
 
     if sync_mode():
         for t in missing:
+            # Claim the tile BEFORE fetching it (#158): ensure_tile runs its
+            # own evict_if_needed() right after writing, so a query spanning
+            # several missing tiles would otherwise evict the ones it fetched
+            # earlier this loop (they're the oldest *unclaimed* files) before
+            # the caller ever reads them — defeating #150 with zero
+            # concurrency. Reserving the claim up front means every eviction
+            # pass, including ensure_tile's own, skips this tile. Claiming a
+            # not-yet-existing path is harmless: eviction only deletes files
+            # that exist and skips claimed paths regardless.
+            path = tile_path(release, theme, fingerprint, t)
+            claim_paths([str(path)])
             cached.append(ensure_tile(con, release, theme, t, upstream_glob, fingerprint))
-        paths = [str(p) for p in cached]
-        claim_paths(paths)
-        return paths
+        return [str(p) for p in cached]
 
     for t in missing:
         _materialize_in_background(release, theme, t, upstream_glob, fingerprint, new_connection)

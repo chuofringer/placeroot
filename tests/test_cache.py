@@ -253,6 +253,28 @@ def test_lru_eviction_removes_oldest_tiles_when_over_cap(con, cache_dir, monkeyp
     assert paths[-1].exists()
 
 
+def test_sync_multi_tile_query_does_not_evict_its_own_tiles(
+    con, cache_dir, sync_cache, monkeypatch
+):
+    """#158: a sync-mode query that fans out to more missing tiles than fit
+    under PLACEROOT_CACHE_MAX_MB must not evict the tiles it just fetched
+    before returning them. On the pre-fix code the tiles were claimed only
+    after the whole loop, while ensure_tile evicts after each write, so
+    earlier-fetched (unclaimed) tiles got deleted mid-loop and the returned
+    paths pointed at files that no longer existed -> UpstreamUnavailable."""
+    # ~3 KB cap: a couple of tiles overflow it, forcing eviction mid-loop.
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", str(3000 / 1024 / 1024))
+    bbox = (-74.5, 40.5, -73.5, 41.5)  # spans 4 tiles (one dense, three sparse)
+    tiles = cache.tiles_for_bbox(*bbox)
+    assert len(tiles) >= 3  # need a fan-out for the bug to bite
+
+    paths = cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con)
+    assert paths is not None
+    assert len(paths) == len(tiles)
+    gone = [p for p in paths if not os.path.exists(p)]
+    assert gone == [], f"query returned paths to tiles it self-evicted: {gone}"
+
+
 # --- Issue #63: schema-fingerprinted tile layout --- #
 
 
