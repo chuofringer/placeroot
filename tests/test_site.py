@@ -110,7 +110,10 @@ def test_installer_page_keeps_verbatim_install_commands():
     for cmd in VERBATIM_INSTALL:
         assert cmd in doc, f"add-to-your-ai.html: install instruction drifted: {cmd!r}"
     # All six tools/tabs present.
-    tabs = ("Claude Desktop", "Claude Code", "ChatGPT Desktop", "Gemini CLI", "Cursor", "any MCP agent")
+    tabs = (
+        "Claude Desktop", "Claude Code", "ChatGPT Desktop",
+        "Gemini CLI", "Cursor", "any MCP agent",
+    )
     for tool in tabs:
         assert tool in doc, f"add-to-your-ai.html: missing tab {tool}"
 
