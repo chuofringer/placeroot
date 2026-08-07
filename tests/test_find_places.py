@@ -4,6 +4,24 @@ from ._geo import haversine_m
 from .conftest import CENTER_LAT, CENTER_LON, raw_rows
 
 
+def test_operating_status_is_relabelled():
+    """operating_status is surfaced as business-lifecycle language, never the
+    raw Overture "open" (which reads as "open right now" — we have no hours)."""
+    results = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=25)
+    surfaced = {r["operating_status"] for r in results}
+    assert "open" not in surfaced
+    assert surfaced <= {"in business", "permanently closed", "temporarily closed", None}
+
+
+def test_label_operating_status_maps_and_passes_through():
+    assert overture._label_operating_status("open") == "in business"
+    assert overture._label_operating_status("closed") == "permanently closed"
+    assert overture._label_operating_status("closed_temporarily") == "temporarily closed"
+    assert overture._label_operating_status(None) is None
+    # Unrecognised values pass through unchanged — never misrepresent the source.
+    assert overture._label_operating_status("some_future_value") == "some_future_value"
+
+
 def test_limit_fill():
     """Regression for #1: a dense area with more than `limit` matches
     returns exactly `limit` rows, not fewer."""
