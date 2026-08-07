@@ -1,316 +1,221 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PlaceRoot — grounded map answers for AI agents</title>
-<meta name="description" content="PlaceRoot is a keyless MCP server that answers spatial questions from Overture Maps open data, sized for an agent's context window.">
-<link rel="stylesheet" href="style.css">
+<title>PlaceRoot — Ask about anywhere. Get a real answer.</title>
+<meta name="description" content="PlaceRoot is an MCP server that gives any AI assistant real knowledge of the world around you — every shop, park, clinic, and café, from open map data. Free, no account, no API key.">
+<link rel="icon" type="image/svg+xml" href="logo-mark.svg">
+<meta property="og:type" content="website">
+<meta property="og:title" content="PlaceRoot — Ask about anywhere. Get a real answer.">
+<meta property="og:description" content="Give any AI assistant real knowledge of the world around you, from open map data. Free, no account, no API key.">
+<meta property="og:url" content="https://placeroot.dev/">
+<meta property="og:image" content="https://placeroot.dev/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="PlaceRoot — Ask about anywhere. Get a real answer.">
+<meta name="twitter:description" content="Give any AI assistant real knowledge of the world around you, from open map data. Free, no account, no API key.">
+<meta name="twitter:image" content="https://placeroot.dev/og-image.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  body{margin:0;background:#fbfaf5;font-family:Sora,system-ui,sans-serif}
+  a{color:#5c8a63}a:hover{color:#4c7a54}
+  @keyframes prType2{0%,6%{width:0}34%,100%{width:100%}}
+  @keyframes prFadeUp2{0%,32%{opacity:0;transform:translateY(10px)}40%,100%{opacity:1;transform:translateY(0)}}
+  @media (max-width:980px){
+    .pr-wrap{padding-left:24px!important;padding-right:24px!important}
+    .pr-grid4{grid-template-columns:1fr 1fr!important}
+  }
+  @media (max-width:720px){
+    .pr-nav{flex-wrap:wrap!important;gap:12px!important;justify-content:center!important}
+    .pr-navlinks{gap:14px!important;font-size:13px!important;flex-wrap:wrap!important;justify-content:center!important}
+    .pr-wrap{padding-left:18px!important;padding-right:18px!important}
+    .pr-grid2,.pr-grid2-hero,.pr-grid4,.pr-pipeline,.pr-chips,.pr-installgrid{grid-template-columns:1fr!important}
+    .pr-pipeline,.pr-chips{gap:12px!important}
+    .pr-conn{display:none!important}
+    .pr-h1hero{white-space:normal!important;font-size:33px!important}
+    .pr-devhead,.pr-footrow{flex-direction:column!important;align-items:flex-start!important;gap:14px!important}
+    .pr-toolgrid{grid-template-columns:1fr!important}
+  }
+</style>
 </head>
 <body>
-<main>
-
-<header class="top">
-  <h1>PlaceRoot</h1>
-  <nav>
-    <a href="demo-map.html">live map demo</a>
-  </nav>
-</header>
-
-<p class="tagline">
-  An MCP server that answers spatial questions from
-  Overture Maps open data — queried live from the public GeoParquet
-  release with DuckDB. No API key. No vendor platform. Every answer sized
-  for an agent's context window, not a browser.
-</p>
-
-<div class="badges">
-  <span class="badge">keyless</span>
-  <span class="badge">Overture-native</span>
-  <span class="badge">token-budgeted</span>
-  <span class="badge">no ETL</span>
-  <span class="badge">MIT licensed</span>
+<div style="background:#fbfaf5">
+  <div class="pr-nav pr-wrap" style="max-width:1240px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:20px 48px;box-sizing:border-box">
+    <a href="index.html" style="display:flex;align-items:center;gap:7px;text-decoration:none"><svg width="32" height="30" viewBox="0 0 96 92"><rect x="8" y="8" width="80" height="58" rx="18" fill="#5c8a63"></rect><path d="M28 66 L28 86 L48 66 Z" fill="#5c8a63"></path><circle cx="48" cy="33" r="10" fill="#fbfaf5"></circle><circle cx="48" cy="33" r="4" fill="#e8b04b"></circle><path d="M48 43 L48 52" stroke="#fbfaf5" stroke-width="4" stroke-linecap="round"></path></svg><span style="font-weight:800;font-size:18px;letter-spacing:-.02em;color:#2a332b">placeroot</span></a>
+    <div class="pr-navlinks" style="display:flex;gap:26px;align-items:center;font-size:14px;font-weight:600"><a href="how-it-works.html" style="color:#55604f;text-decoration:none">How it works</a><a href="https://github.com/chuofringer/placeroot" style="color:#55604f;text-decoration:none">GitHub ↗</a><a href="add-to-your-ai.html" style="color:#fbfaf5;background:#5c8a63;padding:10px 20px;border-radius:99px;white-space:nowrap;text-decoration:none">Add to your AI — free</a></div>
+  </div>
 </div>
-
-<section id="onboarding">
-  <h2><span class="step">1</span>Add it to your agent</h2>
-  <p>Claude Desktop / Claude Code config — no signup, no API key to paste in.</p>
-  <div class="config-block panel">
-    <button class="copy-btn" id="copy-config" type="button" aria-label="Copy config to clipboard">Copy</button>
-    <pre id="config-json"><code>{
-  "mcpServers": {
-    "placeroot": {
-      "command": "uvx",
-      "args": ["placeroot"]
-    }
-  }
-}</code></pre>
-  </div>
-  <p class="install-line">Or run it directly: <code>uv run placeroot</code> starts the stdio MCP server.</p>
-</section>
-
-<section id="tokens">
-  <h2><span class="step">2</span>See the difference a token budget makes</h2>
-  <p>
-    One real query — <strong>coffee shops within 500m</strong> — run against
-    this repo's committed offline test fixture, two ways: what a raw
-    GeoJSON dump looks like, and what PlaceRoot's <code>find_places</code>
-    actually returns.
-  </p>
-
-  <div class="compare">
-    <div class="compare-col">
-      <h3>Raw GeoJSON <span class="token-count raw">~45,000 tokens</span></h3>
-      <p class="sub">typical raw GeoJSON for this query — full Overture Places
-        schema, all categories within radius, no ranking or truncation</p>
-      <div class="scroll-panel"><pre>{
-  "type": "FeatureCollection",
-  "features": [
-    {
-      "type": "Feature",
-      "id": "08f2a10793b0a2b1030037c9c1234567",
-      "geometry": { "type": "Point", "coordinates": [-73.899751, 40.699798] },
-      "bbox": [-73.899751, 40.699798, -73.899751, 40.699798],
-      "properties": {
-        "version": 3,
-        "sources": [
-          { "property": "", "dataset": "meta",
-            "record_id": "1234567890123456789",
-            "update_time": "2024-11-15T00:00:00.000Z", "confidence": 0.98 },
-          { "property": "names", "dataset": "Microsoft", "record_id": null,
-            "update_time": "2024-10-02T00:00:00.000Z", "confidence": 0.91 }
-        ],
-        "names": { "primary": "Cluster Place 160", "common": null, "rules": null },
-        "categories": { "primary": "coffee_shop",
-          "alternate": ["cafe", "breakfast_brunch_restaurant"] },
-        "confidence": 0.67,
-        "websites": ["https://example-coffee-160.example.com"],
-        "socials": ["https://www.instagram.com/clusterplace160",
-          "https://www.facebook.com/clusterplace160"],
-        "emails": ["hello@example-coffee-160.example.com"],
-        "phones": ["+12125550160"],
-        "brand": { "names": { "primary": null, "common": null, "rules": null },
-          "wikidata": null },
-        "addresses": [{ "freeform": "160 Cluster Ave", "locality": "New York",
-          "postcode": "10003", "region": "NY", "country": "US" }],
-        "operating_status": "open"
-      }
-    },
-    {
-      "type": "Feature",
-      "id": "08f2a10793b0a2b1030037c9c7654321",
-      "geometry": { "type": "Point", "coordinates": [-73.900576, 40.699636] },
-      "bbox": [-73.900576, 40.699636, -73.900576, 40.699636],
-      "properties": {
-        "version": 2,
-        "sources": [
-          { "property": "", "dataset": "meta",
-            "record_id": "9876543210987654321",
-            "update_time": "2024-08-03T00:00:00.000Z", "confidence": 0.94 }
-        ],
-        "names": { "primary": "Cluster Place 000", "common": null, "rules": null },
-        "categories": { "primary": "coffee_shop", "alternate": ["cafe"] },
-        "confidence": 0.63,
-        "websites": [],
-        "socials": [],
-        "emails": [],
-        "phones": ["+12125550100"],
-        "brand": { "names": { "primary": null, "common": null, "rules": null },
-          "wikidata": null },
-        "addresses": [{ "freeform": "100 Cluster Ave", "locality": "New York",
-          "postcode": "10003", "region": "NY", "country": "US" }],
-        "operating_status": "closed_permanently"
-      }
-    }
-
-    /* … ~148 more features. Overture's row-group pruning gets you the
-       right tile fast; it does not shrink the payload once it lands.
-       Each feature above runs ~291 tokens (measured, chars/4) at this
-       schema depth — ~150 places is a normal count within 500m of a
-       dense downtown block across all categories, not just coffee. */
-  ]
-}</pre></div>
-      <p class="compare-note">
-        <code>~45,000</code> = 291 tokens/feature (measured: <code>len(json.dumps(feature))
-        // 4</code> against one representative Overture Places record, full native
-        schema) × ~150 features, the typical all-category place count within
-        500m of a dense downtown intersection. This repo's committed test
-        fixture only has 210 synthetic rows total, too small to reproduce
-        that count directly — the per-feature token cost above is real and
-        measured against this repo's actual code paths.
-      </p>
+<div style="background:linear-gradient(160deg,#fbfaf5 40%,#eef3ea)">
+  <div class="pr-grid2-hero pr-wrap" style="max-width:1240px;margin:0 auto;display:grid;grid-template-columns:1.1fr 1fr;gap:40px;align-items:center;padding:64px 48px 72px;box-sizing:border-box">
+    <div>
+      <h1 class="pr-h1hero" style="margin:0;font-size:48px;font-weight:800;letter-spacing:-.03em;line-height:1.12;color:#2a332b;white-space:nowrap">Ask about anywhere.<br>Get a <span style="color:#5c8a63">real answer</span>.</h1>
+      <p style="margin:20px 0 0;max-width:480px;font-size:17.5px;line-height:1.65;color:#55604f;text-wrap:pretty">PlaceRoot gives any AI assistant real knowledge of the world around you — every shop, park, clinic, and café, from the same open map data that powers the big apps. Free, and nothing to sign up for.</p>
+      <div style="display:flex;gap:12px;margin-top:30px;align-items:center">
+        <a href="add-to-your-ai.html" style="display:flex;align-items:center;gap:10px;background:#5c8a63;color:#fbfaf5;border-radius:99px;padding:15px 28px;font-weight:700;font-size:15.5px;box-shadow:0 10px 24px rgba(92,138,99,.28);text-decoration:none">Add to your AI — free</a>
+        <div style="display:flex;align-items:center;font-size:15px;font-weight:700;color:#5c8a63;padding:15px 20px">See it answer ↓</div>
+      </div>
+      <div style="display:flex;gap:20px;margin-top:26px;font-size:12.5px;font-weight:600;color:#8a9482"><span>✓ No account</span><span>✓ No API key</span><span>✓ Open data</span></div>
     </div>
-
-    <div class="compare-col">
-      <h3>PlaceRoot <span class="token-count placeroot">501 tokens</span></h3>
-      <p class="sub">measured: <code>find_places(lat, lon, 500, category="coffee_shop")</code>
-        against the committed offline fixture</p>
-      <div class="scroll-panel"><pre>{
-  "results": [
-    {
-      "name": "Cluster Place 160",
-      "category": "coffee_shop",
-      "basic_category": "coffee_shop",
-      "operating_status": "open",
-      "confidence": 0.67,
-      "lat": 40.699798,
-      "lon": -73.899751,
-      "distance_m": 31.0
-    },
-    {
-      "name": "Cluster Place 000",
-      "category": "coffee_shop",
-      "basic_category": "coffee_shop",
-      "operating_status": "closed_permanently",
-      "confidence": 0.63,
-      "lat": 40.699636,
-      "lon": -73.900576,
-      "distance_m": 63.0
-    },
-    {
-      "name": "Cluster Place 104",
-      "category": "coffee_shop",
-      "basic_category": "coffee_shop",
-      "operating_status": "open",
-      "confidence": 0.88,
-      "lat": 40.700003,
-      "lon": -73.898479,
-      "distance_m": 128.0
-    }
-
-    /* … 7 more, nearest-first, same shape. All 10 results together:
-       2005 JSON characters, 501 estimated tokens (chars/4 heuristic,
-       same one placeroot.budget uses to enforce its own 2000-token
-       default budget). */
-  ]
-}</pre></div>
-      <p class="compare-note">
-        Reproduce it: <code>uv run python -c "from placeroot import overture,
-        budget; overture.set_data_path('tests/fixtures/places.parquet');
-        r=overture.find_places(40.7,-73.9,500,category='coffee_shop',limit=10);
-        print(budget.estimate_tokens({'results': r}))"</code> — real output
-        against the fixture committed in this repo, not a rounded guess.
-      </p>
+    <div style="position:relative;display:flex;flex-direction:column;gap:12px">
+      <div style="display:flex;align-items:center;gap:12px;background:#fff;border-radius:99px;padding:15px 22px;box-shadow:0 12px 28px rgba(42,51,43,.09)">
+        <span style="width:9px;height:9px;border-radius:50%;background:#e8b04b;flex:none"></span>
+        <div style="overflow:hidden;white-space:nowrap;animation:prType2 14s steps(33) infinite;font-size:15.5px;color:#2a332b">What's around downtown Palo Alto?</div>
+      </div>
+      <div style="background:#fff;border-radius:18px 18px 18px 6px;padding:18px 22px;box-shadow:0 12px 28px rgba(42,51,43,.09);animation:prFadeUp2 14s ease infinite">
+        <div style="font-size:14.5px;line-height:1.6;color:#2a332b">It's a great food-and-browsing area — <b style="color:#5c8a63">54 restaurants, 22 cafés, and 11 bookstores</b> within a short walk. Most are along <b style="color:#5c8a63">University Ave</b>, so start there.</div>
+        <div style="margin-top:10px;font-size:11.5px;font-weight:600;color:#8a9482">Answered from live open map data · just now</div>
+      </div>
     </div>
   </div>
-</section>
-
-<section id="map-demo">
-  <h2><span class="step">3</span>See it on a map — no key, no CDN</h2>
-  <p>
-    The same query, rendered by <code>render_map</code> /
-    <code>placeroot.mapview</code> into one self-contained HTML file:
-    inline CSS and JS, vector markers, click-to-open popups, a scale bar,
-    zero network requests when opened. This is a real generated artifact,
-    not a screenshot.
-  </p>
-  <iframe class="map-embed" src="demo-map.html" title="PlaceRoot live map demo" loading="lazy"></iframe>
-  <p class="map-links">
-    <a href="demo-map.html">Open the map artifact directly</a> — same file,
-    full window.
-  </p>
-</section>
-
-<section id="facts">
-  <h2><span class="step">4</span>What's actually in it</h2>
-  <ul class="facts">
-    <li><strong>Keyless.</strong> Queries run directly against Overture's
-      public S3 GeoParquet release with DuckDB — no signup, no API key,
-      no vendor platform on the critical path.</li>
-    <li><strong>Fresh, not a stale snapshot.</strong> Every place carries
-      Overture's <code>operating_status</code> and a <code>confidence</code>
-      score, contributed by Meta, Uber, TomTom, and others — an agent can
-      reason about whether a place is actually still open.</li>
-    <li><strong>Token-budgeted by design.</strong> Every tool response is
-      built to fit roughly 2K tokens; when a result would blow past that,
-      the response is truncated (rows dropped nearest-first-preserved,
-      then optional fields stripped) and says so with
-      <code>truncated: true</code> and <code>omitted_count</code>, rather
-      than silently dumping more than an agent can use.</li>
-    <li><strong>A local tile cache.</strong> The first query touching a
-      1°×1° tile materializes it to disk; every later query touching that
-      tile reads local parquet instead of rescanning S3 — the design
-      target is warm queries under 500ms, and it keeps working if the
-      network doesn't.</li>
-    <li><strong>GERS ids in every response.</strong> Each place carries
-      Overture's stable GERS identifier — a cross-session, cross-tool
-      reference an agent can hold onto and resolve later, instead of
-      re-searching by name and hoping for the same match.</li>
-    <li><strong>No ETL.</strong> There's no intermediate database or
-      import job — every query reads Overture's GeoParquet directly, with
-      bbox column pushdown to prune row groups.</li>
-    <li><strong>MIT licensed.</strong> No usage tier, no metered key.</li>
-  </ul>
-</section>
-
-<section id="tools">
-  <h2><span class="step">5</span>Tools today</h2>
-  <table class="tools">
-    <thead><tr><th>Tool</th><th>Answers</th></tr></thead>
-    <tbody>
-      <tr>
-        <td><code>find_places</code></td>
-        <td>Named places near a point, nearest first, with category,
-          confidence, and operating status</td>
-      </tr>
-      <tr>
-        <td><code>summarize_area</code></td>
-        <td>What's in an area: total places and top categories</td>
-      </tr>
-      <tr>
-        <td><code>render_map</code></td>
-        <td>Any <code>find_places</code>/<code>summarize_area</code> result
-          as a self-contained interactive HTML map</td>
-      </tr>
-    </tbody>
-  </table>
-</section>
-
-<footer>
-  <span>MIT licensed.</span>
-  <span>Overture Maps Foundation contributors.</span>
-</footer>
-
-</main>
-
+</div>
+<div style="background:#fff">
+  <div class="pr-wrap" style="max-width:1240px;margin:0 auto;padding:56px 48px;box-sizing:border-box">
+    <h2 style="margin:0 0 30px;font-size:28px;font-weight:800;letter-spacing:-.02em;color:#2a332b;text-align:center">Whenever a place matters, PlaceRoot answers</h2>
+    <div class="pr-grid4" style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px">
+      <div style="background:#f4f7f0;border-radius:16px;padding:24px"><svg width="24" height="24" viewBox="0 0 24 24" style="margin-bottom:10px"><rect x="4" y="8" width="16" height="12" rx="3" fill="#5c8a63"></rect><path d="M9 8 V5 a2 2 0 0 1 2-2 h2 a2 2 0 0 1 2 2 V8" fill="none" stroke="#5c8a63" stroke-width="2"></path><circle cx="12" cy="14" r="2.4" fill="#e8b04b"></circle></svg><div style="font-weight:700;font-size:15px;color:#2a332b;margin-bottom:6px">Planning a trip</div><p style="margin:0;font-size:13px;line-height:1.6;color:#55604f">"A walkable food day in Lisbon — what's nearby?"</p></div>
+      <div style="background:#faf5ea;border-radius:16px;padding:24px"><svg width="24" height="24" viewBox="0 0 24 24" style="margin-bottom:10px"><path d="M3 12 L12 4 L21 12" fill="none" stroke="#b98a2e" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path><rect x="6.5" y="12" width="11" height="8" rx="1.5" fill="#e8b04b"></rect><rect x="10.4" y="14.5" width="3.2" height="5.5" rx="1" fill="#fbfaf5"></rect></svg><div style="font-weight:700;font-size:15px;color:#2a332b;margin-bottom:6px">Choosing a neighborhood</div><p style="margin:0;font-size:13px;line-height:1.6;color:#55604f">"Compare two areas — groceries, transit, parks."</p></div>
+      <div style="background:#f4f7f0;border-radius:16px;padding:24px"><svg width="24" height="24" viewBox="0 0 24 24" style="margin-bottom:10px"><circle cx="12" cy="10" r="6" fill="#5c8a63"></circle><circle cx="12" cy="10" r="2.2" fill="#fbfaf5"></circle><path d="M12 16 L12 21" stroke="#5c8a63" stroke-width="2.6" stroke-linecap="round"></path></svg><div style="font-weight:700;font-size:15px;color:#2a332b;margin-bottom:6px">Running errands</div><p style="margin:0;font-size:13px;line-height:1.6;color:#55604f">"A hardware store on my route?"</p></div>
+      <div style="background:#faf5ea;border-radius:16px;padding:24px"><svg width="24" height="24" viewBox="0 0 24 24" style="margin-bottom:10px"><rect x="4" y="12" width="4" height="8" rx="1.2" fill="#a8c2a9"></rect><rect x="10" y="7" width="4" height="13" rx="1.2" fill="#5c8a63"></rect><rect x="16" y="10" width="4" height="10" rx="1.2" fill="#e8b04b"></rect></svg><div style="font-weight:700;font-size:15px;color:#2a332b;margin-bottom:6px">Research &amp; work</div><p style="margin:0;font-size:13px;line-height:1.6;color:#55604f">"What's the category mix in this district?"</p></div>
+    </div>
+  </div>
+</div>
+<div style="background:#fbfaf5">
+  <div class="pr-wrap" style="max-width:1240px;margin:0 auto;padding:60px 48px;box-sizing:border-box">
+    <h2 style="margin:0 auto 8px;max-width:720px;text-align:center;font-size:32px;font-weight:800;letter-spacing:-.025em;color:#2a332b">This isn't another maps app.</h2>
+    <p style="margin:0 auto 36px;text-align:center;font-size:15.5px;color:#55604f">Keep your maps app for driving. PlaceRoot answers.</p>
+    <div class="pr-grid2" style="display:grid;grid-template-columns:1fr 1fr;gap:20px;max-width:940px;margin:0 auto;align-items:stretch">
+      <div style="background:#fff;border:1px solid rgba(42,51,43,.08);border-radius:18px;padding:30px 32px;box-sizing:border-box">
+        <div style="font-size:13px;font-weight:700;color:#8a9482;margin-bottom:16px">MAPS APPS</div>
+        <div style="display:flex;flex-direction:column;gap:12px;font-size:14.5px;line-height:1.5;color:#55604f">
+          <div>Made for <b style="color:#2a332b">navigating</b></div>
+          <div>Accounts, ads, tracking</div>
+          <div>Closed platform — your AI can't see it</div>
+        </div>
+      </div>
+      <div style="background:#5c8a63;border:1px solid transparent;border-radius:18px;padding:30px 32px;box-sizing:border-box;box-shadow:0 14px 32px rgba(92,138,99,.25)">
+        <div style="font-size:13px;font-weight:700;color:#d9e6d4;margin-bottom:16px">PLACEROOT</div>
+        <div style="display:flex;flex-direction:column;gap:12px;font-size:14.5px;line-height:1.5;color:#eef3ea">
+          <div>Made for <b style="color:#fff">answering</b></div>
+          <div><b style="color:#fff">Completely free</b> — no account, no ads</div>
+          <div>Open data, inside any AI you use</div>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;justify-content:center;gap:26px;margin-top:30px;font-size:13px;font-weight:700;color:#5c8a63"><span>100% open source</span><span>·</span><span>100% open data</span><span>·</span><span>$0 forever</span></div>
+  </div>
+</div>
+<div style="background:#fff">
+  <div class="pr-wrap" style="max-width:1240px;margin:0 auto;padding:64px 48px;box-sizing:border-box">
+    <div style="text-align:center;max-width:640px;margin:0 auto 40px">
+      <div style="font:600 12px 'Fira Code',monospace;color:#b98a2e;margin-bottom:10px">UNDER THE HOOD</div>
+      <h2 style="margin:0;font-size:32px;font-weight:800;letter-spacing:-.025em;line-height:1.15;color:#2a332b">Answers, not data dumps.</h2>
+      <p style="margin:14px 0 0;font-size:15px;line-height:1.65;color:#55604f;text-wrap:pretty">Most map tools hand an AI hundreds of kilobytes of raw GeoJSON. PlaceRoot returns compact, ranked answers — queried live from Overture Maps with DuckDB, no vendor in the middle.</p>
+    </div>
+    <div class="pr-grid2" style="display:grid;grid-template-columns:1.15fr 1fr;gap:24px;align-items:stretch;max-width:1080px;margin:0 auto">
+      <div style="background:#fbfaf5;border:1px solid rgba(42,51,43,.09);border-radius:16px;overflow:hidden;display:flex;flex-direction:column">
+        <div style="display:flex;align-items:center;gap:8px;padding:11px 18px;border-bottom:1px solid rgba(42,51,43,.08);background:#fff">
+          <span style="width:9px;height:9px;border-radius:50%;background:#c2552a"></span><span style="width:9px;height:9px;border-radius:50%;background:#e8b04b"></span><span style="width:9px;height:9px;border-radius:50%;background:#6faa77"></span>
+          <span style="margin-left:8px;font:500 11px 'Fira Code',monospace;color:#8a9482">one question, end to end</span>
+        </div>
+        <div style="padding:20px 22px;display:flex;flex-direction:column;gap:14px;flex:1">
+          <div style="display:grid;grid-template-columns:74px 1fr;gap:14px;align-items:start">
+            <span style="font:600 10px 'Fira Code',monospace;color:#8a9482;padding-top:8px;text-align:right">ASK</span>
+            <div style="justify-self:start;background:#5c8a63;color:#fbfaf5;border-radius:12px;padding:10px 15px;font-size:13.5px;line-height:1.5">Is there a hardware store near the job site?</div>
+          </div>
+          <div style="display:grid;grid-template-columns:74px 1fr;gap:14px;align-items:start">
+            <span style="font:600 10px 'Fira Code',monospace;color:#8a9482;padding-top:8px;text-align:right">TOOL CALL</span>
+            <div style="justify-self:start;display:flex;align-items:center;gap:8px;background:#fff;border:1px solid rgba(42,51,43,.1);border-radius:8px;padding:8px 12px;font:500 11.5px 'Fira Code',monospace;color:#55604f"><span style="width:7px;height:7px;border-radius:50%;background:#e8b04b"></span>find_places(lat, lon, category="hardware_store")</div>
+          </div>
+          <div style="display:grid;grid-template-columns:74px 1fr;gap:14px;align-items:start">
+            <span style="font:600 10px 'Fira Code',monospace;color:#8a9482;padding-top:10px;text-align:right">DATA</span>
+            <div style="background:#2a332b;border-radius:10px;padding:13px 16px">
+              <pre style="margin:0;font:400 11.5px/1.65 'Fira Code',monospace;color:#e8ead9">{ "name": "Stone Way Hardware",
+  "distance_m": 210,
+  "operating_status": <span style="color:#e8b04b">"open"</span>,
+  "confidence": 0.97 }  <span style="color:#8a9482">… 4 more, ranked</span></pre>
+              <div style="margin-top:8px;display:flex;justify-content:space-between;font:500 10.5px 'Fira Code',monospace;color:#8a9482"><span>1.4 KB</span><span style="color:#8fbf96">✓ budget ok</span></div>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:74px 1fr;gap:14px;align-items:start">
+            <span style="font:600 10px 'Fira Code',monospace;color:#b98a2e;padding-top:8px;text-align:right">ANSWER</span>
+            <div style="justify-self:start;background:#fff;border:1px solid rgba(42,51,43,.1);border-radius:12px;padding:10px 15px;font-size:13.5px;line-height:1.5;color:#2a332b">Yes — Stone Way Hardware, 210 m away and in business.</div>
+          </div>
+        </div>
+      </div>
+      <div style="background:#fbfaf5;border:1px solid rgba(42,51,43,.09);border-radius:16px;padding:26px 28px;display:flex;flex-direction:column;justify-content:center;gap:22px;box-sizing:border-box">
+        <div style="font:600 11px 'Fira Code',monospace;color:#8a9482">WHAT YOUR AI HAS TO READ</div>
+        <div>
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:7px"><span style="font-size:13.5px;font-weight:700;color:#55604f">Typical map API dump</span><span style="font-size:15px;font-weight:800;color:#8a9482">482 KB</span></div>
+          <div style="height:12px;border-radius:99px;background:#e9e6da;overflow:hidden"><div style="width:100%;height:100%;background:repeating-linear-gradient(-45deg,#c9c4b2 0 6px,#d8d4c4 6px 12px)"></div></div>
+          <div style="margin-top:6px;font-size:11.5px;color:#8a9482">raw GeoJSON — overflows the context window</div>
+        </div>
+        <div>
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:7px"><span style="font-size:13.5px;font-weight:700;color:#2a332b">PlaceRoot answer</span><span style="font-size:15px;font-weight:800;color:#5c8a63">≤ 2K tokens</span></div>
+          <div style="height:12px;border-radius:99px;background:#e9f0e6;overflow:hidden"><div style="width:4%;min-width:14px;height:100%;border-radius:99px;background:#5c8a63"></div></div>
+          <div style="margin-top:6px;font-size:11.5px;color:#55604f">~60× smaller — ranked, readable, ready to use</div>
+        </div>
+        <div style="border-top:1px solid rgba(42,51,43,.08);padding-top:16px;font-size:13px;line-height:1.6;color:#55604f">Small answers mean your AI actually reads them — and has room left to think.</div>
+      </div>
+    </div>
+  </div>
+</div>
+<div style="background:#2a332b">
+  <div class="pr-wrap" style="max-width:1240px;margin:0 auto;padding:56px 48px;box-sizing:border-box">
+    <div class="pr-devhead" style="display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:28px">
+      <div>
+        <div style="font:600 12px 'Fira Code',monospace;color:#e8b04b;margin-bottom:10px">FOR DEVELOPERS</div>
+        <h2 style="margin:0;font-size:28px;font-weight:800;letter-spacing:-.02em;color:#fbfaf5">One line. No keys. Fourteen tools.</h2>
+      </div>
+      <a href="https://github.com/chuofringer/placeroot" style="font:500 12px 'Fira Code',monospace;color:#e8b04b;text-decoration:none;white-space:nowrap;border:1px solid rgba(232,176,75,.4);padding:9px 16px;border-radius:99px">github.com/chuofringer/placeroot ↗</a>
+    </div>
+    <div class="pr-grid2" style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:stretch">
+      <div style="background:#1e261f;border-radius:14px;border:1px solid rgba(251,250,245,.1);overflow:hidden;display:flex;flex-direction:column">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:11px 18px;border-bottom:1px solid rgba(251,250,245,.08)"><span style="font:500 11px 'Fira Code',monospace;color:#8a9482">1 · ADD — mcp_config.json</span><button id="copyBtn" type="button" style="cursor:pointer;font:600 11px 'Fira Code',monospace;color:#2a332b;background:#e8b04b;padding:5px 12px;border-radius:6px;border:none">copy</button></div>
+        <pre style="margin:0;padding:18px 20px;font:400 12.5px/1.65 'Fira Code',monospace;color:#e8ead9;flex:1">"mcpServers": {
+  "placeroot": { "command": "uvx", "args": ["placeroot"] }
+}</pre>
+        <div style="display:flex;align-items:center;gap:8px;padding:12px 18px;border-top:1px solid rgba(251,250,245,.08);font:500 11.5px 'Fira Code',monospace;color:#8a9482;flex-wrap:wrap"><span style="color:#8fbf96">works in:</span><span style="color:#c9d4c4">Claude · ChatGPT · Gemini · Cursor · any MCP agent</span></div>
+      </div>
+      <div style="background:#1e261f;border-radius:14px;border:1px solid rgba(251,250,245,.1);overflow:hidden;display:flex;flex-direction:column">
+        <div style="padding:11px 18px;border-bottom:1px solid rgba(251,250,245,.08);font:500 11px 'Fira Code',monospace;color:#8a9482">2 · CALL — fourteen tools</div>
+        <div class="pr-toolgrid" style="display:grid;grid-template-columns:1fr 1fr;gap:0 18px;flex:1;padding:6px 18px 12px">
+          <div style="padding:8px 0;border-bottom:1px solid rgba(251,250,245,.06)"><div style="font:600 12px 'Fira Code',monospace;color:#8fbf96">find_places</div><div style="font-size:11.5px;line-height:1.4;color:#c9d4c4;margin-top:2px">nearest places: category, confidence, status</div></div>
+          <div style="padding:8px 0;border-bottom:1px solid rgba(251,250,245,.06)"><div style="font:600 12px 'Fira Code',monospace;color:#8fbf96">summarize_area</div><div style="font-size:11.5px;line-height:1.4;color:#c9d4c4;margin-top:2px">what's in an area: totals and category mix</div></div>
+          <div style="padding:8px 0;border-bottom:1px solid rgba(251,250,245,.06)"><div style="font:600 12px 'Fira Code',monospace;color:#8fbf96">compare_areas</div><div style="font-size:11.5px;line-height:1.4;color:#c9d4c4;margin-top:2px">2–5 areas side by side</div></div>
+          <div style="padding:8px 0;border-bottom:1px solid rgba(251,250,245,.06)"><div style="font:600 12px 'Fira Code',monospace;color:#8fbf96">within_distance</div><div style="font-size:11.5px;line-height:1.4;color:#c9d4c4;margin-top:2px">is the nearest match within N metres</div></div>
+          <div style="padding:8px 0;border-bottom:1px solid rgba(251,250,245,.06)"><div style="font:600 12px 'Fira Code',monospace;color:#8fbf96">place_details</div><div style="font-size:11.5px;line-height:1.4;color:#c9d4c4;margin-top:2px">one place in full: address, hours, links</div></div>
+          <div style="padding:8px 0;border-bottom:1px solid rgba(251,250,245,.06)"><div style="font:600 12px 'Fira Code',monospace;color:#8fbf96">admin_lookup</div><div style="font-size:11.5px;line-height:1.4;color:#c9d4c4;margin-top:2px">point → neighborhood, city, county, state</div></div>
+          <div style="padding:8px 0;border-bottom:1px solid rgba(251,250,245,.06)"><div style="font:600 12px 'Fira Code',monospace;color:#8fbf96">geocode</div><div style="font-size:11.5px;line-height:1.4;color:#c9d4c4;margin-top:2px">place names → coordinates</div></div>
+          <div style="padding:8px 0;border-bottom:1px solid rgba(251,250,245,.06)"><div style="font:600 12px 'Fira Code',monospace;color:#8fbf96">reverse_geocode</div><div style="font-size:11.5px;line-height:1.4;color:#c9d4c4;margin-top:2px">coordinates → nearest address</div></div>
+          <div style="padding:8px 0;border-bottom:1px solid rgba(251,250,245,.06)"><div style="font:600 12px 'Fira Code',monospace;color:#8fbf96">resolve_place</div><div style="font-size:11.5px;line-height:1.4;color:#c9d4c4;margin-top:2px">free text → a stable place id</div></div>
+          <div style="padding:8px 0;border-bottom:1px solid rgba(251,250,245,.06)"><div style="font:600 12px 'Fira Code',monospace;color:#8fbf96">summarize_buildings</div><div style="font-size:11.5px;line-height:1.4;color:#c9d4c4;margin-top:2px">building footprints & heights in an area</div></div>
+          <div style="padding:8px 0;border-bottom:1px solid rgba(251,250,245,.06)"><div style="font:600 12px 'Fira Code',monospace;color:#8fbf96">buildings_at</div><div style="font-size:11.5px;line-height:1.4;color:#c9d4c4;margin-top:2px">the buildings at a point</div></div>
+          <div style="padding:8px 0;border-bottom:1px solid rgba(251,250,245,.06)"><div style="font:600 12px 'Fira Code',monospace;color:#8fbf96">isochrone</div><div style="font-size:11.5px;line-height:1.4;color:#c9d4c4;margin-top:2px">walk / cycle / drive reach in N minutes</div></div>
+          <div style="padding:8px 0;border-bottom:1px solid rgba(251,250,245,.06)"><div style="font:600 12px 'Fira Code',monospace;color:#8fbf96">simplify_geometry</div><div style="font-size:11.5px;line-height:1.4;color:#c9d4c4;margin-top:2px">shrink a shape to a token budget</div></div>
+          <div style="padding:8px 0;border-bottom:1px solid rgba(251,250,245,.06)"><div style="font:600 12px 'Fira Code',monospace;color:#8fbf96">render_map</div><div style="font-size:11.5px;line-height:1.4;color:#c9d4c4;margin-top:2px">a self-contained HTML map of any answer</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="pr-footrow" style="display:flex;align-items:center;justify-content:space-between;margin-top:44px;padding-top:24px;border-top:1px solid rgba(251,250,245,.1)">
+      <span style="display:inline-flex;align-items:center;gap:9px;font-size:12.5px;color:#8a9482"><svg width="20" height="19" viewBox="0 0 96 92"><rect x="8" y="8" width="80" height="58" rx="18" fill="#fbfaf5"></rect><path d="M28 66 L28 86 L48 66 Z" fill="#fbfaf5"></path><circle cx="48" cy="33" r="10" fill="#5c8a63"></circle><circle cx="48" cy="33" r="4" fill="#e8b04b"></circle><path d="M48 43 L48 52" stroke="#5c8a63" stroke-width="4" stroke-linecap="round"></path></svg>PlaceRoot · MIT licensed · built on Overture Maps open data</span>
+      <span style="font-size:12.5px;color:#8a9482">free forever · no account · no API key</span>
+    </div>
+  </div>
+</div>
 <script>
-(function () {
-  "use strict";
-  var btn = document.getElementById("copy-config");
-  var codeEl = document.getElementById("config-json");
-  if (!btn || !codeEl) return;
-  btn.addEventListener("click", function () {
-    var text = codeEl.textContent;
-    function marked() {
-      btn.textContent = "Copied";
-      btn.setAttribute("data-state", "copied");
-      setTimeout(function () {
-        btn.textContent = "Copy";
-        btn.removeAttribute("data-state");
-      }, 1600);
-    }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(marked, function () {
-        fallbackCopy(text, marked);
-      });
-    } else {
-      fallbackCopy(text, marked);
-    }
-  });
-
-  function fallbackCopy(text, done) {
-    var ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    try { document.execCommand("copy"); } catch (e) { /* best effort */ }
-    document.body.removeChild(ta);
-    done();
-  }
-})();
+  (function () {
+    var config = '{\n  "mcpServers": {\n    "placeroot": {\n      "command": "uvx",\n      "args": ["placeroot"]\n    }\n  }\n}';
+    var btn = document.getElementById("copyBtn");
+    var t;
+    btn.addEventListener("click", function () {
+      if (navigator.clipboard) navigator.clipboard.writeText(config);
+      btn.textContent = "copied ✓";
+      clearTimeout(t);
+      t = setTimeout(function () { btn.textContent = "copy"; }, 1500);
+    });
+  })();
 </script>
 </body>
 </html>
