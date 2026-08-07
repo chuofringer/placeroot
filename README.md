@@ -35,7 +35,7 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 
 ## What it can do
 
-**21 tools**, all returning compact, budgeted answers. Several single-item tools have a `*_batch` sibling that collapses many calls into one round-trip.
+**22 tools**, all returning compact, budgeted answers. Several single-item tools have a `*_batch` sibling that collapses many calls into one round-trip.
 
 | Tool | Answers |
 |---|---|
