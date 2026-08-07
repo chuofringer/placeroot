@@ -101,6 +101,52 @@ def test_warm_metadata_async_returns_without_waiting_for_the_probe(monkeypatch):
     time.sleep(0.3)  # let the background thread finish before the test exits
     assert started == [True]
 
+def test_warm_divisions_async_returns_without_waiting_for_the_build(monkeypatch):
+    """Issue #93: the divisions-table warm must be fire-and-forget, same as
+    _warm_metadata_async — main() shouldn't stall startup waiting on the
+    ~20-30s one-time materialization.
+    """
+    started = []
+
+    def slow_materialize():
+        started.append(True)
+        time.sleep(0.2)
+
+    monkeypatch.setattr(server.geocoding, "_local_divisions_table", slow_materialize)
+    monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
+    t0 = time.monotonic()
+    server._warm_divisions_async()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.1  # returned immediately, didn't wait for the "build"
+    time.sleep(0.3)  # let the background thread finish before the test exits
+    assert started == [True]
+
+
+def test_warm_divisions_async_skipped_when_cache_disabled(monkeypatch):
+    monkeypatch.setenv("PLACEROOT_CACHE", "off")
+    called = []
+    monkeypatch.setattr(server.geocoding, "_local_divisions_table", lambda: called.append(True))
+    server._warm_divisions_async()
+    time.sleep(0.05)  # would-be thread startup window
+    assert called == []
+
+
+def test_warm_divisions_async_is_non_fatal_on_failure(monkeypatch):
+    """Issue #93: a materialization failure must never crash startup — this
+    mirrors geocode._local_divisions_table()'s own internal
+    log-and-swallow, but proves the warm hook itself doesn't propagate a
+    background-thread exception into the caller either.
+    """
+
+    def boom():
+        raise RuntimeError("materialization exploded")
+
+    monkeypatch.setattr(server.geocoding, "_local_divisions_table", boom)
+    monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
+    server._warm_divisions_async()  # must not raise
+    time.sleep(0.1)  # let the background thread run (and fail) before exit
+
+
 def test_render_map_tool_writes_artifact_from_find_places_output(tmp_path, monkeypatch):
     monkeypatch.setenv("PLACEROOT_ARTIFACT_DIR", str(tmp_path))
     found = server.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=5)

@@ -151,6 +151,13 @@ DEFAULT_LIMIT = 5
 MAX_LIMIT = 25
 DIVISION_OVERFETCH = 50  # rows pulled per theme before Python-side ranking trims to `limit`
 
+# #83: bbox radius for the places-theme fallback once an anchor point (a
+# division match already in hand, or one derived from a trailing word in the
+# query — see _fallback_anchor) is available. Same "same metro area" idea as
+# resolve_place's own _RESOLVE_PLACE_RADIUS_M, just defined here too since
+# geocode() needs it before that constant's #22 section further down.
+_PLACES_FALLBACK_RADIUS_M = 30_000
+
 # Subdirectory (under cache.cache_dir()/<release>/) for the #43 materialized
 # divisions name table — kept distinct from cache.py's own places/<theme>
 # tile layout so the two never collide on a filename, even though they
@@ -658,23 +665,90 @@ def _query_divisions(
     return _query_divisions_from_upstream(query, region_code, name_expr)
 
 
-def _query_places_fallback(query: str) -> list[dict]:
-    """Supplement divisions with named places when divisions alone don't fill limit."""
+def _fallback_anchor(
+    search_query: str,
+    divisions: list[dict],
+    region_code: str | None,
+    local_table: str | None,
+) -> tuple[float, float, str] | None:
+    """(lat, lon, name_query) to bound/aim the places fallback (#83), or None
+    if no location context can be derived from the query at all — the
+    caller (geocode()) then runs the fallback unbounded, same as before #83
+    (row-capped via DIVISION_OVERFETCH's LIMIT, but not bbox-pruned) rather
+    than dropping a genuine name-only query (e.g. "Blue Bottle Roastery",
+    with no city/region in it anywhere) to no results.
+
+    Prefers the best division match already in hand (`divisions`, already
+    ranked by _rank_key) — name_query stays the full search_query in that
+    case. Failing that, tries the query's trailing one/two words as a
+    division lookup of their own — e.g. "Westfield Valley Fair San Jose"
+    never matches a division as a whole string, but its trailing "San Jose"
+    does (the #83 bug's actual repro case: a big-box place name followed by
+    the city it's in). Mirrors the trailing-token idea _split_region_suffix
+    already uses for region suffixes, just aimed at finding *any* location
+    anchor rather than a region code specifically.
+
+    When the anchor comes from trailing tokens like this, name_query is the
+    remaining prefix ("Westfield Valley Fair") rather than the full query —
+    matching the *whole* query (which appends the city name onto the place
+    name) against a places row's own name would otherwise never match
+    anything, defeating the point of finding an anchor at all.
+    """
+    if divisions:
+        top = divisions[0]
+        return top["lat"], top["lon"], search_query
+    tokens = search_query.strip().split()
+    for n in (2, 1):
+        if len(tokens) <= n:
+            continue
+        candidate = " ".join(tokens[-n:])
+        rows = _query_divisions(candidate, region_code, local_table)
+        if not rows:
+            continue
+        best = min(rows, key=lambda r: _rank_key(r, candidate, {}))
+        base = " ".join(tokens[:-n]).strip()
+        return best["lat"], best["lon"], (base or search_query)
+    return None
+
+
+def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None) -> list[dict]:
+    """Supplement divisions with named places when divisions alone don't fill limit.
+
+    #83: an unconstrained ILIKE scan over the places theme — Overture's
+    largest, least row-group-prunable theme — measured 100s+ live against a
+    query with no bbox pushdown to exploit (a global name search touches
+    every row, worldwide). `anchor` (lat, lon), when the caller
+    (geocode(), via _fallback_anchor) can derive one, bounds the search to a
+    vicinity via the same bbox+distance predicate every other point-radius
+    query in this codebase already uses (overture.area_geometry) — same fix
+    resolve_place already applies to its own places search. Without an
+    anchor, this still runs (row-capped by the existing LIMIT, same as
+    before #83) rather than dropping a genuine name-only query to nothing.
+    """
     glob = overture.upstream_glob(theme="places", type_="place")
     cols = overture.probe_schema(glob)
     if cols is not None and "names" not in cols:
         return []
+    filters = ["names.primary ILIKE $pattern"]
+    params: dict = {"pattern": f"%{query}%"}
+    if anchor is not None:
+        lat, lon = anchor
+        bbox_filter, distance_filter, geo_params, _bbox = overture.area_geometry(
+            lat, lon, _PLACES_FALLBACK_RADIUS_M
+        )
+        filters += [bbox_filter, distance_filter]
+        params.update(geo_params)
     sql = f"""
         SELECT id, names.primary AS name, bbox.ymin AS lat, bbox.xmin AS lon,
                coalesce(confidence, 0) AS confidence
         FROM read_parquet('{glob}', hive_partitioning=1)
-        WHERE names.primary ILIKE $pattern
+        WHERE {' AND '.join(filters)}
         ORDER BY confidence DESC
         LIMIT {DIVISION_OVERFETCH}
     """
     try:
         with overture._conn_lock:
-            rows = overture.conn().execute(sql, {"pattern": f"%{query}%"}).fetchall()
+            rows = overture.conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
     result = []
@@ -776,11 +850,19 @@ def geocode(query: str, limit: int = DEFAULT_LIMIT) -> list[dict]:
     has_exact_division = any(_effective_tier(c, search_query) == 3 for c in divisions)
     candidates = divisions
     if len(candidates) < limit and not has_exact_division:
+        # #83: bound the places scan to an anchor's vicinity whenever one
+        # can be derived (a division match already in hand, or a trailing
+        # location word in the query) instead of an unconstrained
+        # worldwide scan — see _fallback_anchor/_query_places_fallback.
+        anchor_hit = _fallback_anchor(search_query, divisions, region_code, local_table)
+        anchor, name_query = (
+            ((anchor_hit[0], anchor_hit[1]), anchor_hit[2]) if anchor_hit else (None, search_query)
+        )
         seen_names = {(c["name"].lower()) for c in candidates}
-        places = _query_places_fallback(search_query)
+        places = _query_places_fallback(name_query, anchor=anchor)
         places = [p for p in places if p["name"].lower() not in seen_names]
         places.sort(
-            key=lambda r: (-_match_tier(r["name"], search_query), -r["_confidence"], r["id"])
+            key=lambda r: (-_match_tier(r["name"], name_query), -r["_confidence"], r["id"])
         )
         candidates = candidates + places
 
