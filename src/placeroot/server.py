@@ -82,7 +82,9 @@ def find_places(
 
     category matches Overture's taxonomy (e.g. 'coffee_shop', 'restaurant',
     'grocery'); name is a substring match on the place name. Results include
-    operating_status so agents can reason about whether a place is open.
+    operating_status ("in business" / "permanently closed" / null when
+    unknown) — a business-lifecycle signal, NOT opening hours; this data has
+    no open-now information.
     Returns {"results": [...]}, plus truncated/omitted_count if the answer
     didn't fit the token budget. If the upstream dataset is unavailable or
     missing columns this tool depends on, returns a structured {"error":
