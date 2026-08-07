@@ -14,6 +14,25 @@ Fonts (Sora + Fira Code) load from Google Fonts; everything else is local.
 `tests/test_site.py` guards structure, the external-reference allowlist, the
 verbatim install commands, and cross-links.
 
+## Per-release refresh
+Every release, update the site in the same change that bumps the version
+(step 2 of [PUBLISHING.md](PUBLISHING.md#cut-a-release)):
+
+- `site/index.html` — the `vX.Y.Z` chip in the developer section, the
+  `PlaceRoot vX.Y.Z` footer byline, the "new in this release" tool names,
+  and the tool grid + both "N tools" count claims.
+- `site/add-to-your-ai.html` — the "latest release vX.Y.Z" note.
+- Any capability copy that a new tool makes stale (e.g. how-it-works'
+  "WHAT IT KNOWS" list).
+
+Two offline guards enforce the mechanical parts, so a stale site fails CI
+rather than shipping:
+- `tests/test_site_version_sync.py` — every version string on the site equals
+  `pyproject.toml`'s, `npm/package.json` matches it too, and the "new in this
+  release" chip names real registered tools.
+- `tests/test_site_tools_sync.py` — the tool grid and count claims match the
+  tools registered in `server.py`.
+
 ## Serve locally
 ```bash
 cd site && python3 -m http.server 8000
