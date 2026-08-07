@@ -136,6 +136,7 @@ normalized.
 
 import logging
 import math
+import os
 import re
 import time
 import unicodedata
@@ -764,7 +765,16 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
 
 
 def geocode(query: str, limit: int = DEFAULT_LIMIT) -> list[dict]:
+    """Free-text place name -> ranked candidates. See geocode_detailed."""
+    return geocode_detailed(query, limit)["results"]
+
+
+def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
     """Free-text place name -> ranked candidates, from Overture divisions (and places fallback).
+
+    Returns {"results": [...]} and, when a query carries no derivable
+    location context, a "note" explaining that the places-name half of the
+    search was skipped and how to make the query answerable (#105).
 
     Never more than `limit` results. Each result: {name, type, lat, lon, id
     (GERS), admin_context, rank_score}. Raises overture.UpstreamUnavailable
@@ -777,8 +787,9 @@ def geocode(query: str, limit: int = DEFAULT_LIMIT) -> list[dict]:
     query = query.strip()
     limit = max(1, min(limit, MAX_LIMIT))
     if not query:
-        return []
+        return {"results": []}
 
+    note = None
     local_table = _local_divisions_table()
     base_query, region_code, _region_name = _parse_region_suffix(query, local_table)
     search_query = base_query if region_code else query
@@ -859,13 +870,28 @@ def geocode(query: str, limit: int = DEFAULT_LIMIT) -> list[dict]:
         anchor, name_query = (
             ((anchor_hit[0], anchor_hit[1]), anchor_hit[2]) if anchor_hit else (None, search_query)
         )
-        seen_names = {(c["name"].lower()) for c in candidates}
-        places = _query_places_fallback(name_query, anchor=anchor)
-        places = [p for p in places if p["name"].lower() not in seen_names]
-        places.sort(
-            key=lambda r: (-_match_tier(r["name"], name_query), -r["_confidence"], r["id"])
-        )
-        candidates = candidates + places
+        if anchor is None and _skip_unanchored_places_scan():
+            # #105: with no anchor there is no bbox to prune by, so this is
+            # a substring scan of every place on Earth. Measured live
+            # against the 2026-07-22.0 release: 216s end-to-end for a query
+            # that matched nothing, and dropping the ORDER BY doesn't help
+            # (219s) -- with few or no matches the LIMIT can never
+            # short-circuit, so the whole theme is read either way. That is
+            # far past any MCP client's timeout: not a slow answer, a hang.
+            #
+            # Return what divisions found (often nothing) immediately and
+            # tell the caller how to make the query answerable, instead.
+            # Local datasets keep #83's behavior -- see
+            # _skip_unanchored_places_scan.
+            note = _UNANCHORED_NAME_SEARCH_NOTE
+        else:
+            seen_names = {(c["name"].lower()) for c in candidates}
+            places = _query_places_fallback(name_query, anchor=anchor)
+            places = [p for p in places if p["name"].lower() not in seen_names]
+            places.sort(
+                key=lambda r: (-_match_tier(r["name"], name_query), -r["_confidence"], r["id"])
+            )
+            candidates = candidates + places
 
     out = []
     for row in candidates[:limit]:
@@ -880,7 +906,13 @@ def geocode(query: str, limit: int = DEFAULT_LIMIT) -> list[dict]:
                 0.4 + row["_confidence"] * 0.3, 3
             ),
         })
-    return out
+    result = {"results": out}
+    if note and not out:
+        # Only worth saying when the answer is empty: if divisions already
+        # produced candidates, the skipped places half isn't what the caller
+        # is missing.
+        result["note"] = note
+    return result
 
 
 # --- #22: GERS id resolution -----------------------------------------------
@@ -889,6 +921,52 @@ def geocode(query: str, limit: int = DEFAULT_LIMIT) -> list[dict]:
 # `limit`, the same reasoning as DIVISION_OVERFETCH: a shallow per-source
 # limit can drop the right candidate before the merged ranking ever sees it.
 _RESOLVE_OVERFETCH = 10
+
+# #105: a places-name search with no anchor has no bbox to prune by, making
+# it a substring scan of Overture's largest theme. Against the live remote
+# dataset that measured 216s end-to-end (and 219s with the ORDER BY removed
+# -- a LIMIT can't short-circuit a scan matching few or no rows), which is
+# past any MCP client's timeout.
+#
+# The cost is the *remote* full-theme read, not the query shape: against a
+# local dataset (a test fixture, or a mirror via PLACEROOT_DATA_PATH /
+# PLACEROOT_UPSTREAM_BASE) the same scan is cheap and genuinely useful, so
+# #83's name-only search is kept exactly as-is there. Set this env var to
+# force the unbounded scan even against a remote dataset.
+_UNBOUNDED_NAME_SEARCH_ENV = "PLACEROOT_UNBOUNDED_NAME_SEARCH"
+
+# Schemes DuckDB reads over the network; anything else is a local path.
+_REMOTE_GLOB_SCHEMES = ("s3://", "http://", "https://", "gcs://", "gs://", "az://", "azure://")
+
+_UNANCHORED_NAME_SEARCH_NOTE = (
+    "no division matched, and this query carries no location context to bound a "
+    "place-name search by, so the places half of the search was skipped (it would "
+    "scan the entire global places dataset -- minutes, not seconds). Add a location "
+    "to the query (\"Blue Bottle Roastery, Oakland\"), or use find_places with "
+    "lat/lon (or resolve_place with near_lat/near_lon) to search a known area."
+)
+
+
+def _unbounded_name_search_enabled() -> bool:
+    """True iff the operator opted back into the unbounded places-name scan."""
+    value = os.environ.get(_UNBOUNDED_NAME_SEARCH_ENV, "").strip().lower()
+    return value not in ("", "0", "false", "off")
+
+
+def _is_remote(glob: str) -> bool:
+    """Whether reading `glob` means going over the network."""
+    return glob.lower().startswith(_REMOTE_GLOB_SCHEMES)
+
+
+def _skip_unanchored_places_scan() -> bool:
+    """Whether to skip the anchorless places-name scan for this dataset.
+
+    Only skipped when the scan would be a remote read of the whole places
+    theme (#105) and the operator hasn't opted back in.
+    """
+    if _unbounded_name_search_enabled():
+        return False
+    return _is_remote(overture.upstream_glob(theme="places", type_="place"))
 
 # Bbox radius (#22) for the name-filtered find_places call when no
 # near_lat/near_lon hint is given but a division match is in hand — "same
