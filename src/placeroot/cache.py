@@ -75,6 +75,7 @@ tell us any different.
 """
 
 import hashlib
+import itertools
 import logging
 import math
 import os
@@ -102,6 +103,18 @@ DEFAULT_MAX_MB = 500
 # bounded too. Normal point-radius queries touch a handful of tiles, far
 # under this.
 MAX_TILES_PER_QUERY = 128
+
+# Early-out threshold tiles_for_bbox() checks BEFORE building the (tx, ty)
+# cross product (issue #163's A1: a degenerate bbox — e.g. from an
+# unclamped near-pole dlon — must not get to allocate tens of millions of
+# tuples just so local_paths_for_query() can throw them away one line
+# later for exceeding MAX_TILES_PER_QUERY). Deliberately looser than
+# MAX_TILES_PER_QUERY itself, not equal to it: the raw x_span*y_span grid
+# product checked here can be a slight overcount of the real (deduped)
+# tile count for a bbox that wraps the antimeridian, so this stays a cheap,
+# clearly-oversized early-out rather than a second, subtly different copy
+# of local_paths_for_query's authoritative cap.
+OVERSIZE_TILE_SPAN_GUARD = MAX_TILES_PER_QUERY * 4
 
 # Tiles currently being fetched by a background thread, as (release, theme,
 # tile) keys — guards against two concurrent cache misses on the same tile
@@ -156,8 +169,46 @@ def tiles_for_bbox(
     span = round(360.0 / tile_deg)
     half = span // 2
 
+    # Defense in depth for issue #163's A1: geo.bbox_around now clamps its
+    # span before it ever gets here, but this function has no way to know
+    # that every caller does — so compute the projected tile count from the
+    # same x0/x1/y0/y1 this function already derived, BEFORE materialising
+    # the (tx, ty) cross product, and bail out to a small sentinel list once
+    # it's clearly beyond what local_paths_for_query()'s MAX_TILES_PER_QUERY
+    # cap would accept anyway. Without this, an oversized bbox slipping
+    # through builds tens of millions of tuples just to have the caller
+    # throw the list away one line later. The threshold is deliberately
+    # looser than MAX_TILES_PER_QUERY itself (not equal to it) so this stays
+    # a cheap early-out rather than a second, subtly-different copy of the
+    # caller's real cap — local_paths_for_query still does the authoritative
+    # `len(tiles) > MAX_TILES_PER_QUERY` check and takes its existing
+    # "too many tiles, scan upstream directly" branch either way.
     def wrap_x(tx: int) -> int:
         return ((tx + half) % span) - half
+
+    x_span = x1 - x0 + 1
+    y_span = y1 - y0 + 1
+    if x_span * y_span > OVERSIZE_TILE_SPAN_GUARD:
+        # Too big to materialise: enumerate only the first
+        # MAX_TILES_PER_QUERY + 1 tiles — already more than any caller's
+        # `len(tiles) > MAX_TILES_PER_QUERY` cap accepts, without building
+        # the full cross product. These are REAL tiles of the bbox (a
+        # prefix of the full enumeration), not a fabricated filler: a
+        # caller that iterates the result — a warm loop, a log line —
+        # sees genuine ids rather than repeated copies of the
+        # perfectly-valid tile (0, 0). Dedup can't shrink the prefix
+        # under the cap: ty is never wrapped and two raw columns only
+        # collide when they are a full 360° apart, far beyond this many
+        # consecutive tx values.
+        logger.warning(
+            "bbox projects to ~%d tiles; truncating enumeration at %d",
+            x_span * y_span, MAX_TILES_PER_QUERY + 1,
+        )
+        prefix = itertools.islice(
+            ((wrap_x(tx), ty) for tx in range(x0, x1 + 1) for ty in range(y0, y1 + 1)),
+            MAX_TILES_PER_QUERY + 1,
+        )
+        return list(dict.fromkeys(prefix))
 
     tiles = [(wrap_x(tx), ty) for tx in range(x0, x1 + 1) for ty in range(y0, y1 + 1)]
     # Preserve first-seen order while deduping: wrapping can only fold two

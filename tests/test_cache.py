@@ -43,6 +43,48 @@ def test_tiles_for_bbox_single_tile():
     assert cache.tiles_for_bbox(-73.95, 40.65, -73.85, 40.75) == [(-74, 40)]
 
 
+def test_tiles_for_bbox_pole_query_stays_bounded():
+    """Issue #163 (A1): bbox_around(90, 0, 500000) is clamped to a
+    (still full-globe-width) box, but tiles_for_bbox must not materialize
+    the full (tx, ty) cross product for it — the count returned must be
+    small enough that local_paths_for_query's MAX_TILES_PER_QUERY cap takes
+    its existing oversize branch without ever needing to build (or throw
+    away) tens of millions of tuples."""
+    from placeroot import geo
+
+    bbox = geo.bbox_around(90.0, 0.0, 500_000)
+    tiles = cache.tiles_for_bbox(*bbox)
+    # Structural assertion, not a timing one: whatever tiles_for_bbox
+    # returns here must already be over the cap (so local_paths_for_query
+    # rejects it), and bounded — nowhere near the tens of millions a naive
+    # range(x0, x1+1) x range(y0, y1+1) would have produced.
+    assert len(tiles) > cache.MAX_TILES_PER_QUERY
+    assert len(tiles) < 100_000
+
+
+def test_tiles_for_bbox_huge_bbox_rejected_before_building_full_range():
+    """A deliberately oversized bbox (independent of bbox_around/geo.py)
+    must be caught by tiles_for_bbox's own early span-guard, not just rely
+    on the caller's cap after the fact."""
+    tiles = cache.tiles_for_bbox(-1_000_000.0, -1_000_000.0, 1_000_000.0, 1_000_000.0)
+    assert len(tiles) > cache.MAX_TILES_PER_QUERY
+    assert len(tiles) < 100_000
+
+
+def test_tiles_for_bbox_oversize_early_out_returns_real_tiles():
+    """The oversize early-out must return a truncated prefix of the REAL
+    enumeration, not fabricated filler ids: (0, 0) is a legitimate tile
+    (Gulf of Guinea), so a caller that iterates the result — a cache-warm
+    loop, a log line — must see genuine tiles of this bbox, and a wrong
+    result must not be indistinguishable from a real one."""
+    tiles = cache.tiles_for_bbox(-179.5, -89.5, 179.5, 89.5)
+    assert len(tiles) > cache.MAX_TILES_PER_QUERY
+    assert len(set(tiles)) == len(tiles)  # distinct ids, not N copies of one
+    assert tiles[0] == (-180, -90)  # the bbox's own corner tile
+    assert all(t in {(x, y) for x in range(-180, 180) for y in range(-90, 90)}
+               for t in tiles)
+
+
 def test_offline_fallback_picks_most_recently_used_not_most_recently_created(
     cache_dir, monkeypatch
 ):
