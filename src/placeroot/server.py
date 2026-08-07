@@ -12,6 +12,7 @@ stays safe under that concurrency.
 
 import argparse
 import logging
+import math
 import os
 import threading
 
@@ -57,6 +58,35 @@ def _upstream_error(e: Exception) -> dict:
 
 def _schema_error(e: overture.SchemaDegraded) -> dict:
     return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
+
+
+def _invalid_coord(lat, lon) -> dict | None:
+    """bad_request dict if lat/lon are out of range or non-finite, else None.
+
+    Issue #163 (A2): bbox_around only clamps pole-*overshoot*, so an
+    out-of-range lat (e.g. 91.0, or the common LLM mistake of swapping
+    lat/lon) produced an inverted ymin>ymax box that silently matched zero
+    rows instead of erroring. Every coordinate-taking tool calls this at
+    its boundary and returns the error before doing any work. bool is
+    checked separately from (int, float) because bool is a subclass of int
+    (isinstance(True, int) is True) and a stray True/False would otherwise
+    pass the range check.
+    """
+    for name, val, lo, hi in (("lat", lat, -90.0, 90.0), ("lon", lon, -180.0, 180.0)):
+        if (
+            not isinstance(val, (int, float))
+            or isinstance(val, bool)
+            or not math.isfinite(val)
+            or not (lo <= val <= hi)
+        ):
+            return {
+                "error": "bad_request",
+                "detail": (
+                    f"{name}={val!r} is out of range; lat must be in [-90, 90] and "
+                    "lon in [-180, 180] (did you swap lat and lon?)"
+                ),
+            }
+    return None
 
 
 def _with_degraded_fields(result: dict) -> dict:
@@ -223,6 +253,9 @@ def find_places(
 
     if lat is None or lon is None:
         return {"error": "bad_request", "detail": "pass both lat and lon"}
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
     try:
         rows = overture.find_places(
             lat, lon, radius_m, category, name,
@@ -245,6 +278,9 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
     Returns a structured {"error": ...} instead of raising if upstream is
     unavailable or the dataset is missing columns this tool depends on.
     """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
     try:
         result = overture.summarize_area(lat, lon, radius_m)
     except overture.UpstreamUnavailable as e:
@@ -282,6 +318,14 @@ def place_details(
     Ignored when resolving by name. Omitting it still works, just slower on
     a cold, uncached id.
     """
+    if lat is not None and lon is not None:
+        coord_error = _invalid_coord(lat, lon)
+        if coord_error is not None:
+            return coord_error
+    if near_lat is not None and near_lon is not None:
+        coord_error = _invalid_coord(near_lat, near_lon)
+        if coord_error is not None:
+            return coord_error
     try:
         result = overture.place_details(id, name, lat, lon, radius_m, near_lat, near_lon)
     except ValueError as e:
@@ -312,6 +356,9 @@ def within_distance(
     Returns a structured {"error": ...} if upstream is unavailable or the
     dataset is missing columns this tool depends on.
     """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
     try:
         result = overture.within_distance(lat, lon, max_distance_m, category, name)
     except overture.UpstreamUnavailable as e:
@@ -351,6 +398,16 @@ def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
         d_pts = [(float(p["lat"]), float(p["lon"])) for p in destinations]
     except (KeyError, TypeError, ValueError) as e:
         return {"error": "bad_request", "detail": f"each point needs numeric lat and lon: {e}"}
+    for idx, (plat, plon) in enumerate(o_pts):
+        coord_error = _invalid_coord(plat, plon)
+        if coord_error is not None:
+            coord_error["detail"] = f"origins[{idx}]: {coord_error['detail']}"
+            return coord_error
+    for idx, (plat, plon) in enumerate(d_pts):
+        coord_error = _invalid_coord(plat, plon)
+        if coord_error is not None:
+            coord_error["detail"] = f"destinations[{idx}]: {coord_error['detail']}"
+            return coord_error
     elements = [
         {
             "origin_idx": oi,
@@ -381,6 +438,11 @@ def compare_areas(areas: list[dict], radius_m: float = 1000) -> dict:
         centers = [(a["lat"], a["lon"]) for a in areas]
     except (KeyError, TypeError) as e:
         return {"error": "bad_request", "detail": f"each area needs lat and lon: {e}"}
+    for idx, (clat, clon) in enumerate(centers):
+        coord_error = _invalid_coord(clat, clon)
+        if coord_error is not None:
+            coord_error["detail"] = f"areas[{idx}]: {coord_error['detail']}"
+            return coord_error
     try:
         result = overture.compare_areas(centers, radius_m)
     except ValueError as e:
@@ -404,6 +466,9 @@ def admin_lookup(lat: float, lon: float) -> dict:
     a structured {"error": ...} if upstream is unavailable or the divisions
     dataset is missing the geometry column this tool depends on.
     """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
     try:
         result = divisions.admin_lookup(lat, lon)
     except overture.UpstreamUnavailable as e:
@@ -428,6 +493,9 @@ def summarize_buildings(
     {"error": ...} if upstream is unavailable or the dataset is missing
     geometry/bbox.
     """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
     try:
         result = buildings.summarize_buildings(lat, lon, radius_m)
     except overture.UpstreamUnavailable as e:
@@ -458,6 +526,9 @@ def buildings_at(
     Returns a structured {"error": ...} if upstream is unavailable or the
     dataset is missing geometry/bbox.
     """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
     try:
         rows = buildings.buildings_at(lat, lon, radius_m, limit, include_geometry)
     except overture.UpstreamUnavailable as e:
@@ -615,6 +686,10 @@ def resolve_place(
     structured {"error": ...} instead of raising if the remote scan fails
     or the places dataset is missing columns this tool depends on.
     """
+    if near_lat is not None and near_lon is not None:
+        coord_error = _invalid_coord(near_lat, near_lon)
+        if coord_error is not None:
+            return coord_error
     try:
         rows = geocoding.resolve_place(query, near_lat, near_lon, limit)
     except overture.UpstreamUnavailable as e:
@@ -680,6 +755,9 @@ def reverse_geocode(lat: float, lon: float) -> dict:
     this is the expected degraded path. Returns a structured {"error": ...}
     instead of raising if the remote scan fails outright.
     """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
     try:
         return geocoding.reverse_geocode(lat, lon)
     except overture.UpstreamUnavailable as e:
@@ -718,6 +796,10 @@ def reverse_geocode_batch(points: list[dict]) -> dict:
                         "error": "each point needs numeric lat and lon",
                     }
                 )
+                continue
+            coord_error = _invalid_coord(lat, lon)
+            if coord_error is not None:
+                rows.append({"lat": lat, "lon": lon, "error": coord_error["detail"]})
                 continue
             rows.append(geocoding.reverse_geocode(lat, lon))
     except overture.UpstreamUnavailable as e:
@@ -795,6 +877,9 @@ def isochrone(
     {"error": "unsupported_mode"}. minutes must be > 0 and radius_m (if
     given) must be >= 0, else returns {"error": "bad_request"}.
     """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
     try:
         return routing.isochrone(
             lat, lon, minutes=minutes, mode=mode, speed_m_s=speed_m_s, radius_m=radius_m

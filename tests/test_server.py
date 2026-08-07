@@ -6,6 +6,176 @@ from placeroot.cache import parse_warm_region
 
 from .conftest import CENTER_LAT, CENTER_LON
 
+# --- Issue #163: coordinate hardening ---------------------------------------
+
+
+def test_invalid_coord_rejects_out_of_range_lat():
+    for bad_lat in (91.0, -91.0):
+        err = server._invalid_coord(bad_lat, CENTER_LON)
+        assert err == {
+            "error": "bad_request",
+            "detail": (
+                f"lat={bad_lat!r} is out of range; lat must be in [-90, 90] and "
+                "lon in [-180, 180] (did you swap lat and lon?)"
+            ),
+        }
+
+
+def test_invalid_coord_rejects_out_of_range_lon():
+    for bad_lon in (181.0, -181.0):
+        assert server._invalid_coord(CENTER_LAT, bad_lon)["error"] == "bad_request"
+
+
+def test_invalid_coord_rejects_swapped_lat_lon():
+    # Manila, swapped: lat=120.98 (invalid) instead of lon=120.98.
+    err = server._invalid_coord(120.98, 14.60)
+    assert err["error"] == "bad_request"
+    assert "swap" in err["detail"]
+
+
+def test_invalid_coord_rejects_non_finite():
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        assert server._invalid_coord(bad, CENTER_LON)["error"] == "bad_request"
+        assert server._invalid_coord(CENTER_LAT, bad)["error"] == "bad_request"
+
+
+def test_invalid_coord_accepts_boundary_values():
+    assert server._invalid_coord(90.0, 180.0) is None
+    assert server._invalid_coord(-90.0, -180.0) is None
+    assert server._invalid_coord(CENTER_LAT, CENTER_LON) is None
+
+
+def test_find_places_rejects_out_of_range_lat():
+    for bad_lat in (91.0, -91.0):
+        result = server.find_places(lat=bad_lat, lon=CENTER_LON)
+        assert result["error"] == "bad_request"
+
+
+def test_find_places_rejects_out_of_range_lon():
+    for bad_lon in (181.0, -181.0):
+        result = server.find_places(lat=CENTER_LAT, lon=bad_lon)
+        assert result["error"] == "bad_request"
+
+
+def test_find_places_rejects_swapped_lat_lon():
+    result = server.find_places(lat=120.98, lon=14.60)
+    assert result["error"] == "bad_request"
+    assert "swap" in result["detail"]
+
+
+def test_find_places_rejects_non_finite_lat():
+    result = server.find_places(lat=float("nan"), lon=CENTER_LON)
+    assert result["error"] == "bad_request"
+    result = server.find_places(lat=float("inf"), lon=CENTER_LON)
+    assert result["error"] == "bad_request"
+
+
+def test_find_places_accepts_boundary_coords_without_bad_request():
+    # Legitimately empty/off-fixture is fine; must NOT be rejected by the
+    # coordinate-range check itself.
+    for lat, lon in ((90.0, 0.0), (-90.0, 0.0), (0.0, 180.0), (0.0, -180.0)):
+        result = server.find_places(lat=lat, lon=lon, radius_m=1000)
+        assert result.get("error") != "bad_request"
+
+
+def test_isochrone_rejects_out_of_range_coord():
+    result = server.isochrone(lat=91.0, lon=CENTER_LON)
+    assert result["error"] == "bad_request"
+
+
+def test_summarize_area_rejects_out_of_range_coord():
+    result = server.summarize_area(lat=CENTER_LAT, lon=181.0)
+    assert result["error"] == "bad_request"
+
+
+def test_resolve_place_rejects_swapped_near_lat_lon():
+    # resolve_place was the one coordinate-taking tool left unguarded: a
+    # swapped near_lat/near_lon fed bbox_around an inverted box that matched
+    # zero rows, returning "no such place" instead of bad_request.
+    result = server.resolve_place(query="Rustan's", near_lat=120.98, near_lon=14.60)
+    assert result["error"] == "bad_request"
+    assert "swap" in result["detail"]
+
+
+def test_distance_matrix_rejects_out_of_range_origin():
+    result = server.distance_matrix(
+        origins=[{"lat": 91.0, "lon": CENTER_LON}],
+        destinations=[{"lat": CENTER_LAT, "lon": CENTER_LON}],
+    )
+    assert result["error"] == "bad_request"
+    assert "origins[0]" in result["detail"]
+
+
+def test_distance_matrix_rejects_out_of_range_destination():
+    result = server.distance_matrix(
+        origins=[{"lat": CENTER_LAT, "lon": CENTER_LON}],
+        destinations=[{"lat": CENTER_LAT, "lon": 200.0}],
+    )
+    assert result["error"] == "bad_request"
+    assert "destinations[0]" in result["detail"]
+
+
+def test_compare_areas_rejects_out_of_range_area():
+    result = server.compare_areas(
+        areas=[
+            {"lat": CENTER_LAT, "lon": CENTER_LON},
+            {"lat": 95.0, "lon": CENTER_LON},
+        ]
+    )
+    assert result["error"] == "bad_request"
+    assert "areas[1]" in result["detail"]
+
+
+def test_reverse_geocode_rejects_out_of_range_coord():
+    result = server.reverse_geocode(lat=91.0, lon=CENTER_LON)
+    assert result["error"] == "bad_request"
+
+
+def test_reverse_geocode_batch_flags_out_of_range_point_without_failing_batch():
+    result = server.reverse_geocode_batch(
+        points=[
+            {"lat": CENTER_LAT, "lon": CENTER_LON},
+            {"lat": 95.0, "lon": CENTER_LON},
+        ]
+    )
+    rows = result["results"]
+    assert len(rows) == 2
+    assert "error" not in rows[0]
+    assert "error" in rows[1]
+
+
+def test_admin_lookup_rejects_out_of_range_coord():
+    result = server.admin_lookup(lat=91.0, lon=CENTER_LON)
+    assert result["error"] == "bad_request"
+
+
+def test_within_distance_rejects_out_of_range_coord():
+    result = server.within_distance(lat=91.0, lon=CENTER_LON, max_distance_m=1000)
+    assert result["error"] == "bad_request"
+
+
+def test_summarize_buildings_rejects_out_of_range_coord():
+    result = server.summarize_buildings(lat=91.0, lon=CENTER_LON)
+    assert result["error"] == "bad_request"
+
+
+def test_buildings_at_rejects_out_of_range_coord():
+    result = server.buildings_at(lat=91.0, lon=CENTER_LON)
+    assert result["error"] == "bad_request"
+
+
+def test_place_details_rejects_out_of_range_coord_when_both_given():
+    result = server.place_details(name="anything", lat=91.0, lon=CENTER_LON)
+    assert result["error"] == "bad_request"
+
+
+def test_place_details_ignores_range_check_when_lat_lon_not_both_given():
+    # id-only lookup: lat/lon absent entirely, must not spuriously fail the
+    # coordinate check (place_details' own "requires id or name+lat+lon"
+    # validation still applies downstream, independent of this check).
+    result = server.place_details(id="does-not-exist")
+    assert result.get("error") != "bad_request"
+
 
 def test_find_places_tool_wraps_results_and_applies_budget():
     result = server.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=10)
