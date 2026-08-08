@@ -63,7 +63,15 @@
       "transport": {
         "type": "streamable-http",
         "url": "http://127.0.0.1:8321/mcp"
-      }
+      },
+      "environmentVariables": [
+        {
+          "name": "PLACEROOT_CACHE",
+          "description": "Set to 'off' to disable the local on-disk tile cache. Optional; caching is on by default.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
     }
   ]
 }
