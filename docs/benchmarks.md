@@ -138,7 +138,8 @@ a session spends far more context on *being able to* ask than on the answers.
 `annotations` (readOnlyHint and friends) plus a display `title` on all 25
 tools — issue #193 — added **839 tokens** to the schema surface (9192 →
 10031, +9.1%; ~134 chars per tool). That is the price of letting a client
-know, before it prompts the user, that nothing here writes anything. It is
+know, before it prompts the user, which calls touch nothing — 24 of the 25
+are pure lookups, and `render_map`, which writes an HTML file, says so. It is
 paid once per conversation and it is worth it, but it is not free, and it is
 one more reason the fix for schema surface is fewer *loaded* tools.
 

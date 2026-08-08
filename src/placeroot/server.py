@@ -62,11 +62,14 @@ _TOOL_FUNCS: dict[str, Callable] = {}
 # Human-readable display title per tool, keyed by function name (issue #193).
 _TOOL_TITLES: dict[str, str] = {}
 
-# The behavioral hints every PlaceRoot tool carries (MCP `annotations`).
-# They are identical for all 25 tools because all 25 are pure reads:
-#   read_only_hint  — no tool writes anything anywhere; the only side effect
-#                     is a local parquet tile cache, which is invisible to
-#                     the caller and to the upstream data.
+# The behavioral hints a PlaceRoot tool carries (MCP `annotations`).
+# This is the default, and 24 of the 25 tools take it unchanged because they
+# are pure reads:
+#   read_only_hint  — the tool writes nothing anywhere the caller can see;
+#                     the only side effect is a local parquet tile cache,
+#                     which is invisible to the caller and to the upstream
+#                     data. render_map is the exception: it writes an HTML
+#                     file to disk, so it overrides this (see below).
 #   destructive_hint/idempotent_hint — spelled out even though the spec says
 #                     they only matter when read_only_hint is false, because
 #                     clients that predate readOnlyHint-aware gating still
@@ -86,15 +89,38 @@ _READ_ONLY_ANNOTATIONS = ToolAnnotations(
     open_world_hint=False,
 )
 
+# render_map creates a new timestamped HTML file under the map output
+# directory on every call. readOnlyHint is what clients gate auto-approval
+# on, so claiming it here would hand a filesystem write the approval-free
+# path meant for pure lookups. It is:
+#   read_only_hint   False — it writes a file (mapview.py, mkdir + write_bytes)
+#   destructive_hint False — the filename carries a timestamp, so it only
+#                    ever adds; it never overwrites or deletes anything
+#   idempotent_hint  False — two identical calls leave two distinct files
+#   open_world_hint  False — same closed, pinned domain as everything else
+_WRITES_A_FILE_ANNOTATIONS = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
 
-def _tool(title: str) -> Callable[[Callable], Callable]:
+# Per-tool annotation overrides, keyed by function name. Anything absent
+# here gets _READ_ONLY_ANNOTATIONS.
+_TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {}
+
+
+def _tool(title: str, annotations: ToolAnnotations | None = None) -> Callable[[Callable], Callable]:
     """Mark a function as an MCP tool with a display title.
 
     Replaces a direct @mcp.tool(). `title` is required rather than
     defaulted so a new tool cannot ship untitled: forgetting it is a
     TypeError at import, not a silently unannotated entry in tools/list.
-    The behavioral hints are added centrally in build_server() — there is
-    exactly one place that decides what PlaceRoot claims about itself.
+
+    `annotations` overrides the read-only default for the rare tool whose
+    behavior is not a pure read — pass it at the definition site, next to
+    the code that does the writing, so the claim and the behavior are read
+    together. Everything else is annotated centrally in build_server().
     """
     if not isinstance(title, str) or not title.strip():
         # Catches the bare `@_tool` (no call) mistake, which would otherwise
@@ -104,6 +130,8 @@ def _tool(title: str) -> Callable[[Callable], Callable]:
     def register(fn: Callable) -> Callable:
         _TOOL_FUNCS[fn.__name__] = fn
         _TOOL_TITLES[fn.__name__] = title
+        if annotations is not None:
+            _TOOL_ANNOTATIONS[fn.__name__] = annotations
         return fn
 
     return register
@@ -1057,7 +1085,7 @@ def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
     except simplify.InvalidGeometry as e:
         return {"error": "invalid_geometry", "detail": e.detail}
 
-@_tool("Render map")
+@_tool("Render map", annotations=_WRITES_A_FILE_ANNOTATIONS)
 def render_map(result: dict | list, title: str | None = None, inline: bool = False) -> dict:
     """Render place-search or area-summary JSON (or caller-supplied GeoJSON) as a map.
 
@@ -1319,7 +1347,7 @@ def build_server(spec=_UNSET) -> MCPServer:
             # like the full surface.
             server.tool(
                 title=_TOOL_TITLES[name],
-                annotations=_READ_ONLY_ANNOTATIONS,
+                annotations=_TOOL_ANNOTATIONS.get(name, _READ_ONLY_ANNOTATIONS),
             )(fn)
     # One line at startup naming what got registered. An empty or
     # whitespace-only PLACEROOT_TOOLS is legal and means "everything", which

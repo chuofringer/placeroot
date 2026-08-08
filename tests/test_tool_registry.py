@@ -43,13 +43,29 @@ def test_every_tool_function_is_registered():
     assert not unknown, f"registered tools with no matching server.py function: {sorted(unknown)}"
 
 
-# What every PlaceRoot tool claims about itself: all reads, all closed-world.
+# What a PlaceRoot lookup tool claims about itself: a read, closed-world.
 EXPECTED_HINTS = {
     "read_only_hint": True,
     "destructive_hint": False,
     "idempotent_hint": True,
     "open_world_hint": False,
 }
+
+# render_map is the one tool that is not a pure read: it writes a new
+# timestamped HTML file on every call. readOnlyHint is what clients gate
+# auto-approval on, so this must not claim the lookup hints.
+WRITING_TOOLS = {
+    "render_map": {
+        "read_only_hint": False,
+        "destructive_hint": False,
+        "idempotent_hint": False,
+        "open_world_hint": False,
+    },
+}
+
+
+def _expected_hints(name: str) -> dict:
+    return WRITING_TOOLS.get(name, EXPECTED_HINTS)
 
 
 def test_every_registered_tool_is_annotated():
@@ -67,9 +83,48 @@ def test_every_registered_tool_declares_the_expected_hints():
     wrong = {}
     for tool in asyncio.run(server.mcp.list_tools()):
         actual = {k: getattr(tool.annotations, k) for k in EXPECTED_HINTS}
-        if actual != EXPECTED_HINTS:
+        if actual != _expected_hints(tool.name):
             wrong[tool.name] = actual
     assert not wrong, f"tools with unexpected annotation hints: {wrong}"
+
+
+def test_render_map_is_not_advertised_as_read_only():
+    """It writes a file; readOnlyHint drives client auto-approval.
+
+    Asserted by name rather than only through the table above, because the
+    failure this guards against is exactly someone folding render_map back
+    into the read-only default and the table quietly following.
+    """
+    tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
+    annotations = tools["render_map"].annotations
+    assert annotations.read_only_hint is False
+    assert annotations.idempotent_hint is False, (
+        "two identical render_map calls write two differently named files"
+    )
+    assert annotations.destructive_hint is False, "it only ever adds files"
+    assert annotations.open_world_hint is False
+
+
+def test_every_other_tool_is_still_read_only():
+    """The exception stays an exception: the other 24 are pure lookups."""
+    reads = [
+        t.name
+        for t in asyncio.run(server.mcp.list_tools())
+        if t.name not in WRITING_TOOLS
+    ]
+    assert len(reads) == len(server._TOOL_FUNCS) - len(WRITING_TOOLS)
+    not_read_only = [
+        t.name
+        for t in asyncio.run(server.mcp.list_tools())
+        if t.name not in WRITING_TOOLS and t.annotations.read_only_hint is not True
+    ]
+    assert not not_read_only, f"lookup tools that lost readOnlyHint: {not_read_only}"
+
+
+def test_annotation_overrides_are_declared_for_real_tools():
+    """_TOOL_ANNOTATIONS can't drift from _TOOL_FUNCS, or from this test."""
+    assert set(server._TOOL_ANNOTATIONS) == set(WRITING_TOOLS)
+    assert set(server._TOOL_ANNOTATIONS) <= set(server._TOOL_FUNCS)
 
 
 def test_every_registered_tool_has_a_nonempty_unique_title():
@@ -100,7 +155,11 @@ def test_subset_profiles_are_annotated_too(profile):
     assert tools, f"profile {profile} registered no tools"
     for tool in tools:
         assert tool.annotations is not None, f"{profile}/{tool.name} is unannotated"
-        assert tool.annotations.read_only_hint is True, f"{profile}/{tool.name} lost readOnlyHint"
+        actual = {k: getattr(tool.annotations, k) for k in EXPECTED_HINTS}
+        assert actual == _expected_hints(tool.name), (
+            f"{profile}/{tool.name} is annotated differently under a subset "
+            f"than on the full surface: {actual}"
+        )
         assert (tool.title or "").strip(), f"{profile}/{tool.name} lost its title"
 
 
