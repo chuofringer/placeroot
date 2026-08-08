@@ -144,7 +144,7 @@ from pathlib import Path
 
 import duckdb
 
-from placeroot import cache, overture, release
+from placeroot import addresses, cache, overture, release
 from placeroot.errors import AmbiguousArea
 
 logger = logging.getLogger(__name__)
@@ -1141,27 +1141,36 @@ def resolve_place(
 
 def _nearest_address(lat: float, lon: float) -> dict | None:
     """Nearest address point within an expanding search radius, or None if none found nearby
-    or the addresses theme is unreachable/missing (degrade, don't raise)."""
-    glob = overture.upstream_glob(theme="addresses", type_="address")
+    or the addresses theme is unreachable/missing (degrade, don't raise).
+
+    Reads through addresses._from_source, so this hop shares the tile cache
+    (and the tiles themselves) with address_at rather than re-scanning S3 on
+    every call — issue #189. Cache resolution can itself raise
+    UpstreamUnavailable, which is caught alongside the query's own DB errors:
+    this function's contract is to degrade to a divisions-only answer on any
+    addresses-side failure, and "the cache could not reach upstream to
+    materialize a tile" is one of those.
+    """
+    glob = addresses._upstream_glob()
     cols = overture.probe_schema(glob)
     if cols is not None and "street" not in cols:
         return None
     for radius_m in (200, 1000, 5000):
-        bbox_filter, distance_filter, params, _bbox, _radius_m = overture.area_geometry(
+        bbox_filter, distance_filter, params, bbox, _radius_m = overture.area_geometry(
             lat, lon, radius_m
         )
-        sql = f"""
-            SELECT street, number, postcode, bbox.ymin AS lat, bbox.xmin AS lon,
-                   round({overture.DISTANCE_EXPR}, 1) AS distance_m
-            FROM read_parquet('{glob}', hive_partitioning=1)
-            WHERE {bbox_filter} AND {distance_filter}
-            ORDER BY distance_m
-            LIMIT 1
-        """
         try:
+            sql = f"""
+                SELECT street, number, postcode, bbox.ymin AS lat, bbox.xmin AS lon,
+                       round({overture.DISTANCE_EXPR}, 1) AS distance_m
+                FROM {addresses._from_source(bbox)}
+                WHERE {bbox_filter} AND {distance_filter}
+                ORDER BY distance_m
+                LIMIT 1
+            """
             with overture._conn_lock:
                 row = overture.conn().execute(sql, params).fetchone()
-        except duckdb.Error as e:
+        except (duckdb.Error, overture.UpstreamUnavailable) as e:
             logger.warning("addresses theme query failed, degrading to divisions-only: %s", e)
             return None
         if row:
