@@ -676,7 +676,7 @@ def _fallback_anchor(
     divisions: list[dict],
     region_code: str | None,
     local_table: str | None,
-) -> tuple[float, float, str] | None:
+) -> tuple[float, float, str | None] | None:
     """(lat, lon, name_query) to bound/aim the places fallback (#83), or None
     if no location context can be derived from the query at all — the
     caller (geocode()) then runs the fallback unbounded, same as before #83
@@ -699,6 +699,24 @@ def _fallback_anchor(
     matching the *whole* query (which appends the city name onto the place
     name) against a places row's own name would otherwise never match
     anything, defeating the point of finding an anchor at all.
+
+    #216: that trailing-token split is only worth acting on when what's
+    left over is something a place could plausibly be *named*. name_query
+    comes back None when it isn't — "the Met" splits into anchor "Met"
+    (which substring-matches a real division) and residual "the", and
+    ILIKE '%the%' matches a large fraction of every place on Earth: 50.2s
+    measured live, answering "the Met" with "The Core IAS". The caller
+    treats a None name_query as "skip the places half entirely and say so",
+    which is strictly better than that. The significance rule is
+    _significant_words' — >=3 chars and not a _STOPWORD — so this stays in
+    step with how resolve_place decides which words are worth searching on.
+
+    Note this gate is about *emptiness*, not correctness: a misspelling
+    like "Sna Francisco" (anchor "Francisco", residual "Sna") still clears
+    it and still reaches the fallback to find "Snags N Burgs Cafe". Getting
+    that one right needs the fuzzy/trigram tier tracked in #215 -- a
+    residual that matches nothing well should degrade to a fuzzy retry of
+    the whole query, not to a substring scan of its typo.
     """
     if divisions:
         top = divisions[0]
@@ -713,7 +731,8 @@ def _fallback_anchor(
             continue
         best = min(rows, key=lambda r: _rank_key(r, candidate, {}))
         base = " ".join(tokens[:-n]).strip()
-        return best["lat"], best["lon"], (base or search_query)
+        name_query = base if _significant_words(base) else None
+        return best["lat"], best["lon"], name_query
     return None
 
 
@@ -776,9 +795,10 @@ def geocode(query: str, limit: int = DEFAULT_LIMIT) -> list[dict]:
 def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
     """Free-text place name -> ranked candidates, from Overture divisions (and places fallback).
 
-    Returns {"results": [...]} and, when a query carries no derivable
-    location context, a "note" explaining that the places-name half of the
-    search was skipped and how to make the query answerable (#105).
+    Returns {"results": [...]} and, when the places-name half of the search
+    is skipped as not worth its cost — no derivable location context to
+    bound it by (#105), or nothing but stopwords left to search names for
+    (#216) — a "note" saying so and how to make the query answerable.
 
     Never more than `limit` results. Each result: {name, type, lat, lon, id
     (GERS), admin_context, rank_score}. Raises overture.UpstreamUnavailable
@@ -874,7 +894,15 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
         anchor, name_query = (
             ((anchor_hit[0], anchor_hit[1]), anchor_hit[2]) if anchor_hit else (None, search_query)
         )
-        if anchor is None and _skip_unanchored_places_scan():
+        if name_query is None:
+            # #216: an anchor was derivable, but the query has nothing left
+            # in it that a place could be named — see _fallback_anchor.
+            # Searching places for a bag of stopwords costs a full-theme
+            # substring scan (50.2s measured on "the Met") and returns
+            # whatever unrelated name happens to contain "the". Say what
+            # went wrong instead.
+            note = _STOPWORD_RESIDUAL_NOTE
+        elif anchor is None and _skip_unanchored_places_scan():
             # #105: with no anchor there is no bbox to prune by, so this is
             # a substring scan of every place on Earth. Measured live
             # against the 2026-07-22.0 release: 216s end-to-end for a query
@@ -942,6 +970,16 @@ _UNBOUNDED_NAME_SEARCH_ENV = "PLACEROOT_UNBOUNDED_NAME_SEARCH"
 # Schemes DuckDB reads over the network; anything else is a local path.
 _REMOTE_GLOB_SCHEMES = ("s3://", "http://", "https://", "gcs://", "gs://", "az://", "azure://")
 
+_STOPWORD_RESIDUAL_NOTE = (
+    "no division matched this query as a whole, and once its trailing location "
+    "word is set aside as an anchor nothing distinctive is left to search place "
+    "names for (only common words like \"the\" or \"of\"), so the places half of "
+    "the search was skipped -- matching those against every place name is minutes "
+    "of scanning for results that would be unrelated anyway. Spell the name out "
+    "(\"the Metropolitan Museum of Art\" rather than \"the Met\"), or use "
+    "find_places with lat/lon to search a known area."
+)
+
 _UNANCHORED_NAME_SEARCH_NOTE = (
     "no division matched, and this query carries no location context to bound a "
     "place-name search by, so the places half of the search was skipped (it would "
@@ -998,6 +1036,18 @@ def _match_label(name: str, query: str) -> str:
 _MAX_RESOLVE_TOKENS = 12
 
 
+def _significant_words(text: str) -> list[str]:
+    """text -> the words in it worth searching a name index on: >=3 chars and
+    not a _STOPWORD, in order of appearance.
+
+    The shared rule behind _significant_tokens (which layers resolve_place's
+    fan-out cap and its own never-search-nothing fallback on top) and
+    _fallback_anchor's residual gate (#216, which needs the raw answer —
+    "nothing here is worth searching for" is exactly the case it acts on).
+    """
+    return [t for t in re.findall(r"[\w'-]+", text) if len(t) >= 3 and t.lower() not in _STOPWORDS]
+
+
 def _significant_tokens(query: str) -> list[str]:
     """query -> its meaningful words: >=3 chars, not a stopword, in order of
     appearance, capped at _MAX_RESOLVE_TOKENS. Falls back to the whole query
@@ -1005,8 +1055,7 @@ def _significant_tokens(query: str) -> list[str]:
     rather than searching nothing.
     """
     tokens = [t for t in re.findall(r"[\w'-]+", query) if len(t) >= 3]
-    significant = [t for t in tokens if t.lower() not in _STOPWORDS]
-    return (significant or tokens or [query])[:_MAX_RESOLVE_TOKENS]
+    return (_significant_words(query) or tokens or [query])[:_MAX_RESOLVE_TOKENS]
 
 
 def _place_match_label(name: str, query: str) -> str | None:
