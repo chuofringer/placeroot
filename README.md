@@ -11,7 +11,7 @@ PlaceRoot is an MCP server that answers spatial questions from [Overture Maps](h
 
 ## Why PlaceRoot
 
-It is the only keyless MCP server that does real graph routing over global open map data. `isochrone` and `route` walk an actual street graph built from Overture's transportation segments — not a straight-line approximation — anywhere on Earth, with no key, no signup, and no per-call quota. All 22 tools work that way.
+It is the only keyless MCP server that does real graph routing over global open map data. `isochrone` and `route` walk an actual street graph built from Overture's transportation segments — not a straight-line approximation — anywhere on Earth, with no key, no signup, and no per-call quota. All 23 tools work that way.
 
 What it deliberately does not do, because Overture's open data does not carry it:
 
