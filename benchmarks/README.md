@@ -1,3 +1,18 @@
+# Benchmarks
+
+Two scripts live here, measuring different things:
+
+- **`token_benchmark.py`** (issue #26) — accuracy plus tokens-per-correct-
+  answer against **live** Overture data, versus the raw payload an agent
+  would have had to read itself. Needs network. Writes `results.md`. The
+  rest of this file describes it.
+- **`token_efficiency.py`** (issue #178) — fully **offline**, on committed
+  fixtures: the MCP schema surface of every registered tool (the context an
+  agent pays before asking anything) plus per-answer response cost for a
+  fixed scenario suite. Writes the generated section of
+  [`../docs/benchmarks.md`](../docs/benchmarks.md), which carries its
+  methodology and analysis.
+
 # Token benchmark (issue #26)
 
 ## Reality check first
