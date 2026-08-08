@@ -88,11 +88,12 @@ detour cost model.
 
 Multi-stop ordering (#177): optimize_route() answers "what order should I
 visit these 2-10 stops in". One graph extraction covers every stop (the
-same center/radius/cap relation route() uses, applied to the widest pair —
-see _stops_extraction_geometry), all stops snap into it once, and n
-target-less Dijkstras fill an n x n directed cost matrix, which Held-Karp
-(solve_tsp) then solves exactly. Unroutable pairs fall back to a flagged
-straight-line estimate rather than failing the call.
+same center/radius/cap relation route() uses, applied to the stops'
+smallest enclosing circle — see _stops_extraction_geometry), all stops
+snap into it once, and n target-less Dijkstras fill an n x n directed
+cost matrix, which Held-Karp (solve_tsp) then solves exactly. Unroutable
+pairs fall back to a flagged straight-line estimate rather than failing
+the call.
 
 Query layer: this module shares the package-wide connection, bbox
 helpers, and schema probe (via db.py/geo.py); db.ensure_spatial() is
@@ -232,9 +233,22 @@ MODE_CONFIG = {
 # straight-line check below and the base_radius_m > max_radius_m check
 # below it equivalent (the latter becomes a redundant safety net that
 # should essentially never fire, modulo floating point).
-ROUTE_MAX_STRAIGHT_LINE_M = {
-    mode: 2.0 * (cfg["max_radius_m"] - SNAP_RADIUS_M) / RADIUS_BUFFER
+#
+# The primitive both route() and optimize_route() enforce is really a cap on
+# the *enclosing radius* of the input points — the radius of the smallest
+# circle covering them, which is what the extraction radius is computed from
+# (enclosing_radius_m * RADIUS_BUFFER + SNAP_RADIUS_M <= max_radius_m).
+# For route()'s two points that circle is the diametral one, so its radius is
+# exactly straight_line_m / 2 and the familiar straight-line cap is just
+# twice the radius cap. Defining the radius cap first and deriving the
+# straight-line cap from it keeps optimize_route's n-stop check and route()'s
+# two-point check the same rule by construction, not by a matching constant.
+ROUTE_MAX_ENCLOSING_RADIUS_M = {
+    mode: (cfg["max_radius_m"] - SNAP_RADIUS_M) / RADIUS_BUFFER
     for mode, cfg in MODE_CONFIG.items()
+}
+ROUTE_MAX_STRAIGHT_LINE_M = {
+    mode: 2.0 * radius_m for mode, radius_m in ROUTE_MAX_ENCLOSING_RADIUS_M.items()
 }
 ROUTE_MIN_RADIUS_M = 500.0  # extraction radius floor, so very-close points still get a real graph
 ROUTE_RADIUS_RETRY_FACTOR = 1.6  # widen-and-retry factor when the first extraction misses a path
@@ -370,9 +384,14 @@ class RouteTooLong(Exception):
     produce a route we'd be willing to extract a graph for anyway.
     """
 
-    def __init__(self, distance_m: float, max_distance_m: float):
+    def __init__(
+        self,
+        distance_m: float,
+        max_distance_m: float,
+        label: str = "straight-line distance",
+    ):
         detail = (
-            f"straight-line distance {distance_m:.0f}m exceeds the "
+            f"{label} {distance_m:.0f}m exceeds the "
             f"{max_distance_m:.0f}m cap for this mode"
         )
         super().__init__(detail)
@@ -2299,51 +2318,158 @@ def _dijkstra_costs_to_targets(
     return found
 
 
+def _minimum_enclosing_center(points: list[tuple[float, float]]) -> tuple[float, float]:
+    """(lat, lon) center of the smallest circle covering every point.
+
+    Exact, not a heuristic: the minimum enclosing circle of a finite planar
+    set is always determined by two of the points (as a diametral pair) or
+    three (through their circumcircle), so with n <= OPTIMIZE_MAX_STOPS = 10
+    a brute-force scan of every pair and every triple — the smallest
+    candidate circle that covers all points wins — is both exact and
+    trivially cheap (45 pairs + 120 triples, each checked against 10 points).
+    No Welzl recursion, no randomization, no degenerate-input surprises.
+
+    The search runs in a local equirectangular projection in meters around
+    the points' bbox center, with longitudes unwrapped relative to that
+    reference so the +/-180 seam is just another straight line (same trick
+    _midpoint uses). The projection is only used to *choose* the center;
+    the caller re-measures the true haversine distance to every point from
+    the returned center, so any projection distortion costs at most a
+    slightly-larger-than-optimal radius, never a point outside the circle.
+    """
+    lats = [lat for lat, _ in points]
+    lons = _unwrapped_lons([lon for _, lon in points])
+    ref_lat = (min(lats) + max(lats)) / 2.0
+    ref_lon = (min(lons) + max(lons)) / 2.0
+    m_per_deg_lat = 111_320.0
+    m_per_deg_lon = 111_320.0 * max(math.cos(math.radians(ref_lat)), 1e-6)
+    xy = [
+        ((lon - ref_lon) * m_per_deg_lon, (lat - ref_lat) * m_per_deg_lat)
+        for lat, lon in zip(lats, lons)
+    ]
+
+    def covers(cx: float, cy: float, r: float) -> bool:
+        # 1mm slack absorbs the float noise in the circumcenter arithmetic,
+        # which would otherwise reject the very circle it just constructed.
+        limit = (r + 1e-3) ** 2
+        return all((x - cx) ** 2 + (y - cy) ** 2 <= limit for x, y in xy)
+
+    best: tuple[float, float, float] | None = None  # (r, cx, cy)
+    n = len(xy)
+    for i in range(n):
+        ax, ay = xy[i]
+        for j in range(i + 1, n):
+            bx, by = xy[j]
+            cx, cy = (ax + bx) / 2.0, (ay + by) / 2.0
+            r = math.hypot(bx - ax, by - ay) / 2.0
+            if (best is None or r < best[0]) and covers(cx, cy, r):
+                best = (r, cx, cy)
+    if best is None:
+        for i in range(n):
+            ax, ay = xy[i]
+            for j in range(i + 1, n):
+                bx, by = xy[j]
+                for k in range(j + 1, n):
+                    cx0, cy0 = xy[k]
+                    d = 2.0 * (ax * (by - cy0) + bx * (cy0 - ay) + cx0 * (ay - by))
+                    if abs(d) < 1e-9:  # collinear: no circumcircle
+                        continue
+                    a2 = ax * ax + ay * ay
+                    b2 = bx * bx + by * by
+                    c2 = cx0 * cx0 + cy0 * cy0
+                    ux = (a2 * (by - cy0) + b2 * (cy0 - ay) + c2 * (ay - by)) / d
+                    uy = (a2 * (cx0 - bx) + b2 * (ax - cx0) + c2 * (bx - ax)) / d
+                    r = math.hypot(ax - ux, ay - uy)
+                    if (best is None or r < best[0]) and covers(ux, uy, r):
+                        best = (r, ux, uy)
+    if best is None:  # pragma: no cover - unreachable for a finite point set
+        best = (0.0, 0.0, 0.0)
+
+    _, cx, cy = best
+    center_lat = ref_lat + cy / m_per_deg_lat
+    center_lon = ((ref_lon + cx / m_per_deg_lon + 180.0) % 360.0) - 180.0
+    return center_lat, center_lon
+
+
+def _unwrapped_lons(lons: list[float]) -> list[float]:
+    """Longitudes shifted by multiples of 360 so the set is contiguous.
+
+    Same seam problem _midpoint solves for two points, generalized: a set
+    straddling +/-180 (179.9, -179.9) has a 0.2-degree true extent but a
+    359.8-degree naive one, which would put the bbox center on the far side
+    of the globe. Anchor on the first longitude and pull every other one
+    into [anchor - 180, anchor + 180]; stop sets are capped well under
+    180 degrees wide by the per-mode radius cap, so that window always
+    holds the whole set.
+    """
+    anchor = lons[0]
+    return [lon + 360.0 * round((anchor - lon) / 360.0) for lon in lons]
+
+
 def _stops_extraction_geometry(
     points: list[tuple[float, float]], mode: str
 ) -> tuple[float, float, float]:
     """(center_lat, center_lon, base_radius_m) for one graph covering every stop.
 
-    Deliberately the *same* relation route()/_shortest_path uses, applied to
-    the widest pair of stops rather than to the only pair: the two stops
-    furthest apart (the diametral pair) give span_m, the center is their
-    antimeridian-aware midpoint, and the radius is
-    span_m / 2 * RADIUS_BUFFER + SNAP_RADIUS_M, floored at ROUTE_MIN_RADIUS_M.
-    Keeping the relation identical is what lets the per-mode straight-line
-    cap machinery (ROUTE_MAX_STRAIGHT_LINE_M, itself derived by inverting
-    that relation against MODE_CONFIG's max_radius_m) carry over unchanged:
-    if the widest pair is within the mode's cap, the extraction radius is
-    within the mode's radius cap, and vice versa.
+    Deliberately the *same* relation route()/_shortest_path uses, generalized
+    from two points to n. route() centers on the two points' midpoint with
+    radius straight_line_m / 2 * RADIUS_BUFFER + SNAP_RADIUS_M — that is,
+    on the center of the smallest circle covering its inputs, with radius
+    (enclosing radius) * RADIUS_BUFFER + SNAP_RADIUS_M. Here the same holds
+    with the enclosing circle computed for the whole stop set
+    (_minimum_enclosing_center), so the two-stop case reproduces route()'s
+    geometry exactly and the n-stop case is the same rule.
 
-    That circle really does contain every stop, not just the two: by Jung's
-    theorem a planar point set of diameter d fits in a circle of radius
-    d / sqrt(3) ~= 0.5774 d, and the circle centered on the diametral pair's
-    midpoint with radius span_m / 2 * RADIUS_BUFFER = 0.625 * span_m is
-    larger than that — before SNAP_RADIUS_M is even added. At these scales
-    the sphere is flat enough for that planar bound to hold with room to
-    spare.
+    Containment is by *construction*, not by a geometric bound: the radius
+    is measured as the true haversine distance from the chosen center to the
+    furthest stop, then multiplied by RADIUS_BUFFER (>= 1) and padded by
+    SNAP_RADIUS_M. Every stop therefore sits at least SNAP_RADIUS_M inside
+    the extraction circle, whatever the center is — which is what the old
+    diametral-midpoint + Jung's-theorem argument got wrong: Jung's d/sqrt(3)
+    bound is about the enclosing circle's *circumcenter*, while the
+    diametral pair's midpoint can need up to sqrt(3)/2 ~= 0.866 * d, more
+    than the 0.625 * d that version allowed. An equilateral triple of stops
+    ~6.5km apart (inside walk's 7.5km cap) left its third stop outside the
+    extracted graph and failed with NoGraphNearby.
 
-    Raises RouteTooLong if the widest pair exceeds the mode's cap.
+    Raises RouteTooLong if the stops' enclosing radius exceeds the mode's
+    ROUTE_MAX_ENCLOSING_RADIUS_M — the same cap route() enforces, reported
+    as a diameter against ROUTE_MAX_STRAIGHT_LINE_M (twice the radius cap)
+    so a two-stop call's message is identical to route()'s.
     """
-    cap_m = ROUTE_MAX_STRAIGHT_LINE_M[mode]
-    span_m = 0.0
-    widest = (points[0], points[0])
-    for i in range(len(points)):
-        for j in range(i + 1, len(points)):
-            d = _haversine_m(*points[i], *points[j])
-            if d > span_m:
-                span_m, widest = d, (points[i], points[j])
-    if span_m > cap_m:
-        raise RouteTooLong(span_m, cap_m)
+    if len(points) == 2:
+        # Two stops are route()'s own case: take its expression verbatim
+        # (great-circle midpoint, half the straight-line distance) so a pair
+        # gets bit-identical geometry and an identical cap decision whether
+        # it arrives through route() or through optimize_route().
+        (alat, alon), (blat, blon) = points
+        center_lat, center_lon = _midpoint(alat, alon, blat, blon)
+        enclosing_radius_m = _haversine_m(alat, alon, blat, blon) / 2.0
+    else:
+        center_lat, center_lon = _minimum_enclosing_center(points)
+        enclosing_radius_m = max(
+            _haversine_m(center_lat, center_lon, lat, lon) for lat, lon in points
+        )
+    radius_cap_m = ROUTE_MAX_ENCLOSING_RADIUS_M[mode]
+    if enclosing_radius_m > radius_cap_m:
+        raise RouteTooLong(
+            2.0 * enclosing_radius_m,
+            ROUTE_MAX_STRAIGHT_LINE_M[mode],
+            label="the stops' enclosing-circle diameter",
+        )
 
-    (alat, alon), (blat, blon) = widest
-    center_lat, center_lon = _midpoint(alat, alon, blat, blon)
-    base_radius_m = max(span_m / 2.0 * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M)
+    base_radius_m = max(
+        enclosing_radius_m * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M
+    )
     if base_radius_m > MODE_CONFIG[mode]["max_radius_m"]:
-        # Redundant safety net, exactly as in _shortest_path: cap_m is
+        # Redundant safety net, exactly as in _shortest_path: the cap is
         # derived from max_radius_m through this very relation, so only
         # floating-point edge cases can land here. Report the honest cap.
-        raise RouteTooLong(span_m, cap_m)
+        raise RouteTooLong(
+            2.0 * enclosing_radius_m,
+            ROUTE_MAX_STRAIGHT_LINE_M[mode],
+            label="the stops' enclosing-circle diameter",
+        )
     return center_lat, center_lon, base_radius_m
 
 
@@ -2535,8 +2661,8 @@ def optimize_route(
 
     Answers "what order should I do these errands in": builds ONE street
     graph covering every stop (see _stops_extraction_geometry — the same
-    center/radius/cap relation route() uses, applied to the widest pair of
-    stops), snaps all of them into it once, fills an n x n cost matrix with
+    center/radius/cap relation route() uses, applied to the stops'
+    smallest enclosing circle), snaps all of them into it once, fills an n x n cost matrix with
     n target-less Dijkstras (_cost_matrices — one per stop, not one per
     pair), and solves it exactly with Held-Karp (solve_tsp). No polyline or
     geometry comes back, same as route() (#161): just the order, the legs'
@@ -2558,10 +2684,11 @@ def optimize_route(
     leg carries "estimated": true, and the response carries a note naming
     every estimated leg. Raises UnsupportedMode for an unknown mode,
     ValueError for a bad stop count / start_index / non-finite coordinate,
-    RouteTooLong if the two furthest-apart stops exceed the mode's
-    straight-line cap (rejected before any extraction, exactly as route()
-    does), and NoGraphNearby — labeled with the offending stop's index — if
-    some stop never snaps to a usable street node.
+    RouteTooLong if the smallest circle covering the stops is wider than
+    the mode's straight-line cap (rejected before any extraction, the same
+    enclosing-radius rule route() applies to its two points), and
+    NoGraphNearby — labeled with the offending stop's index — if some stop
+    never snaps to a usable street node.
 
     Returns {"order", "legs", "total_distance_m", "total_duration_s",
     "mode", "roundtrip"}, plus "truncated"/"note" when the street graph hit
@@ -2640,21 +2767,37 @@ def optimize_route(
             "the street graph hit its size cap; this order may be suboptimal or incomplete"
         )
 
+    def finish(payload: dict, extra_notes: list[str], is_truncated: bool) -> dict:
+        """The response exactly as it will be returned — notes and flag included."""
+        out = dict(payload)
+        if is_truncated:
+            out["truncated"] = True
+        all_notes = notes + extra_notes
+        if all_notes:
+            out["note"] = "; ".join(all_notes)
+        return out
+
     # Bounded by construction — OPTIMIZE_MAX_STOPS caps the tour at 10 legs
     # of five short scalar fields — so this can only fire under a
     # deliberately tiny PLACEROOT_TOKEN_BUDGET. When it does, the legs are
     # the droppable detail: `order` plus the totals is the answer, and
     # dropping *rows* of legs (apply_budget's usual move) would leave a leg
     # list that no longer covers the order it describes.
-    if budget.estimate_tokens(result) > budget.token_budget():
+    #
+    # Both sides of the check are measured on the *finished* response: the
+    # "truncated" flag and the ~30-token note the drop itself adds are part
+    # of what ships, so estimating the bare payload and appending the note
+    # afterwards would let the answer overrun the budget it just checked
+    # against (a 40-token budget returned 61 tokens).
+    final = finish(result, [], truncated)
+    if budget.estimate_tokens(final) > budget.token_budget():
         result.pop("legs")
-        truncated = True
-        notes.append(
-            "per-leg distances/durations were dropped to fit the token budget; "
-            "the order and the totals are complete"
+        final = finish(
+            result,
+            [
+                "per-leg distances/durations were dropped to fit the token budget; "
+                "the order and the totals are complete"
+            ],
+            True,
         )
-    if truncated:
-        result["truncated"] = True
-    if notes:
-        result["note"] = "; ".join(notes)
-    return result
+    return final

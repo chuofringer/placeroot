@@ -19,6 +19,7 @@ Two properties of that fixture do most of the work here:
 """
 
 import itertools
+import math
 import random
 
 import pytest
@@ -359,6 +360,117 @@ def test_route_too_long_reports_the_derived_per_mode_cap():
     )
 
 
+# --- extraction geometry -------------------------------------------------
+#
+# The extraction circle has to contain every stop with SNAP_RADIUS_M to
+# spare, or a stop that sits perfectly well on a street simply isn't in the
+# extracted graph and the call dies with NoGraphNearby. These are pure
+# geometry — no fixture data needed.
+
+
+def _extraction_margins(stops, mode):
+    """Slack, in meters, between each stop and the extraction circle's edge."""
+    center_lat, center_lon, radius_m = routing._stops_extraction_geometry(stops, mode)
+    return [
+        radius_m - routing._haversine_m(center_lat, center_lon, lat, lon)
+        for lat, lon in stops
+    ]
+
+
+def test_equilateral_stop_triple_stays_inside_the_extraction_circle():
+    """Regression: three stops on an equilateral triangle, each pair 6.5km
+    apart and so comfortably inside walk's 7.5km cap.
+
+    Centering on the *diametral pair's midpoint* (the old behaviour) leaves
+    the third vertex sqrt(3)/2 = 0.866 x span from that midpoint while the
+    radius only covers 0.625 x span + 300m — the third stop fell ~1.2km
+    outside the extracted graph and the call failed with
+    NoGraphNearby: stops[2] even though that coordinate snaps fine on its
+    own. (Jung's theorem's d/sqrt(3) bound is about the enclosing circle's
+    circumcenter, not the diametral midpoint.)
+    """
+    stops = [(37.730000, -122.460000), (37.730000, -122.386173), (37.780567, -122.423086)]
+    sides = [
+        routing._haversine_m(*a, *b)
+        for a, b in itertools.combinations(stops, 2)
+    ]
+    assert min(sides) == pytest.approx(max(sides), rel=1e-3)  # equilateral
+    assert max(sides) < routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"]  # inside the cap
+
+    margins = _extraction_margins(stops, "walk")
+    assert min(margins) >= routing.SNAP_RADIUS_M
+
+
+@pytest.mark.parametrize("mode", ["walk", "cycle", "drive"])
+def test_every_stop_sits_inside_the_extraction_circle_for_random_sets(mode):
+    """Property: whatever the stop set, containment holds by construction.
+
+    Random sets, sized and shaped so they stay inside the mode's cap; any
+    set the cap rejects is skipped rather than asserted about.
+    """
+    rng = random.Random(1177)
+    radius_cap_m = routing.ROUTE_MAX_ENCLOSING_RADIUS_M[mode]
+    checked = 0
+    for _ in range(200):
+        lat0 = rng.uniform(-60.0, 60.0)
+        lon0 = rng.uniform(-180.0, 180.0)
+        spread_m = rng.uniform(50.0, radius_cap_m)
+        stops = []
+        for _ in range(rng.randint(2, routing.OPTIMIZE_MAX_STOPS)):
+            north_m = rng.uniform(-spread_m, spread_m)
+            east_m = rng.uniform(-spread_m, spread_m)
+            lat = lat0 + north_m / 111_320.0
+            lon = lon0 + east_m / (111_320.0 * math.cos(math.radians(lat0)))
+            stops.append((lat, ((lon + 180.0) % 360.0) - 180.0))
+        try:
+            margins = _extraction_margins(stops, mode)
+        except routing.RouteTooLong:
+            continue
+        checked += 1
+        assert min(margins) >= routing.SNAP_RADIUS_M - 1e-6
+    assert checked > 50  # the sampling actually exercised the accepted region
+
+
+def test_stops_straddling_the_antimeridian_are_contained_too():
+    """The seam is where a naive bbox center lands on the far side of the
+    globe; the enclosing-circle center unwraps longitudes first."""
+    stops = [(0.5, 179.98), (0.5, -179.98), (0.52, 179.999)]
+    margins = _extraction_margins(stops, "walk")
+    assert min(margins) >= routing.SNAP_RADIUS_M
+
+
+def test_two_stops_reproduce_route_s_own_extraction_geometry():
+    """The n-stop rule generalizes route()'s, so for n=2 it must agree with
+    it exactly — same center, same radius, same cap."""
+    a, b = (40.7000, -73.9900), (40.7250, -73.9600)
+    center_lat, center_lon, radius_m = routing._stops_extraction_geometry([a, b], "walk")
+    span_m = routing._haversine_m(*a, *b)
+    expected_center = routing._midpoint(*a, *b)
+    assert center_lat == pytest.approx(expected_center[0], abs=1e-6)
+    assert center_lon == pytest.approx(expected_center[1], abs=1e-6)
+    assert radius_m == pytest.approx(
+        span_m / 2.0 * routing.RADIUS_BUFFER + routing.SNAP_RADIUS_M, rel=1e-6
+    )
+
+
+def test_a_pair_just_inside_the_advertised_cap_is_accepted():
+    """Advertised == enforced: the straight-line cap route() publishes has
+    to remain reachable through optimize_route's n-stop check."""
+    cap_m = routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"]
+    lat = 40.7
+    stops = [(lat, -73.99), (lat + (cap_m * 0.999) / 111_320.0, -73.99)]
+    _, _, radius_m = routing._stops_extraction_geometry(stops, "walk")
+    assert radius_m <= routing.MODE_CONFIG["walk"]["max_radius_m"]
+
+
+def test_equilateral_triple_on_the_fixture_grid_routes_end_to_end():
+    """The same shape at fixture scale, through the real code path."""
+    stops = [fx.node_latlon(2, 2), fx.node_latlon(14, 2), fx.node_latlon(8, 12)]
+    result = routing.optimize_route(stops, mode="walk", roundtrip=True)
+    assert sorted(result["order"]) == [0, 1, 2]
+    assert result["total_distance_m"] > 0
+
+
 def test_stop_with_no_street_nearby_names_its_index():
     stops = list(LINE_STOPS)
     # Middle of the ocean-ish: inside the extraction circle, nowhere near a
@@ -399,6 +511,25 @@ def test_a_tiny_budget_drops_the_legs_and_says_so(monkeypatch):
     # The answer itself survives.
     assert sorted(result["order"]) == [0, 1, 2, 3]
     assert result["total_distance_m"] > 0
+
+
+def test_the_dropped_legs_note_is_paid_for_out_of_the_budget(monkeypatch):
+    """Regression: the fit check has to price the response it actually
+    returns.
+
+    Dropping the legs adds a ~30-token explanatory note plus the
+    "truncated" flag. Estimating the bare payload and appending those
+    afterwards overran the very budget just checked — at
+    PLACEROOT_TOKEN_BUDGET=110 the answer came back at ~130 tokens.
+    """
+    from placeroot import budget
+
+    monkeypatch.setenv("PLACEROOT_TOKEN_BUDGET", "110")
+    stops = [fx.node_latlon(2, j) for j in range(0, 20, 2)]  # 10 stops, the max
+    result = routing.optimize_route(stops, mode="walk", roundtrip=True)
+    assert "legs" not in result  # the budget did bind
+    assert "token budget" in result["note"]
+    assert budget.estimate_tokens(result) <= budget.token_budget()
 
 
 # --- registration --------------------------------------------------------

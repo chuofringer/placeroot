@@ -1559,9 +1559,9 @@ def optimize_route(
     Errors are structured, not raised: fewer than 2 or more than 10 stops, a
     stop missing numeric lat/lon, or an out-of-range start_index return
     {"error": "bad_request"} naming the offending stop index; an unknown mode
-    returns {"error": "unsupported_mode"}; stops further apart than the
-    mode's straight-line cap (see `route`) return {"error":
-    "route_too_long"}; a stop with no usable street node near it returns
+    returns {"error": "unsupported_mode"}; a stop set whose smallest
+    covering circle is wider than the mode's straight-line cap (see `route`)
+    returns {"error": "route_too_long"}; a stop with no usable street node near it returns
     {"error": "no_graph_nearby"} naming that stop's index.
     """
     if not isinstance(stops, list):
