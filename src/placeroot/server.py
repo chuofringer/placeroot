@@ -957,6 +957,17 @@ def geocode(query: str, limit: int = 5) -> dict:
     results rank below any literal match and come with a "note" naming the
     spelling they were corrected to.
 
+    A query that is entirely a postcode ("94110", "1011AB") is answered as
+    one (#223): one result per country whose address points carry that code,
+    with "type": "postcode", "country", "address_count" and a null "id" (a
+    postcode is not a GERS entity). Codes are shared across countries far
+    more often than not, so the alternates below the top row are real
+    ambiguity. The accompanying "note" carries the granularity caveat (a
+    Dutch code is a street block, a US ZIP a district) and the coverage
+    limits -- including the countries the addresses theme covers but that
+    carry no postcode values at all, which is why a valid postcode can still
+    come back empty.
+
     Exonyms work too (#214): names are matched against Overture's ~100
     localized alternates as well as its canonical one, so "Munich" answers
     München and "Tokyo" answers 東京都. `name` is always the canonical

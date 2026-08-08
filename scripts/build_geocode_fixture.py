@@ -345,6 +345,22 @@ def build_divisions() -> list[tuple]:
         43.66, -70.26, _chain("United States", "Maine", "Portland"),
         population=68_408,
     )
+    # #223: the divisions the postcode answer names. "Mission District" is the
+    # locality-ish row nearest the synthetic 94110 US cluster below, so
+    # geocode("94110") can report *where* the centroid is rather than bare
+    # coordinates -- mirroring the live R27 probe, which put 94110's US
+    # centroid in the Mission in San Francisco. Amsterdam does the same job
+    # for the NL "1011AB" cluster.
+    add(
+        "gers-div-mission-district", "Mission District", "neighborhood", "US", "US-CA",
+        37.7599, -122.4148,
+        _chain("United States", "California", "San Francisco", "Mission District"),
+    )
+    add(
+        "gers-div-amsterdam", "Amsterdam", "locality", "NL", "NL-NH",
+        52.3728, 4.8936, _chain("Netherlands", "North Holland", "Amsterdam"),
+        population=921_402,
+    )
     # #188: a division in a country the addresses theme does NOT cover (GB is
     # not one of addresses.COVERED_COUNTRIES), so address_at has somewhere to
     # resolve "this coordinate is in an uncovered country" from. Deliberately
@@ -403,6 +419,62 @@ def build_addresses() -> list[tuple]:
                 address_levels,
             ))
             n += 1
+    rows += build_postcode_addresses()
+    return rows
+
+
+# #223: the postcode clusters geocode("94110") / geocode("1011AB") answer from.
+# Synthetic, but shaped like what the live R27 probe measured on release
+# 2026-07-22.0: one code carried by three different countries, with the US
+# cluster the largest, SK second and FR third (live: 29,956 / 3,491 / 3,310) --
+# so the fixture exercises a genuinely ambiguous postcode, not a tidy one.
+# Each cluster sits on a division already in the divisions fixture, which is
+# what the covering-locality join has to find: the Mission District (SF), then
+# Bratislava and the small French "St. Louis", then Amsterdam.
+#
+# "1011AB" is stored unspaced, the way the Dutch source data writes it, so
+# querying "1011 AB" only works if the spaced/unspaced variant pair really is
+# searched. GB is deliberately absent from every cluster: the addresses theme
+# does not cover it, which is what makes "SW1A 1AA" the empty-but-valid-shaped
+# case the coverage note exists for.
+POSTCODE_CLUSTERS = (
+    # (postcode, country, postal_city, admin level, lat, lon, count)
+    ("94110", "US", "San Francisco", "CA", 37.7599, -122.4148, 12),
+    ("94110", "SK", "Bratislava", None, 48.1500, 17.1100, 5),
+    ("94110", "FR", "St. Louis", None, 45.5000, 4.8000, 3),
+    ("1011AB", "NL", "Amsterdam", None, 52.3728, 4.8936, 4),
+)
+
+# Cluster points are spread over a few hundred meters so the centroid is an
+# average of scattered points (what a real postcode aggregate computes), not a
+# single repeated coordinate.
+POSTCODE_SPREAD_DEG = 0.002
+
+
+def build_postcode_addresses() -> list[tuple]:
+    """Address points carrying a queryable postcode, per POSTCODE_CLUSTERS.
+
+    Offsets are symmetric around the cluster centre on purpose: the mean of
+    each cluster lands back on the stated lat/lon, so a test can assert the
+    centroid against the division it is supposed to name.
+    """
+    rows = []
+    for postcode, country, city, level, lat, lon, count in POSTCODE_CLUSTERS:
+        for i in range(count):
+            # Symmetric around 0: for count points, offsets are
+            # (i - (count-1)/2) steps out, which sums to zero.
+            step = (i - (count - 1) / 2) * POSTCODE_SPREAD_DEG
+            rows.append((
+                f"gers-addr-pc-{country.lower()}-{postcode.lower()}-{i:02d}",
+                _point_bbox(lat + step, lon - step),
+                country,
+                str(1 + i),
+                STREET_NAMES[i % len(STREET_NAMES)],
+                None,
+                postcode,
+                city,
+                [{"value": level}] if level else None,
+            ))
     return rows
 
 
