@@ -41,6 +41,18 @@ ADDRESS_GRID_COLS = 20
 ADDRESS_SPACING_M = 15.0
 STREET_NAMES = ["Main St", "Oak Ave", "1st St", "River Rd", "Elm St"]
 
+# #188: a coordinate in a country outside the addresses theme's coverage (see
+# addresses.COVERED_COUNTRIES). Real Kensington, London — there is a division
+# here in the fixture but deliberately no address point anywhere near it, so
+# address_at's coverage note is what has to explain the empty answer.
+UNCOVERED_LAT = 51.5000
+UNCOVERED_LON = -0.1900
+
+# Grid index of the address point sitting exactly on CENTER_LAT/CENTER_LON —
+# the nearest row to every fixture query aimed at the centre, so it is where
+# the awkward-but-real attribute shapes live (see build_addresses).
+CENTER_ADDRESS_INDEX = (ADDRESS_GRID_ROWS // 2) * ADDRESS_GRID_COLS + ADDRESS_GRID_COLS // 2
+
 
 def _point_bbox(lat: float, lon: float) -> dict:
     return {"xmin": lon, "ymin": lat, "xmax": lon, "ymax": lat}
@@ -199,10 +211,34 @@ def build_divisions() -> list[tuple]:
         -23.55, -46.63, _chain("Brazil", "São Paulo"),
         population=12_300_000,
     )
+    # #188: a division in a country the addresses theme does NOT cover (GB is
+    # not one of addresses.COVERED_COUNTRIES), so address_at has somewhere to
+    # resolve "this coordinate is in an uncovered country" from. Deliberately
+    # not named "London" — the two fixture Londons above are load-bearing for
+    # the ambiguity tests, and a third would change what they assert.
+    add(
+        "gers-div-kensington-gb", "Kensington", "locality", "GB", "GB-ENG",
+        UNCOVERED_LAT, UNCOVERED_LON,
+        _chain("United Kingdom", "England", "Kensington"),
+    )
     return rows
 
 
 def build_addresses() -> list[tuple]:
+    """A grid of synthetic address points around the fixture centre.
+
+    Columns follow Overture's addresses schema (#188): country/number/street
+    /unit/postcode/postal_city/address_levels, with address_levels as the
+    list-of-{value} struct the real theme uses. Two rows near the centre are
+    deliberately awkward rather than uniform:
+
+    - the exact-centre row carries a non-numeric house number ("74B") and a
+      unit, because Overture's `number` is a string and real data is full of
+      "74B"/"12 bis" — anything that parses it as an integer must break here;
+    - its immediate neighbour carries no postcode, postal_city or
+      address_levels at all, which is the common shape outside the
+      best-covered countries and the case the optional-field omission is for.
+    """
     rows = []
     dlat = ADDRESS_SPACING_M / 111_320.0
     dlon = ADDRESS_SPACING_M / (111_320.0 * math.cos(math.radians(CENTER_LAT)))
@@ -213,12 +249,24 @@ def build_addresses() -> list[tuple]:
             lon = CENTER_LON + (col - ADDRESS_GRID_COLS // 2) * dlon
             street = STREET_NAMES[n % len(STREET_NAMES)]
             number = str(100 + n)
+            unit = None
+            postcode = "11201"
+            postal_city = "Brooklyn"
+            address_levels = [{"value": "NY"}]
+            if n == CENTER_ADDRESS_INDEX:
+                number, unit = "74B", "Apt 3"
+            elif n == CENTER_ADDRESS_INDEX + 1:
+                postcode, postal_city, address_levels = None, None, None
             rows.append((
                 f"gers-addr-{n:05d}",
                 _point_bbox(lat, lon),
-                street,
+                "US",
                 number,
-                "11201",
+                street,
+                unit,
+                postcode,
+                postal_city,
+                address_levels,
             ))
             n += 1
     return rows
@@ -250,12 +298,16 @@ def main() -> None:
         CREATE TABLE addresses (
             id VARCHAR,
             bbox STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE),
-            street VARCHAR,
+            country VARCHAR,
             number VARCHAR,
-            postcode VARCHAR
+            street VARCHAR,
+            unit VARCHAR,
+            postcode VARCHAR,
+            postal_city VARCHAR,
+            address_levels STRUCT("value" VARCHAR)[]
         )
     """)
-    con.executemany("INSERT INTO addresses VALUES (?, ?, ?, ?, ?)", addresses)
+    con.executemany("INSERT INTO addresses VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", addresses)
     con.execute(f"COPY addresses TO '{ADDRESSES_PATH}' (FORMAT PARQUET)")
     print(f"wrote {len(addresses)} rows to {ADDRESSES_PATH}")
 
