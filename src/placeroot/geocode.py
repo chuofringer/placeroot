@@ -1648,8 +1648,8 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
 # The cost of a false positive is one wasted upstream aggregate plus a
 # fallthrough to the normal name search; the cost of a false negative is
 # today's empty answer. That asymmetry still doesn't buy loose patterns: the
-# aggregate is a ~12s cold scan of a 474M-row theme (R27, measured), which is
-# not a thing to spend on "1984".
+# aggregate is a ~10-30s cold scan of a 474M-row theme (R27/R28, measured
+# across sessions), which is not a thing to spend on "1984".
 _POSTCODE_PATTERNS = (
     re.compile(r"^\d{4}$"),           # AT BE AU CH DK HU LU NO NZ SI ...
     re.compile(r"^\d{5}$"),           # US ZIP, DE, FR, ES, IT, FI, MX
@@ -1740,8 +1740,8 @@ def _query_postcode_countries(variants: list[str]) -> list[tuple]:
     the tile cache would either have to be complete (the whole theme
     materialized) or answer from a slice, which for this query is not a
     slower answer but a wrong one. So it is a direct upstream scan with the
-    usual duckdb.Error -> UpstreamUnavailable conversion, ~12s cold
-    (R27-measured); the note says so when the read is remote.
+    usual duckdb.Error -> UpstreamUnavailable conversion, ~10-30s cold
+    (R27/R28-measured); the note says so when the read is remote.
     """
     glob = addresses._upstream_glob()
     cols = overture.probe_schema(glob)
@@ -1864,7 +1864,7 @@ def _postcode_cold_scan_sentence() -> str:
         return ""
     return (
         " This is an unindexed scan of the whole addresses theme, so the first "
-        "such query in a session costs ~12s."
+        "such query in a session costs ~10-30s."
     )
 
 
@@ -2053,6 +2053,18 @@ def geocode_detailed(
     # is for. Cheap enough to do every time — one more predicate over the
     # same local divisions table the literal pass just read (0.2s measured,
     # #214).
+    #
+    # Deliberately still a second scan, not `name ILIKE $q OR
+    # strip_accents(name) ILIKE $q` folded into the first (R28 considered
+    # and declined). Merging saves one read of an already-local table and
+    # costs the thing this pass depends on: which predicate a row matched.
+    # A folded-only hit is tagged `_variant` and carries a `_tier` graded
+    # against the *stripped* query, while a literal hit is neither — a
+    # merged scan cannot tell them apart without recomputing both
+    # predicates per row in Python, at which point the saving is gone. The
+    # SQL ORDER BY that decides which rows survive DIVISION_OVERFETCH is
+    # written against one name expression too, and a merged LIMIT would
+    # let one branch's matches crowd out the other's.
     #
     # The abbreviation retries above stay gated: they fire one extra query
     # per expandable token ("St." -> "Saint", "N." -> "North"), and unlike

@@ -1402,10 +1402,10 @@ def test_a_dataset_without_a_postcode_column_degrades_to_the_name_search(tmp_pat
 
 
 def test_the_cold_scan_warning_only_appears_for_a_remote_read(monkeypatch):
-    assert "~12s" not in geocode.geocode_detailed("94110", limit=5)["note"]
+    assert "~10-30s" not in geocode.geocode_detailed("94110", limit=5)["note"]
     monkeypatch.setattr(
         geocode.addresses, "_upstream_glob",
         lambda: str(ADDRESSES_FIXTURE_PATH),
     )
     monkeypatch.setattr(geocode, "_is_remote", lambda glob: True)
-    assert "~12s" in geocode.geocode_detailed("94110", limit=5)["note"]
+    assert "~10-30s" in geocode.geocode_detailed("94110", limit=5)["note"]
