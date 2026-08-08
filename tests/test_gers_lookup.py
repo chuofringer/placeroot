@@ -329,7 +329,7 @@ def test_upstream_failure_propagates(monkeypatch):
         gers.gers_lookup(PLACE_ID)
 
 
-def test_schema_degraded_only_when_every_theme_is_degraded(monkeypatch):
+def test_a_degraded_theme_does_not_mask_another_themes_answer(monkeypatch):
     def degraded(id, near_lat, near_lon):
         raise overture.SchemaDegraded(["id"])
 
@@ -343,6 +343,57 @@ def test_schema_degraded_only_when_every_theme_is_degraded(monkeypatch):
     monkeypatch.setattr(gers, "_PROBES", (("places", degraded), ("divisions", degraded)))
     with pytest.raises(overture.SchemaDegraded):
         gers.gers_lookup(PLACE_ID)
+
+
+def test_a_miss_plus_a_degraded_theme_is_schema_degraded_not_not_found(monkeypatch):
+    """The exact twin of the miss-plus-failure rule: a theme too degraded to
+    check might have owned the id, so a miss elsewhere must not read as a
+    confident not_found — and the error names the unchecked theme."""
+    def degraded(id, near_lat, near_lon):
+        raise overture.SchemaDegraded(["id"])
+
+    monkeypatch.setattr(gers, "_PROBES", tuple(
+        (theme, degraded if theme == "places" else fn) for theme, fn in gers._PROBES
+    ))
+    with pytest.raises(overture.SchemaDegraded, match="places"):
+        gers.gers_lookup("00000000000000000000000000000000")
+
+
+def test_a_degraded_miss_is_not_negatively_cached(monkeypatch):
+    """A miss we could not confirm must not answer the retry (degraded twin
+    of test_a_failed_lookup_is_not_negatively_cached)."""
+    def degraded(id, near_lat, near_lon):
+        raise overture.SchemaDegraded(["id"])
+
+    monkeypatch.setattr(gers, "_PROBES", tuple(
+        (theme, degraded if theme == "buildings" else fn) for theme, fn in gers._PROBES
+    ))
+    with pytest.raises(overture.SchemaDegraded):
+        gers.gers_lookup(BUILDING_ID)
+    monkeypatch.undo()
+    assert gers.gers_lookup(BUILDING_ID)["theme"] == "buildings"
+
+
+def test_hinted_probe_without_a_bbox_column_is_degraded_not_an_unbounded_scan(monkeypatch):
+    """No bbox column means a hint cannot bound the probe. Scanning anyway
+    would be the very full-theme read the hint exists to prevent (and would
+    make the hint-miss note false), so the theme reports as degraded."""
+    monkeypatch.setattr(overture, "missing_columns", lambda glob, required=None: ["bbox"])
+    scans = _count_unbounded_scans(monkeypatch)
+    with pytest.raises(overture.SchemaDegraded, match="bbox"):
+        gers._probe_divisions(DIVISION_ID, NEAR_LAT, NEAR_LON)
+    with pytest.raises(overture.SchemaDegraded, match="bbox"):
+        gers._probe_buildings(BUILDING_ID, NEAR_LAT, NEAR_LON)
+    assert scans == []
+
+
+def test_unhinted_probe_without_a_bbox_column_still_scans_and_resolves(monkeypatch):
+    """The exhaustive path never needed the bbox column; it stays available."""
+    monkeypatch.setattr(overture, "missing_columns", lambda glob, required=None: ["bbox"])
+    result = gers._probe_divisions(DIVISION_ID, None, None)
+    assert result["theme"] == "divisions"
+    assert result["name"] == "Brooklyn"
+    assert result["lat"] is None
 
 
 # --- server tool boundary ---------------------------------------------------
@@ -365,6 +416,16 @@ def test_server_tool_hinted_miss_explains_the_bound():
     result = server.gers_lookup(BUILDING_ID, near_lat=FAR_LAT, near_lon=FAR_LON)
     assert result["error"] == "not_found"
     assert result["note"] == gers.HINT_MISS_NOTE
+
+
+def test_server_tool_hinted_lookup_without_bbox_columns_is_schema_degraded(monkeypatch):
+    """A hint that cannot bound anything must not produce the hint-miss note
+    ("the search was bounded") — the answer is schema_degraded, note-free."""
+    monkeypatch.setattr(overture, "missing_columns", lambda glob, required=None: ["bbox"])
+    result = server.gers_lookup(BUILDING_ID, near_lat=NEAR_LAT, near_lon=NEAR_LON)
+    assert result["error"] == "schema_degraded"
+    assert "bbox" in result["missing_columns"]
+    assert "note" not in result
 
 
 def test_server_tool_unhinted_miss_carries_no_hint_note():

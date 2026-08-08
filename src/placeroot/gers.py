@@ -183,6 +183,32 @@ def _hint_bbox(
     return geo.bbox_around(near_lat, near_lon, overture.ID_HINT_RADIUS_M)
 
 
+def _bbox_or_degraded(
+    theme: str, missing: set[str], near_lat: float | None, near_lon: float | None
+) -> tuple[float, float, float, float] | None:
+    """The probe's hint bbox — treating a hint that *cannot* bound as degraded.
+
+    The bbox column is what a near-hint prunes on. When the dataset is
+    missing it, a hinted probe has no bounded path left: silently running
+    the unbounded full-theme scan instead would be exactly the read the
+    hint exists to prevent (for buildings, a multi-billion-row one), and it
+    would make the hint-miss note a lie ("the search was bounded" when it
+    wasn't). So a hinted probe on a bbox-less dataset is SchemaDegraded —
+    the caller sees which theme couldn't be checked — while an unhinted
+    probe still scans unbounded, which is the exhaustive path anyway.
+    """
+    if near_lat is None or near_lon is None:
+        return None
+    if "bbox" in missing:
+        logger.warning(
+            "gers_lookup: %s dataset has no bbox column; a hinted probe cannot "
+            "be bounded, reporting the theme as degraded instead of scanning it in full",
+            theme,
+        )
+        raise overture.SchemaDegraded(["bbox"], dataset=f"{theme} dataset")
+    return _hint_bbox(near_lat, near_lon)
+
+
 def _compact(fields: dict) -> dict:
     """Drop null summary fields — an absent attribute costs nothing to omit."""
     return {k: v for k, v in fields.items() if v is not None}
@@ -272,6 +298,8 @@ def _probe_divisions(id: str, near_lat: float | None, near_lon: float | None) ->
     if essential_missing:
         raise overture.SchemaDegraded(essential_missing)
 
+    bbox = _bbox_or_degraded("divisions", missing, near_lat, near_lon)
+
     name_expr = "NULL" if "names" in missing else "names.primary"
     subtype_expr = "NULL" if "subtype" in missing else "subtype"
     country_expr = "NULL" if "country" in missing else "country"
@@ -286,7 +314,6 @@ def _probe_divisions(id: str, near_lat: float | None, near_lon: float | None) ->
         f"{country_expr} AS country, {region_expr} AS region, "
         f"{lat_expr} AS lat, {lon_expr} AS lon"
     )
-    bbox = None if "bbox" in missing else _hint_bbox(near_lat, near_lon)
     row = _lookup_row("divisions", select_sql, glob, id, bbox)
     if row is None:
         return None
@@ -315,6 +342,8 @@ def _probe_buildings(id: str, near_lat: float | None, near_lon: float | None) ->
     if essential_missing:
         raise overture.SchemaDegraded(essential_missing)
 
+    bbox = _bbox_or_degraded("buildings", missing, near_lat, near_lon)
+
     geom_expr = geo.geom_expr(glob)
     subtype_expr = "NULL" if "subtype" in missing else "subtype"
     class_expr = "NULL" if "class" in missing else "class"
@@ -327,7 +356,6 @@ def _probe_buildings(id: str, near_lat: float | None, near_lon: float | None) ->
         f"round(ST_Y(ST_Centroid({geom_expr})), 6) AS lat, "
         f"round(ST_X(ST_Centroid({geom_expr})), 6) AS lon"
     )
-    bbox = None if "bbox" in missing else _hint_bbox(near_lat, near_lon)
     # A hint also lets the narrowed read go through the local tile cache,
     # the same way buildings_at's bbox-bounded queries do.
     row = _lookup_row(
@@ -476,10 +504,13 @@ def gers_lookup(
     what an unhinted lookup costs. Note that the hint *bounds* the search:
     an id outside the box comes back as a miss, not as a slow full scan.
 
-    Raises ValueError for an id that could not be a GERS id at all,
-    UpstreamUnavailable if every theme that could still have claimed the id
-    failed its remote scan, or SchemaDegraded only if *every* theme is too
-    degraded to look an id up in.
+    Raises ValueError for an id that could not be a GERS id at all. When no
+    theme claims the id but some theme could not actually be checked, the
+    miss is not confirmed and the lookup raises instead of returning None:
+    UpstreamUnavailable if a probe's remote scan failed, SchemaDegraded if
+    a theme was too degraded to look an id up in — either error naming the
+    unchecked theme(s). A hinted probe whose dataset is missing the bbox
+    column counts as degraded (see _bbox_or_degraded).
     """
     id = _validate_id(id)
     hinted = near_lat is not None and near_lon is not None
@@ -492,9 +523,9 @@ def gers_lookup(
         try:
             entity = probe(id, near_lat, near_lon)
         except overture.SchemaDegraded as e:
-            # One theme missing its id column shouldn't stop the others from
-            # answering; only an all-themes-degraded dataset is fatal.
-            degraded.append(e)
+            # One theme too degraded to check shouldn't stop the others from
+            # answering; a lookup only errors if nothing resolved (below).
+            degraded.append((theme, e))
             continue
         except overture.UpstreamUnavailable as e:
             # Likewise one theme being unreachable: an id the *next* theme
@@ -517,9 +548,14 @@ def gers_lookup(
                 f"({failed[0][1].detail}); no other theme claimed it, so this is "
                 "an unavailable lookup rather than a confirmed not-found"
             )
-        if len(degraded) == len(_PROBES):
-            raise degraded[0]
-        if not hinted and not degraded:
+        if degraded:
+            # Same reasoning for a degraded theme: it might have owned the
+            # id, so a miss elsewhere is not a confirmed not-found. Name the
+            # unchecked theme(s) rather than answering with false confidence.
+            names = ", ".join(theme for theme, _ in degraded)
+            columns = sorted({c for _, e in degraded for c in e.missing})
+            raise overture.SchemaDegraded(columns, dataset=f"{names} dataset(s)")
+        if not hinted:
             # Only an exhaustive, fully-healthy miss is authoritative enough
             # to cache — see the module docstring.
             _cache_miss(id)
