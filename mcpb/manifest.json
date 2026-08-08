@@ -79,6 +79,10 @@
       "description": "What kind of land is this: land use and land cover classification at a point."
     },
     {
+      "name": "infrastructure_at",
+      "description": "Infrastructure near a point, nearest first: bridges, towers, piers — and street furniture."
+    },
+    {
       "name": "geocode",
       "description": "Free-text place name -> ranked candidate locations, from Overture divisions and places."
     },
