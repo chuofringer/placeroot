@@ -132,6 +132,13 @@ MIN_USABLE_COMPONENT_NODES = 5  # components smaller than this are treated as fr
 # graph as if it were complete.
 MAX_GRAPH_SEGMENTS = 200_000
 
+# Build-time pruning tolerance (m) for the per-edge shape vertices a Graph
+# retains so route(include_path=True) can follow the road instead of
+# chording it — see _edge_shape. A vertex this close to the line its
+# neighbours already draw is noise at street scale; keeping it would cost
+# memory in every cached graph for detail no caller can act on.
+GRAPH_SHAPE_EPSILON_M = 2.0
+
 # Overture road classes a pedestrian cannot use. Everything else (footway,
 # path, residential, service, tertiary, living_street, cycleway, steps,
 # unclassified, unknown, ...) is treated as walkable.
@@ -410,6 +417,47 @@ def _point_at_fraction(
     return lat1 + frac * (lat2 - lat1), lon1 + frac * (lon2 - lon1)
 
 
+def _edge_shape(
+    points: list[tuple[float, float]], cum: list[float], at_a: float, at_b: float
+) -> tuple[list[tuple[float, float]], float]:
+    """(source vertices strictly between at_a and at_b, meters dropped pruning them).
+
+    The counterpart to _point_at_fraction: where that interpolates the node
+    position at a connector's `at`, this returns the real shape vertices
+    that fall in the open interval between two consecutive stops, i.e. the
+    road's actual bends inside one graph edge. Strict comparisons keep the
+    edge's own endpoints out of the list (they are graph nodes already and
+    are emitted from Graph.coords).
+
+    Vertices within GRAPH_SHAPE_EPSILON_M of the line their neighbours
+    already describe are dropped here, at build time. Every graph carries
+    these shapes whether or not anyone asks for a path, and a gridded city
+    spends most of its vertices restating "still straight" — the worst-case
+    extraction (60 km drive radius over Manhattan, capped at
+    MAX_GRAPH_SEGMENTS) keeps a graph that would otherwise be over half
+    shape data. The dropped vertices are sub-lane-width detail, well under
+    the accuracy of the source geometry itself — but the second return value
+    says exactly how far off the retained shape is, so route() can report
+    that rather than a 0.0 it hasn't earned.
+    """
+    total = cum[-1]
+    if total <= 0.0:
+        return [], 0.0
+    lo, hi = at_a * total, at_b * total
+    interior = [p for p, d in zip(points, cum) if lo < d < hi]
+    if not interior:
+        return [], 0.0
+    lat_a, lon_a = _point_at_fraction(points, at_a, cum)
+    lat_b, lon_b = _point_at_fraction(points, at_b, cum)
+    line = [(lon_a, lat_a), *interior, (lon_b, lat_b)]
+    mpd_lat = simplify.METERS_PER_DEGREE_LAT
+    mpd_lon = mpd_lat * max(math.cos(math.radians(lat_a)), 1e-6)
+    projected = [(lon * mpd_lon, lat * mpd_lat) for lon, lat in line]
+    kept = simplify._rdp_keep_indices(projected, GRAPH_SHAPE_EPSILON_M)
+    dropped_m = simplify._max_deviation_m(projected, kept)
+    return [line[i] for i in kept if 0 < i < len(line) - 1], dropped_m
+
+
 def _parse_linestring_wkt(wkt: str) -> list[tuple[float, float]]:
     """"LINESTRING (lon1 lat1, lon2 lat2, ...)" -> [(lon, lat), ...]."""
     inner = wkt.strip()
@@ -457,6 +505,11 @@ class Graph:
     True for a drive-mode graph whose per-edge weight was already baked to
     seconds at build time (variable speed per class/speed-limit) — such a
     graph must be queried with dijkstra(..., speed_m_s=1.0).
+
+    Nodes are segment endpoints and interior connectors only, so an edge's
+    two node coordinates are a chord across whatever the road actually
+    does in between; the intermediate shape vertices are kept separately
+    (see shape_between) so route()'s emitted geometry can follow the road.
     """
 
     def __init__(self):
@@ -473,6 +526,19 @@ class Graph:
         # street being one-way for cars doesn't disconnect it as a
         # geometric/topological fragment).
         self._undirected_neighbors: dict[str, set[str]] = {}
+        # (node_a, node_b) -> (weight, [(lon, lat), ...], dropped_m): the
+        # source segment's shape vertices strictly *between* the two nodes,
+        # in a -> b order, plus how far GRAPH_SHAPE_EPSILON_M pruning moved
+        # the retained shape off the source geometry. Only edges that
+        # actually bend carry an entry, so a grid of straight segments
+        # stores nothing. Read back through shape_between() so an emitted
+        # route line follows the real road rather than cutting the chord
+        # across every curve (#161 sweep). Parallel edges between the same
+        # node pair keep the lowest-weight shape, which is the one dijkstra
+        # would have taken.
+        self._edge_shapes: dict[
+            tuple[str, str], tuple[float, list[tuple[float, float]], float]
+        ] = {}
 
     def add_node(self, node_id: str, lat: float, lon: float) -> None:
         self.adjacency.setdefault(node_id, [])
@@ -480,7 +546,14 @@ class Graph:
         self.coords.setdefault(node_id, (lat, lon))
 
     def add_edge(
-        self, a: str, b: str, weight: float, length_m: float, directed: bool = False
+        self,
+        a: str,
+        b: str,
+        weight: float,
+        length_m: float,
+        directed: bool = False,
+        shape: list[tuple[float, float]] | None = None,
+        shape_dropped_m: float = 0.0,
     ) -> None:
         if a == b:
             return
@@ -489,6 +562,30 @@ class Graph:
         self._undirected_neighbors[b].add(a)
         if not directed:
             self.adjacency[b].append((a, weight, length_m))
+        # An edge whose every shape vertex was pruned away still gets an
+        # entry: its shape is empty but its dropped_m isn't, and losing that
+        # would put the emitted line right back on the chord while reporting
+        # a deviation of 0.0.
+        if shape or shape_dropped_m:
+            existing = self._edge_shapes.get((a, b))
+            if existing is None or weight < existing[0]:
+                self._edge_shapes[(a, b)] = (weight, shape or [], shape_dropped_m)
+
+    def shape_between(self, a: str, b: str) -> tuple[list[tuple[float, float]], float]:
+        """(shape vertices strictly between `a` and `b` in a -> b order, meters dropped).
+
+        Empty and 0.0 when the edge is a straight chord (or unknown). An
+        undirected edge is stored once, under the orientation build_graph
+        walked the source segment in, so the reverse orientation is served
+        by reversing the stored vertex list.
+        """
+        entry = self._edge_shapes.get((a, b))
+        if entry is not None:
+            return entry[1], entry[2]
+        entry = self._edge_shapes.get((b, a))
+        if entry is not None:
+            return list(reversed(entry[1])), entry[2]
+        return [], 0.0
 
     def node_count(self) -> int:
         return len(self.adjacency)
@@ -773,12 +870,28 @@ def build_graph(
         for (at_a, id_a), (at_b, id_b) in zip(stops, stops[1:]):
             edge_length_m = (at_b - at_a) * total_length_m
             weight = edge_length_m / edge_speed_m_s if bake_time else edge_length_m
+            # edge_length_m is measured along the source geometry, so the
+            # edge's real shape has to travel with it — otherwise the only
+            # thing left of this segment's curves is a chord between two
+            # nodes that is shorter than the length the router charges for
+            # it (#161 sweep: a Conzelman Rd switchback came back as a
+            # 2-point line 851 m short of its own distance_m).
+            shape, dropped_m = _edge_shape(points, cum, at_a, at_b)
             if forward_allowed and backward_allowed:
-                graph.add_edge(id_a, id_b, weight, edge_length_m, directed=False)
+                graph.add_edge(
+                    id_a, id_b, weight, edge_length_m, directed=False,
+                    shape=shape, shape_dropped_m=dropped_m,
+                )
             elif forward_allowed:
-                graph.add_edge(id_a, id_b, weight, edge_length_m, directed=True)
+                graph.add_edge(
+                    id_a, id_b, weight, edge_length_m, directed=True,
+                    shape=shape, shape_dropped_m=dropped_m,
+                )
             else:
-                graph.add_edge(id_b, id_a, weight, edge_length_m, directed=True)
+                graph.add_edge(
+                    id_b, id_a, weight, edge_length_m, directed=True,
+                    shape=list(reversed(shape)), shape_dropped_m=dropped_m,
+                )
 
     return graph
 
@@ -1400,15 +1513,29 @@ PATH_ENVELOPE_TOKENS = 12
 # smaller, the path is dropped with a note rather than emitted truncated.
 PATH_MIN_TOKENS = 30
 
+# Said instead of a path when one couldn't be fitted. Priced against the
+# budget before it's attached (see route) — at very small budgets even this
+# doesn't fit, and the bare "path_omitted" flag is all that's left. Kept
+# terse for exactly that reason: a note that costs more than the path it is
+# apologizing for can only ever be dropped.
+PATH_OMITTED_NOTE = (
+    "omitted (not truncated) to fit the token budget; raise PLACEROOT_TOKEN_BUDGET"
+)
+
 
 def _path_linestring(
     graph: Graph, path: list[tuple[str, float]], max_tokens: int
 ) -> tuple[dict, float] | None:
-    """(GeoJSON LineString, max_deviation_m) for `path`, or None if it can't fit max_tokens.
+    """(GeoJSON LineString, deviation_m from the source roads), or None if it can't fit max_tokens.
 
     `path` is _dijkstra_path_to_target's node sequence (source first, target
-    last), so the emitted coordinates are already in A->B order; they are
-    read straight out of Graph.coords and flipped to GeoJSON's [lon, lat].
+    last), so the emitted coordinates are already in A->B order; each node
+    is read out of Graph.coords and flipped to GeoJSON's [lon, lat], with
+    the traversed edge's own shape vertices (Graph.shape_between) spliced
+    in between consecutive nodes so the line follows the road instead of
+    cutting the chord across each curve. Without them the emitted line can
+    be dramatically shorter than the distance_m reported alongside it, while
+    a deviation of 0.0 claims it is exact.
 
     Simplification goes through the same simplify.simplify_geometry the
     isochrone polygon and building footprints use — a token budget, not a
@@ -1424,12 +1551,28 @@ def _path_linestring(
     line that stops short of the destination while looking complete.
     """
     coords: list[list[float]] = []
+
+    def push(lon: float, lat: float) -> None:
+        point = [round(lon, PATH_COORD_PRECISION), round(lat, PATH_COORD_PRECISION)]
+        # A shape vertex can round onto the node it sits next to; a repeated
+        # position adds tokens and tells the reader nothing.
+        if not coords or coords[-1] != point:
+            coords.append(point)
+
+    prev_node: str | None = None
+    shape_dropped_m = 0.0
     for node_id, _along_m in path:
         latlon = graph.coords.get(node_id)
         if latlon is None:  # pragma: no cover - every path node came from the graph
             continue
+        if prev_node is not None:
+            shape, dropped_m = graph.shape_between(prev_node, node_id)
+            shape_dropped_m = max(shape_dropped_m, dropped_m)
+            for shape_lon, shape_lat in shape:
+                push(shape_lon, shape_lat)
         lat, lon = latlon
-        coords.append([round(lon, PATH_COORD_PRECISION), round(lat, PATH_COORD_PRECISION)])
+        push(lon, lat)
+        prev_node = node_id
     if not coords:
         return None
     if len(coords) == 1:
@@ -1446,7 +1589,11 @@ def _path_linestring(
     line[0], line[-1] = coords[0], coords[-1]
     if budget.estimate_tokens({"path": geometry}) > max_tokens:
         return None
-    return geometry, simplified["max_deviation_m"]
+    # Two things move the emitted line off the source geometry: the token-fit
+    # simplification here, and the GRAPH_SHAPE_EPSILON_M pruning build_graph
+    # already did. Report the larger — reporting only the first is how a
+    # perfectly-fitting curvy route came back claiming 0.0.
+    return geometry, max(simplified["max_deviation_m"], shape_dropped_m)
 
 
 def route(
@@ -1496,9 +1643,11 @@ def route(
     plus "truncated"/"note" if the extraction graph hit MAX_GRAPH_SEGMENTS.
 
     include_path=True additionally returns "path", a GeoJSON LineString
-    tracing the route from A's snapped node to B's, and
-    "path_max_deviation_m", how far the simplified line strays from the true
-    node-by-node path (0.0 when nothing was dropped). It is omitted entirely
+    tracing the route from A's snapped node to B's — following each
+    traversed segment's own shape vertices, not chords between
+    intersections — and "path_max_deviation_m", how far the simplified line
+    strays from that full-fidelity road geometry (0.0 when nothing was
+    dropped, which for a curvy route means the whole shape fit). It is omitted entirely
     by default — compact-first: most callers want the distance and duration,
     and the polyline is by far the largest thing this tool can return. The
     line is fitted to whatever of the token budget the rest of the response
@@ -1533,16 +1682,25 @@ def route(
         # Whatever the rest of the response (including any truncation note)
         # leaves of the budget is what the polyline gets, so adding the path
         # can never push the answer over the budget the other tools respect.
-        path_tokens = budget.token_budget() - budget.estimate_tokens(result) - PATH_ENVELOPE_TOKENS
+        max_tokens = budget.token_budget()
+        base_tokens = budget.estimate_tokens(result)
+        path_tokens = max_tokens - base_tokens - PATH_ENVELOPE_TOKENS
         line = (
             _path_linestring(graph, path, path_tokens) if path_tokens >= PATH_MIN_TOKENS else None
         )
         if line is None:
-            result["path_omitted"] = True
-            result["path_note"] = (
-                "the route path did not fit the remaining token budget and was omitted "
-                "rather than truncated; raise PLACEROOT_TOKEN_BUDGET to include it"
-            )
+            # The "why there's no path" explanation is itself ~35 tokens, so
+            # it has to be priced inside the fit decision rather than stapled
+            # on after it — a budget too small to hold the path is often too
+            # small to hold a paragraph about the path either (#161 sweep:
+            # budget=60 produced a 78-token response). Fall back to the bare
+            # flag, then to saying nothing, so the answer never overruns.
+            explained = {**result, "path_omitted": True, "path_note": PATH_OMITTED_NOTE}
+            flagged = {**result, "path_omitted": True}
+            if budget.estimate_tokens(explained) <= max_tokens:
+                result = explained
+            elif budget.estimate_tokens(flagged) <= max_tokens:
+                result = flagged
         else:
             geometry, deviation_m = line
             result["path"] = geometry

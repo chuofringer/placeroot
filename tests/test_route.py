@@ -565,6 +565,101 @@ def test_route_path_survives_the_simplify_geometry_tool_round_trip():
     assert round_trip["geometry"]["type"] == "LineString"
 
 
+# --- the path must follow the road, not chord across it (#161 sweep) --------
+
+SWITCHBACK_START, SWITCHBACK_END = fx.switchback_endpoints_latlon()
+
+
+def _linestring_length_m(coords: list[list[float]]) -> float:
+    total = 0.0
+    for (lon1, lat1), (lon2, lat2) in zip(coords, coords[1:]):
+        total += routing._haversine_m(lat1, lon1, lat2, lon2)
+    return total
+
+
+def test_route_path_follows_segment_shape_instead_of_chording_it():
+    """Graph nodes are segment endpoints and interior connectors, so a line
+    drawn node-to-node cuts straight across every curve in between. On the
+    fixture's switchback spur that chord is ~430 m against ~850 m of actual
+    road: pre-fix the emitted line had 2 coordinates and was half the length
+    of the distance_m printed beside it, while path_max_deviation_m claimed
+    0.0. The emitted geometry must account for the distance it reports."""
+    result = routing.route(
+        *SWITCHBACK_START, *SWITCHBACK_END, mode="walk", include_path=True
+    )
+    coords = result["path"]["coordinates"]
+    line_m = _linestring_length_m(coords)
+
+    # The detour is real: a straight line between the endpoints is far
+    # shorter than the route, so a chorded path could not fake this.
+    chord_m = routing._haversine_m(*SWITCHBACK_START, *SWITCHBACK_END)
+    assert chord_m < result["distance_m"] * 0.6
+
+    assert len(coords) > 2
+    assert line_m == pytest.approx(result["distance_m"], rel=0.02)
+
+
+def test_route_path_deviation_is_zero_only_when_the_shape_is_fully_kept():
+    """path_max_deviation_m is measured against the road-following line, so
+    an unsimplified curvy route reports 0.0 honestly — and a budget that
+    forces vertices out reports a deviation on the order of the detour it
+    dropped, not 0.0."""
+    full = routing.route(*SWITCHBACK_START, *SWITCHBACK_END, mode="walk", include_path=True)
+    assert full["path_max_deviation_m"] == 0.0
+    assert len(full["path"]["coordinates"]) == len(
+        set(map(tuple, full["path"]["coordinates"]))
+    )
+
+
+def test_route_path_deviation_accounts_for_build_time_shape_pruning(monkeypatch):
+    """Shapes are pruned at build time (GRAPH_SHAPE_EPSILON_M), so a path
+    whose token-fit simplification dropped nothing is still not exact.
+    Reporting only the simplify deviation would print 0.0 for a line that
+    is knowingly off the road — the reported number covers both."""
+    monkeypatch.setattr(routing, "GRAPH_SHAPE_EPSILON_M", 120.0)
+    routing._graph_cache.clear()
+    result = routing.route(*SWITCHBACK_START, *SWITCHBACK_END, mode="walk", include_path=True)
+    # 120 m of tolerance flattens the fixture's 100/150 m zigzag corners...
+    assert len(result["path"]["coordinates"]) < 8
+    # ...and that is reported, not hidden behind a full-fidelity 0.0.
+    assert result["path_max_deviation_m"] > 0
+    routing._graph_cache.clear()
+
+
+def test_route_path_shape_is_direction_symmetric():
+    """The stored shape belongs to the segment, not to a direction: routing
+    B->A must return the same road, reversed."""
+    forward = routing.route(*SWITCHBACK_START, *SWITCHBACK_END, mode="walk", include_path=True)
+    backward = routing.route(*SWITCHBACK_END, *SWITCHBACK_START, mode="walk", include_path=True)
+    assert backward["path"]["coordinates"] == list(
+        reversed(forward["path"]["coordinates"])
+    )
+
+
+def test_route_path_omitted_note_is_priced_inside_the_budget(monkeypatch):
+    """The ~35-token "why there's no path" note used to be appended after
+    the fit check, so a budget too small for the path overran anyway
+    (budget=60 produced a 78-token response). Whatever survives, the final
+    response fits — and asking for a path never costs more than not asking
+    for one at a budget too small for either."""
+    for limit in (40, 50, 60, 70, 80, 100):
+        monkeypatch.setenv("PLACEROOT_TOKEN_BUDGET", str(limit))
+        kwargs = dict(mode="walk")
+        plain = routing.route(CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, **kwargs)
+        result = routing.route(
+            CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON,
+            include_path=True, **kwargs,
+        )
+        # The distance/duration answer is irreducible, so at absurd budgets
+        # the floor is what route() costs without a path at all; include_path
+        # must never push past that or past the budget itself.
+        floor = budget.estimate_tokens(plain)
+        assert budget.estimate_tokens(result) <= max(limit, floor), limit
+        assert result["distance_m"] > 0
+        if "path_note" in result:
+            assert result["path_omitted"] is True
+
+
 def test_server_route_include_path_passthrough():
     result = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", include_path=True)
     assert "error" not in result

@@ -1248,8 +1248,9 @@ def route(
     carries "truncated": true — the route may be suboptimal or incomplete.
 
     include_path=true adds "path", a GeoJSON LineString from the origin's
-    snapped node to the destination's, simplified to fit the token budget,
-    with "path_max_deviation_m" reporting how far it strays from the exact
+    snapped node to the destination's that follows the streets' own
+    geometry (curves included), simplified to fit the token budget, with
+    "path_max_deviation_m" reporting how far it strays from the exact
     street path. Off by default (the polyline dwarfs the rest of the
     answer) — ask for it only to draw or trace the route. If even a fully
     simplified line won't fit, you get "path_omitted": true instead of a
