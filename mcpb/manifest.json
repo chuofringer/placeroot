@@ -143,6 +143,10 @@
       "description": "Places on the way from A to B: corridor search along the route, ranked by detour."
     },
     {
+      "name": "optimize_route",
+      "description": "Best order to visit several stops: multi-stop route ordering (a small TSP)."
+    },
+    {
       "name": "data_version",
       "description": "Which Overture Maps release backs the answers from every other tool."
     }
