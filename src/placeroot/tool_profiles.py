@@ -1,6 +1,6 @@
 """PLACEROOT_TOOLS: load only the tools an install actually uses (issue #182).
 
-The whole 22-tool surface costs ~7.4k estimated tokens of JSON schema in
+The whole 25-tool surface costs ~9.2k estimated tokens of JSON schema in
 every conversation, paid before the agent asks anything. Most installs use
 a slice of it. This module is the single registry mapping a profile name to
 its tools, plus the parser for the `PLACEROOT_TOOLS` env var; server.py
@@ -39,6 +39,10 @@ PROFILES: dict[str, frozenset[str]] = {
         "search_categories",
         "summarize_area",
         "route",
+        # Composed of two tools core already carries (route + find_places),
+        # and its description names both — so this is the profile where
+        # those references resolve.
+        "places_along_route",
     }),
     # Find/name/identify, including the batch siblings and the category
     # lookup that makes find_places' category filter usable.
@@ -52,6 +56,8 @@ PROFILES: dict[str, frozenset[str]] = {
         "reverse_geocode",
         "reverse_geocode_batch",
         "search_categories",
+        # Identify: any GERS id back to the entity it names.
+        "gers_lookup",
     }),
     # Getting between points, and how far apart things are.
     "routing": frozenset({
@@ -67,6 +73,7 @@ PROFILES: dict[str, frozenset[str]] = {
         "compare_areas",
         "buildings_at",
         "land_use_at",
+        "infrastructure_at",
         "admin_lookup",
     }),
     # Working on geometry the caller already has, and turning results into
@@ -136,15 +143,18 @@ def resolve(spec: str | None, known_tools: set[str]) -> set[str]:
         return set(known_tools)
     entries = [part.strip().lower() for part in spec.split(",")]
     entries = [e for e in entries if e]
-    if not entries or ALL in entries:
+    if not entries:
         return set(known_tools)
 
+    # Validate every entry before honoring `all`: "all,typo" must fail the
+    # same way "typo" does, not silently load the full surface — the loud
+    # failure on typos is this module's whole contract.
     selected: set[str] = set()
     unknown: list[str] = []
     for entry in entries:
         if entry in PROFILES:
             selected |= PROFILES[entry]
-        elif entry in known_tools:
+        elif entry in known_tools or entry == ALL:
             selected.add(entry)
         else:
             unknown.append(entry)
@@ -154,4 +164,6 @@ def resolve(spec: str | None, known_tools: set[str]) -> set[str]:
             f"Valid profiles: {', '.join(sorted(PROFILES) + [ALL])}. "
             f"Valid tool names: {', '.join(sorted(known_tools))}."
         )
+    if ALL in selected:
+        return set(known_tools)
     return selected | (ALWAYS_INCLUDED & known_tools)

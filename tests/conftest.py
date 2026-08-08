@@ -13,7 +13,7 @@ os.environ.pop("PLACEROOT_TOOLS", None)
 import duckdb  # noqa: E402
 import pytest  # noqa: E402
 
-from placeroot import buildings, overture, release, routing  # noqa: E402
+from placeroot import buildings, gers, overture, release, routing  # noqa: E402
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "places.parquet"
 # type=division_area (polygons; consumed by divisions.py's admin_lookup) and
@@ -73,6 +73,10 @@ def offline_data(request, monkeypatch):
     # into the next test — clear it so every test starts from a cold cache,
     # which the cache-specific tests rely on to count extractions accurately.
     routing.clear_graph_cache()
+    # gers.py's negative cache is keyed by (release, id), and the release is
+    # pinned identically for every test — so a not-found cached against one
+    # test's fixtures would answer for the next test's. Start each test cold.
+    gers.clear_miss_cache()
     try:
         yield
     finally:

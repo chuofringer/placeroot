@@ -10,9 +10,58 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Gate: a release must not be able to publish past a stale website. The
+  # site's version copy and tool list are guarded by tests, but those guards
+  # only run on a push/PR — a release tagged without the version bump would
+  # otherwise sail straight to PyPI while placeroot.dev still advertised the
+  # previous version. Failing here costs a re-tag; failing silently costs a
+  # wrong website for as long as nobody notices.
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Package versions agree with the release tag
+        env:
+          # Empty on workflow_dispatch (no tag to compare against); the
+          # pyproject/npm cross-check below still runs.
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          PY_VERSION=$(uv run python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          NPM_VERSION=$(node -p "require('./npm/package.json').version")
+          echo "pyproject=$PY_VERSION npm=$NPM_VERSION tag=${TAG_NAME:-<none>}"
+
+          if [ "$PY_VERSION" != "$NPM_VERSION" ]; then
+            echo "::error::pyproject.toml ($PY_VERSION) and npm/package.json ($NPM_VERSION) disagree." >&2
+            exit 1
+          fi
+
+          if [ -n "${TAG_NAME:-}" ] && [ "${TAG_NAME#v}" != "$PY_VERSION" ]; then
+            echo "::error::Release tag $TAG_NAME does not match the package version $PY_VERSION. Run the Prepare Release workflow, merge its PR, then re-tag." >&2
+            exit 1
+          fi
+
+      - name: Website matches this release
+        run: |
+          set -euo pipefail
+          # Same guards CI runs, re-run here against the tagged tree: every
+          # version string on the site equals the package version, and the
+          # tool grid matches the tools server.py actually registers.
+          uv run pytest tests/test_site_version_sync.py tests/test_site_tools_sync.py -q
+
   pypi:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: verify
     environment: pypi
     permissions:
       id-token: write  # trusted publishing: no PyPI token in the repo

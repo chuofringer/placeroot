@@ -42,6 +42,13 @@ def test_all_wins_over_other_entries():
     assert _names("core,all") == _all_names()
 
 
+def test_all_does_not_excuse_an_unknown_name():
+    """"all,typo" must fail like "typo", not silently load everything."""
+    with pytest.raises(tool_profiles.InvalidToolSelection) as excinfo:
+        server.build_server("all,typo")
+    assert "typo" in str(excinfo.value)
+
+
 def test_core_profile():
     assert _names("core") == {
         "find_places",
@@ -52,6 +59,7 @@ def test_core_profile():
         "search_categories",
         "summarize_area",
         "route",
+        "places_along_route",
         "data_version",
     }
 

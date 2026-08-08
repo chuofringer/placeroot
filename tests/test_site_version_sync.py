@@ -95,9 +95,13 @@ def test_new_in_release_chip_names_registered_tools():
     match = _NEW_IN_RELEASE_RE.search(doc)
     assert match, "index.html: the 'new in this release' chip is missing"
 
-    named = _CHIP_TOOL_RE.findall(match.group("body"))
-    assert named, "index.html: the 'new in this release' chip lists no tools"
+    body = match.group("body").strip()
+    assert body, "index.html: the 'new in this release' chip is empty"
 
+    # A release that adds no tools carries free-text copy instead (see
+    # scripts/bump_version.py --highlight), so an empty name list is fine —
+    # but any name shown in the tool style must be a real tool.
+    named = _CHIP_TOOL_RE.findall(body)
     unknown = set(named) - _registered_tool_names()
     assert not unknown, (
         f"index.html's 'new in this release' chip names {sorted(unknown)}, "

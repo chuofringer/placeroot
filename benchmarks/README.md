@@ -1,3 +1,18 @@
+# Benchmarks
+
+Two scripts live here, measuring different things:
+
+- **`token_benchmark.py`** (issue #26) — accuracy plus tokens-per-correct-
+  answer against **live** Overture data, versus the raw payload an agent
+  would have had to read itself. Needs network. Writes `results.md`. The
+  rest of this file describes it.
+- **`token_efficiency.py`** (issue #178) — fully **offline**, on committed
+  fixtures: the MCP schema surface of every registered tool (the context an
+  agent pays before asking anything) plus per-answer response cost for a
+  fixed scenario suite. Writes the generated section of
+  [`../docs/benchmarks.md`](../docs/benchmarks.md), which carries its
+  methodology and analysis.
+
 # Token benchmark (issue #26)
 
 ## Reality check first
@@ -50,7 +65,7 @@ normal suite, no network required.
 ## The other half of the cost: the schema surface
 
 This benchmark measures the tokens an *answer* costs. The tool schemas cost
-tokens too — ~7.6k estimated tokens across all 22 tools, paid once per
+tokens too — ~9.2k estimated tokens across all 25 tools, paid once per
 conversation before the agent asks anything, which is roughly 56 median
 answers' worth. That side isn't reduced by better answers; it's reduced by
 registering fewer tools. See `PLACEROOT_TOOLS` in the top-level README
