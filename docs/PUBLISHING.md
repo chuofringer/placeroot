@@ -27,6 +27,20 @@ in the repo, and there is no 2FA prompt for CI.
    - History note: the earlier automation-token approach failed with `EOTP`
      (the account requires an OTP on publish, which CI can't supply). Trusted
      publishing removes tokens and OTP from the path entirely.
+3. The npm job publishes from `npm/`, so the package's README must live there —
+   npm ignores a README one directory up, and a package without one renders as
+   `ERROR: No README data found!` on npmjs.com (issue #203). `npm/README.md` is
+   **generated** from the root `README.md`:
+
+   ```bash
+   uv run python scripts/sync_npm_readme.py          # regenerate
+   uv run python scripts/sync_npm_readme.py --check  # what CI runs
+   ```
+
+   Edit the root README (or the npm-only sections inside the script), never
+   `npm/README.md` directly — `tests/test_npm_readme_sync.py` fails CI on drift.
+   The README is baked into each published version's metadata, so a README fix
+   only reaches npmjs.com when the next version publishes.
 
 ## Cut a release
 
