@@ -266,6 +266,40 @@ the answer carries the coverage note -- because an empty postcode answer
 usually means "outside the addresses theme" (GB) or "covered but carrying no
 postcode values" (the 9 countries in _POSTCODE_ZERO_COUNTRIES), not "no such
 code".
+
+--- #224: bbox columns on the local divisions table (and why they are empty) ---
+
+R27 wanted a city extent to bound a street-level address scan with (#225): a
+hand-guessed Mountain View bbox 0.002 degrees too small returned empty for
+"1600 Amphitheatre Parkway". The divisions rows carry a `bbox` struct
+natively, so the four corners (xmin/ymin/xmax/ymax) now ride along in
+_materialize_divisions_table's COPY and _division_bbox reads them back by id.
+The columns are INTERNAL: no tool response mentions them, and geocode /
+resolve_place answers are unchanged.
+
+**The extent is not there.** Measured live against release 2026-07-22.0, every
+type=division row's bbox is degenerate -- the rows are points (the same
+bbox.ymin/bbox.xmin this module has always read as lat/lon), and their bbox is
+just that point's float32 rounding envelope: 7.6e-6 to 1.5e-5 degrees wide,
+3.8e-6 to 7.6e-6 tall, i.e. under two metres, for Mountain View CA exactly as
+for San Francisco. So _division_bbox applies _DEGENERATE_BBOX_SPAN_DEG and
+returns None for them rather than handing a caller a one-metre "city" it would
+silently scan nothing inside of. A caller that gets None must fall back;
+today, in practice, that is every locality.
+
+The real extents live one type over, on divisions/type=division_area, which
+carries a genuine polygon bbox plus a `division_id` column that joins straight
+back to this table's `id` (verified live: division 15f1bd57-... "Mountain
+View" -> area bbox -122.1176,37.3542 .. -122.0449,37.4711, about 6.4 x 13 km).
+Materializing that theme wholesale is a second full-table COPY this module has
+no other use for, so #224 deliberately stops here: the plumbing and the
+honest None. #225, which resolves one anchor locality per query, should fetch
+the area bbox for that single id at query time instead -- one bounded lookup,
+not another release-sized table.
+
+If a future Overture release starts populating real extents on the division
+rows themselves, nothing here needs changing: _division_bbox already returns
+whatever it finds once the span clears the degeneracy floor.
 """
 
 import logging
@@ -302,6 +336,21 @@ _DIVISIONS_TABLE_SUBDIR = "geocode-divisions"
 _DIVISIONS_TABLE_FILENAME = "table.parquet"
 # #214: the alternate-name table, written alongside the primary one.
 _ALT_NAMES_TABLE_FILENAME = "alt_names.parquet"
+
+# #224: the bbox columns carried by the materialized divisions table. Named
+# with a bbox_ prefix rather than reusing the struct so the stale-cache check
+# is a plain column-name test (see _divisions_table_has_bbox), and so `lat`/
+# `lon` -- which are bbox.ymin/bbox.xmin, unchanged since #43 -- keep meaning
+# exactly what they meant before.
+_DIVISIONS_BBOX_COLUMNS = ("bbox_xmin", "bbox_ymin", "bbox_xmax", "bbox_ymax")
+
+# Below this span (degrees, in either axis) a bbox is a point, not an extent.
+# Overture's division rows store a point's float32 rounding envelope: measured
+# live at 7.6e-6 to 1.5e-5 degrees wide, so this floor sits ~6x above the
+# widest observed noise and far below any real division polygon -- even a
+# single city block spans more than 1e-4 degrees (~11m). See the module
+# docstring's #224 section.
+_DEGENERATE_BBOX_SPAN_DEG = 1e-4
 
 # Bigger number = ranked higher among same name-match tier. Chosen so a
 # free-text query like "Springfield" surfaces the city before a same-named
@@ -643,6 +692,13 @@ def _materialize_divisions_table(path: Path, glob: str) -> None:
     top-level columns), and losing alternate-name search is a much smaller
     loss than losing the local table entirely — so a failure there is logged
     and swallowed, leaving the install on primary names only.
+
+    #224 adds the four bbox corners as their own columns. They are internal
+    (nothing in a tool response reads them) and, on today's data, degenerate —
+    see the module docstring's #224 section and _division_bbox. `bbox` is
+    required by the theme, so unlike `population`/`hierarchies` they need no
+    probe_schema guard: a dataset without it fails the existing `names` check
+    or the COPY itself, both of which the caller already handles.
     """
     cols = overture.probe_schema(glob)
     if cols is not None and "names" not in cols:
@@ -661,7 +717,9 @@ def _materialize_divisions_table(path: Path, glob: str) -> None:
         COPY (
             SELECT id, names.primary AS name, subtype, country, {region_expr},
                    bbox.ymin AS lat, bbox.xmin AS lon, {population_expr},
-                   {hierarchies_expr}
+                   {hierarchies_expr},
+                   bbox.xmin AS bbox_xmin, bbox.ymin AS bbox_ymin,
+                   bbox.xmax AS bbox_xmax, bbox.ymax AS bbox_ymax
             FROM read_parquet('{glob}', hive_partitioning=1)
             WHERE names.primary IS NOT NULL
         ) TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)
@@ -724,6 +782,105 @@ def _local_alt_names_table(local_table: str | None) -> str | None:
     return None
 
 
+# #224: divisions tables this process has already checked for the bbox columns
+# (and, if they were missing, tried once to rebuild). Same shape and same
+# reasoning as _ALT_BUILD_ATTEMPTED above — an existing cache directory has a
+# divisions table without the bbox columns, and rather than leaving it that way
+# until the next Overture release rolls the cache over, it is rebuilt in place
+# the first time the columns are found missing. Bounded to one attempt per
+# release per process so a persistent failure costs one try, not one per
+# geocode call.
+_DIVISIONS_BBOX_CHECKED: set[str] = set()
+
+
+def _divisions_table_has_bbox(path: Path) -> bool:
+    """Whether the materialized table at `path` carries the #224 bbox columns.
+
+    False for any table written before #224, and also for an unreadable one —
+    both mean the same thing to the caller (rebuild if you haven't yet, and
+    treat bbox lookups as unavailable either way).
+    """
+    try:
+        with overture._conn_lock:
+            cols = overture.conn().execute(
+                f"SELECT * FROM read_parquet('{path}') LIMIT 0"
+            ).description
+    except duckdb.Error:
+        return False
+    names = {c[0] for c in cols or []}
+    return all(c in names for c in _DIVISIONS_BBOX_COLUMNS)
+
+
+def _division_bbox(
+    local_table: str | None, division_id: str
+) -> tuple[float, float, float, float] | None:
+    """(xmin, ymin, xmax, ymax) for `division_id`, or None.
+
+    INTERNAL — #225 (street-level address search) is the intended consumer; no
+    tool response exposes this. None means "no usable extent", which covers
+    four cases the caller must treat identically: no local table (cache off),
+    a table predating #224, an unknown id, and — on release 2026-07-22.0, for
+    *every* division row measured — a bbox whose span is below
+    _DEGENERATE_BBOX_SPAN_DEG, i.e. a point rather than an extent.
+
+    That last case is the normal one today, not an edge case: division rows
+    are points and their bbox is the point's float32 rounding envelope. A
+    caller needing a real city extent must join divisions/type=division_area
+    on its `division_id` column instead. See the module docstring's #224
+    section for the measurements and for why that join is not done here.
+    """
+    if not local_table:
+        return None
+    sql = f"""
+        SELECT bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax
+        FROM read_parquet('{local_table}') WHERE id = $id LIMIT 1
+    """
+    try:
+        with overture._conn_lock:
+            row = overture.conn().execute(sql, {"id": division_id}).fetchone()
+    except duckdb.Error:
+        # Pre-#224 table (no such columns), or an unreadable one.
+        return None
+    if row is None or any(v is None for v in row):
+        return None
+    xmin, ymin, xmax, ymax = (float(v) for v in row)
+    if (xmax - xmin) < _DEGENERATE_BBOX_SPAN_DEG and (ymax - ymin) < _DEGENERATE_BBOX_SPAN_DEG:
+        return None
+    return xmin, ymin, xmax, ymax
+
+
+def _rebuild_once_for_bbox_columns(path: Path, glob: str) -> None:
+    """Rebuild a pre-#224 divisions table in place so it carries the bbox
+    columns, at most once per release per process.
+
+    Failure is logged and swallowed: the existing table is still a perfectly
+    good name table, and the only thing missing without the rebuild is a bbox
+    lookup that returns None today anyway. Note this also refreshes the #214
+    alt table, since _materialize_divisions_table writes both from the one
+    upstream read.
+    """
+    key = str(path)
+    if key in _DIVISIONS_BBOX_CHECKED:
+        return
+    # Recorded before the check, not after, so the schema probe is also once
+    # per process: the common case is a table that already has the columns,
+    # and re-probing it on every geocode call would be pure overhead.
+    _DIVISIONS_BBOX_CHECKED.add(key)
+    if _divisions_table_has_bbox(path):
+        return
+    logger.info("divisions table at %s predates #224 (no bbox columns); rebuilding it", path)
+    t0 = time.time()
+    try:
+        _materialize_divisions_table(path, glob)
+    except (duckdb.Error, overture.UpstreamUnavailable) as e:
+        logger.warning(
+            "divisions table rebuild for bbox columns failed, keeping the "
+            "existing table (bbox lookups stay unavailable): %s", e,
+        )
+        return
+    logger.info("divisions table rebuilt with bbox columns in %.1fs", time.time() - t0)
+
+
 def _local_divisions_table() -> str | None:
     """Path to the materialized local divisions name table for the active
     release, building it (blocking — see the module docstring's #43
@@ -735,9 +892,10 @@ def _local_divisions_table() -> str | None:
         return None
     active_release = release.resolve_release()
     path = _local_divisions_table_path(active_release)
-    if path.exists():
-        return str(path)
     glob = overture.upstream_glob(theme="divisions", type_="division")
+    if path.exists():
+        _rebuild_once_for_bbox_columns(path, glob)
+        return str(path)
     logger.info(
         "materializing local divisions name table for release %s "
         "(first geocode call this process; one-time cost per release)",
