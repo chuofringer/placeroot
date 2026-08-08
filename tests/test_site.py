@@ -24,6 +24,7 @@ _ALLOWED_EXTERNAL_HOSTS = (
     "fonts.gstatic.com",
     "github.com",
     "pypi.org",
+    "www.npmjs.com",
     "docs.astral.sh",
     "placeroot.dev",  # og:image / canonical absolute URLs in meta tags
     # Developer-credit links (footer): the maintainer's site and siblings.
