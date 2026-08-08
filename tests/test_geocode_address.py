@@ -82,10 +82,34 @@ def test_trailing_house_number_is_the_german_convention():
         ("94110", (None, "94110")),
         # Mid-query digits are part of the street name, not the house number.
         ("West 42nd Street", (None, "West 42nd Street")),
+        # R28 MED-6: the five parse cases the sweep hit. A trailing number
+        # after a leading street type is the street's own name...
+        ("Calle 8", (None, "Calle 8")),
+        ("Avenida 9", (None, "Avenida 9")),
+        ("Carrera 7", (None, "Carrera 7")),
+        # ...as is a leading number followed by a particle...
+        ("8 de Octubre", (None, "8 de Octubre")),
+        # ...while a digits-plus-letter token really is a house number.
+        ("221B Baker Street", ("221B", "Baker Street")),
+        ("Baker Street 221B", ("221B", "Baker Street")),
+        # The German convention is the mirror image of Calle 8 -- the street
+        # type is glued to the name, so the trailing number still splits.
+        ("Hauptstraße 5", ("5", "Hauptstraße")),
     ],
 )
 def test_house_number_is_leading_or_trailing_only(text, expected):
     assert geocode._split_house_number(text) == expected
+
+
+def test_calle_8_searches_for_the_street_not_house_number_8():
+    """Stripping the 8 searches Miami for a street called "Calle" and comes
+    back empty -- an answer that looks honest and is not."""
+    result = geocode.geocode_address("Calle 8, Miami", limit=10)
+
+    assert result["anchor"]["name"] == "Miami"
+    # Every doorway on the street, nearest Miami's own point first.
+    assert {r["number"] for r in result["results"]} == {"1", "3", "5"}
+    assert all(r["street"] == "CALLE 8" for r in result["results"])
 
 
 def test_first_comma_splits_street_from_place_and_the_rest_goes_to_geocode():
