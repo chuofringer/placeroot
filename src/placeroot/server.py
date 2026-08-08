@@ -21,6 +21,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
 from placeroot import (
+    addresses,
     budget,
     buildings,
     cache,
@@ -1025,6 +1026,46 @@ def reverse_geocode(lat: float, lon: float) -> dict:
         return geocoding.reverse_geocode(lat, lon)
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
+
+
+@_tool("Nearest street addresses to a point")
+def address_at(lat: float, lon: float, limit: int = addresses.DEFAULT_LIMIT) -> dict:
+    """Nearest street addresses to a point, nearest first: number, street, unit, postcode.
+
+    The address-level counterpart to reverse_geocode (issue #188): where
+    that returns one collapsed hop plus the admin chain, this returns the
+    few doorways around the point with the attributes an address lookup
+    wants. Returns {"results": [{number, street, unit, postcode,
+    postal_city, address_levels, country, distance_m}, ...]}, capped at 5.
+    Optional attributes are omitted when the source has no value for them.
+
+    No id is returned: Overture documents address ids as not GERS-stable, so
+    unlike a place/division/building id there is no durable handle to hand
+    out. For a stable reference to what is at a coordinate, use
+    reverse_geocode and hold onto the division it names.
+
+    Coverage is the thing to read carefully. The addresses theme is
+    Overture's only alpha theme and covers 39 countries — no UK, Ireland,
+    India, China, Korea or Russia, no Africa or Middle East, and little of
+    Latin America outside Brazil, Mexico, Chile, Colombia and Uruguay. An
+    empty results list is a valid answer, never an error, and always carries
+    a "note" saying whether the country is outside the theme's coverage
+    entirely or is covered but had nothing within the search radius.
+
+    Returns a structured {"error": ...} if upstream is unavailable, if the
+    dataset is missing the bbox/street columns this depends on, or for an
+    out-of-range coordinate.
+    """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
+    try:
+        result = addresses.address_at(lat, lon, limit)
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    return budget.apply_budget(result, "results")
 
 
 @_tool("Reverse geocode points in batch")
