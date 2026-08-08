@@ -20,9 +20,18 @@ from placeroot import gers, overture, server
 PLACE_ID = "41b764a2b9ea71e97088d733d7f5898c"       # "Cluster Place 000"
 DIVISION_ID = "gers-div-brooklyn"                    # locality, US-NY
 BUILDING_ID = "394aca62078e6fb90fe1879e6e78e990"     # residential house
-DOWNTOWN_ID = "2835be088c8011a4aee3dff5cabbcf13"     # containing neighborhood
+
+# The containment chain over the fixture centre, smallest first. Downtown and
+# Metropolis exist as division *entities* as well as division_area polygons,
+# sharing one GERS id across the two fixtures the way real Overture data does
+# — which is what lets a division's own entry appear in its own chain.
+DOWNTOWN_ID = "2835be088c8011a4aee3dff5cabbcf13"     # neighborhood
+METROPOLIS_ID = "9e34d836dceb18e1254bed9c0a40d455"   # locality, contains Downtown
+FRANKLIN_COUNTY_ID = "e54421a2777c4e19bee68decbc66e8ee"  # county, contains Metropolis
 
 NEAR_LAT, NEAR_LON = 40.6996, -73.9006
+# Far from every fixture row: São Paulo. Any probe hinted here misses.
+FAR_LAT, FAR_LON = -23.55, -46.63
 
 
 def test_place_id_resolves_to_places_theme():
@@ -54,9 +63,48 @@ def test_division_id_resolves_with_subtype_and_country():
     assert result["type"] == "division"
     assert result["name"] == "Brooklyn"
     assert result["summary"] == {"subtype": "locality", "country": "US", "region": "US-NY"}
-    assert result["related"]["division_id"] == DOWNTOWN_ID
     # No building join for a division — that relation is meaningless.
     assert "building_id" not in result["related"]
+
+
+def test_division_relates_to_its_parent_not_to_a_child():
+    """The containing division of a division is the chain entry AFTER it.
+
+    Metropolis is a locality whose reference point also falls inside the
+    Downtown neighborhood, so its chain is [Downtown, Metropolis, Franklin
+    County, ...]. Skipping only the self entry and taking the next would
+    hand back Downtown — a division Metropolis *contains*, reported as the
+    division containing it.
+    """
+    related = gers.gers_lookup(METROPOLIS_ID)["related"]
+    assert related["division_id"] == FRANKLIN_COUNTY_ID
+    assert related["division_name"] == "Franklin County"
+    assert related["division_type"] == "county"
+    assert related["division_id"] != DOWNTOWN_ID
+
+
+def test_smallest_division_in_the_chain_relates_to_the_next_one_up():
+    related = gers.gers_lookup(DOWNTOWN_ID)["related"]
+    assert related["division_id"] == METROPOLIS_ID
+    assert related["division_type"] == "locality"
+
+
+def test_division_absent_from_the_containment_chain_has_no_related_division():
+    """No container we can name honestly beats naming the wrong one.
+
+    gers-div-brooklyn is a division entity with no division_area polygon of
+    its own, so it never appears in the chain over its own point — there is
+    no "entry after self" to report.
+    """
+    assert gers.gers_lookup(DIVISION_ID)["related"] == {}
+
+
+def test_top_of_the_chain_has_no_related_division(monkeypatch):
+    """A country is the last chain entry; nothing contains it."""
+    monkeypatch.setattr(gers.divisions, "admin_lookup", lambda lat, lon: {
+        "chain": [{"id": DOWNTOWN_ID, "name": "Downtown", "type": "neighborhood"}]
+    })
+    assert gers.gers_lookup(DOWNTOWN_ID)["related"] == {}
 
 
 def test_building_id_resolves_with_class_and_height():
@@ -89,23 +137,92 @@ def test_near_hint_returns_the_same_entity_as_the_unhinted_lookup(id_):
     assert hinted == gers.gers_lookup(id_)
 
 
-def test_hint_that_misses_still_resolves_via_the_full_scan_fallback():
-    """A stale hint must never manufacture a false not_found (see module docstring)."""
-    # São Paulo — nowhere near the fixture cluster, so every probe's 50km
-    # box misses and each has to fall back to the unbounded scan.
-    result = gers.gers_lookup(BUILDING_ID, near_lat=-23.55, near_lon=-46.63)
-    assert result is not None
-    assert result["theme"] == "buildings"
+def test_hint_that_misses_bounds_the_search_instead_of_scanning(monkeypatch):
+    """A hint is a boundary, not a preference — see the module docstring.
+
+    The old contract fell back to an unbounded scan per theme, which for
+    buildings is a multi-billion-row read triggered by one stale coordinate.
+    """
+    scans = _count_unbounded_scans(monkeypatch)
+    assert gers.gers_lookup(BUILDING_ID, near_lat=FAR_LAT, near_lon=FAR_LON) is None
+    assert scans == []
+
+
+def test_the_same_id_still_resolves_without_the_hint():
+    """The escape hatch the hint-miss note points at actually works."""
+    assert gers.gers_lookup(BUILDING_ID)["theme"] == "buildings"
+
+
+def _count_unbounded_scans(monkeypatch) -> list[str]:
+    """Records every id query issued without a bbox predicate, and returns the list.
+
+    Two chokepoints cover all three probes: gers._run_id_query (divisions,
+    buildings) and overture._run_place_details_query (places, reached via
+    place_details' id path).
+    """
+    unbounded: list[str] = []
+
+    real_id_query = gers._run_id_query
+
+    def id_query_spy(select_sql, from_source, params, bbox_filter):
+        if bbox_filter is None:
+            unbounded.append(from_source)
+        return real_id_query(select_sql, from_source, params, bbox_filter)
+
+    real_place_query = overture._run_place_details_query
+
+    def place_query_spy(from_source, filters, order_expr, params, missing):
+        if not any("bbox" in f for f in filters):
+            unbounded.append(from_source)
+        return real_place_query(from_source, filters, order_expr, params, missing)
+
+    monkeypatch.setattr(gers, "_run_id_query", id_query_spy)
+    monkeypatch.setattr(overture, "_run_place_details_query", place_query_spy)
+    return unbounded
 
 
 def test_unknown_id_returns_none():
     assert gers.gers_lookup("00000000000000000000000000000000") is None
 
 
+def test_repeat_unknown_id_is_served_from_the_negative_cache(monkeypatch):
+    junk = "deadbeefdeadbeefdeadbeefdeadbeef"
+    assert gers.gers_lookup(junk) is None
+
+    def boom(id, near_lat, near_lon):
+        raise AssertionError("a cached miss must not re-probe any theme")
+
+    monkeypatch.setattr(gers, "_PROBES", (("places", boom),))
+    assert gers.gers_lookup(junk) is None
+
+
+def test_a_hinted_miss_is_not_cached_as_a_miss():
+    """Otherwise the hint-miss note would send callers to a poisoned answer."""
+    assert gers.gers_lookup(BUILDING_ID, near_lat=FAR_LAT, near_lon=FAR_LON) is None
+    assert gers.gers_lookup(BUILDING_ID)["theme"] == "buildings"
+
+
 @pytest.mark.parametrize("bad", ["", "   ", "x" * (gers.MAX_ID_LENGTH + 1)])
 def test_malformed_id_raises_value_error(bad):
     with pytest.raises(ValueError):
         gers.gers_lookup(bad)
+
+
+@pytest.mark.parametrize("bad", [
+    "not an id",                      # whitespace inside
+    "41b764a2b9ea71e97088d733d7f5898c'; DROP TABLE",
+    "s3://bucket/places/*.parquet",   # a path, not an id
+    "café",                           # non-ASCII
+    "id.with.dots",
+])
+def test_id_that_cannot_be_a_gers_id_raises_value_error(bad):
+    with pytest.raises(ValueError, match="not a GERS id"):
+        gers.gers_lookup(bad)
+
+
+@pytest.mark.parametrize("ok", [PLACE_ID, DIVISION_ID, "A_B-c9"])
+def test_id_gate_admits_real_and_fixture_id_shapes(ok):
+    assert gers._validate_id(ok) == ok
 
 
 def test_non_string_id_raises_value_error():
@@ -128,11 +245,7 @@ def test_place_probe_runs_before_the_building_probe(monkeypatch):
         return wrapper
 
     monkeypatch.setattr(gers, "_PROBES", tuple(
-        record(n, f) for n, f in (
-            ("places", gers._probe_places),
-            ("divisions", gers._probe_divisions),
-            ("buildings", gers._probe_buildings),
-        )
+        (theme, record(theme, fn)) for theme, fn in gers._PROBES
     ))
     gers.gers_lookup(PLACE_ID)
     assert probed == ["places"]
@@ -150,14 +263,68 @@ def test_related_joins_degrade_instead_of_failing_the_lookup(monkeypatch):
     monkeypatch.setattr(gers.divisions, "admin_lookup", boom)
     result = gers.gers_lookup(DIVISION_ID)
     assert result["name"] == "Brooklyn"
-    assert result["related"] == {}
+    assert result["related"] == {"note": gers.RELATED_UNAVAILABLE_NOTE}
+
+
+def test_a_broken_related_join_is_distinguishable_from_no_containing_division():
+    """{} means "in no division"; only an outage carries a note."""
+    assert "note" not in gers.gers_lookup(DIVISION_ID)["related"]
+
+
+def test_a_broken_building_join_notes_itself_without_losing_the_division(monkeypatch):
+    def boom(lat, lon, radius_m=None, limit=None):
+        raise overture.UpstreamUnavailable("buildings theme down")
+
+    monkeypatch.setattr(gers.buildings, "buildings_at", boom)
+    related = gers.gers_lookup(PLACE_ID)["related"]
+    assert related["division_id"] == DOWNTOWN_ID
+    assert related["note"] == gers.BUILDING_UNAVAILABLE_NOTE
+
+
+def test_one_theme_being_down_does_not_stop_a_later_theme_resolving(monkeypatch):
+    """Probe 1 failing must not mask an id probe 2 would have resolved."""
+    def boom(id, near_lat, near_lon):
+        raise overture.UpstreamUnavailable("places theme down")
+
+    monkeypatch.setattr(gers, "_PROBES", tuple(
+        (theme, boom if theme == "places" else fn) for theme, fn in gers._PROBES
+    ))
+    result = gers.gers_lookup(DIVISION_ID)
+    assert result["theme"] == "divisions"
+    assert result["name"] == "Brooklyn"
+
+
+def test_a_miss_plus_a_failure_is_upstream_unavailable_not_not_found(monkeypatch):
+    """An unchecked theme might have owned the id — that is not a not_found."""
+    def boom(id, near_lat, near_lon):
+        raise overture.UpstreamUnavailable("buildings theme down")
+
+    monkeypatch.setattr(gers, "_PROBES", tuple(
+        (theme, boom if theme == "buildings" else fn) for theme, fn in gers._PROBES
+    ))
+    with pytest.raises(overture.UpstreamUnavailable, match="buildings"):
+        gers.gers_lookup("00000000000000000000000000000000")
+
+
+def test_a_failed_lookup_is_not_negatively_cached(monkeypatch):
+    """A miss we could not confirm must not answer the retry."""
+    def boom(id, near_lat, near_lon):
+        raise overture.UpstreamUnavailable("buildings theme down")
+
+    monkeypatch.setattr(gers, "_PROBES", tuple(
+        (theme, boom if theme == "buildings" else fn) for theme, fn in gers._PROBES
+    ))
+    with pytest.raises(overture.UpstreamUnavailable):
+        gers.gers_lookup(BUILDING_ID)
+    monkeypatch.undo()
+    assert gers.gers_lookup(BUILDING_ID)["theme"] == "buildings"
 
 
 def test_upstream_failure_propagates(monkeypatch):
     def boom(id, near_lat, near_lon):
         raise overture.UpstreamUnavailable("s3 unreachable")
 
-    monkeypatch.setattr(gers, "_PROBES", (boom,))
+    monkeypatch.setattr(gers, "_PROBES", (("places", boom),))
     with pytest.raises(overture.UpstreamUnavailable):
         gers.gers_lookup(PLACE_ID)
 
@@ -170,10 +337,10 @@ def test_schema_degraded_only_when_every_theme_is_degraded(monkeypatch):
         return {"theme": "divisions", "type": "division", "name": "X", "lat": None,
                 "lon": None, "summary": {}}
 
-    monkeypatch.setattr(gers, "_PROBES", (degraded, finds_it))
+    monkeypatch.setattr(gers, "_PROBES", (("places", degraded), ("divisions", finds_it)))
     assert gers.gers_lookup(PLACE_ID)["name"] == "X"
 
-    monkeypatch.setattr(gers, "_PROBES", (degraded, degraded))
+    monkeypatch.setattr(gers, "_PROBES", (("places", degraded), ("divisions", degraded)))
     with pytest.raises(overture.SchemaDegraded):
         gers.gers_lookup(PLACE_ID)
 
@@ -194,8 +361,34 @@ def test_server_tool_unknown_id_is_not_found():
     assert "segments" in result["detail"]
 
 
+def test_server_tool_hinted_miss_explains_the_bound():
+    result = server.gers_lookup(BUILDING_ID, near_lat=FAR_LAT, near_lon=FAR_LON)
+    assert result["error"] == "not_found"
+    assert result["note"] == gers.HINT_MISS_NOTE
+
+
+def test_server_tool_unhinted_miss_carries_no_hint_note():
+    assert "note" not in server.gers_lookup("00000000000000000000000000000000")
+
+
 def test_server_tool_malformed_id_is_bad_request():
     assert server.gers_lookup("")["error"] == "bad_request"
+
+
+def test_server_tool_id_with_illegal_characters_is_bad_request():
+    result = server.gers_lookup("SELECT * FROM places")
+    assert result["error"] == "bad_request"
+    assert "GERS id" in result["detail"]
+
+
+def test_server_tool_reports_degraded_fields_for_the_resolved_theme(monkeypatch):
+    monkeypatch.setattr(overture, "degraded_fields", lambda: ["websites"])
+    monkeypatch.setattr(server.buildings, "degraded_fields", lambda: ["num_floors"])
+
+    assert server.gers_lookup(PLACE_ID)["degraded_fields"] == ["websites"]
+    assert server.gers_lookup(BUILDING_ID)["degraded_fields"] == ["num_floors"]
+    # A division answer draws on neither dataset's optional columns.
+    assert "degraded_fields" not in server.gers_lookup(DIVISION_ID)
 
 
 def test_server_tool_swapped_near_coords_is_bad_request():

@@ -998,7 +998,8 @@ def _run_place_details_query(from_source: str, filters: list[str], order_by: str
 
 
 def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None,
-                          upstream: str, missing: set[str]) -> tuple | None:
+                          upstream: str, missing: set[str],
+                          bound_to_hint: bool = False) -> tuple | None:
     """Resolve a GERS id, cheapest source first (issue #41).
 
     1. Whatever tiles the local cache already has on disk — no upstream
@@ -1011,6 +1012,12 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
     3. Full-dataset scan, last resort — logged as a warning so an agent
        calling place_details(id=...) without a hint (or with a hint that
        missed) is visible in the logs as the slow path it is.
+
+    bound_to_hint stops at step 2: when a hint was given and missed, return
+    None instead of scanning the whole dataset. Off by default, so
+    place_details' own contract is unchanged; gers.py opts in because it
+    probes several themes and a hint-miss there would cost one unbounded
+    scan per theme (see gers.py's module docstring).
     """
     if cache.enabled():
         tile_paths = cache.cached_tile_paths(release.resolve_release(), THEME, upstream)
@@ -1030,6 +1037,12 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
         row = _run_place_details_query(from_source, ["id = $id", bbox_filter], "1", params, missing)
         if row is not None:
             return row
+        if bound_to_hint:
+            logger.info(
+                "place_details(id=%s): near-hint missed and the lookup is hint-bounded; "
+                "not falling back to a full-dataset scan", id,
+            )
+            return None
 
     logger.warning(
         "place_details(id=%s) fell back to a full-dataset scan (no cache hit, "
@@ -1048,6 +1061,7 @@ def place_details(
     radius_m: float = DEFAULT_DETAILS_RADIUS_M,
     near_lat: float | None = None,
     near_lon: float | None = None,
+    bound_to_hint: bool = False,
 ) -> dict | None:
     """One place, in full: resolved by GERS id, or by name + a nearby point.
 
@@ -1062,7 +1076,9 @@ def place_details(
     prefilter instead of scanning the whole dataset. Ignored when id isn't
     given. Bare id lookups (no hint) still work exactly as before; they just
     check the local tile cache first and fall back to a full scan, logged,
-    if that misses too.
+    if that misses too. bound_to_hint=True drops that last fallback, so a
+    hint that misses returns None rather than scanning the dataset — see
+    _place_details_by_id.
 
     Raises SchemaDegraded if bbox is missing (needed for the name+point
     path; an id lookup doesn't strictly need it, but the schema probe
@@ -1078,7 +1094,7 @@ def place_details(
     missing = set(_check_schema(upstream))
 
     if id:
-        row = _place_details_by_id(id, near_lat, near_lon, upstream, missing)
+        row = _place_details_by_id(id, near_lat, near_lon, upstream, missing, bound_to_hint)
     else:
         bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(
             lat, lon, radius_m

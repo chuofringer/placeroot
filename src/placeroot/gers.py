@@ -25,11 +25,29 @@ same reasoning as place_details — which is the difference between a
 row-group-pruned read and a full-theme scan. Callers that have a coordinate
 should always pass it.
 
-A hint that *misses* still falls back to the unbounded scan, per theme, and
-logs that it did. That is place_details' existing contract (issue #41) and
-all three probes here follow it, so the three themes behave identically and
-a stale or wrong hint can never turn a resolvable id into a false
-not_found — it only costs the scan the unhinted call would have cost.
+A hint that *misses* does NOT fall back to the unbounded scan. This is a
+deliberate departure from place_details' single-theme contract (issue #41),
+where one hint-miss costs one extra scan: here a hint-miss would cost one
+unbounded scan *per theme*, and the worst of the three is the buildings
+glob — billions of rows. So the hint is treated as a boundary, not a
+preference: if no theme has the id inside the box, the lookup returns
+not_found carrying HINT_MISS_NOTE, which says the search was bounded and
+tells the caller to retry without the hint for an exhaustive lookup. The
+trade is explicit — a stale or wrong hint turns a resolvable id into a
+not_found, and the note is what makes that recoverable rather than a lie.
+
+An *unhinted* lookup still scans each theme unbounded, as before. That is
+the exhaustive path and it is genuinely slow; the only protection is the
+negative cache below, which makes the *second* lookup of a junk id free.
+
+Negative cache
+--------------
+An id no theme claims is the expensive case, and agents retry. A small
+in-process (release, id) -> miss set, mirroring overture.py's division
+geometry miss-cache, means a repeated junk id costs nothing after the
+first. Only *exhaustive* (unhinted) misses are cached: a hinted miss only
+proves the id isn't in that one box, so caching it would poison the
+exhaustive lookup the note just told the caller to make.
 
 The probe order is by likelihood, not cost: places is by far the theme
 whose ids agents actually hold (it's what find_places, geocode, resolve_place
@@ -53,18 +71,70 @@ tool genuinely cannot resolve it yet.
 """
 
 import logging
+import re
+import threading
 
 import duckdb
 
-from placeroot import buildings, db, divisions, geo, overture
+from placeroot import buildings, db, divisions, geo, overture, release
 
 logger = logging.getLogger(__name__)
 
 # Sanity bound on the id string itself. Real GERS ids are short (32-char
-# hex-ish tokens); anything wildly longer is a caller mistake, and rejecting
+# hex tokens); anything wildly longer is a caller mistake, and rejecting
 # it up front beats spending three theme scans discovering it matches
 # nothing. Generous enough not to reject a longer id format later.
 MAX_ID_LENGTH = 128
+
+# Character gate on the id, deliberately looser than the real format.
+# Live GERS ids are 32 lowercase hex characters, and gating on exactly that
+# would be the tightest useful check — but the committed test fixtures use
+# readable synthetic division ids ("gers-div-brooklyn"), and so does
+# scripts/build_geocode_fixture.py which generates them, so a strict hex
+# gate would reject the fixtures wholesale. This charset gate is the
+# conservative middle: it admits every real GERS id and every fixture id,
+# while rejecting the shapes that actually indicate a caller mistake —
+# whitespace inside the id, quotes, path separators, glob characters, URLs,
+# whole sentences. Those are bad_request; a well-formed id that matches
+# nothing stays not_found, which is the distinction that matters.
+ID_CHARSET_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# Returned as "note" on a not_found when the caller passed a near-hint —
+# see the module docstring on why a hint bounds the search rather than
+# merely ordering it.
+HINT_MISS_NOTE = (
+    "near_lat/near_lon bounded this lookup to a ~50km box around the hint; an id "
+    "outside that box is reported as not found without an exhaustive scan. Retry "
+    "without near_lat/near_lon to search every theme in full (much slower)."
+)
+
+# Exhaustive misses only (see the module docstring). Bounded by entry count:
+# the entries are short strings, so a flat cap is enough, and the whole
+# thing is dropped rather than LRU-evicted — a negative cache exists to
+# absorb retry storms, and rebuilding it costs exactly what not having it
+# would have cost anyway.
+_MISS_CACHE_MAX_ENTRIES = 4096
+_miss_cache: set[tuple[str, str]] = set()
+_miss_cache_lock = threading.Lock()
+
+
+def clear_miss_cache() -> None:
+    """Drop every cached not-found id. For tests and hot-reloads."""
+    with _miss_cache_lock:
+        _miss_cache.clear()
+
+
+def _miss_cached(id: str) -> bool:
+    with _miss_cache_lock:
+        return (release.resolve_release(), id) in _miss_cache
+
+
+def _cache_miss(id: str) -> None:
+    with _miss_cache_lock:
+        if len(_miss_cache) >= _MISS_CACHE_MAX_ENTRIES:
+            _miss_cache.clear()
+        _miss_cache.add((release.resolve_release(), id))
+
 
 # Divisions probe: the type=division rows (the division *entity* — point,
 # name, subtype, country/region), not the type=division_area polygon rows.
@@ -95,6 +165,12 @@ def _validate_id(id: str) -> str:
         raise ValueError("id must be a non-empty GERS id")
     if len(trimmed) > MAX_ID_LENGTH:
         raise ValueError(f"id is longer than {MAX_ID_LENGTH} characters; that is not a GERS id")
+    if not ID_CHARSET_RE.match(trimmed):
+        raise ValueError(
+            f"{id!r} is not a GERS id: expected an opaque token of letters, digits, "
+            "'-' and '_' (a real GERS id is 32 lowercase hex characters, e.g. "
+            "'41b764a2b9ea71e97088d733d7f5898c')"
+        )
     return trimmed
 
 
@@ -131,26 +207,30 @@ def _run_id_query(select_sql: str, from_source: str, params: dict, bbox_filter: 
 def _lookup_row(
     theme: str, select_sql: str, glob: str, id: str, bbox, from_source_fn=None
 ):
-    """Hint-narrowed id lookup, falling back to the unbounded scan on a miss.
+    """Hint-narrowed id lookup, or the unbounded scan when there is no hint.
 
-    The shared body of the divisions and buildings probes — the same
-    two-stage shape overture._place_details_by_id uses for places, so all
-    three themes have one contract (see the module docstring). from_source_fn
-    lets a theme route the *narrowed* read through its tile cache; the
-    fallback read is always straight upstream, since there is no bbox to
-    resolve tiles from.
+    The shared body of the divisions and buildings probes — the same shape
+    overture._place_details_by_id(bound_to_hint=True) uses for places, so
+    all three themes have one contract (see the module docstring). A bbox
+    is a *boundary*: a miss inside it returns None rather than escalating
+    to a full-theme scan. from_source_fn lets a theme route the narrowed
+    read through its tile cache; the unbounded read is always straight
+    upstream, since there is no bbox to resolve tiles from.
     """
-    unbounded = f"read_parquet('{glob}', hive_partitioning=1)"
     if bbox is not None:
         bbox_filter, bbox_params = geo.bbox_filter_sql(*bbox)
+        unbounded = f"read_parquet('{glob}', hive_partitioning=1)"
         source = from_source_fn(bbox) if from_source_fn is not None else unbounded
         row = _run_id_query(select_sql, source, {"id": id, **bbox_params}, bbox_filter)
-        if row is not None:
-            return row
-        logger.warning(
-            "gers_lookup(%s): %s near-hint missed, falling back to a full-theme scan", id, theme
-        )
-    return _run_id_query(select_sql, unbounded, {"id": id}, None)
+        if row is None:
+            logger.info(
+                "gers_lookup(%s): %s near-hint missed; not escalating to a full-theme scan",
+                id, theme,
+            )
+        return row
+    return _run_id_query(
+        select_sql, f"read_parquet('{glob}', hive_partitioning=1)", {"id": id}, None
+    )
 
 
 def _probe_places(id: str, near_lat: float | None, near_lon: float | None) -> dict | None:
@@ -160,9 +240,12 @@ def _probe_places(id: str, near_lat: float | None, near_lon: float | None) -> di
     (local tile cache -> hint-constrained upstream -> full scan, logged);
     reimplementing it here would be a second copy that drifts. We just take
     its rich row and keep the handful of fields that belong in a compact
-    cross-theme answer.
+    cross-theme answer. bound_to_hint drops its last stage so this probe
+    treats a hint as a boundary like the other two do.
     """
-    row = overture.place_details(id=id, near_lat=near_lat, near_lon=near_lon)
+    row = overture.place_details(
+        id=id, near_lat=near_lat, near_lon=near_lon, bound_to_hint=True
+    )
     if row is None:
         return None
     return {
@@ -271,17 +354,57 @@ def _probe_buildings(id: str, near_lat: float | None, near_lon: float | None) ->
     }
 
 
-_PROBES = (_probe_places, _probe_divisions, _probe_buildings)
+# (theme, probe) pairs, in the likelihood order the module docstring
+# explains. The theme label rides along so a failed probe can be named in
+# the error a caller sees.
+_PROBES = (
+    ("places", _probe_places),
+    ("divisions", _probe_divisions),
+    ("buildings", _probe_buildings),
+)
+
+# What "related" carries when the join itself broke, as opposed to an empty
+# {} meaning "this entity is genuinely in no division". Those two are
+# different answers and used to be indistinguishable.
+RELATED_UNAVAILABLE_NOTE = "related lookups unavailable (upstream error)"
+BUILDING_UNAVAILABLE_NOTE = "related building lookup unavailable (upstream error)"
 
 
-def _related_division(lat: float | None, lon: float | None, self_id: str) -> dict:
-    """Smallest division containing the entity's point, as {division_id, ...}.
+def _containing_entry(chain: list[dict], self_id: str, theme: str) -> dict | None:
+    """The chain entry that *contains* the entity, or None if there is none.
 
-    Degrades to {} rather than failing the whole lookup: the entity itself
-    resolved fine, and a related-join outage (or a point no division covers,
-    which is a perfectly valid answer) should not turn a good answer into an
-    error. An entry whose id *is* the entity we looked up is skipped — for a
-    division, "contained by itself" is noise, not a join.
+    admin_lookup's chain is smallest-division-first. For a point entity (a
+    place or a building) nothing in the chain is the entity itself, so the
+    first entry is the smallest division containing it.
+
+    For a division entity the chain's own first entry is usually the entity
+    — a division contains its own centre — and its container is the entry
+    *after* it, not merely the next one that isn't itself. Taking "the next
+    entry that isn't self" is what made a locality report its own
+    neighborhood as the division containing it: the neighborhood sorts
+    smaller, so it comes first, and skipping only the self entry walked
+    downward through the hierarchy instead of upward. If the entity isn't
+    in the chain at all (a division whose polygon doesn't cover its own
+    reference point, or one absent from the division_area dataset) there is
+    no container we can name honestly, and neither is there if it is the
+    chain's last (largest) entry.
+    """
+    if theme != "divisions":
+        return chain[0] if chain else None
+    for i, entry in enumerate(chain):
+        if entry.get("id") == self_id:
+            return chain[i + 1] if i + 1 < len(chain) else None
+    return None
+
+
+def _related_division(lat: float | None, lon: float | None, self_id: str, theme: str) -> dict:
+    """The division containing the entity's point, as {division_id, ...}.
+
+    Degrades rather than failing the whole lookup: the entity itself
+    resolved fine, and a related-join outage should not turn a good answer
+    into an error. An outage returns {"note": ...} though, not {} — {} is
+    reserved for "no division contains this", which is a real answer and
+    must not be confused with "we couldn't check".
     """
     if lat is None or lon is None:
         return {}
@@ -289,16 +412,15 @@ def _related_division(lat: float | None, lon: float | None, self_id: str) -> dic
         chain = divisions.admin_lookup(lat, lon)["chain"]
     except (overture.UpstreamUnavailable, overture.SchemaDegraded) as e:
         logger.warning("gers_lookup: containing-division join unavailable: %s", e)
+        return {"note": RELATED_UNAVAILABLE_NOTE}
+    entry = _containing_entry(chain, self_id, theme)
+    if entry is None:
         return {}
-    for entry in chain:
-        if entry.get("id") == self_id:
-            continue
-        return {
-            "division_id": entry.get("id"),
-            "division_name": entry.get("name"),
-            "division_type": entry.get("type"),
-        }
-    return {}
+    return {
+        "division_id": entry.get("id"),
+        "division_name": entry.get("name"),
+        "division_type": entry.get("type"),
+    }
 
 
 def _related_building(lat: float | None, lon: float | None) -> dict:
@@ -308,7 +430,8 @@ def _related_building(lat: float | None, lon: float | None) -> dict:
     division's is meaningless), so only the places probe asks for it. The
     distance comes back with it because "nearest within 100m" is not the
     same claim as "the building this place is in" — the caller needs the
-    number to judge which one it got. Degrades to {} like the division join.
+    number to judge which one it got. Degrades like the division join: {}
+    for "no building within range" (a real answer), a note for an outage.
     """
     if lat is None or lon is None:
         return {}
@@ -318,10 +441,19 @@ def _related_building(lat: float | None, lon: float | None) -> dict:
         )
     except (overture.UpstreamUnavailable, overture.SchemaDegraded) as e:
         logger.warning("gers_lookup: building-at-point join unavailable: %s", e)
-        return {}
+        return {"note": BUILDING_UNAVAILABLE_NOTE}
     if not rows or rows[0].get("id") is None:
         return {}
     return {"building_id": rows[0]["id"], "building_distance_m": rows[0]["distance_m"]}
+
+
+def _merge_related(division: dict, building: dict) -> dict:
+    """The two joins as one "related" dict, keeping both degradation notes."""
+    merged = {**division, **building}
+    notes = [n for n in (division.get("note"), building.get("note")) if n]
+    if notes:
+        merged["note"] = "; ".join(notes)
+    return merged
 
 
 def gers_lookup(
@@ -341,16 +473,22 @@ def gers_lookup(
     near_lat/near_lon is an optional location hint — pass the lat/lon of the
     row the id came from and every probe is narrowed to a 50km bbox instead
     of scanning the theme. Strongly recommended: see the module docstring on
-    what an unhinted lookup costs.
+    what an unhinted lookup costs. Note that the hint *bounds* the search:
+    an id outside the box comes back as a miss, not as a slow full scan.
 
     Raises ValueError for an id that could not be a GERS id at all,
-    UpstreamUnavailable if a probe's remote scan fails, or SchemaDegraded
-    only if *every* theme is too degraded to look an id up in.
+    UpstreamUnavailable if every theme that could still have claimed the id
+    failed its remote scan, or SchemaDegraded only if *every* theme is too
+    degraded to look an id up in.
     """
     id = _validate_id(id)
+    hinted = near_lat is not None and near_lon is not None
+    if not hinted and _miss_cached(id):
+        logger.info("gers_lookup(%s): known-miss, skipping all theme scans", id)
+        return None
 
-    entity, degraded = None, []
-    for probe in _PROBES:
+    entity, degraded, failed = None, [], []
+    for theme, probe in _PROBES:
         try:
             entity = probe(id, near_lat, near_lon)
         except overture.SchemaDegraded as e:
@@ -358,16 +496,37 @@ def gers_lookup(
             # answering; only an all-themes-degraded dataset is fatal.
             degraded.append(e)
             continue
+        except overture.UpstreamUnavailable as e:
+            # Likewise one theme being unreachable: an id the *next* theme
+            # owns still resolves. Only a lookup where nothing resolved and
+            # something broke is an upstream error (below).
+            logger.warning("gers_lookup(%s): %s probe failed: %s", id, theme, e)
+            failed.append((theme, e))
+            continue
         if entity is not None:
             break
 
     if entity is None:
+        if failed:
+            # A miss plus a failure is not a miss: the themes that broke
+            # might have owned the id. Name them so the caller knows what
+            # was and wasn't actually checked.
+            names = ", ".join(theme for theme, _ in failed)
+            raise overture.UpstreamUnavailable(
+                f"could not check the {names} theme(s) for GERS id {id!r} "
+                f"({failed[0][1].detail}); no other theme claimed it, so this is "
+                "an unavailable lookup rather than a confirmed not-found"
+            )
         if len(degraded) == len(_PROBES):
             raise degraded[0]
+        if not hinted and not degraded:
+            # Only an exhaustive, fully-healthy miss is authoritative enough
+            # to cache — see the module docstring.
+            _cache_miss(id)
         return None
 
     lat, lon = entity["lat"], entity["lon"]
-    related = _related_division(lat, lon, id)
+    related = _related_division(lat, lon, id, entity["theme"])
     if entity["theme"] == "places":
-        related.update(_related_building(lat, lon))
+        related = _merge_related(related, _related_building(lat, lon))
     return {"id": id, **entity, "related": related}

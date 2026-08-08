@@ -767,12 +767,16 @@ def gers_lookup(id: str, near_lat: float | None = None, near_lon: float | None =
     whenever you have them: the lookup is an id scan across up to three
     themes, and the hint narrows each one to a ~50km box instead of a
     full-theme scan. Omitting it still works, just much slower on a cold id.
+    The hint *bounds* the search rather than merely ordering it: an id
+    outside the box comes back not_found with a note saying so, and the
+    exhaustive lookup is the same call without near_lat/near_lon. Pass a
+    hint you are sure of, or none at all.
 
     Transportation segment/connector ids are not resolvable yet and come
     back as not_found. Returns {"error": "not_found"} if no theme claims
-    the id, {"error": "bad_request"} for an empty or malformed id or an
-    out-of-range hint, or a structured {"error": ...} if upstream is
-    unavailable.
+    the id, {"error": "bad_request"} for a malformed id (a GERS id is an
+    opaque token — 32 lowercase hex characters) or an out-of-range hint,
+    or a structured {"error": ...} if upstream is unavailable.
     """
     if near_lat is not None and near_lon is not None:
         coord_error = _invalid_coord(near_lat, near_lon)
@@ -787,13 +791,22 @@ def gers_lookup(id: str, near_lat: float | None = None, near_lon: float | None =
     except overture.SchemaDegraded as e:
         return _schema_error(e)
     if result is None:
-        return {
+        not_found = {
             "error": "not_found",
             "detail": (
                 f"no places, divisions, or buildings entity matched GERS id {id!r} "
                 "(transportation segments are not resolvable yet)"
             ),
         }
+        if near_lat is not None and near_lon is not None:
+            not_found["note"] = gers.HINT_MISS_NOTE
+        return not_found
+    # Which dataset's degraded columns apply depends on which theme claimed
+    # the id; a division answer has no degraded-fields notion of its own.
+    if result["theme"] == "places":
+        return _with_degraded_fields(result)
+    if result["theme"] == "buildings":
+        return _with_buildings_degraded_fields(result)
     return result
 
 
