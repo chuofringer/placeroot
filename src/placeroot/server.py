@@ -1216,13 +1216,14 @@ def route(
     to_lat: float,
     to_lon: float,
     mode: str = "drive",
+    include_path: bool = False,
 ) -> dict:
     """Route: shortest-path distance and duration between two points, by mode.
 
     Compact directions, not turn-by-turn: builds a street graph from
     Overture's transportation theme around the two points and returns
     {"distance_m", "duration_s", "mode", "from", "to"} for the fastest path
-    — no polyline/geometry (that's a separate tool). mode is "walk",
+    — no polyline unless you ask for one. mode is "walk",
     "cycle", or "drive" (default), on the same cost model every routing tool
     uses (walk 1.4 m/s, cycle 4.2 m/s, drive per-edge from Overture's
     speed_limits or a class-based default table). drive's duration is a posted-speed model
@@ -1245,13 +1246,24 @@ def route(
     islands of road data), returns {"error": "no_route"} rather than
     raising. If the extraction graph hit its internal size cap, the result
     carries "truncated": true — the route may be suboptimal or incomplete.
+
+    include_path=true adds "path", a GeoJSON LineString from the origin's
+    snapped node to the destination's that follows the streets' own
+    geometry (curves included), simplified to fit the token budget, with
+    "path_max_deviation_m" bounding how far it strays from the exact
+    street path. Off by default (the polyline dwarfs the rest of the
+    answer) — ask for it only to draw or trace the route. If even a fully
+    simplified line won't fit, you get "path_omitted": true instead of a
+    line that stops short of the destination.
     """
     for lat, lon in ((from_lat, from_lon), (to_lat, to_lon)):
         coord_error = _invalid_coord(lat, lon)
         if coord_error is not None:
             return coord_error
     try:
-        return routing.route(from_lat, from_lon, to_lat, to_lon, mode=mode)
+        return routing.route(
+            from_lat, from_lon, to_lat, to_lon, mode=mode, include_path=include_path
+        )
     except routing.UnsupportedMode:
         return {"error": "unsupported_mode", "supported": sorted(routing.MODE_CONFIG)}
     except routing.UpstreamUnavailable as e:
