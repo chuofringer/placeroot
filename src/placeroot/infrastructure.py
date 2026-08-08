@@ -26,13 +26,15 @@ bridge". For a point row this collapses to the point itself, so all three
 geometry kinds go through one expression.
 
 The approximation left: ST_ClosestPoint picks its nearest vertex/edge
-position in *planar* lon/lat degree space. Away from the antimeridian
-the error this introduces is second order — a degree of longitude is
-shorter than a degree of latitude off the equator, so the picked point
-can sit slightly off the true geodesic-nearest one, but it is nearly
-zero for the many rows whose nearest point is a vertex, and the
-along-edge misplacement at a few-hundred-metre radius is well under a
-metre. At the antimeridian seam it is a known limitation, not a small
+position in *planar* lon/lat degree space, which is not the nearest
+position on the ground — a degree of longitude is cos(latitude) shorter
+than a degree of latitude. This was originally assumed second order; it
+is not. Measured on a diagonal segment, the point degree-space picks is
+25% too far at 60 deg N and 63% too far at 70 deg N, enough to reorder
+the nearest-first list and to push an in-range feature past the
+radius_m cutoff. So the search runs in a cos(latitude)-scaled space
+(geo.closest_point_sql) and the longitude is divided back out before the
+haversine. At the antimeridian seam it is a known limitation, not a small
 error: for a line or polygon near lon=±180 queried from the opposite
 side of the seam, planar degree distance picks the geodesically *far*
 end of the geometry (359.99 degrees "away" planar is 0.01 degrees away
@@ -281,6 +283,11 @@ def infrastructure_at(
 
     filters = [bbox_filter, *_attribute_filters(missing, subtype, infra_class, params)]
 
+    # Latitude-corrected: raw ST_ClosestPoint picks the nearest point in
+    # degree space, which is not the nearest point on the ground away from
+    # the equator. See geo.closest_point_sql.
+    nlon_expr, nlat_expr = geo.closest_point_sql(geom_expr)
+
     # COUNT(*) OVER () is evaluated over the whole in-range set, before the
     # LIMIT clips it — that is what lets the caller say "10 of 1263" instead
     # of silently presenting a slice of street furniture as the answer. The
@@ -293,8 +300,8 @@ def infrastructure_at(
                 {subtype_expr} AS subtype,
                 {class_expr}   AS class,
                 {name_expr}    AS name,
-                ST_X(ST_ClosestPoint({geom_expr}, ST_Point($lon, $lat))) AS nlon,
-                ST_Y(ST_ClosestPoint({geom_expr}, ST_Point($lon, $lat))) AS nlat
+                {nlon_expr} AS nlon,
+                {nlat_expr} AS nlat
             FROM {_from_source(bbox)}
             WHERE {' AND '.join(filters)}
         ),
