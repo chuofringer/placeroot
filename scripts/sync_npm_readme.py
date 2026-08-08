@@ -55,6 +55,8 @@ INHERITED_SECTIONS = (
     "Why PlaceRoot",
     "Quick start",
     "What it can do",
+    "Workflow prompts",
+    "Resources",
     "Loading fewer tools (`PLACEROOT_TOOLS`)",
     "Design notes",
 )
