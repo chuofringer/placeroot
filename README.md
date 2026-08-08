@@ -11,9 +11,9 @@ PlaceRoot is an MCP server that answers spatial questions from [Overture Maps](h
 
 ## Why PlaceRoot
 
-It is the only keyless MCP server that does real graph routing over global open map data. `isochrone` and `route` walk an actual street graph built from Overture's transportation segments — not a straight-line approximation — anywhere on Earth, with no key, no signup, and no per-call quota. All 27 tools work that way.
+It is the only keyless MCP server that does real graph routing over global open map data. `isochrone` and `route` walk an actual street graph built from Overture's transportation segments — not a straight-line approximation — anywhere on Earth, with no key, no signup, and no per-call quota. All 28 tools work that way.
 
-Every one of those 27 tools declares MCP annotations — closed-world, plus a human-readable title, and `readOnlyHint: true` on the 26 that are pure lookups — so a client can tell before it prompts you which calls touch nothing. The one exception is honest about itself: `render_map` writes an HTML file, so it declares `readOnlyHint: false`. Keyless *and* annotated is a combination the field mostly hasn't shipped. Honest caveat: Claude Code does not gate its permission prompts on `readOnlyHint` (it uses its own classifier), so the practical win is with clients that do, such as Codex CLI and Copilot-class agents — plus spec hygiene everywhere else.
+Every one of those 28 tools declares MCP annotations — closed-world, plus a human-readable title, and `readOnlyHint: true` on the 27 that are pure lookups — so a client can tell before it prompts you which calls touch nothing. The one exception is honest about itself: `render_map` writes an HTML file, so it declares `readOnlyHint: false`. Keyless *and* annotated is a combination the field mostly hasn't shipped. Honest caveat: Claude Code does not gate its permission prompts on `readOnlyHint` (it uses its own classifier), so the practical win is with clients that do, such as Codex CLI and Copilot-class agents — plus spec hygiene everywhere else.
 
 What it deliberately does not do, because Overture's open data does not carry it:
 
@@ -49,7 +49,7 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 
 ## What it can do
 
-**27 tools**, all returning compact, budgeted answers. Several single-item tools have a `*_batch` sibling that collapses many calls into one round-trip.
+**28 tools**, all returning compact, budgeted answers. Several single-item tools have a `*_batch` sibling that collapses many calls into one round-trip.
 
 | Tool | Answers |
 |---|---|
@@ -119,7 +119,7 @@ Like prompts, resources are registered under **every** `PLACEROOT_TOOLS` selecti
 
 ## Loading fewer tools (`PLACEROOT_TOOLS`)
 
-All 27 tool schemas cost roughly **11.5k tokens** of every conversation's context, paid before the agent asks anything — about the cost of 88 median answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS` selects which tools get registered. Unselected tools are never registered and never appear in `tools/list`.
+All 28 tool schemas cost roughly **12.2k tokens** of every conversation's context, paid before the agent asks anything — about the cost of 93 median answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS` selects which tools get registered. Unselected tools are never registered and never appear in `tools/list`.
 
 ```json
 {
@@ -137,22 +137,22 @@ The value is a comma-separated list of profile names, tool names, or both — th
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 27 | ~11,500 | — |
-| `search` | 12 | ~5,200 | 55% |
-| `core` | 10 | ~4,890 | 57% |
-| `routing` | 5 | ~2,190 | 81% |
-| `analysis` | 9 | ~3,240 | 72% |
+| unset / `all` (default) | 28 | ~12,200 | — |
+| `search` | 12 | ~5,200 | 57% |
+| `core` | 10 | ~4,890 | 60% |
+| `routing` | 6 | ~2,890 | 76% |
+| `analysis` | 9 | ~3,240 | 73% |
 | `geometry` | 3 | ~850 | 93% |
 
 - **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `places_along_route`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
 - **`search`** — the find/name/identify family: `find_places`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, `address_at`, `search_categories`, and `gers_lookup`.
-- **`routing`** — `route`, `isochrone`, `distance_matrix`, `within_distance`.
+- **`routing`** — `route`, `isochrone`, `distance_matrix`, `within_distance`, `optimize_route`.
 - **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`.
 - **`geometry`** — `simplify_geometry`, `render_map`.
 
 `data_version` is registered under every profile: it is ~230 tokens and the only way an agent can tell which Overture release backs its answers.
 
-Profiles may overlap, and a list may mix them with bare tool names — `PLACEROOT_TOOLS=routing,find_places` or `PLACEROOT_TOOLS=find_places,geocode,route`. A name that is neither a profile nor a tool **fails at startup** with the list of valid names, rather than quietly falling back to loading everything. The server logs one line at startup naming what it registered (`registered 10 of 27 tools (PLACEROOT_TOOLS=core)`), so a selection that didn't apply — an empty value, a variable that never reached the process — is visible rather than silently the full 27.
+Profiles may overlap, and a list may mix them with bare tool names — `PLACEROOT_TOOLS=routing,find_places` or `PLACEROOT_TOOLS=find_places,geocode,route`. A name that is neither a profile nor a tool **fails at startup** with the list of valid names, rather than quietly falling back to loading everything. The server logs one line at startup naming what it registered (`registered 10 of 28 tools (PLACEROOT_TOOLS=core)`), so a selection that didn't apply — an empty value, a variable that never reached the process — is visible rather than silently the full 28.
 
 ## Design notes
 
