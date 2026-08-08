@@ -56,7 +56,7 @@ jobs:
           # Same guards CI runs, re-run here against the tagged tree: every
           # version string on the site equals the package version, and the
           # tool grid matches the tools server.py actually registers.
-          uv run pytest tests/test_site_version_sync.py tests/test_site_tools_sync.py -q
+          uv run pytest tests/test_site_version_sync.py tests/test_site_tools_sync.py tests/test_npm_readme_sync.py -q
 
   pypi:
     runs-on: ubuntu-latest
