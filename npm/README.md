@@ -21,6 +21,8 @@ It is the only keyless MCP server that does real graph routing over global open 
 
 Every one of those 28 tools declares MCP annotations — closed-world, plus a human-readable title, and `readOnlyHint: true` on the 27 that are pure lookups — so a client can tell before it prompts you which calls touch nothing. The one exception is honest about itself: `render_map` writes an HTML file, so it declares `readOnlyHint: false`. Keyless *and* annotated is a combination the field mostly hasn't shipped. Honest caveat: Claude Code does not gate its permission prompts on `readOnlyHint` (it uses its own classifier), so the practical win is with clients that do, such as Codex CLI and Copilot-class agents — plus spec hygiene everywhere else.
 
+PlaceRoot also speaks the MCP 2026-07-28 revision's listing cache hints: `tools/list` (and the prompt and resource listings) come back with `ttlMs: 86400000` and `cacheScope: "public"`. Our listings are frozen at build time — nothing at runtime can change them — so a client is free to reuse them for a day instead of re-reading a ~12k-token schema surface every session. Clients that speak an older revision are unaffected: those fields did not exist before 2026-07-28, and the response they get is byte-identical to what it was.
+
 What it deliberately does not do, because Overture's open data does not carry it:
 
 - **No live traffic.** Routing is free-flow; durations do not reflect current conditions.
