@@ -1,6 +1,6 @@
 """PLACEROOT_TOOLS: load only the tools an install actually uses (issue #182).
 
-The whole 28-tool surface costs ~12.2k estimated tokens of JSON schema in
+The whole 29-tool surface costs ~12.7k estimated tokens of JSON schema in
 every conversation, paid before the agent asks anything. Most installs use
 a slice of it. This module is the single registry mapping a profile name to
 its tools, plus the parser for the `PLACEROOT_TOOLS` env var; server.py
@@ -58,6 +58,9 @@ PROFILES: dict[str, frozenset[str]] = {
         # The address-level half of reverse lookup: reverse_geocode names a
         # point, address_at lists the doorways around it.
         "address_at",
+        # ...and its forward twin: an address string back to a coordinate,
+        # which geocode cannot answer at doorway granularity.
+        "geocode_address",
         "search_categories",
         # Identify: any GERS id back to the entity it names.
         "gers_lookup",
