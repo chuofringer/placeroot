@@ -1846,7 +1846,9 @@ def geocode(query: str, limit: int = DEFAULT_LIMIT) -> list[dict]:
     return geocode_detailed(query, limit)["results"]
 
 
-def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
+def geocode_detailed(
+    query: str, limit: int = DEFAULT_LIMIT, include_country: bool = False
+) -> dict:
     """Free-text place name -> ranked candidates, from Overture divisions (and places fallback).
 
     Returns {"results": [...]} and, when the places-name half of the search
@@ -1876,6 +1878,14 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
 
     Handles "City, ST" / "City, Region" suffixes (#46) and ranks same-tier
     ties by population/prominence (#47) — see the module docstring.
+
+    include_country adds each row's ISO country code (None for a places-
+    fallback row, which has no admin chain to read one off) to the result
+    dicts. Off by default, and deliberately not part of the MCP tool's
+    payload — it exists for geocode_address, which has to reject a
+    runner-up anchor sitting in a different country than the top candidate
+    ("London" -> London, Ontario for a UK query) and cannot do that from
+    admin_context alone once a row's chain is empty.
     """
     query = query.strip()
     limit = max(1, min(limit, MAX_LIMIT))
@@ -2078,6 +2088,8 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
                 0.4 + row["_confidence"] * 0.3, 3
             ),
         }
+        if include_country:
+            entry["country"] = row.get("country")
         if row.get("_matched_name"):
             # #214: only present when the row was found through one of
             # Overture's alternate (names.common) spellings rather than its
@@ -2838,21 +2850,63 @@ _ADDRESS_NO_STREET_NOTE = (
 )
 
 
-def _address_unresolved_anchor_note(city: str, anchor: dict | None) -> str:
+def _address_unresolved_anchor_note(
+    city: str, anchor: dict | None, rejected: list[dict] | None = None
+) -> str:
     if anchor is None:
         return (
             f"\"{city}\" did not resolve to any place, so there was no extent to "
             f"bound an address scan by and none was run. Check the spelling, or try "
             f"geocode(\"{city}\") to see what the name does match."
         )
-    return (
-        f"\"{city}\" resolved to {anchor['name']}, but Overture carries no boundary "
-        f"extent for it -- only a point -- so there is no city-sized box to scan "
-        f"addresses inside, and guessing one would return confidently wrong doorways. "
-        f"Try a larger containing place (the city rather than the neighborhood), or "
-        f"address_at({anchor['lat']}, {anchor['lon']}) for the doorways around its "
-        f"centre."
+    note = (
+        f"\"{city}\" resolved to {anchor['name']}{_country_suffix(anchor)}, but Overture "
+        f"carries no boundary extent for it -- only a point -- so there is no city-sized "
+        f"box to scan addresses inside, and guessing one would return confidently wrong "
+        f"doorways. Try a larger containing place (the city rather than the "
+        f"neighborhood), or address_at({anchor['lat']}, {anchor['lon']}) for the "
+        f"doorways around its centre."
     )
+    if rejected:
+        names = ", ".join(f"{r['name']}{_country_suffix(r)}" for r in rejected)
+        note += (
+            f" Same-named candidates with a boundary do exist ({names}), but in a "
+            f"different country than the one this name resolved to, so scanning inside "
+            f"one would answer about the wrong place entirely."
+        )
+    return note
+
+
+def _country_suffix(row: dict) -> str:
+    """" (United Kingdom, GB)" — whatever of the two a row actually carries."""
+    label = (row.get("admin_context") or [None])[0]
+    code = row.get("country")
+    parts = [p for p in (label, code) if p]
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+def _same_country(a: dict, b: dict) -> bool:
+    """Are two geocode candidates in the same country?
+
+    #229/R28: the runner-up anchor loop below used to take *any* candidate
+    that had an extent, so "Baker Street, London" — where the UK London has
+    no division_area row at all — walked past it onto London, Ontario and
+    returned Canadian doorways under a UK anchor. A fallback anchor is only
+    ever a fix for "geocode ranked the neighborhood above the city that
+    contains it"; it is never a licence to cross a border.
+
+    ISO code first (the authoritative field, present on every division row),
+    falling back to the top of the admin chain for rows that carry a chain
+    but no code. Missing both is *not* a match: a places-fallback row has
+    neither, and "unknown country" must not be read as "same country".
+    """
+    ca, cb = a.get("country"), b.get("country")
+    if ca and cb:
+        return ca == cb
+    ctx_a, ctx_b = a.get("admin_context") or [], b.get("admin_context") or []
+    if ctx_a and ctx_b:
+        return ctx_a[0] == ctx_b[0]
+    return False
 
 
 def geocode_address(
@@ -2876,6 +2930,10 @@ def geocode_address(
     2. Anchor. The place half goes through geocode(), and the winner's extent
        comes from #224's division bbox, then from a division_id-filtered
        division_area lookup. No extent -> empty plus a note, never a scan.
+       A runner-up candidate may supply the extent when the winner has none
+       (geocode ranks by name match, not by "which of these has a boundary"),
+       but only one in the *same country* as the winner: same-named cities
+       across a border are the normal case, not the exception.
     3. Scan the addresses theme inside that extent, through the same tile
        cache address_at reads, matching `street` against every USPS
        abbreviation/expansion of the query (Parkway<->Pkwy, W<->West, ...).
@@ -2883,8 +2941,10 @@ def geocode_address(
        reference point first.
 
     Returns {"results": [{number, street, unit?, postcode?, country,
-    distance_m, lat, lon}, ...], "anchor": {name, id}} plus, when the answer
-    is empty or clipped, a "note" saying which of the four steps ended it.
+    distance_m, lat, lon}, ...], "anchor": {name, id, country,
+    admin_context}} plus, when the answer is empty or clipped or the anchor
+    is not the top-ranked candidate, a "note" saying which of the four steps
+    ended it.
     Raises overture.UpstreamUnavailable / overture.SchemaDegraded, which
     server.py turns into structured errors.
     """
@@ -2902,20 +2962,38 @@ def geocode_address(
         return {"results": [], "note": _ADDRESS_NO_ANCHOR_NOTE}
 
     local_table = _local_divisions_table()
-    candidates = [r for r in geocode(city, limit=3) if r["id"]]
-    anchor = candidates[0] if candidates else None
+    candidates = [r for r in geocode_detailed(city, limit=3, include_country=True)["results"]
+                  if r["id"]]
+    top = candidates[0] if candidates else None
+    anchor = top
     bbox = _anchor_bbox(anchor["id"], local_table) if anchor else None
-    if bbox is None:
+    notes: list[str] = []
+    rejected: list[dict] = []
+    if bbox is None and top is not None:
         # A neighborhood or a place row can lose to its own containing city
         # here: geocode ranks by name match, not by "which of these has a
-        # boundary". Try the runners-up before declaring no extent.
+        # boundary". Try the runners-up before declaring no extent -- but
+        # only the ones in the *same country* as the top candidate (#229,
+        # R28): every division name worth searching for is shared across
+        # borders, and a fallback that crosses one turns "no extent for the
+        # London you meant" into confidently wrong doorways in Ontario.
         for row in candidates[1:]:
-            bbox = _anchor_bbox(row["id"], local_table)
-            if bbox is not None:
-                anchor = row
-                break
+            candidate_bbox = _anchor_bbox(row["id"], local_table)
+            if candidate_bbox is None:
+                continue
+            if not _same_country(row, top):
+                rejected.append(row)
+                continue
+            anchor, bbox = row, candidate_bbox
+            notes.append(
+                f"\"{city}\" resolved to {top['name']}{_country_suffix(top)}, which "
+                f"Overture carries no boundary extent for, so the scan ran inside "
+                f"{anchor['name']}{_country_suffix(anchor)} -- the next candidate of "
+                f"that name in the same country."
+            )
+            break
     if bbox is None:
-        return {"results": [], "note": _address_unresolved_anchor_note(city, anchor)}
+        return {"results": [], "note": _address_unresolved_anchor_note(city, top, rejected)}
 
     origin = (anchor["lat"], anchor["lon"])
     patterns = _street_variants(street)
@@ -2924,20 +3002,31 @@ def geocode_address(
     )
     payload: dict = {
         "results": [_address_row(r) for r in rows],
-        "anchor": {"name": anchor["name"], "id": anchor["id"]},
+        # country/admin_context always, never conditionally: the anchor is
+        # the one thing that decides *which* Baker Street this answers
+        # about, and a bare "London" is not enough for a caller to tell.
+        "anchor": {
+            "name": anchor["name"],
+            "id": anchor["id"],
+            "country": anchor.get("country"),
+            "admin_context": anchor.get("admin_context") or [],
+        },
     }
     if not rows:
-        payload["note"] = _address_empty_note(origin, street)
-        return payload
-    if distinct_in_range > len(rows):
+        notes.append(_address_empty_note(origin, street))
+    elif distinct_in_range > len(rows):
         payload["truncated"] = True
         payload["distinct_in_range"] = distinct_in_range
-        payload["note"] = (
+        notes.append(
             f"showing the {len(rows)} nearest of {distinct_in_range} distinct "
             f"addresses matching \"{street}\" in {anchor['name']} (deduplicated from "
             f"{matched_rows} raw address points). Add a house number to land on one "
             f"doorway."
         )
+    if notes:
+        payload["note"] = " ".join(notes)
+    if not rows:
+        return payload
     degraded = addresses.degraded_fields()
     if degraded:
         payload["degraded_fields"] = degraded

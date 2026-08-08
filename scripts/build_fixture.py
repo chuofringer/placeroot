@@ -290,6 +290,17 @@ GEOCODE_ANCHOR_AREAS = (
     # backs. Without a boundary here the query would stop one step earlier
     # and never reach that note.
     ("gers-div-kensington-gb", "Kensington", "GB", (-0.22, 51.48, -0.16, 51.52)),
+    # R28/#229: the wrong-country anchor repro, at fixture scale. Cambridge
+    # resolves to the UK one (145,700 over Cambridge MA's 118,403), which has
+    # *no* boundary here -- exactly the shape live "London" has, where the UK
+    # London carries no division_area row at all. Only the Massachusetts one
+    # does, so an anchor fallback that doesn't check the country walks across
+    # the Atlantic and answers a UK query with US doorways.
+    ("gers-div-cambridge-ma", "Cambridge", "US", (-71.16, 42.35, -71.06, 42.40)),
+    # The same shape *within* one country, which is the case the fallback
+    # legitimately exists for: Springfield resolves to the MA one (155,929),
+    # which has no boundary, and the IL runner-up supplies one.
+    ("gers-div-springfield-il", "Springfield", "US", (-89.75, 39.72, -89.58, 39.84)),
 )
 
 

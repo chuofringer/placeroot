@@ -182,6 +182,57 @@ def test_a_city_with_no_boundary_extent_declines_to_guess_one():
     assert "address_at(" in result["note"]
 
 
+# --- the anchor is never in another country (R28 HIGH-1, #229) -------------
+
+
+def test_anchor_carries_its_country_and_admin_context():
+    """Which "Cambridge" (or "London") an answer is about is not readable
+    from a bare name, so the anchor always names its country and chain."""
+    result = geocode.geocode_address("Market Street, San Francisco")
+
+    assert result["anchor"]["country"] == "US"
+    assert result["anchor"]["admin_context"] == ["United States", "California"]
+
+
+def test_runner_up_anchor_never_crosses_a_border():
+    """The fixture analogue of live "Baker Street, London": the top-ranked
+    Cambridge (UK) has no boundary extent, and the only Cambridge that does
+    is in Massachusetts. Answering with US doorways under a UK anchor is
+    worse than answering nothing, so this is an honest empty."""
+    result = geocode.geocode_address("Trumpington Street, Cambridge")
+
+    assert result["results"] == []
+    assert "anchor" not in result
+    assert "no boundary extent" in result["note"]
+    # ...and it says why the Massachusetts one was not used instead.
+    assert "different country" in result["note"]
+    assert "Cambridge (United States, US)" in result["note"]
+
+
+def test_same_country_runner_up_anchor_is_used_and_named():
+    """The case the fallback exists for: Springfield resolves to the MA one,
+    which has no boundary; the IL one does, and is in the same country."""
+    result = geocode.geocode_address("Main St, Springfield")
+
+    assert result["anchor"]["id"] == "gers-div-springfield-il"
+    assert result["anchor"]["admin_context"] == ["United States", "Illinois"]
+    assert "the next candidate of that name in the same country" in result["note"]
+
+
+def test_same_country_compares_iso_codes_then_the_admin_chain():
+    us = {"country": "US", "admin_context": ["United States", "Illinois"]}
+    gb = {"country": "GB", "admin_context": ["United Kingdom", "England"]}
+    assert geocode._same_country(us, dict(us)) is True
+    assert geocode._same_country(us, gb) is False
+    # No code on either side -> the top of the admin chain decides.
+    assert geocode._same_country(
+        {"admin_context": ["Canada", "Ontario"]}, {"admin_context": ["Canada", "Quebec"]}
+    ) is True
+    # Nothing to compare is not a match: a places-fallback row carries
+    # neither, and "unknown" must not read as "same".
+    assert geocode._same_country({"country": None, "admin_context": []}, us) is False
+
+
 # --- coverage --------------------------------------------------------------
 
 
