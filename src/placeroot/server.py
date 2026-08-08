@@ -1312,13 +1312,17 @@ def geocode_address(
 
     The city is resolved first and its boundary bounds the search, so a city
     that resolves to no boundary returns an empty list plus a note rather
-    than a scan — never a wrong-neighborhood guess. Street names match in
-    either spelling (Parkway/Pkwy, West/W).
+    than a scan. If a same-named runner-up in the same country supplies the
+    boundary instead, the note names it — the answer is never silently about
+    a different city, and never about one in another country. Check `anchor`
+    (name, country, admin_context) to see which one it was. Street names
+    match in either spelling (Parkway/Pkwy, West/W, NW/Northwest).
 
     Returns {"results": [{number, street, unit, postcode, country,
-    distance_m, lat, lon}, ...], "anchor": {name, id}}, deduplicated to
-    distinct number+street and nearest the city's own point first. More matches
-    than `limit` adds "truncated", "distinct_in_range" and a note.
+    distance_m, lat, lon}, ...], "anchor": {name, id, country,
+    admin_context}}, deduplicated to distinct number+street+postcode and
+    nearest the city's own point first. More matches than `limit` adds
+    "truncated", "distinct_in_range" and a note.
 
     Coverage is alpha: 39 countries, no UK, Ireland, India or China. An empty
     list is a valid answer and always carries a note saying whether the
