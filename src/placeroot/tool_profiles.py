@@ -1,6 +1,6 @@
 """PLACEROOT_TOOLS: load only the tools an install actually uses (issue #182).
 
-The whole 26-tool surface costs ~10.8k estimated tokens of JSON schema in
+The whole 27-tool surface costs ~11.5k estimated tokens of JSON schema in
 every conversation, paid before the agent asks anything. Most installs use
 a slice of it. This module is the single registry mapping a profile name to
 its tools, plus the parser for the `PLACEROOT_TOOLS` env var; server.py
@@ -77,6 +77,11 @@ PROFILES: dict[str, frozenset[str]] = {
         "buildings_at",
         "land_use_at",
         "infrastructure_at",
+        # Hydrology is a characterize-the-surroundings question of the same
+        # shape as infrastructure_at ("is this parcel waterfront / how far
+        # to the nearest canal"), not a find-a-named-thing one, so it lands
+        # in analysis rather than search.
+        "water_near",
         "admin_lookup",
     }),
     # Working on geometry the caller already has, and turning results into

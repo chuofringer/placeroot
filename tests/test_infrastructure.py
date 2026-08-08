@@ -139,6 +139,30 @@ def test_line_distance_is_to_the_nearest_point_not_the_centroid(infrastructure_f
     assert bridge["distance_m"] == pytest.approx(250.0, abs=5.0)
 
 
+def test_high_latitude_nearest_point_is_measured_on_the_ground(tmp_path):
+    """ST_ClosestPoint minimises *degree* distance, and a degree of
+    longitude is cos(lat) shorter than one of latitude. For this segment at
+    70 deg N the degree-space point is 4112.8 m away while the true nearest
+    point is 2518.5 m — 63% high, enough to push the bridge outside a 3 km
+    radius and report "no infrastructure here"."""
+    lat0, lon0 = 70.0, 10.0
+    wkt = f"LINESTRING({lon0 + 0.07} {lat0}, {lon0} {lat0 + 0.07})"
+    path = tmp_path / "infrastructure_high_lat.parquet"
+    _build_infrastructure_fixture(
+        path, features=[("infra-arctic", wkt, "bridge", "bridge", "Arctic Bridge")]
+    )
+    infrastructure.set_data_path(str(path))
+    try:
+        rows, _, in_range_count = infrastructure.infrastructure_at(
+            lat0, lon0, radius_m=3000
+        )
+        assert [r["name"] for r in rows] == ["Arctic Bridge"]
+        assert in_range_count == 1
+        assert rows[0]["distance_m"] == pytest.approx(2518.5, rel=0.01)
+    finally:
+        infrastructure.set_data_path(None)
+
+
 def test_radius_excludes_features_outside_it(infrastructure_fixture):
     rows, _, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON, radius_m=150)
     assert [r["name"] for r in rows] == ["Test Tower"]

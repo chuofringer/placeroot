@@ -40,6 +40,7 @@ from placeroot import (
     routing,
     simplify,
     tool_profiles,
+    water,
 )
 from placeroot import geocode as geocoding
 
@@ -768,6 +769,167 @@ def infrastructure_at(
     result = budget.apply_budget(result, "results")
     result = _with_infrastructure_truncation(result, total_in_range, subtype, infra_class)
     degraded = infrastructure.degraded_fields()
+    if degraded:
+        result["degraded_fields"] = degraded
+    return result
+
+
+def _water_notes(
+    payload: dict,
+    in_range_count: int,
+    containing: dict | None,
+    radius_m: float,
+    ocean_only_filter: bool = False,
+    filtered: bool = False,
+) -> dict:
+    """Attach water_near's on_water/truncation/empty notes to the payload.
+
+    Four things a caller can get wrong here, so all four are said out
+    loud. (1) The point is inside a generalized *marine* polygon: oceans
+    are cut into 1-degree tiles and their landward edge swallows coastal
+    land, so "inside" means at-or-near the water, and no shoreline
+    distance is derivable from them at all (their boundaries carry phantom
+    grid cuts). Inside a lake or a reservoir none of that applies — those
+    polygons are real, so the note says plainly which body you are in and
+    claims nothing about tiles. (2) The filter asked only for oceans,
+    which are reported through on_water and never as a distance row, so
+    the empty list means "wrong question", not "no water". (3) The rows
+    shown are a slice — a canal district puts hundreds of rows in a 500 m
+    circle. (4) Nothing came back: with no filter active that is a real
+    finding about an arid or unmapped place rather than a failure — but
+    when a subtype/water_class filter is active (`filtered`), it only
+    means nothing *matched the filter*, and saying "arid, remote or
+    unmapped" about a canal district asked for waterfalls would be
+    confidently wrong.
+    """
+    shown = len(payload.get("results", []))
+    notes = []
+    if ocean_only_filter:
+        notes.append(
+            "a subtype filter matching only 'ocean' cannot return distance rows: "
+            "Overture ships the ocean as generalized 1-degree tiles whose landward "
+            "edge covers dry land, so oceans are reported through \"on_water\" and "
+            "\"water_body\" instead. Drop the filter to see the nearest real water "
+            "features, or use water_class='bay' for a named coastal body."
+        )
+    if containing is not None:
+        payload["on_water"] = True
+        if containing["water_body"]:
+            payload["water_body"] = containing["water_body"]
+        body = containing["water_body"] or "a water polygon"
+        if containing["generalized"]:
+            notes.append(
+                f"this point falls inside Overture's generalized {body} polygon. "
+                "Oceans and seas are cut into 1-degree tiles and their landward edge "
+                "is coarse enough to cover dry coastal land, so read this as "
+                "'on or close to the water', not as a precise shoreline test — "
+                "and no distance to the coast is reported, because the tile "
+                "boundaries include phantom grid cuts through open water."
+            )
+        else:
+            notes.append(f"this point is inside {body}.")
+    if in_range_count > shown:
+        payload["truncated"] = True
+        notes.append(
+            f"showing the {shown} nearest of {in_range_count} water features in range; "
+            "narrow with a smaller radius or a filter, e.g. subtype='canal', "
+            "subtype='river', water_class='lake'."
+        )
+    elif shown == 0 and containing is None and not ocean_only_filter:
+        if filtered:
+            notes.append(
+                f"no water features matching the subtype/water_class filter "
+                f"within {radius_m:g} m. That says nothing about water in "
+                "general here — drop the filter to see the nearest water "
+                "features of any kind."
+            )
+        else:
+            notes.append(
+                f"no water features within {radius_m:g} m. base/water coverage is "
+                "OSM-derived, so an arid, remote or unmapped area legitimately has "
+                "nothing here — this is an answer, not a failure."
+            )
+    payload["in_range_count"] = in_range_count
+    if notes:
+        payload["note"] = " ".join(notes)
+    return payload
+
+
+@_tool("Water near a point")
+def water_near(
+    lat: float,
+    lon: float,
+    radius_m: float = water.DEFAULT_RADIUS_M,
+    limit: int = water.DEFAULT_LIMIT,
+    subtype: str | None = None,
+    water_class: str | None = None,
+) -> dict:
+    """Water near a point, nearest first: waterfront check, distance to river/canal/lake.
+
+    From Overture's base theme (issue #200), type=water — oceans, bays,
+    lakes, ponds, reservoirs, rivers, streams, canals, springs, pools.
+    Returns {"center", "radius_m", "in_range_count", "results": [{"name"
+    (when named), "subtype", "class", "distance_m", "is_salt"/
+    "is_intermittent" (only when true)}, ...]}, plus "truncated": true and
+    a "note" when more matched than were returned. No raw geometry.
+
+    distance_m is to the closest point on the feature, not its centroid —
+    a canal bank you are standing on reads ~0 m. Water gets dense (an
+    Amsterdam canal district puts hundreds of rows in a 500 m circle),
+    which is what in_range_count and the filters are for:
+    subtype/water_class match Overture's `subtype`/`class` columns
+    (case-insensitive substring; water_class is `class` under a
+    non-reserved name) — e.g. subtype="canal", subtype="river",
+    water_class="lake".
+
+    "on_water": true plus "water_body" means the point is *inside* a water
+    polygon — a lake, a reservoir, a river. For oceans and seas that is a
+    coarse signal: Overture cuts them into 1-degree tiles whose landward
+    edge covers dry coastal land, so a waterfront building reads as inside
+    the ocean. Those bodies are reported this way rather than as a bogus
+    0 m "nearest water" row, and no distance-to-coast is derived from them
+    (their tile boundaries include phantom cuts through open water), which
+    also means subtype="ocean" cannot return distance rows. Lakes and
+    rivers carry none of that: however large, they appear in results with
+    a real edge distance. The "note" says which case applies.
+
+    An empty results list is a valid answer: coverage is OSM-derived, and
+    "no water within 500 m" is a real finding about an arid or unmapped
+    place. radius_m echoes the effective radius (large values are
+    clamped). Returns a structured {"error": ...} if upstream is
+    unavailable or the dataset is missing geometry/bbox, and {"error":
+    "bad_request"} for a bad coordinate.
+    """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
+    try:
+        rows, effective_radius_m, in_range_count, containing = water.water_near(
+            lat, lon, radius_m, limit, subtype=subtype, water_class=water_class
+        )
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    result = {
+        "center": {"lat": lat, "lon": lon},
+        "radius_m": effective_radius_m,
+        "results": rows,
+    }
+    result = budget.apply_budget(result, "results")
+    degraded = water.degraded_fields()
+    # The ocean-only note mirrors water.water_near's short-circuit, which
+    # only fires when the subtype column exists: under a degraded schema
+    # the filter is a no-op and real distance rows come back, so claiming
+    # the call "cannot return distance rows" would contradict the payload.
+    ocean_only = (
+        water._ocean_only_filter(subtype, water_class) and "subtype" not in degraded
+    )
+    result = _water_notes(
+        result, in_range_count, containing, effective_radius_m,
+        ocean_only_filter=ocean_only,
+        filtered=bool(subtype or water_class),
+    )
     if degraded:
         result["degraded_fields"] = degraded
     return result
