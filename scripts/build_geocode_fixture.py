@@ -23,6 +23,19 @@ ADDRESSES_PATH = FIXTURES_DIR / "addresses.parquet"
 CENTER_LAT = 40.700000
 CENTER_LON = -73.900000
 
+# The GERS id of the "Downtown" polygon in division_areas.parquet. The
+# division *entity* row below reuses it so the two fixtures join the way real
+# Overture data does (division.id == division_area.division_id) — without a
+# shared id, no division entity ever appears in its own admin_lookup chain,
+# and gers_lookup's containing-division join has nothing realistic to test.
+DOWNTOWN_DIVISION_ID = "2835be088c8011a4aee3dff5cabbcf13"
+# The locality that *contains* Downtown, likewise a division_area id. Its
+# entity row sits at the same point, so its own containment chain is
+# [Downtown, Metropolis(self), Franklin County, ...] — a division that is not
+# the smallest thing covering its own reference point, which is the shape
+# that distinguishes "the division containing me" from "the next entry down".
+METROPOLIS_DIVISION_ID = "9e34d836dceb18e1254bed9c0a40d455"
+
 ADDRESS_GRID_ROWS = 15
 ADDRESS_GRID_COLS = 20
 ADDRESS_SPACING_M = 15.0
@@ -104,6 +117,20 @@ def build_divisions() -> list[tuple]:
         "gers-div-downtown-brooklyn", "Downtown Brooklyn", "neighborhood", "US", "US-NY",
         CENTER_LAT + 0.001, CENTER_LON - 0.001,
         _chain("United States", "New York", "Brooklyn", "Downtown Brooklyn"),
+    )
+    # The entity twin of division_areas.parquet's "Downtown" polygon, sharing
+    # its GERS id (see DOWNTOWN_DIVISION_ID). Sits at the fixture centre, so
+    # it is contained by its own polygon and gers_lookup resolving this id
+    # gets a chain whose first entry is itself.
+    add(
+        DOWNTOWN_DIVISION_ID, "Downtown", "neighborhood", "US", "US-NY",
+        CENTER_LAT, CENTER_LON,
+        _chain("United States", "New York", "Brooklyn", "Downtown"),
+    )
+    add(
+        METROPOLIS_DIVISION_ID, "Metropolis", "locality", "US", "US-NY",
+        CENTER_LAT, CENTER_LON,
+        _chain("United States", "New York", "Metropolis"),
     )
     add(
         "gers-div-riverside", "Riverside", "neighborhood", "US", "US-IL",
