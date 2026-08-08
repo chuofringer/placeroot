@@ -27,6 +27,7 @@ from placeroot import (
     errors,
     geo,
     gers,
+    infrastructure,
     land_use,
     mapview,
     overture,
@@ -112,13 +113,21 @@ def _with_category_hint(payload: dict, category: str | None, widen_hint: str) ->
     area really has none". The note points at search_categories and at
     whichever widening move fits the mode the caller used (a bigger
     radius for the point path, a bigger division for the polygon path).
+
+    Joins onto any note already present rather than replacing it:
+    places_along_route can arrive here carrying a truncation note (its
+    corridor candidate budget was hit, or the street graph was capped)
+    that explains why an empty result may not mean "nothing matched" —
+    clobbering it would leave truncated: true with no explanation and
+    lose the more accurate advice.
     """
     if category and not payload.get("results"):
-        payload["note"] = (
+        hint = (
             f"no places matched category '{category}' here; if that may not be a "
             "valid Overture category slug, use search_categories to find the right "
             f"one, or {widen_hint} / drop the category filter."
         )
+        payload["note"] = "; ".join(filter(None, [payload.get("note"), hint]))
     return payload
 
 
@@ -569,6 +578,109 @@ def land_use_at(lat: float, lon: float) -> dict:
     except overture.SchemaDegraded as e:
         return _schema_error(e)
     degraded = land_use.degraded_fields()
+    if degraded:
+        result["degraded_fields"] = degraded
+    return result
+
+
+def _with_infrastructure_truncation(
+    payload: dict, total_in_range: int, subtype: str | None, infra_class: str | None
+) -> dict:
+    """Flag an infrastructure_at answer that is a slice of a much larger set.
+
+    budget.apply_budget only knows about rows *it* dropped; the SQL LIMIT
+    cuts first and invisibly, and base/infrastructure is street-furniture
+    dominated, so the 10 nearest features around a city square are lamps
+    and benches even when 72 bridges are in range. Left unflagged that
+    reads as "no bridge near here". So: whenever fewer rows came back than
+    matched, say so, give the true in-range count, and name the move that
+    actually finds landmarks (a subtype/infra_class filter), not just
+    "narrow the query".
+    """
+    shown = len(payload.get("results", []))
+    if total_in_range <= shown:
+        return payload
+    payload["truncated"] = True
+    payload["omitted_count"] = total_in_range - shown
+    payload["total_in_range"] = total_in_range
+    if subtype or infra_class:
+        payload["note"] = (
+            f"showing the {shown} nearest of {total_in_range} matching features; "
+            "narrow further with a smaller radius or a more specific filter."
+        )
+    else:
+        payload["note"] = (
+            f"showing the {shown} nearest of {total_in_range} infrastructure features "
+            "in range. This layer is dominated by street furniture (street lamps, "
+            "benches, waste baskets, bollards), so the nearest few are usually not "
+            "landmarks and their absence here proves nothing: to ask about landmarks, "
+            "filter, e.g. subtype='bridge' / subtype='tower' / infra_class='pier', or "
+            "use a smaller radius."
+        )
+    return payload
+
+
+@mcp.tool()
+def infrastructure_at(
+    lat: float,
+    lon: float,
+    radius_m: float = infrastructure.DEFAULT_RADIUS_M,
+    limit: int = infrastructure.DEFAULT_LIMIT,
+    subtype: str | None = None,
+    infra_class: str | None = None,
+) -> dict:
+    """Infrastructure near a point, nearest first: bridges, towers, piers — and street furniture.
+
+    From Overture's base theme (issue #179), type=infrastructure — the
+    built things that are neither buildings nor POIs. Read the data
+    honestly before trusting an answer: this layer is dominated by street
+    furniture (street_lamp, bench, waste_basket, bollard, kerb, crossing),
+    which outnumbers landmark infrastructure roughly 50:1 in a city
+    centre. An unfiltered query in a dense area returns lamps and benches
+    and says nothing about whether a bridge is nearby. To ask about
+    landmarks, filter: subtype/infra_class match Overture's `subtype` and
+    `class` columns (case-insensitive substring; infra_class is `class`
+    under a non-reserved name) — e.g. subtype="bridge", subtype="tower",
+    subtype="power", infra_class="pier".
+
+    Returns {"center", "radius_m", "results": [{"id", "subtype", "class",
+    "name", "distance_m"}, ...]}, plus "truncated": true, "total_in_range"
+    and an explanatory "note" whenever more features matched than were
+    returned. id is the GERS id, usable with other GERS-keyed tools. No raw
+    geometry (design rule: answers, not data).
+
+    Radius search, not containment: most infrastructure is linear or a
+    bare point, so "what's within radius_m" is the answerable question.
+    distance_m is measured to the closest point on the feature, not its
+    centroid — a bridge you are standing on reads ~0 m, not "distance to
+    the middle of the bridge". radius_m echoes the effective radius, which
+    may be lower than requested (large values are clamped).
+
+    An empty results list is a valid answer, not an error: base-theme
+    coverage is OSM-derived and patchy, and "no infrastructure within
+    500 m" is a real finding. Returns a structured {"error": ...} if
+    upstream is unavailable or the dataset is missing geometry/bbox, and
+    {"error": "bad_request"} for a non-finite or out-of-range coordinate.
+    """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
+    try:
+        rows, effective_radius_m, total_in_range = infrastructure.infrastructure_at(
+            lat, lon, radius_m, limit, subtype=subtype, infra_class=infra_class
+        )
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    result = {
+        "center": {"lat": lat, "lon": lon},
+        "radius_m": effective_radius_m,
+        "results": rows,
+    }
+    result = budget.apply_budget(result, "results")
+    result = _with_infrastructure_truncation(result, total_in_range, subtype, infra_class)
+    degraded = infrastructure.degraded_fields()
     if degraded:
         result["degraded_fields"] = degraded
     return result
@@ -1026,6 +1138,83 @@ def route(
         }
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
+
+
+@mcp.tool()
+def places_along_route(
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+    mode: str = "drive",
+    category: str | None = None,
+    name: str | None = None,
+    max_detour_m: float = routing.CORRIDOR_DEFAULT_DETOUR_M,
+    limit: int = 10,
+) -> dict:
+    """Places on the way from A to B: corridor search along the route.
+
+    Answers "find a coffee shop on my drive to the airport" — the route tool
+    plus find_places in one call. Builds the same street-graph shortest path
+    `route` returns, then finds places whose nearest point on that path is
+    within max_detour_m (default 1000m, capped at 5000m; larger values
+    return a bad_request error rather than being silently clamped).
+
+    Each result row is a find_places row plus two numbers: detour_m, the
+    straight-line distance to the route doubled — an approximation of the
+    round trip off and back on, not a re-routed detour — and along_m, how
+    far along the route from the origin that place sits, so "roughly
+    halfway" is answerable. Results are ordered by along_m (route order,
+    reading as an itinerary) rather than by detour cost. When more than
+    limit places are on the way, the response is an even sample spanning the
+    whole route — never just the first limit, which would drop the far end
+    of the journey — and carries "truncated": true saying so. It also
+    carries {"route": {"distance_m", "duration_s", "mode"}} for the
+    underlying route.
+
+    category and name narrow the search exactly as they do in find_places
+    (category matches Overture's taxonomy, e.g. 'coffee_shop'; name is a
+    substring match) — worth passing on a long route, since an unfiltered
+    corridor through a dense area can hold more places than the search
+    considers, in which case the response carries "truncated": true and a
+    note saying so.
+
+    mode is "walk", "cycle", or "drive" (default), with the same cost model
+    and the same straight-line-distance caps as `route`, and the same
+    structured errors: route_too_long, no_graph_nearby, no_route,
+    unsupported_mode, and bad_request for non-finite/out-of-range
+    coordinates or an invalid max_detour_m.
+    """
+    for lat, lon in ((from_lat, from_lon), (to_lat, to_lon)):
+        coord_error = _invalid_coord(lat, lon)
+        if coord_error is not None:
+            return coord_error
+    try:
+        result = routing.places_along_route(
+            from_lat, from_lon, to_lat, to_lon,
+            mode=mode, category=category, name=name,
+            max_detour_m=max_detour_m, limit=limit,
+        )
+    except routing.UnsupportedMode:
+        return {"error": "unsupported_mode", "supported": sorted(routing.MODE_CONFIG)}
+    except routing.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except (routing.SchemaDegraded, overture.SchemaDegraded) as e:
+        return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
+    except routing.NoGraphNearby as e:
+        return {"error": "no_graph_nearby", "detail": e.detail}
+    except routing.RouteTooLong as e:
+        return {
+            "error": "route_too_long",
+            "detail": e.detail,
+            "max_distance_m": e.max_distance_m,
+        }
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
+    if "error" in result:
+        return result
+    payload = _with_degraded_fields(budget.apply_budget(result, "results"))
+    return _with_category_hint(payload, category, widen_hint="widen max_detour_m")
 
 
 @mcp.tool()

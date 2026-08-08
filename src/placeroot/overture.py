@@ -559,6 +559,113 @@ def find_places(
     return results
 
 
+# Candidate cap for find_places_in_bbox: a corridor bbox has no radius to
+# bound it, so a dense city between two points could otherwise pull an
+# unbounded candidate set into Python for the per-place corridor test. Same
+# "honest partial rather than unbounded" idiom as routing.MAX_GRAPH_SEGMENTS
+# — the caller sees whether the cap was hit and can say so. A cap always
+# slices by the query's ORDER BY rather than by geography, so callers
+# covering an extended shape should spend this budget over several small
+# boxes (see routing.CORRIDOR_BBOX_CHUNKS) rather than one large one.
+BBOX_MAX_CANDIDATES = 500
+
+
+def find_places_in_bbox(
+    bbox: tuple[float, float, float, float],
+    category: str | None = None,
+    name: str | None = None,
+    limit: int = BBOX_MAX_CANDIDATES,
+    near: tuple[float, float] | None = None,
+) -> tuple[list[dict], bool]:
+    """Places whose point falls in an (xmin, ymin, xmax, ymax) box.
+
+    The raw-box counterpart to find_places' point+radius circle, for callers
+    that have a shape of their own to test against and only need the box as
+    a cheap prefilter — currently routing.places_along_route, which measures
+    each candidate against the route corridor in Python. bbox may run
+    outside [-180, 180] in longitude exactly like geo.bbox_around's output;
+    geo.bbox_filter_sql folds an antimeridian-crossing box into two in-range
+    boxes.
+
+    Rows come back in find_places' shape minus distance_m (there's no
+    reference point to rank from — the caller supplies its own ordering),
+    ordered by name then id so the row set is deterministic. category/name
+    narrow results with exactly the same semantics as find_places (shared
+    _place_category_name_filters).
+
+    `near` is an optional (lat, lon) the rows are ranked by proximity to
+    instead — it decides *which* rows survive `limit` when the box holds
+    more than that, so a capped query returns the places closest to the
+    point of interest rather than an alphabetical slice. The ranking is a
+    cheap planar squared distance (longitude scaled by cos(lat)), which is
+    plenty for an ordering the caller re-measures exactly afterwards; name
+    and id still break ties so the row set stays deterministic. Pass it only
+    for an in-range box: the expression compares raw longitudes, so it would
+    rank the far side of an antimeridian-crossing box as distant.
+
+    Returns (rows, capped); capped is True when the query hit `limit` rows,
+    meaning the box holds more matching places than were returned and the
+    caller's own filtering saw only a partial candidate set.
+
+    Raises SchemaDegraded if bbox is missing from the active dataset, or
+    UpstreamUnavailable if the remote scan fails after retries.
+    """
+    limit = max(0, int(limit))
+    upstream = _upstream_glob()
+    missing = set(_check_schema(upstream))
+    xmin, ymin, xmax, ymax = bbox
+    bbox_filter, params = _bbox_filter_sql(xmin, ymin, xmax, ymax)
+    filters = [bbox_filter]
+    if "names" not in missing:
+        filters.append("names.primary IS NOT NULL")
+    filters.extend(_place_category_name_filters(missing, category, name, params))
+
+    order_by = "name, id"
+    if near is not None:
+        near_lat, near_lon = near
+        params["near_lat"] = near_lat
+        params["near_lon"] = near_lon
+        params["near_coslat"] = max(math.cos(math.radians(near_lat)), 1e-6)
+        order_by = (
+            "(bbox.ymin - $near_lat) * (bbox.ymin - $near_lat)"
+            " + ((bbox.xmin - $near_lon) * $near_coslat)"
+            " * ((bbox.xmin - $near_lon) * $near_coslat), name, id"
+        )
+
+    exprs = _place_select_exprs(missing)
+    sql = f"""
+        SELECT
+            {exprs["id"]}                       AS id,
+            {exprs["name"]}                      AS name,
+            {exprs["category"]}                  AS category,
+            {exprs["basic_category"]}             AS basic_category,
+            {exprs["operating_status"]}           AS operating_status,
+            {exprs["confidence"]}                AS confidence,
+            {exprs["brand"]}                     AS brand,
+            {exprs["has_website"]}               AS has_website,
+            {exprs["has_phone"]}                 AS has_phone,
+            round(bbox.ymin, 6)                 AS lat,
+            round(bbox.xmin, 6)                 AS lon
+        FROM {_from_source(bbox)}
+        WHERE {' AND '.join(filters)}
+        ORDER BY {order_by}
+        LIMIT {limit}
+    """
+    try:
+        with _conn_lock:
+            rows = _conn().execute(sql, params).fetchall()
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(str(e)) from e
+    cols = [
+        "id", "name", "category", "basic_category", "operating_status",
+        "confidence", "brand", "has_website", "has_phone", "lat", "lon",
+    ]
+    results = [dict(zip(cols, r)) for r in rows]
+    for d in results:
+        d["operating_status"] = _label_operating_status(d["operating_status"])
+    return results, len(results) >= limit
+
+
 # division_area (divisions theme) columns find_places_in_division depends on
 # to resolve a division's polygon by id. geometry is essential (mirrors
 # divisions.py's admin_lookup) — without it there's no containment test to

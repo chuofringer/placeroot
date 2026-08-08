@@ -1,15 +1,11 @@
 # Registry submissions
 
-Ready-to-paste entries per registry. **Blocker, read first:** PyPI and npm
-publishing (ROADMAP #16 / PLAN.md Phase 1) has not shipped yet as of this
-draft — `uvx placeroot` / `npx placeroot` are the intended install commands
-and match `pyproject.toml` (`name = "placeroot"`) and `npm/package.json`
-(`name: "placeroot"`, a placeholder pointing at the PyPI release), but
-neither package is live on its registry today. Every entry
-below is written as it should read once #16 ships — do not submit any of
-these until the packages are published and the install commands actually
-work, or the submission will be rejected/flagged by registry maintainers who
-test before merging.
+Ready-to-paste entries per registry. **Status:** both packages are live as
+of v0.5.0 — `placeroot` on PyPI and `placeroot` on npm — so `uvx placeroot`
+and `npx placeroot` work as written below. The repo-side manifests these
+submissions draw from are checked in at `server.json` (official MCP
+registry) and `mcpb/manifest.json` (MCPB bundle manifest); keep their
+`version` fields in step with `pyproject.toml` when releasing.
 
 Repo: https://github.com/chuofringer/placeroot · License: MIT · Homepage:
 https://placeroot.dev
@@ -66,57 +62,58 @@ row format:
 
 ## Smithery
 
-- **Qualified name:** `chuofringer/placeroot` (adjust to Smithery's actual GitHub-based naming once claimed)
+**There is no `smithery.yaml` any more.** Smithery's current docs
+(https://smithery.ai/docs/build/publish, index at
+https://smithery.ai/docs/llms.txt — checked 2026-08-07, zero occurrences of
+"yaml") describe exactly two publishing paths, and neither reads a config
+file from the repo:
+
+1. **URL** — give Smithery a public HTTPS endpoint speaking streamable
+   HTTP; their Gateway proxies to it and scans it for tools. PlaceRoot
+   serves streamable HTTP (`uvx placeroot --http`) but is not hosted
+   anywhere public, so this path needs a deployment decision first.
+2. **Local (MCPB bundle)** — upload a `.mcpb` bundle for a stdio server:
+   `smithery mcp publish ./server.mcpb -n chuofringer/placeroot`.
+
+Path 2 is the one that fits a `uvx`-installed stdio server. The bundle
+manifest is checked in at `mcpb/manifest.json` (MCPB manifest_version 0.4,
+`server.type: "uv"` — deps come from `pyproject.toml`, nothing vendored),
+validated against
+https://github.com/modelcontextprotocol/mcpb/blob/main/schemas/mcpb-manifest-v0.4.schema.json.
+Building the actual `.mcpb` (an `mcpb pack` run plus an `.mcpbignore`) is
+not done yet — that is the remaining work before a Smithery submission.
+
+- **Qualified name:** `chuofringer/placeroot` (adjust once the namespace is claimed)
 - **Display name:** PlaceRoot
 - **Description:** Keyless MCP server that answers spatial questions from Overture Maps open data (GeoParquet via DuckDB) — token-budgeted answers, geocoding without Nominatim, GERS ids on every place.
 - **Category:** geospatial / maps
-- **Install/run command:** `uvx placeroot`
 - **Config:** none required — no API key, no environment variables for basic operation (`PLACEROOT_CACHE=off` is optional, to disable the local tile cache)
 
 ## Official MCP registry (registry.modelcontextprotocol.io)
 
-The registry's submission unit is a `server.json` file, published via the
-`mcp-publisher` CLI (schema: `pkg/model/` in
-`modelcontextprotocol/registry`; namespace convention
-`io.github.<user>/<name>` or `<domain>/<name>`). Draft below, following the
-registry's documented generic-server-json example shape — **this needs a
-final check against the live schema and a real `mcp-publisher` dry run
-before submitting**, since the schema can change and this draft was written
-from documentation, not a validated publish:
+The registry's submission unit is a `server.json` file, published with the
+`mcp-publisher` CLI under an `io.github.<user>/<name>` namespace. That file
+is checked in at the repo root: **`server.json`**. It declares three
+packages — PyPI via `uvx` (stdio), npm via `npx` (stdio), and PyPI via
+`uvx --http` (streamable-HTTP on 127.0.0.1:8321/mcp) — plus the optional
+`PLACEROOT_CACHE` environment variable.
 
-```json
-{
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.chuofringer/placeroot",
-  "description": "Keyless MCP server answering spatial questions from Overture Maps open data (GeoParquet via DuckDB) — token-budgeted answers, no API key, no vendor platform.",
-  "title": "PlaceRoot",
-  "websiteUrl": "https://placeroot.dev",
-  "repository": {
-    "url": "https://github.com/chuofringer/placeroot",
-    "source": "github"
-  },
-  "version": "0.3.0",
-  "packages": [
-    {
-      "registryType": "pypi",
-      "registryBaseUrl": "https://pypi.org",
-      "identifier": "placeroot",
-      "version": "0.3.0",
-      "runtimeHint": "uvx",
-      "transport": {
-        "type": "stdio"
-      }
-    }
-  ]
-}
-```
+It validates cleanly (0 errors) against the published schema
+https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json
+as of 2026-08-07. Format reference:
+https://github.com/modelcontextprotocol/registry/blob/main/docs/reference/server-json/generic-server-json.md
 
-TODO before submitting: confirm the `packages[].registryType`/`transport`
-enum values against the current schema (`pkg/model/` in the registry repo)
-and bump `version` to whatever actually lands on PyPI — this draft's
-`0.3.0` matches `pyproject.toml` at time of writing but the PyPI publish
-itself (#16) hasn't happened yet. The official registry currently returns
-zero results for "overture" (noted in PLAN.md) — this is an open namespace.
+Note that `server.json` carries no tool list — the schema has no field for
+one; registries discover tools by connecting to the server. The per-tool
+descriptions live in `mcpb/manifest.json` instead, which does have a
+`tools` array.
+
+Remaining owner-gated steps: `mcp-publisher login github` (proves ownership
+of the `io.github.chuofringer` namespace) then `mcp-publisher publish`. The
+repo is currently private, which may affect the ownership check and the
+`repository.url` link in the manifest — make the repo public first, or
+expect that step to need revisiting. The official registry still returns
+zero results for "overture" (noted in PLAN.md): open namespace.
 
 ## awesome-agentic-AI-for-ST
 

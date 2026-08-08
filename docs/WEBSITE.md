@@ -15,23 +15,37 @@ Fonts (Sora + Fira Code) load from Google Fonts; everything else is local.
 verbatim install commands, and cross-links.
 
 ## Per-release refresh
-Every release, update the site in the same change that bumps the version
-(step 2 of [PUBLISHING.md](PUBLISHING.md#cut-a-release)):
+**Automated** — run **Actions → Prepare Release** (step 1 of
+[PUBLISHING.md](PUBLISHING.md#cut-a-release)) and merge the PR it opens. That
+covers the version-linked copy:
 
 - `site/index.html` — the `vX.Y.Z` chip in the developer section, the
-  `PlaceRoot vX.Y.Z` footer byline, the "new in this release" tool names,
-  and the tool grid + both "N tools" count claims.
+  `PlaceRoot vX.Y.Z` footer byline, and the "new in this release" chip
+  (auto-filled with the tools added since the previous release tag, or with
+  the workflow's free-text `highlight` input).
 - `site/add-to-your-ai.html` — the "latest release vX.Y.Z" note.
-- Any capability copy that a new tool makes stale (e.g. how-it-works'
-  "WHAT IT KNOWS" list).
 
-Two offline guards enforce the mechanical parts, so a stale site fails CI
-rather than shipping:
+Still yours to write when a release calls for it:
+- The tool grid + both "N tools" count claims, when tools were added or
+  renamed (guarded, so CI tells you).
+- Capability copy a new tool makes stale — e.g. how-it-works' "WHAT IT KNOWS"
+  list, or the use-case cards.
+
+Three layers keep this honest, so a stale site fails loudly rather than
+shipping:
 - `tests/test_site_version_sync.py` — every version string on the site equals
-  `pyproject.toml`'s, `npm/package.json` matches it too, and the "new in this
-  release" chip names real registered tools.
+  `pyproject.toml`'s, `npm/package.json` matches it too, and any tool named in
+  the "new in this release" chip is really registered.
 - `tests/test_site_tools_sync.py` — the tool grid and count claims match the
   tools registered in `server.py`.
+- `release.yml`'s `verify` job — re-runs both guards against the tagged tree
+  and refuses to publish to PyPI/npm if the site doesn't match the release.
+
+`scripts/bump_version.py` is the bumper the workflow drives; run it directly
+(`--dry-run` to preview) if you'd rather prepare a release locally. Its
+rewrite helpers are tested in `tests/test_bump_version.py` — if the site's
+chip or version markup is ever restyled, update the regexes there and in the
+guard together.
 
 ## Serve locally
 ```bash
