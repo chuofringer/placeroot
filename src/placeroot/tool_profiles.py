@@ -1,6 +1,6 @@
 """PLACEROOT_TOOLS: load only the tools an install actually uses (issue #182).
 
-The whole 26-tool surface costs ~10.6k estimated tokens of JSON schema in
+The whole 26-tool surface costs ~10.8k estimated tokens of JSON schema in
 every conversation, paid before the agent asks anything. Most installs use
 a slice of it. This module is the single registry mapping a profile name to
 its tools, plus the parser for the `PLACEROOT_TOOLS` env var; server.py

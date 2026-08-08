@@ -26,6 +26,10 @@ routing.py expects. A deterministic 20x20 street grid, 100m spacing:
   backward travel — regression coverage for issue #38's directed-edge
   handling (A -> B routable, B -> A not, for cycle/drive modes; walk
   ignores it).
+- A "switchback" spur (build_switchback_rows): one segment whose geometry
+  detours wildly between its two connectors — regression coverage for the
+  #161 sweep finding that route(include_path=True) emitted chords between
+  graph nodes and threw the road's real shape away.
 - speed_limits/access_restrictions columns on every row (NULL for most —
   standing in for "older" rows a real Overture release might carry before
   those columns existed everywhere): the motorway SHORTCUT segment carries
@@ -111,15 +115,26 @@ def _offset_m(east_m: float, north_m: float) -> tuple[float, float]:
 def _segment_row(idx: int, p0: tuple[float, float], p1: tuple[float, float], cls: str,
                   connectors: list[dict], speed_limits: list[dict] | None = None,
                   access_restrictions: list[dict] | None = None) -> tuple:
-    lat1, lon1 = p0
-    lat2, lon2 = p1
-    wkt = f"LINESTRING ({lon1} {lat1}, {lon2} {lat2})"
+    return _polyline_row(idx, [p0, p1], cls, connectors, speed_limits, access_restrictions)
+
+
+def _polyline_row(idx: int, points: list[tuple[float, float]], cls: str,
+                   connectors: list[dict], speed_limits: list[dict] | None = None,
+                   access_restrictions: list[dict] | None = None) -> tuple:
+    """A segment row from an arbitrary-length (lat, lon) vertex list.
+
+    Most fixture segments are straight two-point lines; the switchback below
+    needs interior shape vertices, which is the whole point of it.
+    """
+    wkt_points = ", ".join(f"{lon} {lat}" for lat, lon in points)
+    lats = [lat for lat, _lon in points]
+    lons = [lon for _lat, lon in points]
     bbox = {
-        "xmin": min(lon1, lon2), "ymin": min(lat1, lat2),
-        "xmax": max(lon1, lon2), "ymax": max(lat1, lat2),
+        "xmin": min(lons), "ymin": min(lats), "xmax": max(lons), "ymax": max(lats),
     }
     return (
-        f"seg-{idx:05d}", wkt, bbox, cls, None, connectors, speed_limits, access_restrictions,
+        f"seg-{idx:05d}", f"LINESTRING ({wkt_points})", bbox, cls, None, connectors,
+        speed_limits, access_restrictions,
     )
 
 
@@ -230,6 +245,39 @@ def build_oneway_rows(start_idx: int) -> list[tuple]:
     ]
 
 
+# --- Switchback spur (#161 sweep) ------------------------------------------
+# A single segment with a big interior detour between its two connectors:
+# every other fixture segment is a straight two-point line, so nothing here
+# could ever catch a router that emits chords between graph nodes and
+# discards the road's real shape. Built as a dead-end spur hanging off the
+# grid's south-east corner node, east of the lattice, so it adds no new
+# route between existing grid nodes and changes no existing distance.
+SWITCHBACK_ANCHOR_NODE = (GRID_N - 1, 0)
+SWITCHBACK_END_ID = "sw_end"
+# (east_m, north_m) from ORIGIN, after the anchor node. Zig north / east /
+# south repeatedly: ~850 m of road across a ~430 m chord.
+SWITCHBACK_OFFSETS_M = [
+    (2000.0, 0.0), (2000.0, 150.0), (2100.0, 150.0), (2100.0, 0.0),
+    (2200.0, 0.0), (2200.0, 150.0), (2300.0, 150.0),
+]
+
+
+def switchback_endpoints_latlon() -> tuple[tuple[float, float], tuple[float, float]]:
+    """((lat, lon) of the anchored start, (lat, lon) of the far end)."""
+    return node_latlon(*SWITCHBACK_ANCHOR_NODE), _offset_m(*SWITCHBACK_OFFSETS_M[-1])
+
+
+def build_switchback_rows(start_idx: int) -> list[tuple]:
+    start, _end = switchback_endpoints_latlon()
+    points = [start] + [_offset_m(*p) for p in SWITCHBACK_OFFSETS_M]
+    return [
+        _polyline_row(start_idx, points, "residential", [
+            {"connector_id": node_id(*SWITCHBACK_ANCHOR_NODE), "at": 0.0},
+            {"connector_id": SWITCHBACK_END_ID, "at": 1.0},
+        ]),
+    ]
+
+
 def _edge_allowed(i: int, j: int, i2: int, j2: int) -> bool:
     if {i, i2} == {RIVER_GAP_I, RIVER_GAP_I + 1} and j == j2 and j != BRIDGE_J:
         return False
@@ -298,6 +346,7 @@ def build_rows() -> list[tuple]:
     rows.extend(build_cross_rows(len(rows)))
     rows.extend(build_isolated_fragment_rows(len(rows)))
     rows.extend(build_oneway_rows(len(rows)))
+    rows.extend(build_switchback_rows(len(rows)))
     return rows
 
 

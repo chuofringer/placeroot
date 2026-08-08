@@ -16,12 +16,13 @@ WHOLE_GRID_RADIUS_M = 3000
 # x_a0, x_a1, x_b0, x_b1, x_cross), the isolated 2-node fragment
 # (frag_0, frag_1), and the issue #38 one-way pair (ow_a, ow_b). See
 # build_routing_fixture.py.
-EXPECTED_NODE_COUNT = fx.GRID_N * fx.GRID_N + 5 + 2 + 2
+# ... and the switchback spur's far end (sw_end), 1 more node.
+EXPECTED_NODE_COUNT = fx.GRID_N * fx.GRID_N + 5 + 2 + 2 + 1
 # All grid edges (horizontal + vertical + diagonal) minus the one motorway
 # shortcut (excluded by the walkable filter), plus the crossing's 4 split
-# edges, the isolated fragment's 1 edge, and the one-way pair's 1 edge (same
-# #37/#38 additions as above).
-EXPECTED_EDGE_COUNT = len(fx.build_edges()) - 1 + 4 + 1 + 1
+# edges, the isolated fragment's 1 edge, the one-way pair's 1 edge (same
+# #37/#38 additions as above), and the switchback spur's 1 edge.
+EXPECTED_EDGE_COUNT = len(fx.build_edges()) - 1 + 4 + 1 + 1 + 1
 
 
 def test_bbox_filter_sql_unchanged_for_non_crossing_box():
