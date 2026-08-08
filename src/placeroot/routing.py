@@ -80,6 +80,12 @@ isochrone() surfaces that as a `truncated: true` top-level flag plus a note
 in `stats`, so the result is honestly a partial graph rather than either an
 unbounded one or a silent undercount.
 
+Corridor search (#171): places_along_route() answers "what's on the way
+from A to B" by keeping the node path of the same shortest path route()
+computes (_dijkstra_path_to_target) and measuring find_places-style
+candidates from the places theme against it — see that function for the
+detour cost model.
+
 Query layer: this module shares the package-wide connection, bbox
 helpers, and schema probe (via db.py/geo.py); db.ensure_spatial() is
 called explicitly here since this module needs the spatial extension.
@@ -217,6 +223,41 @@ ROUTE_MAX_STRAIGHT_LINE_M = {
 }
 ROUTE_MIN_RADIUS_M = 500.0  # extraction radius floor, so very-close points still get a real graph
 ROUTE_RADIUS_RETRY_FACTOR = 1.6  # widen-and-retry factor when the first extraction misses a path
+
+# places_along_route (#171): how far off the route a place may sit and still
+# count as "on the way". CORRIDOR_MAX_DETOUR_M caps the caller's
+# max_detour_m — the corridor bbox grows with it in both dimensions, so an
+# unbounded value would turn a cross-town route into a metro-wide place
+# scan. 5km is already far wider than any "on the way" question (it's a
+# ~10km round-trip detour) while keeping the candidate box bounded.
+CORRIDOR_DEFAULT_DETOUR_M = 1000.0
+CORRIDOR_MAX_DETOUR_M = 5000.0
+# Cost bound for the per-place corridor test, which is O(candidates x path
+# segments) of pure-Python point-to-segment math. A long drive route can
+# settle tens of thousands of nodes; scanning every one against every
+# candidate is the only expensive part of this tool. Above this count the
+# path is evenly subsampled, endpoints always kept.
+#
+# Since the test measures against the *polyline* through the retained nodes
+# (not the nodes themselves), subsampling costs far less accuracy than it
+# used to: what's lost is only the difference between the real path and the
+# chords across the dropped runs. That error runs both ways — a chord can
+# cut a corner the street actually takes, admitting a place the real route
+# passes farther from, or bulge inside a curve and exclude one — and is
+# bounded by how far the dropped nodes stray from their chord. On a
+# city-scale route thinned to 1000 nodes that is metres against a
+# max_detour_m measured in hundreds.
+CORRIDOR_MAX_PATH_NODES = 1000
+# One bbox over a whole route lets a dense stretch consume the entire
+# overture.BBOX_MAX_CANDIDATES budget and starve the rest of the corridor:
+# the SQL cap slices by the query's ORDER BY, not by geography, so 500
+# alphabetically-early places clustered at one end can hide every match
+# elsewhere. Instead the path is cut into this many chunks, each querying
+# its own tight box with its own share of the budget, so coverage is
+# spatially uniform and the scanned area is much smaller. Consecutive
+# chunks overlap by one node, so every path *segment* lies wholly inside
+# some chunk's box and no slice of the corridor falls between two boxes.
+CORRIDOR_BBOX_CHUNKS = 20
 
 CONCAVE_MIN_NODES = 8  # fewer reached nodes than this: convex hull is used directly
 CONCAVE_CELL_MIN_M = 60.0
@@ -1287,10 +1328,10 @@ def _midpoint(
     return lat_mid, lon_mid
 
 
-def _dijkstra_to_target(
+def _dijkstra_path_to_target(
     graph: Graph, source: str, target: str, speed_m_s: float
-) -> tuple[float, float] | None:
-    """(elapsed_seconds, distance_m) of the min-time path source->target, or None.
+) -> tuple[float, float, list[tuple[str, float]]] | None:
+    """(elapsed_seconds, distance_m, path) of the min-time path source->target, or None.
 
     Target-terminated Dijkstra: identical relaxation to dijkstra() (only
     outgoing adjacency entries are followed, so directed/one-way edges are
@@ -1301,23 +1342,41 @@ def _dijkstra_to_target(
     None if the heap empties before `target` is reached, meaning target is
     unreachable from source in this graph (different component, or a
     one-way maze that only lets traffic flow away from it).
+
+    `path` is the node sequence from source to target, each paired with the
+    cumulative route distance in meters at that node (source -> 0.0, target
+    -> distance_m). It comes from a predecessor table written in lockstep
+    with dist_to, so a node's recorded along-distance is always the distance
+    along the very chain the predecessor table describes — see
+    places_along_route, the caller that needs it. route() shares this same
+    search through _shortest_path and simply ignores the path element.
     """
     if source == target:
-        return 0.0, 0.0
+        return 0.0, 0.0, [(source, 0.0)]
     time_to: dict[str, float] = {source: 0.0}
     dist_to: dict[str, float] = {source: 0.0}
+    prev: dict[str, str] = {}
     heap = [(0.0, source)]
     while heap:
         t, node = heapq.heappop(heap)
         if t > time_to.get(node, math.inf):
             continue
         if node == target:
-            return t, dist_to[node]
+            path: list[tuple[str, float]] = []
+            cur = node
+            while True:
+                path.append((cur, dist_to[cur]))
+                if cur == source:
+                    break
+                cur = prev[cur]
+            path.reverse()
+            return t, dist_to[node], path
         for neighbor, weight, length_m in graph.adjacency[node]:
             nt = t + weight / speed_m_s
             if nt < time_to.get(neighbor, math.inf):
                 time_to[neighbor] = nt
                 dist_to[neighbor] = dist_to[node] + length_m
+                prev[neighbor] = node
                 heapq.heappush(heap, (nt, neighbor))
     return None
 
@@ -1371,6 +1430,58 @@ def route(
     are derived from the same edges along the same min-time path); for
     drive, duration_s comes from baked per-edge time weights while
     distance_m is summed length_m independently, so no such identity holds.
+    """
+    graph, found = _shortest_path(from_lat, from_lon, to_lat, to_lon, mode)
+    if found is None:
+        return _no_route_result(from_lat, from_lon, to_lat, to_lon, mode)
+
+    duration_s, distance_m, _path = found
+    result = {
+        "distance_m": round(distance_m, 1),
+        "duration_s": round(duration_s, 1),
+        "mode": mode,
+        "from": {"lat": from_lat, "lon": from_lon},
+        "to": {"lat": to_lat, "lon": to_lon},
+    }
+    if graph.truncated:
+        result["truncated"] = True
+        result["note"] = (
+            "the street graph hit its size cap; this route may be suboptimal or incomplete"
+        )
+    return result
+
+
+def _no_route_result(
+    from_lat: float, from_lon: float, to_lat: float, to_lon: float, mode: str
+) -> dict:
+    """The structured "both points snapped, nothing connects them" answer,
+    shared by route() and places_along_route()."""
+    return {
+        "error": "no_route",
+        "detail": "no path found between the points in the searched area",
+        "mode": mode,
+        "from": {"lat": from_lat, "lon": from_lon},
+        "to": {"lat": to_lat, "lon": to_lon},
+    }
+
+
+def _shortest_path(
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+    mode: str,
+) -> tuple[Graph, tuple[float, float, list[tuple[str, float]]] | None]:
+    """(graph, (duration_s, distance_m, path)) for the A->B min-time path.
+
+    The shared machinery behind route() and places_along_route(): input
+    validation, the straight-line/radius caps, the widen-and-retry
+    extraction loop, endpoint snapping, and the path search itself. The
+    second element is None when both endpoints snapped into a graph but no
+    path connects them — callers turn that into their own structured
+    no_route answer (_no_route_result). Every error case (UnsupportedMode,
+    ValueError, RouteTooLong, NoGraphNearby) raises exactly as route()'s
+    docstring describes.
     """
     if mode not in MODE_CONFIG:
         raise UnsupportedMode(mode)
@@ -1441,37 +1552,310 @@ def route(
 
         snapped_both = True
         speed = 1.0 if graph.weight_is_time else const_speed
-        found = _dijkstra_to_target(graph, source, target, speed)
+        found = _dijkstra_path_to_target(graph, source, target, speed)
         if found is not None:
             break
 
-    if found is None:
-        # snapped_both is guaranteed True here: the loop above raises
-        # NoGraphNearby before falling through on the last radius whenever
-        # snapped_both is still False, so reaching this point with found
-        # still None means both endpoints snapped at some radius (Bug 4:
-        # even if a *later*, larger retry radius then failed to snap, that
-        # later failure just `continue`s rather than raising and clobbering
-        # this — the accurate answer here is no_route, not NoGraphNearby).
-        return {
-            "error": "no_route",
-            "detail": "no path found between the points in the searched area",
-            "mode": mode,
-            "from": {"lat": from_lat, "lon": from_lon},
-            "to": {"lat": to_lat, "lon": to_lon},
-        }
+    # found is None here only with snapped_both True: the loop above raises
+    # NoGraphNearby before falling through on the last radius whenever
+    # snapped_both is still False, so reaching that point with found still
+    # None means both endpoints snapped at some radius (Bug 4: even if a
+    # *later*, larger retry radius then failed to snap, that later failure
+    # just `continue`s rather than raising and clobbering this — the
+    # accurate answer is no_route, not NoGraphNearby).
+    return graph, found
 
-    duration_s, distance_m = found
+
+def _sample_evenly(items: list, count: int) -> list:
+    """At most `count` items spread evenly across `items`, keeping order and both ends.
+
+    Same idea as decimate() but index-based over a plain sequence. When
+    `items` is longer than `count` the step is > 1, so the rounded indices
+    strictly increase and exactly `count` items come back — no dedup gap.
+    """
+    if count <= 0:
+        return []
+    if len(items) <= count:
+        return list(items)
+    if count == 1:
+        return [items[0]]
+    step = (len(items) - 1) / (count - 1)
+    return [items[round(i * step)] for i in range(count)]
+
+
+def _subsample_path(
+    path: list[tuple[str, float]], max_nodes: int
+) -> list[tuple[str, float]]:
+    """Evenly thin a node path to at most max_nodes entries, keeping both ends.
+
+    The last node is pinned (via _sample_evenly) since the corridor's
+    along_m readings should still reach the route's full length after
+    thinning. max_nodes < 2 is meaningless for a path — a corridor needs at
+    least the two endpoints — so it leaves the path alone.
+    """
+    if max_nodes < 2:
+        return path
+    return _sample_evenly(path, max_nodes)
+
+
+def _corridor_bbox(
+    coords: list[tuple[float, float]], buffer_m: float
+) -> tuple[float, float, float, float]:
+    """(xmin, ymin, xmax, ymax) around (lat, lon) coords, padded by buffer_m.
+
+    A cheap superset of the corridor — the exact "within buffer_m of the
+    path" test happens per-place in Python — so the longitude padding uses
+    the box's highest-|latitude| edge (where a metre is worth the most
+    degrees) to be sure it never under-covers.
+
+    Longitude may come back outside [-180, 180], exactly like geo.bbox_around's
+    output, and overture.find_places_in_bbox folds such a box into two
+    in-range ones. A path whose raw longitudes span more than half the globe
+    has crossed the antimeridian rather than genuinely circled it (routes
+    are capped at ROUTE_MAX_STRAIGHT_LINE_M, a few hundred km), so its
+    western lons are unwrapped past +180 to give a tight wrapped box instead
+    of a global latitude band.
+    """
+    lats = [lat for lat, _lon in coords]
+    lons = [lon for _lat, lon in coords]
+    if max(lons) - min(lons) > 180.0:
+        lons = [lon + 360.0 if lon < 0.0 else lon for lon in lons]
+    widest_lat = max(abs(min(lats)), abs(max(lats)))
+    dlat = buffer_m / 111_320.0
+    dlon = buffer_m / (111_320.0 * max(math.cos(math.radians(widest_lat)), 1e-6))
+    return (
+        min(lons) - dlon,
+        max(min(lats) - dlat, -90.0),
+        max(lons) + dlon,
+        min(max(lats) + dlat, 90.0),
+    )
+
+
+def _point_to_segment_m(
+    plat: float, plon: float, alat: float, alon: float, blat: float, blon: float
+) -> tuple[float, float]:
+    """(distance_m, t) from point P to segment A->B.
+
+    t is P's projection along A->B, clamped to [0, 1].
+
+    Works in a local equirectangular projection centred on A: longitude
+    differences are scaled by cos(A's latitude) and both axes by metres per
+    degree, which turns the segment test into plain 2D geometry. At corridor
+    scale — graph edges are tens to a few hundred metres and max_detour_m
+    caps the offset at 5km — that projection's distortion is well under a
+    metre, far below the precision this filter needs. Longitude differences
+    are wrapped into (-180, 180] first, so a segment or a place straddling
+    the antimeridian still measures the short way round.
+    """
+    coslat = math.cos(math.radians(alat))
+    m_per_deg = EARTH_RADIUS_M * math.pi / 180.0
+
+    def xy(lat: float, lon: float) -> tuple[float, float]:
+        dlon = ((lon - alon + 180.0) % 360.0) - 180.0
+        return dlon * coslat * m_per_deg, (lat - alat) * m_per_deg
+
+    px, py = xy(plat, plon)
+    bx, by = xy(blat, blon)
+    seg_sq = bx * bx + by * by
+    if seg_sq <= 0.0:  # degenerate segment (duplicate coords): point distance
+        return math.hypot(px, py), 0.0
+    t = min(1.0, max(0.0, (px * bx + py * by) / seg_sq))
+    return math.hypot(px - t * bx, py - t * by), t
+
+
+def _nearest_on_path(
+    plat: float, plon: float, path_points: list[tuple[float, float, float]]
+) -> tuple[float, float]:
+    """(distance_m, along_m) of the closest point on the path polyline to (plat, plon).
+
+    Measures against the *segments* between consecutive path nodes, not the
+    nodes alone: a place beside the middle of a long block is as much "on
+    the way" as one beside a junction, and node-only distance would have
+    reported it as up to half a block farther off than it is. along_m is
+    interpolated between the two nodes' route distances at the same
+    fraction t the closest point sits at.
+    """
+    if len(path_points) == 1:
+        lat, lon, along_m = path_points[0]
+        return _haversine_m(plat, plon, lat, lon), along_m
+    best_m, best_along_m = math.inf, 0.0
+    for i in range(len(path_points) - 1):
+        alat, alon, a_along = path_points[i]
+        blat, blon, b_along = path_points[i + 1]
+        dist_m, t = _point_to_segment_m(plat, plon, alat, alon, blat, blon)
+        if dist_m < best_m:
+            best_m = dist_m
+            best_along_m = a_along + t * (b_along - a_along)
+    return best_m, best_along_m
+
+
+def _path_chunks(
+    path_points: list[tuple[float, float, float]], chunks: int
+) -> list[list[tuple[float, float, float]]]:
+    """Cut the path into <= `chunks` consecutive runs that overlap by one node.
+
+    The overlap matters: a chunk boundary that merely abutted would leave
+    the segment spanning it inside neither chunk's padded box, so a place
+    beside that segment could be missed. Sharing the boundary node puts
+    every segment wholly inside exactly one chunk.
+    """
+    if len(path_points) < 2:
+        return [path_points]
+    segments = len(path_points) - 1
+    count = max(1, min(chunks, segments))
+    return [
+        path_points[i * segments // count : (i + 1) * segments // count + 1]
+        for i in range(count)
+    ]
+
+
+def _corridor_candidates(
+    path_points: list[tuple[float, float, float]],
+    max_detour_m: float,
+    category: str | None,
+    name: str | None,
+) -> tuple[list[dict], bool]:
+    """(candidate places, capped) near the path, gathered chunk by chunk.
+
+    One query per _path_chunks chunk over that chunk's own padded box, each
+    with its own slice of the overture.BBOX_MAX_CANDIDATES budget, ranked by
+    distance from the chunk's middle node — see CORRIDOR_BBOX_CHUNKS for why
+    a single whole-route box is not enough. Rows are unioned and deduped by
+    id (chunks overlap, and a place near a boundary legitimately falls in
+    two boxes); `capped` is True if any chunk filled its own limit, meaning
+    that stretch of the corridor held more candidates than were measured.
+    """
+    chunks = _path_chunks(path_points, CORRIDOR_BBOX_CHUNKS)
+    per_chunk_limit = max(1, overture.BBOX_MAX_CANDIDATES // len(chunks))
+    by_key: dict = {}
+    capped = False
+    for chunk in chunks:
+        coords = [(lat, lon) for lat, lon, _along in chunk]
+        bbox = _corridor_bbox(coords, max_detour_m)
+        # Proximity ranking compares raw longitudes, so it is only
+        # meaningful for a box that hasn't been unwrapped past the seam.
+        mid_lat, mid_lon = coords[len(coords) // 2]
+        near = (mid_lat, mid_lon) if -180.0 <= bbox[0] and bbox[2] <= 180.0 else None
+        rows, chunk_capped = overture.find_places_in_bbox(
+            bbox, category, name, limit=per_chunk_limit, near=near
+        )
+        capped = capped or chunk_capped
+        for row in rows:
+            key = row["id"] or ("", row["name"], row["lat"], row["lon"])
+            by_key.setdefault(key, row)
+    return list(by_key.values()), capped
+
+
+def places_along_route(
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+    mode: str = "drive",
+    category: str | None = None,
+    name: str | None = None,
+    max_detour_m: float = CORRIDOR_DEFAULT_DETOUR_M,
+    limit: int = 10,
+) -> dict:
+    """Places within a corridor around the A->B route — "on the way" search (#171).
+
+    Composes route()'s machinery with a find_places-style query: the same
+    shortest path route() computes (see _shortest_path — identical caps,
+    extraction retries, snapping and error taxonomy), but keeping the node
+    path, then every candidate place near it (gathered chunk by chunk, see
+    _corridor_candidates) is measured against the path.
+
+    A place is "on the way" when the path polyline passes within
+    max_detour_m of it — the distance is to the nearest point on the nearest
+    *segment* (_nearest_on_path), not to the nearest node, so a place
+    halfway along a long block counts exactly as much as one at a junction.
+    Its reported detour_m is that distance doubled — an approximation of the
+    round trip off and back onto the route, deliberately a *straight-line*
+    one: measuring the true routed detour would mean a fresh Dijkstra per
+    candidate. along_m is the route distance from the origin at that closest
+    point, so an agent can say "about a third of the way there"; results are
+    ordered by along_m (route order, not detour cost) so the list reads as
+    an itinerary.
+
+    More matches than `limit` are thinned to an even sample along the whole
+    route rather than truncated to the first `limit` — a prefix would silently
+    drop the far end of the journey — and the result is flagged
+    "truncated": true so the caller knows to narrow or raise `limit`.
+
+    max_detour_m must be a positive number no larger than
+    CORRIDOR_MAX_DETOUR_M (5km, i.e. a ~10km round-trip detour); anything
+    else raises ValueError, as does a non-finite coordinate. Raises
+    UnsupportedMode, RouteTooLong and NoGraphNearby exactly as route() does,
+    and returns route()'s {"error": "no_route", ...} when both endpoints
+    snap but nothing connects them.
+
+    Returns {"results": [find_places row + detour_m + along_m, ...],
+    "route": {"distance_m", "duration_s", "mode"}}, plus "truncated": true
+    with a "note" when the street graph hit MAX_GRAPH_SEGMENTS (the route
+    itself may be suboptimal), a chunk of the corridor held more candidate
+    places than its share of overture.BBOX_MAX_CANDIDATES (some "on the way"
+    places were never measured — narrow with category/name or a smaller
+    max_detour_m), or more than `limit` places were on the way.
+    """
+    if not _is_finite_number(max_detour_m) or max_detour_m <= 0:
+        raise ValueError("max_detour_m must be a positive number")
+    if max_detour_m > CORRIDOR_MAX_DETOUR_M:
+        raise ValueError(
+            f"max_detour_m={max_detour_m:.0f} exceeds the "
+            f"{CORRIDOR_MAX_DETOUR_M:.0f}m cap"
+        )
+    limit = max(0, min(int(limit), overture.MAX_ROWS))
+
+    graph, found = _shortest_path(from_lat, from_lon, to_lat, to_lon, mode)
+    if found is None:
+        return _no_route_result(from_lat, from_lon, to_lat, to_lon, mode)
+    duration_s, distance_m, path = found
+
+    sampled = _subsample_path(path, CORRIDOR_MAX_PATH_NODES)
+    path_points = [(*graph.coords[node_id], along_m) for node_id, along_m in sampled]
+
+    candidates, capped = _corridor_candidates(path_points, max_detour_m, category, name)
+
+    rows = []
+    for place in candidates:
+        nearest_m, nearest_along_m = _nearest_on_path(
+            place["lat"], place["lon"], path_points
+        )
+        if nearest_m > max_detour_m:
+            continue
+        rows.append({**place, "detour_m": round(2 * nearest_m, 1),
+                     "along_m": round(nearest_along_m, 1)})
+
+    # Route order first (the itinerary reading), then the cheaper detour and
+    # finally the id, so equal-position ties are still deterministic.
+    rows.sort(key=lambda r: (r["along_m"], r["detour_m"], r["id"] or ""))
+
     result = {
-        "distance_m": round(distance_m, 1),
-        "duration_s": round(duration_s, 1),
-        "mode": mode,
-        "from": {"lat": from_lat, "lon": from_lon},
-        "to": {"lat": to_lat, "lon": to_lon},
+        "results": _sample_evenly(rows, limit),
+        "route": {
+            "distance_m": round(distance_m, 1),
+            "duration_s": round(duration_s, 1),
+            "mode": mode,
+        },
     }
+    notes = []
     if graph.truncated:
-        result["truncated"] = True
-        result["note"] = (
+        notes.append(
             "the street graph hit its size cap; this route may be suboptimal or incomplete"
         )
+    if capped:
+        notes.append(
+            "part of the route's corridor holds more places than the candidate "
+            "budget allows; some on-the-way places were not considered — narrow "
+            "with category/name or a smaller max_detour_m"
+        )
+    if len(rows) > limit:
+        notes.append(
+            f"{len(rows)} places are on the way but limit is {limit}; the results "
+            "are an even sample spanning the whole route, not the first "
+            f"{limit} — raise limit or narrow with category/name to see more"
+        )
+    if notes:
+        result["truncated"] = True
+        result["note"] = "; ".join(notes)
     return result

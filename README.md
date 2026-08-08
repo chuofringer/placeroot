@@ -11,7 +11,7 @@ PlaceRoot is an MCP server that answers spatial questions from [Overture Maps](h
 
 ## Why PlaceRoot
 
-It is the only keyless MCP server that does real graph routing over global open map data. `isochrone` and `route` walk an actual street graph built from Overture's transportation segments — not a straight-line approximation — anywhere on Earth, with no key, no signup, and no per-call quota. All 22 tools work that way.
+It is the only keyless MCP server that does real graph routing over global open map data. `isochrone` and `route` walk an actual street graph built from Overture's transportation segments — not a straight-line approximation — anywhere on Earth, with no key, no signup, and no per-call quota. All 23 tools work that way.
 
 What it deliberately does not do, because Overture's open data does not carry it:
 
@@ -47,7 +47,7 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 
 ## What it can do
 
-**22 tools**, all returning compact, budgeted answers. Several single-item tools have a `*_batch` sibling that collapses many calls into one round-trip.
+**23 tools**, all returning compact, budgeted answers. Several single-item tools have a `*_batch` sibling that collapses many calls into one round-trip.
 
 | Tool | Answers |
 |---|---|
@@ -67,6 +67,7 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 | `search_categories` | Free text → the right Overture category slug to filter `find_places` by |
 | `isochrone` | The area reachable within N minutes on foot, bike, or car |
 | `route` | Shortest-path distance and duration between two points, on foot, bike, or car |
+| `places_along_route` | Places on the way from A to B: corridor search along the route, with each result's detour and how far along it sits |
 | `render_map` | Any result → a self-contained interactive HTML map |
 | `simplify_geometry` | Any geometry → simplified to fit a token budget |
 | `data_version` | Which Overture release the answers are drawn from |
