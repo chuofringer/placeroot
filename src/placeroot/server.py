@@ -956,6 +956,12 @@ def geocode(query: str, limit: int = 5) -> dict:
     one close-spelling retry over the local divisions table (#215); those
     results rank below any literal match and come with a "note" naming the
     spelling they were corrected to.
+
+    Exonyms work too (#214): names are matched against Overture's ~100
+    localized alternates as well as its canonical one, so "Munich" answers
+    München and "Tokyo" answers 東京都. `name` is always the canonical
+    spelling; such rows carry an extra "matched_name" naming the alternate
+    that matched.
     """
     try:
         result = geocoding.geocode_detailed(query, limit)

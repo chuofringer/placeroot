@@ -71,11 +71,19 @@ def _chain(*names: str) -> list[list[dict]]:
 def build_divisions() -> list[tuple]:
     rows = []
 
-    def add(division_id, name, subtype, country, region, lat, lon, hierarchies, population=None):
+    def add(
+        division_id, name, subtype, country, region, lat, lon, hierarchies,
+        population=None, common=None,
+    ):
+        # #214: `common` mirrors Overture's names.common — a language-code ->
+        # localized-name map. Written for every row (empty when there are no
+        # alternates) so the fixture's `names` struct has the same shape the
+        # real theme does and geocode's alt-name materialization runs against
+        # it unchanged.
         rows.append((
             division_id,
             _point_bbox(lat, lon),
-            {"primary": name},
+            {"primary": name, "common": common or {}},
             subtype,
             country,
             region,
@@ -231,6 +239,63 @@ def build_divisions() -> list[tuple]:
         37.77, -122.42, _chain("United States", "California", "San Francisco"),
         population=808_437,
     )
+    # #214: exonyms. Each of these four cities is stored under its endonym in
+    # names.primary and reachable in English only through names.common — the
+    # exact shape that made live "Munich" answer Munich, North Dakota. Each
+    # comes with the small same-named decoy the live probe actually returned,
+    # deliberately without a population, so the tests pin the *ranking* (#47
+    # prominence beats a population-less literal namesake) and not merely
+    # "the alternate matched something".
+    add(
+        "gers-div-munchen", "München", "locality", "DE", "DE-BY",
+        48.14, 11.58, _chain("Germany", "Bavaria", "München"),
+        population=1_512_491,
+        common={"en": "Munich", "fr": "Munich", "it": "Monaco di Baviera", "es": "Múnich"},
+    )
+    add(
+        "gers-div-munich-nd", "Munich", "locality", "US", "US-ND",
+        48.67, -98.83, _chain("United States", "North Dakota", "Munich"),
+    )
+    add(
+        "gers-div-tokyo-jp", "東京都", "locality", "JP", "JP-13",
+        35.68, 139.69, _chain("Japan", "東京都"),
+        population=13_929_286,
+        common={"en": "Tokyo", "de": "Tokio", "fr": "Tokyo"},
+    )
+    add(
+        "gers-div-tokyo-pg", "Tokyo", "locality", "PG", "PG-EBR",
+        -4.35, 152.26, _chain("Papua New Guinea", "East New Britain", "Tokyo"),
+    )
+    add(
+        "gers-div-moskva-ru", "Москва", "locality", "RU", "RU-MOW",
+        55.75, 37.62, _chain("Russia", "Москва"),
+        population=13_010_112,
+        common={"en": "Moscow", "de": "Moskau", "cs": "Moskva", "pl": "Moskwa"},
+    )
+    add(
+        "gers-div-moskva-tj", "Moskva", "locality", "TJ", "TJ-KT",
+        37.60, 68.79, _chain("Tajikistan", "Khatlon", "Moskva"),
+    )
+    add(
+        "gers-div-wien", "Wien", "locality", "AT", "AT-9",
+        48.21, 16.37, _chain("Austria", "Wien"),
+        population=1_982_097,
+        common={"en": "Vienna", "it": "Vienna", "fr": "Vienne", "cs": "Vídeň"},
+    )
+    add(
+        "gers-div-vienna-il", "Vienna", "locality", "US", "US-IL",
+        37.41, -88.89, _chain("United States", "Illinois", "Vienna"),
+    )
+    # #214: an alternate whose only obstacle is a letter strip_accents leaves
+    # alone (duckdb#15706) — "Preßburg" is the German exonym for Bratislava,
+    # and a plain-ASCII "Pressburg" query only reaches it through the
+    # explicit _UNFOLDED_LETTERS map on both sides of the comparison.
+    add(
+        "gers-div-bratislava", "Bratislava", "locality", "SK", "SK-BL",
+        48.15, 17.11, _chain("Slovakia", "Bratislava"),
+        population=475_503,
+        common={"de": "Preßburg", "hu": "Pozsony"},
+    )
     # #188: a division in a country the addresses theme does NOT cover (GB is
     # not one of addresses.COVERED_COUNTRIES), so address_at has somewhere to
     # resolve "this coordinate is in an uncovered country" from. Deliberately
@@ -300,7 +365,7 @@ def main() -> None:
         CREATE TABLE divisions (
             id VARCHAR,
             bbox STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE),
-            names STRUCT("primary" VARCHAR),
+            names STRUCT("primary" VARCHAR, common MAP(VARCHAR, VARCHAR)),
             subtype VARCHAR,
             country VARCHAR,
             region VARCHAR,

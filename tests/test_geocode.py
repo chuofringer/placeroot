@@ -362,6 +362,200 @@ def test_fuzzy_matching_folds_case_and_diacritics(geocode_cache):
     assert results[0]["name"] == "São Paulo"
 
 
+# --- #214: alternate names (Overture's names.common) ----------------------
+# Live repro on release 2026-07-22.0: "Munich" answered Munich, North
+# Dakota; "Tokyo" answered Tokyo, Papua New Guinea; "Moskva" answered
+# Moskva, Tajikistan. The fixture carries each endonym with its names.common
+# alternates *and* the small namesake the live probe actually returned, so
+# these pin the ranking and not just "the alternate matched". Alt matching
+# needs the #43 local table (and the alt table beside it), hence
+# `geocode_cache` throughout.
+
+
+def _alt_table_path(cache_dir):
+    (table,) = cache_dir.rglob(geocode._DIVISIONS_TABLE_FILENAME)
+    return table.with_name(geocode._ALT_NAMES_TABLE_FILENAME)
+
+
+def test_exonym_resolves_to_the_endonym_division(geocode_cache):
+    results = geocode.geocode("Munich", limit=5)
+    assert results[0]["name"] == "München"
+    assert results[0]["id"] == "gers-div-munchen"
+
+
+def test_each_live_verified_exonym_probe_resolves(geocode_cache):
+    for query, expected in [
+        ("Munich", "München"),
+        ("Tokyo", "東京都"),
+        ("Moskva", "Москва"),
+        ("Vienna", "Wien"),
+    ]:
+        results = geocode.geocode(query, limit=5)
+        assert results, f"{query!r} found nothing"
+        assert results[0]["name"] == expected, query
+
+
+def test_exonym_hit_outranks_the_populationless_literal_namesake(geocode_cache):
+    # Munich, ND is a *literal* exact match; München is only an alternate
+    # one. The alternate wins the #47 way — same tier, and it is the one
+    # carrying a population — not by outranking literal matches as a class.
+    names = [r["name"] for r in geocode.geocode("Munich", limit=5)]
+    assert names.index("München") < names.index("Munich")
+
+
+def test_alt_hit_returns_the_canonical_name_and_names_what_matched(geocode_cache):
+    top = geocode.geocode("Munich", limit=5)[0]
+    assert top["name"] == "München"
+    assert top["matched_name"] == "Munich"
+
+
+def test_matched_name_is_absent_on_ordinary_literal_matches(geocode_cache):
+    # The only response-shape change #214 makes is this optional field, and
+    # it must not appear on rows that matched names.primary.
+    for row in geocode.geocode("Brooklyn", limit=5):
+        assert "matched_name" not in row
+
+
+def test_matched_name_reaches_the_geocode_tool(geocode_cache):
+    payload = server.geocode("Vienna", limit=5)
+    assert payload["results"][0]["name"] == "Wien"
+    assert payload["results"][0]["matched_name"] == "Vienna"
+
+
+def test_alt_match_folds_letters_strip_accents_leaves_alone(geocode_cache):
+    # duckdb#15706: strip_accents() doesn't touch ß, so the German exonym
+    # "Preßburg" is only reachable from a plain-ASCII query through the
+    # explicit _UNFOLDED_LETTERS map — applied identically at build time in
+    # SQL and at query time in Python.
+    results = geocode.geocode("Pressburg", limit=5)
+    assert results[0]["name"] == "Bratislava"
+    assert results[0]["matched_name"] == "Preßburg"
+
+
+def test_alt_fold_matches_between_python_and_sql():
+    for name in ["Preßburg", "Łódź", "Malmø", "München", "Ísafjörður"]:
+        assert geocode._fold_alt_name(name) == geocode._fold_alt_name(
+            geocode._fold_alt_name(name)
+        ), name
+    assert geocode._fold_alt_name("Preßburg") == "pressburg"
+    assert geocode._fold_alt_name("Łódź") == "lodz"
+    assert geocode._fold_alt_name("Malmø") == "malmo"
+
+
+def test_endonym_queries_are_unaffected_by_the_alt_table(geocode_cache):
+    # The regression this feature is most at risk of: querying the canonical
+    # spelling must still return it as a plain literal match.
+    for query, expected in [("München", "München"), ("Wien", "Wien"), ("Москва", "Москва")]:
+        top = geocode.geocode(query, limit=5)[0]
+        assert top["name"] == expected
+        assert "matched_name" not in top
+
+
+def test_alt_table_is_materialized_beside_the_divisions_table(geocode_cache):
+    geocode.geocode("Brooklyn", limit=1)
+    alt = _alt_table_path(geocode_cache)
+    assert alt.exists()
+    rows = duckdb.connect().execute(
+        f"SELECT alt_name, alt_display FROM read_parquet('{alt}') ORDER BY alt_name"
+    ).fetchall()
+    assert ("munich", "Munich") in rows
+    # Folded, so one row for the several languages that spell it "Munich",
+    # and none at all for an alternate that folds to the primary name.
+    assert [r for r in rows if r[0] == "munich"] == [("munich", "Munich")]
+    assert "münchen" not in [r[0] for r in rows]
+    assert "munchen" not in [r[0] for r in rows]
+
+
+def test_missing_alt_table_degrades_to_primary_only(geocode_cache, monkeypatch):
+    # A cache directory written before #214: divisions table present, alt
+    # table absent, and the one rebuild attempt fails (offline). Must answer
+    # from primary names alone rather than erroring.
+    geocode.geocode("Brooklyn", limit=1)
+    _alt_table_path(geocode_cache).unlink()
+    monkeypatch.setattr(geocode, "_ALT_BUILD_ATTEMPTED", set())
+
+    def boom(path, glob):
+        raise duckdb.Error("no upstream here")
+
+    monkeypatch.setattr(geocode, "_materialize_alt_names_table", boom)
+
+    results = geocode.geocode("Munich", limit=5)
+
+    assert [r["name"] for r in results] == ["Munich"]  # the North Dakota one
+    assert "matched_name" not in results[0]
+
+
+def test_missing_alt_table_is_rebuilt_once_per_process(geocode_cache, monkeypatch):
+    # The other half of the pre-#214 cache story: existing installs get the
+    # feature without waiting for the next Overture release, and a failing
+    # build costs one attempt, not one per geocode call.
+    geocode.geocode("Brooklyn", limit=1)
+    _alt_table_path(geocode_cache).unlink()
+    monkeypatch.setattr(geocode, "_ALT_BUILD_ATTEMPTED", set())
+    attempts = []
+    real = geocode._materialize_alt_names_table
+
+    def counted(path, glob):
+        attempts.append(glob)
+        raise duckdb.Error("no upstream here")
+
+    monkeypatch.setattr(geocode, "_materialize_alt_names_table", counted)
+    geocode.geocode("Munich", limit=5)
+    geocode.geocode("Vienna", limit=5)
+    assert len(attempts) == 1
+
+    # And once it can succeed, the rebuilt table is picked up.
+    monkeypatch.setattr(geocode, "_ALT_BUILD_ATTEMPTED", set())
+    monkeypatch.setattr(geocode, "_materialize_alt_names_table", real)
+    assert geocode.geocode("Munich", limit=5)[0]["name"] == "München"
+
+
+def test_alt_search_never_runs_without_a_local_table(monkeypatch):
+    # No geocode_cache fixture, so PLACEROOT_CACHE=off: there is no local
+    # table to join against and nowhere to put an alt one, so this stays the
+    # pre-#214 upstream primary-name scan rather than degrading to something
+    # that reads names.common off S3 per query.
+    def boom(*a, **kw):
+        raise AssertionError("alt-name query must not run without a local table")
+
+    monkeypatch.setattr(geocode, "_query_alt_names", boom)
+    assert [r["name"] for r in geocode.geocode("Munich", limit=5)] == ["Munich"]
+
+
+def test_alt_hits_rank_like_variant_hits_not_above_literal_ones(geocode_cache):
+    # An alt row is tagged _variant, so against a same-tier literal row with
+    # the same prominence the literal one wins — the #53 tiebreak, unchanged.
+    literal = {
+        "id": "a", "name": "Vienna", "subtype": "locality", "region": "US-IL",
+        "admin_context": ["a", "b"], "population": 5_000,
+    }
+    alt = {
+        "id": "b", "name": "Wien", "subtype": "locality", "region": "AT-9",
+        "admin_context": ["a", "b"], "population": 5_000,
+        "_variant": True, "_tier": 3, "_matched_name": "Vienna",
+    }
+    ranked = sorted([alt, literal], key=lambda r: geocode._rank_key(r, "Vienna", {}))
+    assert [r["id"] for r in ranked] == ["a", "b"]
+
+
+def test_exact_alt_match_stands_down_the_places_fallback(geocode_cache, monkeypatch):
+    # An exact match is an exact match whichever name column found it: no
+    # reason to pay for a places scan to pad the answer out to `limit`.
+    calls = _count_places_fallback(monkeypatch)
+    geocode.geocode("Vienna", limit=5)
+    assert calls == []
+
+
+def test_alt_names_do_not_feed_the_fuzzy_tier(geocode_cache):
+    # Stated limit of this change (see _query_divisions_fuzzy): the #215
+    # threshold was calibrated on primary names, so a typo of an *exonym*
+    # is not corrected. "Pressburg" resolves Bratislava through names.common;
+    # "Pressbrug" — one transposition away, and nowhere near any *primary*
+    # name in the fixture — finds nothing.
+    assert geocode.geocode("Pressburg", limit=5)[0]["name"] == "Bratislava"
+    assert [r["name"] for r in geocode.geocode("Pressbrug", limit=5)] == []
+
+
 # --- reverse_geocode ---
 
 
