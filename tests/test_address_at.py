@@ -8,10 +8,13 @@ the fixture centre, a GB division with no address points anywhere near it
 postcode/postal_city/address_levels at all.
 """
 
+import os
+import time
+
 import duckdb
 import pytest
 
-from placeroot import addresses, overture, server
+from placeroot import addresses, cache, geocode, overture, release, server
 
 from .conftest import (
     ADDRESSES_FIXTURE_PATH,
@@ -291,7 +294,7 @@ def _count_address_scans(monkeypatch):
     original = addresses._scan_addresses
 
     def counting(*args, **kwargs):
-        calls.append(args[3:5])
+        calls.append(args[3:5])  # (radius_m, limit), for the failure message
         return original(*args, **kwargs)
 
     monkeypatch.setattr(addresses, "_scan_addresses", counting)
@@ -564,3 +567,173 @@ def test_containment_query_is_bounded(tmp_path, monkeypatch):
     assert all(
         f"LIMIT {addresses._CONTAINMENT_ROW_LIMIT}" in q for q in containment_sql
     )
+
+
+# --- the tile cache (issue #189) -------------------------------------------
+#
+# Both address readers -- address_at here and reverse_geocode's address hop --
+# go through addresses._from_source, so these tests cover both. The shape that
+# actually proves the routing is "materialize, then delete upstream": if any
+# direct-glob scan survived anywhere on the path, the warm call would fail on
+# the missing file instead of answering from the local tile.
+
+_RELEASE = release.PINNED_RELEASE
+
+# Ceiling for a warm repeat, from issue #189's acceptance criteria. The cold
+# call it replaces measured ~5.4s against S3; a local tile read is
+# milliseconds, so this is a loose bound chosen to catch a regression back to
+# a remote scan, not to benchmark DuckDB.
+_WARM_BUDGET_S = 0.5
+
+
+@pytest.fixture
+def address_cache(tmp_path, monkeypatch):
+    """Tile cache on, isolated, and synchronous.
+
+    conftest.offline_data turns the cache off for every other test;
+    PLACEROOT_CACHE_SYNC makes a missing tile materialize inline so
+    populate-then-hit is deterministic rather than racing a daemon thread.
+    """
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "placeroot-cache"))
+    monkeypatch.delenv("PLACEROOT_CACHE", raising=False)  # enabled (the default)
+    monkeypatch.setenv("PLACEROOT_CACHE_SYNC", "1")
+    # #142's claim registry is module-global: a claim left by an earlier test
+    # would shield this test's tiles from the eviction it means to exercise.
+    with cache._claims_lock:
+        cache._claims.clear()
+    return tmp_path / "placeroot-cache"
+
+
+@pytest.fixture
+def disposable_upstream(tmp_path, restore_addresses_path):
+    """A copy of the addresses fixture standing in for upstream, deletable.
+
+    Deleting it after the first query is what proves the second query never
+    touches upstream -- see this section's header comment.
+    """
+    upstream = tmp_path / "addresses_upstream.parquet"
+    upstream.write_bytes(ADDRESSES_FIXTURE_PATH.read_bytes())
+    _point_at(upstream)
+    return upstream
+
+
+def _address_tiles(cache_dir):
+    return sorted((cache_dir / _RELEASE / addresses.THEME).rglob("*.parquet"))
+
+
+def test_address_query_materializes_tiles_under_the_addresses_theme(
+    address_cache, disposable_upstream
+):
+    assert addresses.address_at(CENTER_LAT, CENTER_LON)["results"]
+    tiles = _address_tiles(address_cache)
+    assert tiles, "the address scan should have materialized at least one tile"
+    # <release>/<theme>/<fingerprint>/tile_Y_X.parquet -- the theme-generic
+    # key layout, with "addresses" filling the theme slot like any other.
+    assert all(t.name.startswith("tile_") for t in tiles)
+    assert {t.parent.parent.name for t in tiles} == {addresses.THEME}
+
+
+def test_warm_address_at_answers_from_the_cache_after_upstream_disappears(
+    address_cache, disposable_upstream
+):
+    cold = addresses.address_at(CENTER_LAT, CENTER_LON)
+    assert cold["results"]
+
+    disposable_upstream.unlink()
+
+    started = time.monotonic()
+    warm = addresses.address_at(CENTER_LAT, CENTER_LON)
+    elapsed = time.monotonic() - started
+
+    assert warm["results"] == cold["results"]
+    assert elapsed < _WARM_BUDGET_S, f"warm address_at took {elapsed:.3f}s"
+
+
+def test_warm_reverse_geocode_address_hop_answers_from_the_cache(
+    address_cache, disposable_upstream
+):
+    """The #189 acceptance criterion proper: reverse_geocode's address hop is
+    on the same cached path, not still globbing S3 per call."""
+    cold = geocode.reverse_geocode(CENTER_LAT, CENTER_LON)
+    assert cold["source"] == "address"
+
+    disposable_upstream.unlink()
+
+    started = time.monotonic()
+    warm = geocode.reverse_geocode(CENTER_LAT, CENTER_LON)
+    elapsed = time.monotonic() - started
+
+    assert warm["source"] == "address"
+    assert warm["address"] == cold["address"]
+    assert elapsed < _WARM_BUDGET_S, f"warm reverse_geocode took {elapsed:.3f}s"
+
+
+def test_address_at_and_reverse_geocode_share_one_set_of_tiles(
+    address_cache, disposable_upstream
+):
+    """One theme, one tile set: whichever reader runs first warms the other."""
+    addresses.address_at(CENTER_LAT, CENTER_LON)
+    after_first = _address_tiles(address_cache)
+    assert after_first
+
+    disposable_upstream.unlink()
+    assert geocode.reverse_geocode(CENTER_LAT, CENTER_LON)["source"] == "address"
+    assert _address_tiles(address_cache) == after_first
+
+
+def test_reverse_geocode_still_degrades_to_divisions_when_the_cache_path_fails(
+    address_cache, disposable_upstream, monkeypatch
+):
+    """Routing through the cache must not turn a soft degrade into a hard error.
+
+    _from_source raises UpstreamUnavailable when tile resolution itself fails,
+    which is a new failure mode on this hop -- reverse_geocode's contract is
+    still a divisions-only answer, never an exception.
+    """
+    def boom(_bbox):
+        raise overture.UpstreamUnavailable("cache path is down")
+
+    monkeypatch.setattr(addresses, "_from_source", boom)
+    result = geocode.reverse_geocode(CENTER_LAT, CENTER_LON)
+    assert result["source"] == "divisions_only"
+    assert result["address"] is None
+    assert result["admin_context"], "the divisions half must be unaffected"
+
+
+def test_address_tiles_are_evicted_under_the_cache_cap(address_cache, monkeypatch):
+    """Address tiles are ordinary LRU citizens, not a privileged theme."""
+    # ~3 KB: the fixture's dense tile alone overflows it, so eviction must run.
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", str(3000 / 1024 / 1024))
+    con = duckdb.connect()
+    tiles = [(-74, 40), (-75, 40), (-76, 40), (15, 78)]
+    paths = [
+        cache.ensure_tile(con, _RELEASE, addresses.THEME, t, str(ADDRESSES_FIXTURE_PATH))
+        for t in tiles
+    ]
+    remaining = list(cache.cache_dir().rglob("*.parquet"))
+    assert len(remaining) < len(paths)
+    assert paths[-1].exists()  # LRU keeps the newest
+
+
+def test_a_multi_tile_address_query_does_not_evict_its_own_tiles(
+    address_cache, monkeypatch
+):
+    """The claim-before-ensure_tile guarantee (#158), for the addresses theme.
+
+    A sync query spanning more missing tiles than fit under the cap must claim
+    each tile before fetching the next, or ensure_tile's post-write eviction
+    deletes the tiles this very query is about to return.
+    """
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", str(3000 / 1024 / 1024))
+    con = duckdb.connect()
+    bbox = (-74.5, 40.5, -73.5, 41.5)  # 4 tiles: one dense, three empty
+    tiles = cache.tiles_for_bbox(*bbox)
+    assert len(tiles) >= 3
+
+    paths = cache.local_paths_for_query(
+        con, _RELEASE, addresses.THEME, bbox, str(ADDRESSES_FIXTURE_PATH), lambda: con
+    )
+    assert paths is not None
+    assert len(paths) == len(tiles)
+    gone = [p for p in paths if not os.path.exists(p)]
+    assert gone == [], f"query returned paths to tiles it self-evicted: {gone}"
