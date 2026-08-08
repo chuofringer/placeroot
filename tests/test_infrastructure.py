@@ -149,6 +149,18 @@ def test_limit_caps_the_row_count(infrastructure_fixture):
     assert [r["name"] for r in rows] == ["Test Tower", "Test Bridge"]
 
 
+def test_limit_zero_still_answers_with_the_nearest(infrastructure_fixture):
+    """limit<=0 clamps to 1, not 0: total_in_range rides a window function
+    on the returned rows, so LIMIT 0 would report ([], total_in_range=0)
+    with features in range — a confident wrong "nothing here"."""
+    for bad_limit in (0, -3):
+        rows, _, total_in_range = infrastructure.infrastructure_at(
+            CENTER_LAT, CENTER_LON, limit=bad_limit
+        )
+        assert [r["name"] for r in rows] == ["Test Tower"]
+        assert total_in_range == 3
+
+
 def test_no_geometry_in_rows(infrastructure_fixture):
     rows, _, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON)
     for row in rows:
@@ -314,6 +326,16 @@ def furniture_fixture(tmp_path):
         yield path
     finally:
         infrastructure.set_data_path(None)
+
+
+def test_oversized_limit_is_clamped_to_max_rows(furniture_fixture):
+    """The response-size cap holds even for a direct caller asking for
+    everything; the window-function total still reports the full set."""
+    rows, _, total_in_range = infrastructure.infrastructure_at(
+        CENTER_LAT, CENTER_LON, limit=10_000
+    )
+    assert len(rows) == infrastructure.MAX_ROWS
+    assert total_in_range == _LAMP_COUNT + 1
 
 
 def test_unfiltered_query_reports_the_true_in_range_count(furniture_fixture):

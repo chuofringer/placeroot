@@ -25,15 +25,24 @@ are standing on measures ~0 m rather than "distance to the middle of the
 bridge". For a point row this collapses to the point itself, so all three
 geometry kinds go through one expression.
 
-The one approximation left: ST_ClosestPoint picks its nearest vertex/edge
-position in lon/lat degree space, where a degree of longitude is shorter
-than a degree of latitude away from the equator. That can select a point
-slightly off the true geodesic-nearest one, but the resulting error is
-second order (it is nearly zero for the many rows whose nearest point is
-a vertex, and the along-edge misplacement it can cause at a few-hundred-
-metre radius is well under a metre). The reported distance itself is a
-proper haversine, identical to overture.DISTANCE_EXPR, not a planar
-approximation.
+The approximation left: ST_ClosestPoint picks its nearest vertex/edge
+position in *planar* lon/lat degree space. Away from the antimeridian
+the error this introduces is second order — a degree of longitude is
+shorter than a degree of latitude off the equator, so the picked point
+can sit slightly off the true geodesic-nearest one, but it is nearly
+zero for the many rows whose nearest point is a vertex, and the
+along-edge misplacement at a few-hundred-metre radius is well under a
+metre. At the antimeridian seam it is a known limitation, not a small
+error: for a line or polygon near lon=±180 queried from the opposite
+side of the seam, planar degree distance picks the geodesically *far*
+end of the geometry (359.99 degrees "away" planar is 0.01 degrees away
+on the sphere), so distance_m is overstated and an in-range feature can
+be dropped by the radius predicate. This matches the repo's existing
+seam behavior — overture.DISTANCE_EXPR measures to a raw bbox corner
+and misreports the same rows — so it is accepted here rather than
+special-cased; a repo-wide seam-aware distance is follow-up material.
+The reported distance itself is a proper haversine of the picked point,
+identical in formula to overture.DISTANCE_EXPR, not a planar number.
 
 Cache theme key: "base_infrastructure", following land_use.py's composite
 "base_<type>" convention — cache.py uses the theme string verbatim as a
@@ -242,7 +251,13 @@ def infrastructure_at(
     _ensure_spatial()
     # int() before the SQL LIMIT interpolation — defense in depth for any
     # direct (non-MCP) caller; the MCP layer already validates the type.
-    limit = max(0, min(int(limit), MAX_ROWS))
+    # Floor of 1, not 0: total_in_range rides a window function on the
+    # returned rows, so LIMIT 0 would return zero rows AND report
+    # total_in_range=0 with features in range — exactly the confident
+    # wrong "nothing here" this module's truncation reporting exists to
+    # prevent. There is no honest zero-row answer shape, so limit<=0 is
+    # treated as "the single nearest".
+    limit = max(1, min(int(limit), MAX_ROWS))
     upstream = _upstream_glob()
     missing = set(_check_schema(upstream))
     geom_expr = _geom_expr(upstream)
