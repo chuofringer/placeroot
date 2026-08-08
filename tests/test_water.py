@@ -463,6 +463,30 @@ def test_ocean_only_filter_recognises_substrings_but_not_ambiguous_ones():
     assert water._ocean_only_filter(None, None) is False
 
 
+def test_degraded_subtype_schema_does_not_claim_ocean_filter_is_unsatisfiable(tmp_path):
+    """Without a subtype column, water.water_near cannot short-circuit a
+    subtype='ocean' call — the filter is a no-op and real distance rows
+    come back. The note must not then claim the call "cannot return
+    distance rows" while the payload shows exactly those rows."""
+    path = tmp_path / "water.parquet"
+    _build_water_fixture(path)
+    stripped = tmp_path / "water_no_subtype.parquet"
+    con = duckdb.connect()
+    con.execute(
+        "COPY (SELECT * EXCLUDE (subtype) FROM read_parquet("
+        f"'{path}')) TO '{stripped}' (FORMAT PARQUET)"
+    )
+    con.close()
+    water.set_data_path(str(stripped))
+    try:
+        result = server.water_near(CENTER_LAT, CENTER_LON, subtype="ocean")
+        assert len(result["results"]) == 4
+        assert "cannot return distance rows" not in result.get("note", "")
+        assert "subtype" in result["degraded_fields"]
+    finally:
+        water.set_data_path(None)
+
+
 # --- degree-space nearest is not ground nearest -----------------------------
 
 
@@ -586,6 +610,25 @@ def test_server_flags_the_limit_bite(canal_fixture):
     assert result["truncated"] is True
     assert result["in_range_count"] == _CANAL_COUNT + 1
     assert "subtype" in result["note"]
+
+
+def test_filtered_empty_is_blamed_on_the_filter_not_on_aridity(canal_fixture):
+    """subtype='waterfall' over a canal district (31 features in range)
+    matches nothing — the note must say the *filter* came up empty and
+    suggest dropping it, not claim the area is "arid, remote or unmapped"
+    with water on every side."""
+    result = server.water_near(CENTER_LAT, CENTER_LON, subtype="waterfall")
+    assert result["results"] == []
+    assert result["in_range_count"] == 0
+    assert "arid" not in result["note"]
+    assert "filter" in result["note"]
+    assert "drop the filter" in result["note"].lower()
+
+
+def test_unfiltered_empty_still_reads_as_arid(water_fixture):
+    """The arid wording survives for a genuinely empty, unfiltered answer."""
+    result = server.water_near(NOWHERE_LAT, NOWHERE_LON)
+    assert "arid" in result["note"]
 
 
 def test_server_untruncated_answer_carries_no_truncated_flag(water_fixture):

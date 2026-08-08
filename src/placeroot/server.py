@@ -780,6 +780,7 @@ def _water_notes(
     containing: dict | None,
     radius_m: float,
     ocean_only_filter: bool = False,
+    filtered: bool = False,
 ) -> dict:
     """Attach water_near's on_water/truncation/empty notes to the payload.
 
@@ -794,8 +795,12 @@ def _water_notes(
     which are reported through on_water and never as a distance row, so
     the empty list means "wrong question", not "no water". (3) The rows
     shown are a slice — a canal district puts hundreds of rows in a 500 m
-    circle. (4) Nothing came back, which is a real finding about an arid
-    or unmapped place rather than a failure.
+    circle. (4) Nothing came back: with no filter active that is a real
+    finding about an arid or unmapped place rather than a failure — but
+    when a subtype/water_class filter is active (`filtered`), it only
+    means nothing *matched the filter*, and saying "arid, remote or
+    unmapped" about a canal district asked for waterfalls would be
+    confidently wrong.
     """
     shown = len(payload.get("results", []))
     notes = []
@@ -831,11 +836,19 @@ def _water_notes(
             "subtype='river', water_class='lake'."
         )
     elif shown == 0 and containing is None and not ocean_only_filter:
-        notes.append(
-            f"no water features within {radius_m:g} m. base/water coverage is "
-            "OSM-derived, so an arid, remote or unmapped area legitimately has "
-            "nothing here — this is an answer, not a failure."
-        )
+        if filtered:
+            notes.append(
+                f"no water features matching the subtype/water_class filter "
+                f"within {radius_m:g} m. That says nothing about water in "
+                "general here — drop the filter to see the nearest water "
+                "features of any kind."
+            )
+        else:
+            notes.append(
+                f"no water features within {radius_m:g} m. base/water coverage is "
+                "OSM-derived, so an arid, remote or unmapped area legitimately has "
+                "nothing here — this is an answer, not a failure."
+            )
     payload["in_range_count"] = in_range_count
     if notes:
         payload["note"] = " ".join(notes)
@@ -904,11 +917,19 @@ def water_near(
         "results": rows,
     }
     result = budget.apply_budget(result, "results")
+    degraded = water.degraded_fields()
+    # The ocean-only note mirrors water.water_near's short-circuit, which
+    # only fires when the subtype column exists: under a degraded schema
+    # the filter is a no-op and real distance rows come back, so claiming
+    # the call "cannot return distance rows" would contradict the payload.
+    ocean_only = (
+        water._ocean_only_filter(subtype, water_class) and "subtype" not in degraded
+    )
     result = _water_notes(
         result, in_range_count, containing, effective_radius_m,
-        ocean_only_filter=water._ocean_only_filter(subtype, water_class),
+        ocean_only_filter=ocean_only,
+        filtered=bool(subtype or water_class),
     )
-    degraded = water.degraded_fields()
     if degraded:
         result["degraded_fields"] = degraded
     return result
