@@ -126,6 +126,12 @@ def test_plan_changes_rewrites_every_tracked_file():
         text = updates[page]
         assert f"v{old_version}" not in text, f"{page.name}: stale version left behind"
     assert "new in this release: " in updates[bump_version.INDEX_HTML]
+    for manifest in (bump_version.SERVER_JSON, bump_version.MCPB_MANIFEST):
+        text = updates[manifest]
+        assert '"version": "99.0.0"' in text, f"{manifest.name}: version not bumped"
+        assert f'"version": "{old_version}"' not in text, (
+            f"{manifest.name}: stale version left behind"
+        )
 
 
 def test_plan_changes_refuses_a_no_op_bump():
@@ -137,7 +143,13 @@ def test_plan_changes_refuses_a_no_op_bump():
 
 
 def test_plan_changes_writes_nothing():
-    paths = [*bump_version.SITE_PAGES, bump_version.PYPROJECT, bump_version.NPM_PACKAGE]
+    paths = [
+        *bump_version.SITE_PAGES,
+        bump_version.PYPROJECT,
+        bump_version.NPM_PACKAGE,
+        bump_version.SERVER_JSON,
+        bump_version.MCPB_MANIFEST,
+    ]
     before = {p: p.read_text(encoding="utf-8") for p in paths}
     bump_version.plan_changes("99.0.0", ["route"], None)
     for path, text in before.items():

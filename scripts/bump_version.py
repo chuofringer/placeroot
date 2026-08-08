@@ -40,6 +40,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 NPM_PACKAGE = REPO_ROOT / "npm" / "package.json"
+# Registry distribution manifests (#172): both restate the package version and
+# are guarded by tests/test_registry_manifests.py, so a bump that skips them
+# fails the verify step.
+SERVER_JSON = REPO_ROOT / "server.json"
+MCPB_MANIFEST = REPO_ROOT / "mcpb" / "manifest.json"
 INDEX_HTML = REPO_ROOT / "site" / "index.html"
 SITE_PAGES = [
     INDEX_HTML,
@@ -62,10 +67,12 @@ _SITE_VERSION_RE = re.compile(r"\bv(\d+\.\d+\.\d+)\b")
 _CHIP_RE = re.compile(r"(new in this release: )(?P<body>.*?)(</span></div>)", re.DOTALL)
 _CHIP_TOOL_SPAN = '<span style="color:#8fbf96">{name}</span>'
 
-# `@mcp.tool()`-decorated function names in a server.py source text. Used to
-# read the tool surface of an older revision (which can't be imported), while
-# the current surface comes from real MCP introspection.
-_REGISTERED_AT_REV_RE = re.compile(r"@mcp\.tool\(\)\s*\ndef\s+([a-zA-Z0-9_]+)\s*\(")
+# Tool-decorated function names in a server.py source text. Used to read the
+# tool surface of an older revision (which can't be imported), while the
+# current surface comes from real MCP introspection. Matches both decorator
+# spellings: `@mcp.tool()` (through v0.5.0) and `@_tool` (the profile-aware
+# registration that replaced it in #182).
+_REGISTERED_AT_REV_RE = re.compile(r"@(?:mcp\.tool\(\)|_tool)\s*\ndef\s+([a-zA-Z0-9_]+)\s*\(")
 
 # Shown when a release adds no tools and the caller passed no --highlight.
 DEFAULT_HIGHLIGHT = "correctness &amp; performance fixes"
@@ -95,6 +102,18 @@ def bump_pyproject(text: str, new_version: str) -> str:
 
 def bump_npm(text: str, new_version: str) -> str:
     return _NPM_VERSION_RE.sub(rf"\g<1>{new_version}\g<3>", text, count=1)
+
+
+def bump_manifest(text: str, old_version: str, new_version: str) -> str:
+    """Bump every `"version": "<old>"` in a registry manifest's text.
+
+    Textual rather than json.load/dump so the files' existing formatting
+    survives. server.json carries the version once at the top level and once
+    per packages[] entry; mcpb/manifest.json once. Only exact matches of the
+    current version are touched, so fields like `manifest_version` (or a
+    pinned dependency that happens to carry a semver) are left alone.
+    """
+    return text.replace(f'"version": "{old_version}"', f'"version": "{new_version}"')
 
 
 def bump_site_versions(text: str, new_version: str) -> str:
@@ -193,6 +212,10 @@ def plan_changes(
         PYPROJECT: bump_pyproject(pyproject_text, new_version),
         NPM_PACKAGE: bump_npm(npm_text, new_version),
     }
+    for manifest in (SERVER_JSON, MCPB_MANIFEST):
+        updates[manifest] = bump_manifest(
+            manifest.read_text(encoding="utf-8"), old_version, new_version
+        )
 
     chip_body = render_chip_body(new_tools, highlight)
     for page in SITE_PAGES:
