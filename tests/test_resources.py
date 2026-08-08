@@ -16,7 +16,9 @@ Four things are worth testing about a resource, and they are all here:
 """
 
 import asyncio
+import inspect
 import json
+import re
 
 import pytest
 
@@ -259,3 +261,100 @@ def test_both_resources_survive_the_narrowest_possible_selection():
     assert tools == {"geocode", "data_version"}
     assert set(_resources(spec)) == set(ALL_URIS)
     assert _read_json(resources.DATA_VERSION_URI, spec) == server.data_version()
+
+
+# --- the guard ------------------------------------------------------------
+#
+# The categories resource's how_to_use tells the agent which tools take a
+# `category` argument. MCP argument validation silently drops unknown
+# kwargs, so naming a tool that has no such parameter does not fail — it
+# returns a 200 OK *unfiltered* answer the agent believes was filtered.
+# These tests check the prose against the live tool signatures, the same
+# shape as the prompt guard in test_prompts.py.
+
+# Tool mentions in resource prose are written `name()`, backticked with
+# empty parentheses; `_bare_mentions` below enforces that nothing escapes
+# this by dropping the parentheses.
+_TOOL_REF = re.compile(r"`([a-z_][a-z0-9_]*)\(\)`")
+
+# "the `category` filter of `find_places()` or `places_along_route()`" —
+# the parameter claim, and every tool it is claimed for.
+_PARAM_CLAIM = re.compile(
+    r"`([a-z_][a-z0-9_]*)` filter of ((?:`[a-z_][a-z0-9_]*\(\)`(?:,| or|\s)*)+)"
+)
+
+
+def _prose(payload: dict) -> dict[str, str]:
+    """Every free-text field of a resource payload, keyed by field name."""
+    return {k: v for k, v in payload.items() if isinstance(v, str)}
+
+
+def _all_prose() -> dict[str, str]:
+    out = {}
+    for uri in ALL_URIS:
+        for field, text in _prose(_read_json(uri)).items():
+            out[f"{uri}:{field}"] = text
+    return out
+
+
+def test_every_tool_reference_in_every_resource_is_a_registered_tool():
+    """A renamed or deleted tool must not survive as prose in a resource."""
+    registered = {t.name for t in asyncio.run(_server().list_tools())}
+    referenced = {
+        name for text in _all_prose().values() for name in _TOOL_REF.findall(text)
+    }
+    assert referenced, "no resource prose names any tool at all"
+    dangling = sorted(referenced - registered)
+    assert not dangling, (
+        f"resource prose tells the agent to call {dangling}, which is not "
+        f"registered. Known tools: {', '.join(sorted(registered))}."
+    )
+
+
+def test_no_registered_tool_name_appears_outside_the_guarded_form():
+    """A bare mention would slip past `_TOOL_REF` and past the claim check."""
+    registered = {t.name for t in asyncio.run(_server().list_tools())}
+    for where, text in _all_prose().items():
+        stripped = _TOOL_REF.sub("", text)
+        bare = sorted(
+            tool
+            for tool in registered
+            if re.search(rf"(?<![a-z0-9_]){re.escape(tool)}(?![a-z0-9_])", stripped)
+        )
+        assert not bare, (
+            f"{where} mentions {bare} without the `name()` form the guard "
+            f"below checks against the live signatures."
+        )
+
+
+def test_every_claimed_filter_argument_exists_on_the_tool_it_is_claimed_for():
+    """The #198 sweep bug: how_to_use named tools that have no `category`.
+
+    MCP drops unknown kwargs silently, so an agent following that sentence
+    got unfiltered results with no error. Check the claim against the real
+    signature of the real registered function.
+    """
+    claims = []
+    for where, text in _all_prose().items():
+        for param, tools_blob in _PARAM_CLAIM.findall(text):
+            for tool in _TOOL_REF.findall(tools_blob):
+                claims.append((where, param, tool))
+    assert claims, "no `x` filter of `tool()` claim found to check"
+    for where, param, tool in claims:
+        fn = server._TOOL_FUNCS[tool]
+        params = inspect.signature(fn).parameters
+        assert param in params, (
+            f"{where} says {tool}() takes a `{param}` filter, but its "
+            f"signature is ({', '.join(params)}). MCP would silently drop "
+            f"the argument and return an unfiltered answer."
+        )
+
+
+def test_the_claim_regex_actually_matches_the_shipped_sentence():
+    """Guard the guard: a reworded sentence must not silently disarm it."""
+    how_to_use = resources.categories_payload()["how_to_use"]
+    matches = _PARAM_CLAIM.findall(how_to_use)
+    assert matches, f"claim regex no longer matches how_to_use: {how_to_use!r}"
+    param, tools_blob = matches[0]
+    assert param == "category"
+    assert set(_TOOL_REF.findall(tools_blob)) == {"find_places", "places_along_route"}

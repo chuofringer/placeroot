@@ -25,7 +25,7 @@ PROFILES: dict[str, frozenset[str]] = {
     # the geometry/rendering tools.
     #
     # search_categories is here despite being a lookup rather than an
-    # answer: find_places' and summarize_area's `category` filter takes
+    # answer: find_places' and places_along_route's `category` filter takes
     # Overture taxonomy slugs, and a wrong slug returns zero results with a
     # note telling the agent to check the slug with search_categories. Under
     # a profile that dropped it, core's likeliest failure mode would end at

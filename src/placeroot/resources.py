@@ -92,11 +92,16 @@ def categories_payload() -> dict:
         "top_level_categories": [
             {"category": name, "slugs": count} for name, count in summary["top_level"]
         ],
+        # Only tools that actually take a `category` argument may be named
+        # here. MCP argument validation silently drops unknown kwargs, so an
+        # agent that believed summarize_area took a category would get a
+        # 200 OK *unfiltered* answer and never know. test_resources.py
+        # checks every name below against the live tool signature.
         "how_to_use": (
             "Category slugs are the leaves of this tree (e.g. coffee_shop under "
             "eat_and_drink > cafe). Pass one to the `category` filter of "
-            "find_places, summarize_area, compare_areas or places_along_route. "
-            "Call the search_categories tool with free text to get the exact "
+            "`find_places()` or `places_along_route()`. "
+            "Call the `search_categories()` tool with free text to get the exact "
             "slug and its path — guessing a slug returns zero results."
         ),
         "note": (
