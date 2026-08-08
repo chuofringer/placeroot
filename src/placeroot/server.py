@@ -111,13 +111,21 @@ def _with_category_hint(payload: dict, category: str | None, widen_hint: str) ->
     area really has none". The note points at search_categories and at
     whichever widening move fits the mode the caller used (a bigger
     radius for the point path, a bigger division for the polygon path).
+
+    Joins onto any note already present rather than replacing it:
+    places_along_route can arrive here carrying a truncation note (its
+    corridor candidate budget was hit, or the street graph was capped)
+    that explains why an empty result may not mean "nothing matched" —
+    clobbering it would leave truncated: true with no explanation and
+    lose the more accurate advice.
     """
     if category and not payload.get("results"):
-        payload["note"] = (
+        hint = (
             f"no places matched category '{category}' here; if that may not be a "
             "valid Overture category slug, use search_categories to find the right "
             f"one, or {widen_hint} / drop the category filter."
         )
+        payload["note"] = "; ".join(filter(None, [payload.get("note"), hint]))
     return payload
 
 

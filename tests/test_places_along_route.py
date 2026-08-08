@@ -552,3 +552,19 @@ def test_server_tool_category_hint_when_nothing_matches(corridor_places):
     )
     assert result["results"] == []
     assert "search_categories" in result["note"]
+
+
+def test_server_tool_category_hint_keeps_the_truncation_note(corridor_places, monkeypatch):
+    """A capped corridor plus a category filter that yields nothing: the
+    routing layer's "candidates were dropped before measurement" note must
+    survive alongside the category hint, not be clobbered by it — an empty
+    list under a hit cap does NOT establish that no places matched, and the
+    right advice (narrow) is the opposite of the hint's (widen)."""
+    monkeypatch.setattr(overture, "find_places_in_bbox", lambda *a, **k: ([], True))
+    result = server.places_along_route(
+        FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", category="coffee_shop"
+    )
+    assert result["results"] == []
+    assert result["truncated"] is True
+    assert "not considered" in result["note"]  # the routing-layer cap note
+    assert "search_categories" in result["note"]  # the category hint, appended
