@@ -1,9 +1,19 @@
+import os
 from pathlib import Path
 
-import duckdb
-import pytest
+# Before anything imports placeroot.server: its module-level `mcp` is built
+# at import time from PLACEROOT_TOOLS, so an ambient subset in the shell
+# running pytest would leave `mcp` holding a partial registry and fail the
+# suite's full-surface assertions — including test_tool_registry's, whose
+# message would accuse a tool of a missing decorator. A fixture cannot undo
+# that; it has to happen before the import. The autouse fixture below covers
+# the rest of the run.
+os.environ.pop("PLACEROOT_TOOLS", None)
 
-from placeroot import buildings, gers, overture, release, routing
+import duckdb  # noqa: E402
+import pytest  # noqa: E402
+
+from placeroot import buildings, gers, overture, release, routing  # noqa: E402
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "places.parquet"
 # type=division_area (polygons; consumed by divisions.py's admin_lookup) and
@@ -18,6 +28,17 @@ BUILDINGS_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "buildings.parquet
 
 CENTER_LAT = 40.700000
 CENTER_LON = -73.900000
+
+
+@pytest.fixture(autouse=True)
+def no_ambient_tool_selection(monkeypatch):
+    """Every test sees PLACEROOT_TOOLS unset unless it sets one itself.
+
+    Keeps build_server()'s env-reading path deterministic regardless of the
+    shell the suite runs in. Autouse fixtures are set up before the test
+    body runs, so a test's own monkeypatch.setenv still wins.
+    """
+    monkeypatch.delenv("PLACEROOT_TOOLS", raising=False)
 
 
 @pytest.fixture(autouse=True)
