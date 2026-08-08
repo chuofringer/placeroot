@@ -59,7 +59,7 @@ _FEATURES = [
 ]
 
 
-def _build_infrastructure_fixture(path, include_class=True) -> None:
+def _build_infrastructure_fixture(path, include_class=True, features=_FEATURES) -> None:
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
     class_col = "class VARCHAR," if include_class else ""
@@ -73,7 +73,7 @@ def _build_infrastructure_fixture(path, include_class=True) -> None:
             names STRUCT("primary" VARCHAR)
         )
     """)
-    for id_, wkt, subtype, class_, name in _FEATURES:
+    for id_, wkt, subtype, class_, name in features:
         # bbox comes straight from the geometry, as it does upstream —
         # hand-written boxes would be one more thing to get wrong.
         wkb, xmin, ymin, xmax, ymax = con.execute(f"""
@@ -107,7 +107,7 @@ def infrastructure_fixture(tmp_path):
 
 
 def test_all_three_geometry_kinds_are_returned_nearest_first(infrastructure_fixture):
-    rows, radius_m = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON)
+    rows, radius_m, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON)
     assert radius_m == infrastructure.DEFAULT_RADIUS_M
     assert [r["name"] for r in rows] == ["Test Tower", "Test Bridge", "Test Airport"]
     assert [r["subtype"] for r in rows] == ["communication", "bridge", "airport"]
@@ -117,7 +117,7 @@ def test_all_three_geometry_kinds_are_returned_nearest_first(infrastructure_fixt
 
 
 def test_distances_match_the_fixture_geometry(infrastructure_fixture):
-    rows, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON)
+    rows, _, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON)
     by_name = {r["name"]: r["distance_m"] for r in rows}
     # Each feature was placed at a known offset due north of CENTER; a few
     # metres of slack covers the haversine-vs-flat-earth difference in how
@@ -134,32 +134,43 @@ def test_line_distance_is_to_the_nearest_point_not_the_centroid(infrastructure_f
     perpendicular offset (~250 m), not the distance to the line's midpoint.
     """
     lat, lon = CENTER_LAT, CENTER_LON + 0.015
-    rows, _ = infrastructure.infrastructure_at(lat, lon, radius_m=400)
+    rows, _, _ = infrastructure.infrastructure_at(lat, lon, radius_m=400)
     bridge = next(r for r in rows if r["name"] == "Test Bridge")
     assert bridge["distance_m"] == pytest.approx(250.0, abs=5.0)
 
 
 def test_radius_excludes_features_outside_it(infrastructure_fixture):
-    rows, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON, radius_m=150)
+    rows, _, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON, radius_m=150)
     assert [r["name"] for r in rows] == ["Test Tower"]
 
 
 def test_limit_caps_the_row_count(infrastructure_fixture):
-    rows, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON, limit=2)
+    rows, _, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON, limit=2)
     assert [r["name"] for r in rows] == ["Test Tower", "Test Bridge"]
 
 
 def test_no_geometry_in_rows(infrastructure_fixture):
-    rows, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON)
+    rows, _, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON)
     for row in rows:
-        assert set(row) == {"subtype", "class", "name", "distance_m"}
+        assert set(row) == {"id", "subtype", "class", "name", "distance_m"}
+
+
+def test_rows_carry_the_gers_id(infrastructure_fixture):
+    """id is SELECTed, not just declared in REQUIRED_COLUMNS — it is what
+    makes a row composable with the other GERS-keyed tools."""
+    rows, _, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON)
+    assert {r["name"]: r["id"] for r in rows} == {
+        "Test Tower": "infra-tower",
+        "Test Bridge": "infra-bridge",
+        "Test Airport": "infra-airport",
+    }
 
 
 # --- empty is an answer, not an error ---------------------------------------
 
 
 def test_far_away_point_returns_empty_results(infrastructure_fixture):
-    rows, _ = infrastructure.infrastructure_at(NOWHERE_LAT, NOWHERE_LON)
+    rows, _, _ = infrastructure.infrastructure_at(NOWHERE_LAT, NOWHERE_LON)
     assert rows == []
 
 
@@ -167,14 +178,14 @@ def test_far_away_point_returns_empty_results(infrastructure_fixture):
 
 
 def test_oversized_radius_is_clamped_and_reported(infrastructure_fixture):
-    _, radius_m = infrastructure.infrastructure_at(
+    _, radius_m, _ = infrastructure.infrastructure_at(
         CENTER_LAT, CENTER_LON, radius_m=geo.MAX_QUERY_RADIUS_M * 10
     )
     assert radius_m == geo.MAX_QUERY_RADIUS_M
 
 
 def test_non_finite_radius_clamps_to_zero(infrastructure_fixture):
-    rows, radius_m = infrastructure.infrastructure_at(
+    rows, radius_m, _ = infrastructure.infrastructure_at(
         CENTER_LAT, CENTER_LON, radius_m=float("nan")
     )
     assert radius_m == 0.0
@@ -189,7 +200,7 @@ def test_missing_class_column_degrades_to_none(tmp_path):
     _build_infrastructure_fixture(path, include_class=False)
     infrastructure.set_data_path(str(path))
     try:
-        rows, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON)
+        rows, _, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON)
         assert [r["subtype"] for r in rows] == ["communication", "bridge", "airport"]
         assert all(r["class"] is None for r in rows)
         assert "class" in infrastructure.degraded_fields()
@@ -258,5 +269,168 @@ def test_server_structured_error_on_unreachable_upstream(tmp_path):
     try:
         result = server.infrastructure_at(CENTER_LAT, CENTER_LON)
         assert result["error"] == "upstream_unavailable"
+    finally:
+        infrastructure.set_data_path(None)
+
+
+# --- street-furniture domination (#180 sweep) -------------------------------
+#
+# The real base/infrastructure layer is ~50:1 street furniture: around Dam
+# Square, r=500 has 1263 rows in range including 72 bridges, and the 10
+# nearest are all lamps and benches. The fixture below reproduces that shape
+# in miniature — 30 street lamps closer than the single bridge — so the two
+# behaviours that keep "is there a bridge near here?" honest are pinned: the
+# unfiltered answer says it is a slice, and a subtype filter finds the bridge.
+
+_LAMP_COUNT = 30
+_FURNITURE_BRIDGE_LAT = CENTER_LAT + 400.0 / _M_PER_DEG_LAT
+_FURNITURE_FEATURES = [
+    (
+        f"lamp-{i}",
+        f"POINT({CENTER_LON} {CENTER_LAT + (10.0 + 5.0 * i) / _M_PER_DEG_LAT})",
+        "street_furniture",
+        "street_lamp",
+        f"Lamp {i}",
+    )
+    for i in range(_LAMP_COUNT)
+] + [
+    (
+        "furniture-bridge",
+        f"LINESTRING({CENTER_LON} {_FURNITURE_BRIDGE_LAT}, "
+        f"{CENTER_LON + 0.002} {_FURNITURE_BRIDGE_LAT})",
+        "bridge",
+        "viaduct",
+        "Hidden Bridge",
+    )
+]
+
+
+@pytest.fixture
+def furniture_fixture(tmp_path):
+    path = tmp_path / "infrastructure_furniture.parquet"
+    _build_infrastructure_fixture(path, features=_FURNITURE_FEATURES)
+    infrastructure.set_data_path(str(path))
+    try:
+        yield path
+    finally:
+        infrastructure.set_data_path(None)
+
+
+def test_unfiltered_query_reports_the_true_in_range_count(furniture_fixture):
+    rows, _, total_in_range = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON)
+    assert len(rows) == infrastructure.DEFAULT_LIMIT
+    assert all(r["class"] == "street_lamp" for r in rows)
+    assert total_in_range == _LAMP_COUNT + 1
+
+
+def test_subtype_filter_surfaces_the_landmark_the_lamps_were_hiding(furniture_fixture):
+    rows, _, total_in_range = infrastructure.infrastructure_at(
+        CENTER_LAT, CENTER_LON, subtype="bridge"
+    )
+    assert [r["name"] for r in rows] == ["Hidden Bridge"]
+    assert total_in_range == 1
+
+
+def test_class_filter_matches_the_class_column(furniture_fixture):
+    rows, _, _ = infrastructure.infrastructure_at(
+        CENTER_LAT, CENTER_LON, infra_class="viaduct"
+    )
+    assert [r["name"] for r in rows] == ["Hidden Bridge"]
+
+
+def test_server_flags_the_limit_bite_with_a_note(furniture_fixture):
+    result = server.infrastructure_at(CENTER_LAT, CENTER_LON)
+    assert result["truncated"] is True
+    assert result["total_in_range"] == _LAMP_COUNT + 1
+    assert result["omitted_count"] == _LAMP_COUNT + 1 - len(result["results"])
+    assert "street furniture" in result["note"]
+    assert "subtype" in result["note"]
+
+
+def test_server_untruncated_answer_carries_no_note(infrastructure_fixture):
+    result = server.infrastructure_at(CENTER_LAT, CENTER_LON)
+    assert "truncated" not in result
+    assert "note" not in result
+    assert "total_in_range" not in result
+
+
+def test_server_subtype_filter_reaches_the_query(furniture_fixture):
+    result = server.infrastructure_at(CENTER_LAT, CENTER_LON, subtype="bridge")
+    assert [r["name"] for r in result["results"]] == ["Hidden Bridge"]
+    assert "truncated" not in result
+
+
+# --- filter wildcard escaping ----------------------------------------------
+
+_UNDERSCORE_FEATURES = [
+    (
+        "under-literal",
+        f"POINT({CENTER_LON} {CENTER_LAT + 50.0 / _M_PER_DEG_LAT})",
+        "foo_bar",
+        "foo_bar",
+        "Literal Underscore",
+    ),
+    (
+        "under-wildcard",
+        f"POINT({CENTER_LON} {CENTER_LAT + 60.0 / _M_PER_DEG_LAT})",
+        "fooXbar",
+        "fooXbar",
+        "Wildcard Match",
+    ),
+]
+
+
+def test_filter_underscore_is_literal_not_a_wildcard(tmp_path):
+    """subtype='foo_bar' must not match 'fooXbar' — Overture's values are
+    snake_case, so an unescaped '_' would over-match constantly."""
+    path = tmp_path / "infrastructure_underscore.parquet"
+    _build_infrastructure_fixture(path, features=_UNDERSCORE_FEATURES)
+    infrastructure.set_data_path(str(path))
+    try:
+        rows, _, _ = infrastructure.infrastructure_at(
+            CENTER_LAT, CENTER_LON, subtype="foo_bar"
+        )
+        assert [r["name"] for r in rows] == ["Literal Underscore"]
+        rows, _, _ = infrastructure.infrastructure_at(
+            CENTER_LAT, CENTER_LON, infra_class="foo_bar"
+        )
+        assert [r["name"] for r in rows] == ["Literal Underscore"]
+    finally:
+        infrastructure.set_data_path(None)
+
+
+# --- bbox prefilter ring (#180 sweep) ---------------------------------------
+
+# Metres per degree of latitude on the haversine sphere the distance
+# predicate uses (R=6371000), which is *not* the 111_320.0 m/deg
+# geo.bbox_around converts with. A bare point placed with this constant at
+# 499.9 m due north is genuinely 499.9 m away by the exact predicate, but
+# falls outside the unpadded prefilter box for radius_m=500.
+_SPHERE_M_PER_DEG = 6371000.0 * 3.141592653589793 / 180.0
+_RING_FEATURES = [
+    (
+        f"ring-{int(d * 10)}",
+        f"POINT({CENTER_LON} {CENTER_LAT + d / _SPHERE_M_PER_DEG})",
+        "communication",
+        "communication_tower",
+        f"Ring Tower {d}",
+    )
+    for d in (499.5, 499.7, 499.9, 500.0)
+]
+
+
+def test_prefilter_ring_features_are_not_dropped(tmp_path):
+    path = tmp_path / "infrastructure_ring.parquet"
+    _build_infrastructure_fixture(path, features=_RING_FEATURES)
+    infrastructure.set_data_path(str(path))
+    try:
+        rows, _, _ = infrastructure.infrastructure_at(
+            CENTER_LAT, CENTER_LON, radius_m=500
+        )
+        assert [r["name"] for r in rows] == [
+            "Ring Tower 499.5", "Ring Tower 499.7", "Ring Tower 499.9", "Ring Tower 500.0",
+        ]
+        for row in rows:
+            assert row["distance_m"] == pytest.approx(float(row["name"].split()[-1]), abs=0.2)
     finally:
         infrastructure.set_data_path(None)

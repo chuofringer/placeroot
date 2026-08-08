@@ -574,21 +574,71 @@ def land_use_at(lat: float, lon: float) -> dict:
     return result
 
 
+def _with_infrastructure_truncation(
+    payload: dict, total_in_range: int, subtype: str | None, infra_class: str | None
+) -> dict:
+    """Flag an infrastructure_at answer that is a slice of a much larger set.
+
+    budget.apply_budget only knows about rows *it* dropped; the SQL LIMIT
+    cuts first and invisibly, and base/infrastructure is street-furniture
+    dominated, so the 10 nearest features around a city square are lamps
+    and benches even when 72 bridges are in range. Left unflagged that
+    reads as "no bridge near here". So: whenever fewer rows came back than
+    matched, say so, give the true in-range count, and name the move that
+    actually finds landmarks (a subtype/infra_class filter), not just
+    "narrow the query".
+    """
+    shown = len(payload.get("results", []))
+    if total_in_range <= shown:
+        return payload
+    payload["truncated"] = True
+    payload["omitted_count"] = total_in_range - shown
+    payload["total_in_range"] = total_in_range
+    if subtype or infra_class:
+        payload["note"] = (
+            f"showing the {shown} nearest of {total_in_range} matching features; "
+            "narrow further with a smaller radius or a more specific filter."
+        )
+    else:
+        payload["note"] = (
+            f"showing the {shown} nearest of {total_in_range} infrastructure features "
+            "in range. This layer is dominated by street furniture (street lamps, "
+            "benches, waste baskets, bollards), so the nearest few are usually not "
+            "landmarks and their absence here proves nothing: to ask about landmarks, "
+            "filter, e.g. subtype='bridge' / subtype='tower' / infra_class='pier', or "
+            "use a smaller radius."
+        )
+    return payload
+
+
 @mcp.tool()
 def infrastructure_at(
     lat: float,
     lon: float,
     radius_m: float = infrastructure.DEFAULT_RADIUS_M,
     limit: int = infrastructure.DEFAULT_LIMIT,
+    subtype: str | None = None,
+    infra_class: str | None = None,
 ) -> dict:
-    """Infrastructure near a point, nearest first: bridges, airports, towers, power lines.
+    """Infrastructure near a point, nearest first: bridges, towers, piers — and street furniture.
 
     From Overture's base theme (issue #179), type=infrastructure — the
-    built things that are neither buildings nor POIs (bridges, runways and
-    terminals, aerialways, communication towers, power lines and pylons,
-    piers, dams). Returns {"center", "radius_m", "results": [{"subtype",
-    "class", "name", "distance_m"}, ...]}. No raw geometry (design rule:
-    answers, not data).
+    built things that are neither buildings nor POIs. Read the data
+    honestly before trusting an answer: this layer is dominated by street
+    furniture (street_lamp, bench, waste_basket, bollard, kerb, crossing),
+    which outnumbers landmark infrastructure roughly 50:1 in a city
+    centre. An unfiltered query in a dense area returns lamps and benches
+    and says nothing about whether a bridge is nearby. To ask about
+    landmarks, filter: subtype/infra_class match Overture's `subtype` and
+    `class` columns (case-insensitive substring; infra_class is `class`
+    under a non-reserved name) — e.g. subtype="bridge", subtype="tower",
+    subtype="power", infra_class="pier".
+
+    Returns {"center", "radius_m", "results": [{"id", "subtype", "class",
+    "name", "distance_m"}, ...]}, plus "truncated": true, "total_in_range"
+    and an explanatory "note" whenever more features matched than were
+    returned. id is the GERS id, usable with other GERS-keyed tools. No raw
+    geometry (design rule: answers, not data).
 
     Radius search, not containment: most infrastructure is linear or a
     bare point, so "what's within radius_m" is the answerable question.
@@ -607,7 +657,9 @@ def infrastructure_at(
     if coord_error is not None:
         return coord_error
     try:
-        rows, effective_radius_m = infrastructure.infrastructure_at(lat, lon, radius_m, limit)
+        rows, effective_radius_m, total_in_range = infrastructure.infrastructure_at(
+            lat, lon, radius_m, limit, subtype=subtype, infra_class=infra_class
+        )
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
@@ -618,6 +670,7 @@ def infrastructure_at(
         "results": rows,
     }
     result = budget.apply_budget(result, "results")
+    result = _with_infrastructure_truncation(result, total_in_range, subtype, infra_class)
     degraded = infrastructure.degraded_fields()
     if degraded:
         result["degraded_fields"] = degraded

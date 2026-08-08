@@ -49,7 +49,7 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 | `summarize_buildings` | Building stock in an area: count, footprint area, height and use mix |
 | `buildings_at` | Nearest building footprints to a point |
 | `land_use_at` | What kind of land is this: land use and land cover classification at a point |
-| `infrastructure_at` | Infrastructure near a point, nearest first: bridges, airports, towers, power lines |
+| `infrastructure_at` | Infrastructure near a point, nearest first — filter by `subtype`/`infra_class` (e.g. `bridge`, `tower`) to see past the street furniture |
 | `geocode` | Free-text place name → ranked candidates with coordinates and admin context (`geocode_batch` for many at once) |
 | `resolve_place` | Free-text place reference → stable ids an agent can hold onto across turns (`resolve_place_batch`) |
 | `reverse_geocode` | Point → nearest address plus its containing admin areas (`reverse_geocode_batch`) |
