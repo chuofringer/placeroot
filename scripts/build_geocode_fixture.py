@@ -439,6 +439,7 @@ def build_addresses() -> list[tuple]:
             n += 1
     rows += build_postcode_addresses()
     rows += build_street_addresses()
+    rows += build_shared_bbox_addresses()
     return rows
 
 
@@ -496,6 +497,48 @@ def build_street_addresses() -> list[tuple]:
                     city,
                     [{"value": level}] if level else None,
                 ))
+    return rows
+
+
+# R28/#229: two municipalities inside one city's bounding box, and one
+# doorway with many units — the two shapes that made the address dedup lie.
+#
+# Live, Boston's bbox covers Hingham, Charlestown and Cambridge, each with
+# its own "1 MAIN ST"; grouping on (number, street) merged all three into one
+# arbitrarily-picked row. And 1 FRANKLIN ST carries 458 units, of which the
+# old arg_min(unit, d) named exactly one, nondeterministically.
+#
+# Both are reproduced inside the San Francisco anchor box (the fixture's one
+# large extent): a Daly City postcode that the box spills over, and a
+# multi-unit doorway. (number, street, postcode, postal_city, lat, lon, unit)
+SHARED_BBOX_ADDRESSES = (
+    ("1", "MAIN ST", "94112", "San Francisco", 37.7200, -122.4400, None),
+    ("1", "MAIN ST", "94014", "Daly City", 37.7100, -122.4450, None),
+    ("3", "MAIN ST", "94112", "San Francisco", 37.7205, -122.4405, None),
+    ("3", "MAIN ST", "94014", "Daly City", 37.7105, -122.4455, None),
+    # One doorway, three units: `unit` is unanswerable, `unit_count` is not.
+    ("1", "FRANKLIN ST", "94102", "San Francisco", 37.7780, -122.4210, "Apt 1"),
+    ("1", "FRANKLIN ST", "94102", "San Francisco", 37.7780, -122.4210, "Apt 2"),
+    ("1", "FRANKLIN ST", "94102", "San Francisco", 37.7780, -122.4210, "Apt 3"),
+    # ...and one with exactly one unit, which stays nameable.
+    ("3", "FRANKLIN ST", "94102", "San Francisco", 37.7785, -122.4215, "Suite 900"),
+)
+
+
+def build_shared_bbox_addresses() -> list[tuple]:
+    rows = []
+    for i, (number, street, postcode, city, lat, lon, unit) in enumerate(SHARED_BBOX_ADDRESSES):
+        rows.append((
+            f"gers-addr-shared-{i:02d}",
+            _point_bbox(lat, lon),
+            "US",
+            number,
+            street,
+            unit,
+            postcode,
+            city,
+            [{"value": "CA"}],
+        ))
     return rows
 
 
