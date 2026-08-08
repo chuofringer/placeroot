@@ -1,0 +1,56 @@
+{
+  "captured": "2026-08-08",
+  "servers": {
+    "mapbox-mcp": {
+      "label": "Mapbox MCP server",
+      "repo": "https://github.com/mapbox/mcp-server",
+      "commit": "1ccdc1f582227dd042d2276c8e844fb0a8570658",
+      "commit_date": "2026-08-03",
+      "package_version": "0.14.0",
+      "tools_list": "benchmarks/competitors/mapbox-mcp/tools_list.json",
+      "tools_list_method": "Their server, built from that commit (npm ci && npm run build), run over stdio with a syntactically valid dummy MAPBOX_ACCESS_TOKEN; the verbatim `tools/list` result. No network call is involved in a tools/list reply. Script: benchmarks/competitors/capture/capture_mapbox_tools_list.mjs",
+      "tools_list_note": "Default tool set. Their server also supports subsetting (--tools / TOOL_CONFIGURATION.md), exactly as PlaceRoot's PLACEROOT_TOOLS profiles do; this is the surface an install gets with no configuration."
+    },
+    "google-maps-archived": {
+      "label": "Google Maps MCP (archived Anthropic reference server)",
+      "repo": "https://github.com/modelcontextprotocol/servers-archived",
+      "path": "src/google-maps",
+      "commit": "9be4674d1ddf8c469e6461a27a337eeb65f76c2e",
+      "commit_date": "2025-05-28",
+      "package_version": "0.6.2",
+      "tools_list": "benchmarks/competitors/google-maps-archived/tools_list.json",
+      "tools_list_method": "Their `src/google-maps/index.ts` exits at module load without GOOGLE_MAPS_API_KEY, so the list cannot be read over stdio. The literal tool-definition region between the `// Tool definitions` and `// API handlers` comments is isolated, stripped of its two TypeScript-only constructs (`: Tool`, `as const`) and evaluated; the MAPS_TOOLS array is serialized. Script: benchmarks/competitors/capture/capture_google_maps_tools_list.mjs",
+      "tools_list_note": "Repository is archived and read-only as of 2025; the server targets Google's legacy Maps web-service endpoints."
+    }
+  },
+  "answers": {
+    "file": "benchmarks/competitors/answers.json",
+    "method": "Both competitor servers were run for real over stdio, with their upstream HTTP calls redirected to a local stub that replies with the vendor's own documented example response for that endpoint. Every answer is therefore their code's output — their formatting, their field selection, their added hints — on a payload they publish themselves. Script: benchmarks/competitors/capture/capture_answers.mjs",
+    "redirection": {
+      "mapbox-mcp": "MAPBOX_API_ENDPOINT env var, supported by their own src/tools/MapboxApiBasedTool.ts. Server code unmodified.",
+      "google-maps-archived": "Their built dist/index.js hardcodes https://maps.googleapis.com; the capture script rewrites that string to the stub origin and changes nothing else."
+    },
+    "upstream_examples": {
+      "directory": "benchmarks/competitors/upstream_examples/",
+      "method": "Extracted from the vendors' published API reference pages: every <pre> block is stripped of markup and kept only if it parses as JSON, then selected by index plus an asserted heading. Script: benchmarks/competitors/capture/extract_doc_examples.py",
+      "sources": {
+        "mb_forward_geocode.json": "https://docs.mapbox.com/api/search/geocoding/ — 'Example response: Forward geocoding'",
+        "mb_searchbox_forward.json": "https://docs.mapbox.com/api/search/search-box/ — 'Example responses: Search request'",
+        "mb_searchbox_category.json": "https://docs.mapbox.com/api/search/search-box/ — 'Example response: Search for POIs by category'",
+        "mb_directions.json": "https://docs.mapbox.com/api/navigation/directions/ — 'Example EV Alternative route response with EV charging stops'",
+        "mb_matrix.json": "https://docs.mapbox.com/api/navigation/matrix/ — 'Example response: Retrieve a matrix'",
+        "mb_isochrone.json": "https://docs.mapbox.com/api/navigation/isochrone/ — 'Example response: Retrieve isochrones around a location'",
+        "g_geocode.json": "https://developers.google.com/maps/documentation/geocoding/start — 'Geocoding request and response (latitude/longitude lookup)'"
+      }
+    },
+    "known_understatements": [
+      "Vendor documentation abridges long payloads. The Mapbox isochrone example replaces every polygon ring with the literal string \"arrays of longitude, latitude coordinates\", and its search examples carry a single feature and a \"{mapbox_id}\" placeholder. Competitor answer sizes below are therefore floors, not typical values — a real isochrone or a ten-result search is much larger.",
+      "The only Mapbox Directions example response their reference publishes is an EV route with charging stops, and it carries no step-by-step geometry. A real turn-by-turn response with geometry is far larger.",
+      "The nearest_coffee row is the least comparable in the table and should not be read as a win or a loss: PlaceRoot returns ten ranked places, while Mapbox's published category-search example contains one POI. Their cell is roughly a per-result cost; ours is a ten-result answer.",
+      "Mapbox's search, geocode and category tools return formatted plain text rather than JSON, which is a real compaction choice on their part and is reflected in the '(text)' cells. Their routing, isochrone and matrix tools return upstream JSON, pretty-printed."
+    ],
+    "not_measured": {
+      "google-maps-archived": "nearest_coffee, route_a_to_b, isochrone_15min, matrix_3x3. Google retired the legacy web-service reference pages this server calls, so no documented example response is available for Places Text Search, Directions or Distance Matrix, and their server has no isochrone tool at all. Rather than estimate, these are reported as not measured."
+    }
+  }
+}
