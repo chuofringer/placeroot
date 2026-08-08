@@ -7,11 +7,12 @@ autouse fixture in tests/conftest.py points routing.py at the committed
 fixture for every test in this file, same as test_routing.py.
 """
 
+import asyncio
 import math
 
 import pytest
 
-from placeroot import routing, server
+from placeroot import budget, routing, server
 
 from ._routing_fixture import build_routing_fixture as fx
 
@@ -326,3 +327,259 @@ def test_server_route_rejects_out_of_range_coordinate():
 def test_server_route_no_graph_nearby_far_from_the_grid():
     result = server.route(0.0, 0.0, 0.001, 0.001, mode="walk")
     assert result["error"] == "no_graph_nearby"
+
+
+# --- include_path: optional simplified route geometry (#161) -----------------
+
+# Opposite corners of the 20x20 grid: a long Manhattan path with many turns,
+# so simplification has something real to chew on (a straight run would be
+# collapsed to its two endpoints by epsilon=0 alone and prove nothing).
+CORNER_A_LAT, CORNER_A_LON = fx.node_latlon(0, 0)
+CORNER_B_LAT, CORNER_B_LON = fx.node_latlon(19, 19)
+
+
+def _snapped_lonlat(lat: float, lon: float, other_lat: float, other_lon: float, mode: str):
+    """The [lon, lat] of the graph node route() would snap (lat, lon) to.
+
+    Rebuilt through the same extraction the router uses (same midpoint,
+    same base radius) so the expectation is the router's own snapping
+    result, not a hand-picked grid node that merely looks right.
+    """
+    center_lat, center_lon = routing._midpoint(lat, lon, other_lat, other_lon)
+    straight_m = routing._haversine_m(lat, lon, other_lat, other_lon)
+    radius_m = max(
+        straight_m / 2.0 * routing.RADIUS_BUFFER + routing.SNAP_RADIUS_M,
+        routing.ROUTE_MIN_RADIUS_M,
+    )
+    graph = routing._get_or_build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None)
+    node_id = routing.snap_to_graph(graph, lat, lon)
+    node_lat, node_lon = graph.coords[node_id]
+    return [
+        round(node_lon, routing.PATH_COORD_PRECISION),
+        round(node_lat, routing.PATH_COORD_PRECISION),
+    ]
+
+
+def test_route_omits_path_by_default():
+    """Compact-first: the polyline is the largest thing route() can return,
+    so it must be absent unless asked for — not present-but-empty."""
+    result = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
+    assert "path" not in result
+    assert "path_max_deviation_m" not in result
+    assert "path_omitted" not in result
+
+
+def test_route_include_path_returns_a_geojson_linestring():
+    result = routing.route(
+        CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, mode="walk", include_path=True
+    )
+    path = result["path"]
+    assert path["type"] == "LineString"
+    coords = path["coordinates"]
+    assert len(coords) >= 2
+    assert all(len(c) == 2 for c in coords)
+    # [lon, lat] order, both inside the fixture grid's extent.
+    for lon, lat in coords:
+        assert -180.0 <= lon <= 180.0
+        assert -90.0 <= lat <= 90.0
+    assert "path_max_deviation_m" in result
+    assert "path_omitted" not in result
+
+
+def test_route_path_starts_at_a_and_ends_at_b_snapped_nodes():
+    """Acceptance criterion: endpoints correct — the line starts at the
+    origin's snapped node and ends at the destination's, exactly."""
+    result = routing.route(
+        CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, mode="walk", include_path=True
+    )
+    coords = result["path"]["coordinates"]
+    assert coords[0] == _snapped_lonlat(
+        CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, "walk"
+    )
+    assert coords[-1] == _snapped_lonlat(
+        CORNER_B_LAT, CORNER_B_LON, CORNER_A_LAT, CORNER_A_LON, "walk"
+    )
+
+
+def test_route_path_is_ordered_a_to_b_not_reversed():
+    """Reversing the query reverses the geometry: the predecessor chain is
+    walked source -> target, so B->A must not come back in A->B order."""
+    forward = routing.route(
+        CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, mode="walk", include_path=True
+    )
+    backward = routing.route(
+        CORNER_B_LAT, CORNER_B_LON, CORNER_A_LAT, CORNER_A_LON, mode="walk", include_path=True
+    )
+    assert forward["path"]["coordinates"][0] == backward["path"]["coordinates"][-1]
+    assert forward["path"]["coordinates"][-1] == backward["path"]["coordinates"][0]
+    assert forward["path"]["coordinates"] != backward["path"]["coordinates"]
+
+
+def test_route_path_traces_the_route_not_the_straight_line():
+    """The polyline should follow the street path, so summing its segment
+    lengths lands near the reported distance_m — and well above the
+    straight-line distance the two corners are apart."""
+    result = routing.route(
+        CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, mode="walk", include_path=True
+    )
+    coords = result["path"]["coordinates"]
+    traced_m = sum(
+        routing._haversine_m(a[1], a[0], b[1], b[0]) for a, b in zip(coords, coords[1:])
+    )
+    straight_m = routing._haversine_m(
+        CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON
+    )
+    assert traced_m > straight_m * 1.2
+    assert traced_m == pytest.approx(result["distance_m"], rel=0.05)
+
+
+def test_route_path_deviation_is_zero_when_nothing_is_lost():
+    """At the default budget this route fits unsimplified (epsilon=0 only
+    drops exactly-colinear points), so the reported deviation is 0.0 —
+    the deviation is a real measurement, not a constant."""
+    result = routing.route(
+        CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, mode="walk", include_path=True
+    )
+    assert result["path_max_deviation_m"] == 0.0
+
+
+def test_route_path_is_simplified_and_reports_deviation_under_a_tight_budget(monkeypatch):
+    """Acceptance criterion: token-capped with a reported deviation. A
+    budget too small for the full path yields fewer points, a non-zero
+    deviation, and a response that actually fits."""
+    full = routing.route(
+        CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, mode="walk", include_path=True
+    )
+    monkeypatch.setenv("PLACEROOT_TOKEN_BUDGET", "150")
+    tight = routing.route(
+        CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, mode="walk", include_path=True
+    )
+
+    assert "path" in tight
+    tight_coords = tight["path"]["coordinates"]
+    assert len(tight_coords) < len(full["path"]["coordinates"])
+    assert tight["path_max_deviation_m"] > 0
+    assert budget.estimate_tokens(tight) <= 150
+    # Simplifying must not move the endpoints.
+    assert tight_coords[0] == full["path"]["coordinates"][0]
+    assert tight_coords[-1] == full["path"]["coordinates"][-1]
+
+
+def test_route_path_deviation_shrinks_as_the_budget_grows(monkeypatch):
+    """More budget buys a closer line — the deviation is tied to how much
+    was actually dropped, not to an arbitrary tolerance."""
+    monkeypatch.setenv("PLACEROOT_TOKEN_BUDGET", "110")
+    coarse = routing.route(
+        CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, mode="walk", include_path=True
+    )
+    monkeypatch.setenv("PLACEROOT_TOKEN_BUDGET", "150")
+    finer = routing.route(
+        CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, mode="walk", include_path=True
+    )
+    assert coarse["path_max_deviation_m"] > finer["path_max_deviation_m"] > 0
+    assert len(coarse["path"]["coordinates"]) < len(finer["path"]["coordinates"])
+
+
+def test_route_drops_the_path_honestly_when_the_budget_cannot_hold_it(monkeypatch):
+    """Degrade honestly: a budget with no room left for even a two-point
+    line omits the path and says so, rather than returning a line that
+    stops short of the destination."""
+    monkeypatch.setenv("PLACEROOT_TOKEN_BUDGET", "80")
+    result = routing.route(
+        CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, mode="walk", include_path=True
+    )
+    assert "path" not in result
+    assert result["path_omitted"] is True
+    assert "path_note" in result
+    # The distance/duration answer itself survives untouched.
+    assert result["distance_m"] > 0
+    assert result["duration_s"] > 0
+
+
+def test_route_path_omitted_rather_than_truncated_when_simplify_cannot_fit(monkeypatch):
+    """Even with budget headroom for the envelope, if the simplified line
+    still overflows (simplify_geometry returns a best effort rather than
+    failing) the path is dropped, never handed back over budget."""
+    monkeypatch.setattr(routing.simplify, "simplify_geometry", lambda geojson, max_tokens: {
+        "geometry": geojson, "max_deviation_m": 0.0,
+        "original_points": len(geojson["coordinates"]),
+        "kept_points": len(geojson["coordinates"]),
+    })
+    monkeypatch.setenv("PLACEROOT_TOKEN_BUDGET", "120")
+    result = routing.route(
+        CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, mode="walk", include_path=True
+    )
+    assert "path" not in result
+    assert result["path_omitted"] is True
+
+
+@pytest.mark.parametrize("mode", ["walk", "cycle", "drive"])
+def test_route_include_path_works_for_every_mode(mode):
+    result = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode=mode, include_path=True)
+    coords = result["path"]["coordinates"]
+    assert result["mode"] == mode
+    assert len(coords) >= 2
+    assert coords[0] == _snapped_lonlat(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode)
+    assert coords[-1] == _snapped_lonlat(TO_LAT, TO_LON, FROM_LAT, FROM_LON, mode)
+
+
+def test_route_include_path_leaves_no_route_result_unchanged():
+    """The structured no_route answer has no path to report and must not
+    grow one (or a path_omitted flag) just because include_path was set."""
+    j = 5
+    near_lat, near_lon = fx.node_latlon(fx.RIVER_GAP_I, j)
+    far_lat, far_lon = fx.node_latlon(fx.RIVER_GAP_I + 1, j)
+
+    plain = routing.route(near_lat, near_lon, far_lat, far_lon, mode="drive")
+    with_path = routing.route(
+        near_lat, near_lon, far_lat, far_lon, mode="drive", include_path=True
+    )
+    assert with_path == plain
+    assert with_path["error"] == "no_route"
+
+
+def test_route_include_path_leaves_route_too_long_unchanged():
+    with pytest.raises(routing.RouteTooLong):
+        routing.route(0.0, 0.0, 10.0, 10.0, mode="walk", include_path=True)
+
+
+def test_route_path_for_identical_endpoints_is_a_valid_zero_length_line():
+    """Both endpoints snapping to the same node gives a one-node path; a
+    one-position LineString isn't valid GeoJSON, so it's emitted as the
+    degenerate two-position line."""
+    result = routing.route(FROM_LAT, FROM_LON, FROM_LAT, FROM_LON, mode="walk", include_path=True)
+    coords = result["path"]["coordinates"]
+    assert result["distance_m"] == 0.0
+    assert len(coords) == 2
+    assert coords[0] == coords[1]
+
+
+def test_route_path_survives_the_simplify_geometry_tool_round_trip():
+    """The emitted geometry is ordinary GeoJSON the simplify_geometry tool
+    accepts — no bespoke shape that only route() understands."""
+    result = routing.route(
+        CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, mode="walk", include_path=True
+    )
+    round_trip = server.simplify_geometry(result["path"], max_tokens=500)
+    assert "error" not in round_trip
+    assert round_trip["geometry"]["type"] == "LineString"
+
+
+def test_server_route_include_path_passthrough():
+    result = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", include_path=True)
+    assert "error" not in result
+    assert result["path"]["type"] == "LineString"
+    assert "path_max_deviation_m" in result
+
+    default = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
+    assert "path" not in default
+
+
+def test_server_route_schema_exposes_include_path_defaulting_to_false():
+    tools = asyncio.run(server.mcp.list_tools())
+    tool = next(t for t in tools if t.name == "route")
+    schema = tool.model_dump(mode="json", by_alias=True, exclude_none=True)["inputSchema"]
+    prop = schema["properties"]["include_path"]
+    assert prop.get("type") == "boolean"
+    assert prop.get("default") is False
+    assert "include_path" not in schema.get("required", [])

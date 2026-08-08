@@ -1349,7 +1349,9 @@ def _dijkstra_path_to_target(
     with dist_to, so a node's recorded along-distance is always the distance
     along the very chain the predecessor table describes — see
     places_along_route, the caller that needs it. route() shares this same
-    search through _shortest_path and simply ignores the path element.
+    search through _shortest_path and reads the path only when its caller
+    asked for geometry (include_path — see _path_linestring); otherwise it
+    uses just the two costs.
     """
     if source == target:
         return 0.0, 0.0, [(source, 0.0)]
@@ -1381,14 +1383,81 @@ def _dijkstra_path_to_target(
     return None
 
 
+# Decimal places kept on emitted path coordinates. 6 dp is ~0.11 m at the
+# equator — finer than any snapping or graph-node precision the router has —
+# and rounding *before* the simplify pass matters: simplify_geometry's
+# token-fit search measures the very coordinates that get returned, so
+# rounding afterwards would invalidate its budget accounting.
+PATH_COORD_PRECISION = 6
+
+# Reserve for the fields that ride alongside "path" in the response
+# ("path_max_deviation_m" and its number). Small and fixed; kept explicit so
+# the path's own token cap can't eat the envelope it needs.
+PATH_ENVELOPE_TOKENS = 12
+
+# Below this many tokens there is no honest path to return: even a bare
+# two-point LineString costs roughly this much. If the remaining budget is
+# smaller, the path is dropped with a note rather than emitted truncated.
+PATH_MIN_TOKENS = 30
+
+
+def _path_linestring(
+    graph: Graph, path: list[tuple[str, float]], max_tokens: int
+) -> tuple[dict, float] | None:
+    """(GeoJSON LineString, max_deviation_m) for `path`, or None if it can't fit max_tokens.
+
+    `path` is _dijkstra_path_to_target's node sequence (source first, target
+    last), so the emitted coordinates are already in A->B order; they are
+    read straight out of Graph.coords and flipped to GeoJSON's [lon, lat].
+
+    Simplification goes through the same simplify.simplify_geometry the
+    isochrone polygon and building footprints use — a token budget, not a
+    tolerance in degrees. RDP always keeps the first and last index, so the
+    simplified line still starts at A's snapped node and ends at B's; the
+    two assignments below re-pin them anyway so that guarantee is stated in
+    code rather than inherited by assumption.
+
+    Returns None when even the fully simplified line doesn't fit max_tokens
+    (simplify_geometry returns its most-simplified best effort rather than
+    failing, so the fit is re-checked here). Callers drop the path and say
+    so — coordinates are never silently truncated, which would hand back a
+    line that stops short of the destination while looking complete.
+    """
+    coords: list[list[float]] = []
+    for node_id, _along_m in path:
+        latlon = graph.coords.get(node_id)
+        if latlon is None:  # pragma: no cover - every path node came from the graph
+            continue
+        lat, lon = latlon
+        coords.append([round(lon, PATH_COORD_PRECISION), round(lat, PATH_COORD_PRECISION)])
+    if not coords:
+        return None
+    if len(coords) == 1:
+        # source == target (both endpoints snapped to the same node): a
+        # one-position LineString isn't valid GeoJSON, so emit the
+        # zero-length two-position line, which is.
+        coords.append(list(coords[0]))
+
+    simplified = simplify.simplify_geometry(
+        {"type": "LineString", "coordinates": coords}, max_tokens=max_tokens
+    )
+    geometry = simplified["geometry"]
+    line = geometry["coordinates"]
+    line[0], line[-1] = coords[0], coords[-1]
+    if budget.estimate_tokens({"path": geometry}) > max_tokens:
+        return None
+    return geometry, simplified["max_deviation_m"]
+
+
 def route(
     from_lat: float,
     from_lon: float,
     to_lat: float,
     to_lon: float,
     mode: str = "drive",
+    include_path: bool = False,
 ) -> dict:
-    """Shortest-path distance + duration between two points, by mode. No geometry (#161).
+    """Shortest-path distance + duration between two points, by mode; geometry on request (#161).
 
     Extracts a bounded street graph around the midpoint of the two points
     (radius derived from their straight-line distance, same RADIUS_BUFFER
@@ -1425,6 +1494,18 @@ def route(
 
     On success returns {"distance_m", "duration_s", "mode", "from", "to"},
     plus "truncated"/"note" if the extraction graph hit MAX_GRAPH_SEGMENTS.
+
+    include_path=True additionally returns "path", a GeoJSON LineString
+    tracing the route from A's snapped node to B's, and
+    "path_max_deviation_m", how far the simplified line strays from the true
+    node-by-node path (0.0 when nothing was dropped). It is omitted entirely
+    by default — compact-first: most callers want the distance and duration,
+    and the polyline is by far the largest thing this tool can return. The
+    line is fitted to whatever of the token budget the rest of the response
+    leaves (see _path_linestring); if even a fully simplified line doesn't
+    fit, the response carries "path_omitted": true and a "path_note" instead
+    of a path that stops short of the destination.
+
     For walk/cycle (constant speed per mode), distance_m and duration_s
     always satisfy distance_m == duration_s * mode_speed_m_s exactly (both
     are derived from the same edges along the same min-time path); for
@@ -1435,7 +1516,7 @@ def route(
     if found is None:
         return _no_route_result(from_lat, from_lon, to_lat, to_lon, mode)
 
-    duration_s, distance_m, _path = found
+    duration_s, distance_m, path = found
     result = {
         "distance_m": round(distance_m, 1),
         "duration_s": round(duration_s, 1),
@@ -1448,6 +1529,24 @@ def route(
         result["note"] = (
             "the street graph hit its size cap; this route may be suboptimal or incomplete"
         )
+    if include_path:
+        # Whatever the rest of the response (including any truncation note)
+        # leaves of the budget is what the polyline gets, so adding the path
+        # can never push the answer over the budget the other tools respect.
+        path_tokens = budget.token_budget() - budget.estimate_tokens(result) - PATH_ENVELOPE_TOKENS
+        line = (
+            _path_linestring(graph, path, path_tokens) if path_tokens >= PATH_MIN_TOKENS else None
+        )
+        if line is None:
+            result["path_omitted"] = True
+            result["path_note"] = (
+                "the route path did not fit the remaining token budget and was omitted "
+                "rather than truncated; raise PLACEROOT_TOKEN_BUDGET to include it"
+            )
+        else:
+            geometry, deviation_m = line
+            result["path"] = geometry
+            result["path_max_deviation_m"] = round(deviation_m, 2)
     return result
 
 

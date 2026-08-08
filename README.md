@@ -71,7 +71,7 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 | `gers_lookup` | Any GERS id → the entity it names (place, division, or building), what it's inside, and the building at its point |
 | `search_categories` | Free text → the right Overture category slug to filter `find_places` by |
 | `isochrone` | The area reachable within N minutes on foot, bike, or car |
-| `route` | Shortest-path distance and duration between two points, on foot, bike, or car |
+| `route` | Shortest-path distance and duration between two points, on foot, bike, or car; `include_path=true` adds the simplified route polyline |
 | `places_along_route` | Places on the way from A to B: corridor search along the route, with each result's detour and how far along it sits |
 | `render_map` | Any result → a self-contained interactive HTML map |
 | `simplify_geometry` | Any geometry → simplified to fit a token budget |
