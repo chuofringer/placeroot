@@ -951,6 +951,11 @@ def geocode(query: str, limit: int = 5) -> dict:
     region, so the places half of the search is skipped rather than
     scanning the global places dataset — minutes, not seconds (#105). That
     case comes back empty with a "note" saying so and what to do instead.
+
+    A misspelled name that matches no division literally ("Berekley") gets
+    one close-spelling retry over the local divisions table (#215); those
+    results rank below any literal match and come with a "note" naming the
+    spelling they were corrected to.
     """
     try:
         result = geocoding.geocode_detailed(query, limit)

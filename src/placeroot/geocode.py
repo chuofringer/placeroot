@@ -132,6 +132,40 @@ against a same-tier literal match the normal #47 way — literal only breaks
 a full tie, it doesn't override population. Returned names are always
 Overture's untouched canonical spelling; only the matching step is
 normalized.
+
+--- #215: fuzzy fallback tier for typos ---
+
+#53 fixes spellings we can enumerate (St./Saint, diacritics); it does
+nothing for a plain typo. Live before this: "Berekley" and "Cinncinati"
+returned nothing at all, and "Sna Francisco" fell through to the places
+fallback and answered "Snags N Burgs Cafe" (the substring scan of a
+misspelling #216's docstring calls out).
+
+So: when the literal search — including the #53 variant retries — comes
+back *empty*, run one more pass over the local materialized divisions
+table (#43) matching on edit distance instead of substrings:
+jaro_winkler_similarity(folded name, folded query) >=
+_FUZZY_SIMILARITY_THRESHOLD, ordered by similarity then population. The
+trigger is deliberately emptiness alone: a literal substring hit is a real
+answer to the string the caller actually typed, and there is no honest
+tier-based reading of "weak" that doesn't demote some of those.
+
+Two properties this tier is built around:
+
+- It never scans upstream. jaro_winkler over the whole local table is
+  0.26s (measured, 4.65M names); the same predicate against S3 would be a
+  full-theme read with nothing to prune by, which is exactly the cost
+  #105/#216 exist to avoid. No local table (cache off, or materialization
+  failed) means no fuzzy tier — an unavailable nicety, not a fallback to
+  something expensive.
+- A fuzzy hit answers a *different* string than the one typed, so it sorts
+  below every literal tier (_rank_key's leading term, ahead of even tier
+  3), scores below the substring tier, and carries a note naming the
+  spelling it corrected to, so an agent can see the correction happened
+  rather than silently trusting it. A fuzzy hit also stands down the
+  places fallback: the query text is a known misspelling at that point,
+  and substring-matching a typo against the places theme is how
+  "Snags N Burgs Cafe" happened.
 """
 
 import logging
@@ -246,10 +280,18 @@ def _effective_tier(row: dict, query: str) -> int:
 
 
 def _rank_key(row: dict, query: str, region_population: dict[str, int]):
-    """Sort key: match tier, then (#47) population if known, else a
-    documented proxy chain of subtype rank / hierarchy depth / the row's
-    own region's population, then (#53) literal-over-variant, then id for
-    full determinism. All ascending (smaller sorts first).
+    """Sort key: (#215) literal-over-fuzzy, then match tier, then (#47)
+    population if known, else a documented proxy chain of subtype rank /
+    hierarchy depth / the row's own region's population, then (#53)
+    literal-over-variant, then id for full determinism. All ascending
+    (smaller sorts first).
+
+    The #215 fuzzy term leads, ahead of even the tier: a fuzzy row matched
+    a *different* string than the caller typed, so it belongs below every
+    row that matched the typed string somehow — including a bare substring
+    match. Among themselves fuzzy rows order by similarity first (the SQL
+    already picked them by it); for every literal row both terms are
+    constant, so this prefix is a no-op on the pre-#215 ordering.
 
     The literal-over-variant tiebreak sits *after* the #47 chain, not
     before it: real data has plenty of tiny, unrelated places sharing a
@@ -267,6 +309,8 @@ def _rank_key(row: dict, query: str, region_population: dict[str, int]):
     depth = len(row.get("admin_context") or [])
     region_pop = region_population.get(row.get("region")) or 0
     return (
+        1 if row.get("_fuzzy") else 0,
+        -(row.get("_similarity") or 0.0),
         -tier,
         0 if population is not None else 1,
         -(population or 0),
@@ -280,7 +324,11 @@ def _rank_key(row: dict, query: str, region_population: dict[str, int]):
 
 def _rank_score(row: dict, query: str) -> float:
     tier = _effective_tier(row, query)
-    tier_score = {3: 1.0, 2: 0.7, 1: 0.4}[tier]
+    # #215: a fuzzy row didn't match the typed string at any tier, so it
+    # scores below the weakest literal one (substring, 0.4) — the bounded
+    # subtype/population bonuses below can add at most 0.09, keeping every
+    # fuzzy score under 0.4 no matter how prominent the corrected place is.
+    tier_score = 0.3 if row.get("_fuzzy") else {3: 1.0, 2: 0.7, 1: 0.4}[tier]
     weight = _SUBTYPE_WEIGHT.get(row.get("subtype"), 0)
     population = row.get("population")
     # A small, bounded bonus so rank_score stays roughly consistent with
@@ -671,6 +719,114 @@ def _query_divisions(
     return _query_divisions_from_upstream(query, region_code, name_expr)
 
 
+# --- #215: fuzzy fallback tier ------------------------------------------
+
+# Minimum jaro_winkler_similarity (0..1) between a folded division name and
+# the folded query for a fuzzy row to be offered at all.
+#
+# Calibrated against the live 2026-07-22.0 release (R26): the three probes
+# this tier exists for resolve top-1 correct well above it — "Berekley" ->
+# Berkeley at 0.97, "Cinncinati" -> Cincinnati at 0.98, "Sna Francisco" ->
+# San Francisco at 0.98 — so 0.92 keeps headroom for longer or two-typo
+# spellings without reaching down into the ~0.85 band, where short,
+# unrelated names ("Erie"/"Eire", "Lima"/"Lome") start pairing up. Raising
+# it towards the measured 0.97 would buy nothing but lost corrections;
+# lowering it trades a real answer for a plausible-looking wrong one, which
+# for a geocoder is the worse failure.
+_FUZZY_SIMILARITY_THRESHOLD = 0.92
+
+# The folded name expression fuzzy matching compares against: same
+# case-and-diacritic folding _normalize_for_match applies to the query in
+# Python (#53's strip_accents, plus lower()), so "Sao Paulo" and "São
+# Paulo" are the same string to the similarity function.
+_FOLDED_NAME_SQL = "lower(strip_accents(name))"
+
+
+def _has_like_metacharacter(query: str) -> bool:
+    """True if `query` contains an ILIKE wildcard character.
+
+    #165 made those literal, so "Brook_yn" matches nothing and stays
+    visibly a non-match. Jaro-winkler doesn't know "_" from a letter and
+    would quietly answer that query with "Brooklyn" — the same output a
+    wildcard would have produced, which is precisely the behavior #165
+    removed. Real typos don't contain "%" or "_", so declining to fuzzy
+    these costs nothing and keeps that guarantee legible.
+    """
+    return "%" in query or "_" in query
+
+
+def _query_divisions_fuzzy(table_path: str, query: str) -> list[dict]:
+    """Divisions whose folded name is within _FUZZY_SIMILARITY_THRESHOLD
+    jaro-winkler of the folded query — the #215 typo tier.
+
+    No region filter, unlike the literal queries: this only runs when the
+    literal search came back empty, and a region-constrained literal miss
+    has already dropped its region code and retried unconstrained by then
+    (see geocode_detailed) — so there is never a live region constraint
+    left to honor here.
+
+    Local table only, by construction: the caller passes a materialized
+    table path or doesn't call this at all. A similarity predicate has
+    nothing an upstream parquet reader can prune by, so running it against
+    S3 would read the whole divisions theme over the network; locally the
+    same full scan is 0.26s (measured, 4.65M names).
+
+    Rows come back tagged `_fuzzy` with their `_similarity`, and `_tier` 1
+    so tier-reading code (_effective_tier, and through it _rank_score)
+    grades them as the weak match they are rather than re-deriving a tier
+    from a name that doesn't contain the query at all. Ordering is
+    similarity first, then population — between two names equally close to
+    a typo, the one people are more likely to have meant is the bigger
+    place.
+    """
+    params: dict = {"folded": _normalize_for_match(query)}
+    sql = f"""
+        SELECT id, name, subtype, country, region, lat, lon, admin_chain, population,
+               jaro_winkler_similarity({_FOLDED_NAME_SQL}, $folded) AS similarity
+        FROM read_parquet('{table_path}')
+        WHERE jaro_winkler_similarity({_FOLDED_NAME_SQL}, $folded)
+              >= {_FUZZY_SIMILARITY_THRESHOLD}
+        ORDER BY similarity DESC, population DESC NULLS LAST
+        LIMIT {DIVISION_OVERFETCH}
+    """
+    try:
+        with overture._conn_lock:
+            rows = overture.conn().execute(sql, params).fetchall()
+    except duckdb.Error as e:
+        raise overture.UpstreamUnavailable(str(e)) from e
+    result = []
+    for r in rows:
+        result.append({
+            "id": r[0], "name": r[1], "subtype": r[2], "country": r[3], "region": r[4],
+            "lat": round(r[5], 6), "lon": round(r[6], 6),
+            "admin_context": _admin_chain_context(r[7], self_name=r[1]),
+            "population": r[8],
+            "_fuzzy": True, "_similarity": r[9], "_tier": 1,
+        })
+    return result
+
+
+def _fuzzy_correction_note(rows: list[dict], query: str) -> str:
+    """Note naming the spelling(s) a fuzzy answer corrected `query` to.
+
+    Same idiom as the other notes in this module — plain prose saying what
+    the search did and what the caller can do about it — but this one rides
+    along with *results*, not instead of them: the results are real, they
+    just answer a different spelling than the one asked for, and an agent
+    that can't see the correction has no way to catch a wrong guess.
+    """
+    names = []
+    for row in rows:
+        if row["name"] not in names:
+            names.append(row["name"])
+    spellings = ", ".join(f'"{n}"' for n in names)
+    return (
+        f'no division is named "{query}"; these matched by close spelling instead '
+        f"({spellings}). If that is not the place you meant, re-run geocode with the "
+        "exact spelling, or use find_places with lat/lon to search a known area."
+    )
+
+
 def _fallback_anchor(
     search_query: str,
     divisions: list[dict],
@@ -712,11 +868,13 @@ def _fallback_anchor(
     step with how resolve_place decides which words are worth searching on.
 
     Note this gate is about *emptiness*, not correctness: a misspelling
-    like "Sna Francisco" (anchor "Francisco", residual "Sna") still clears
-    it and still reaches the fallback to find "Snags N Burgs Cafe". Getting
-    that one right needs the fuzzy/trigram tier tracked in #215 -- a
-    residual that matches nothing well should degrade to a fuzzy retry of
-    the whole query, not to a substring scan of its typo.
+    like "Sna Francisco" (anchor "Francisco", residual "Sna") clears it
+    just fine — "Sna" is a significant word by this rule. Typos are
+    handled a step earlier instead: #215's fuzzy tier retries the whole
+    query by edit distance and, when it finds a correction, stands the
+    places fallback down before this function is ever reached. Without a
+    local divisions table for that tier to read (cache off), such a query
+    still lands here and still reaches the substring scan of its own typo.
     """
     if divisions:
         top = divisions[0]
@@ -800,6 +958,11 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
     bound it by (#105), or nothing but stopwords left to search names for
     (#216) — a "note" saying so and how to make the query answerable.
 
+    A "note" also comes back *with* results when nothing matched literally
+    and the answer came from the #215 fuzzy tier instead: it names the
+    spelling the results were corrected to ("Berekley" -> "Berkeley"), so
+    a caller can tell a correction from a match.
+
     Never more than `limit` results. Each result: {name, type, lat, lon, id
     (GERS), admin_context, rank_score}. Raises overture.UpstreamUnavailable
     if the remote scan fails after retries; the caller (server.py) turns
@@ -874,6 +1037,15 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
                 seen_ids.add(row["id"])
         divisions = divisions + variant_rows
 
+    # #215: the literal search (and its #53 variant retries) found nothing
+    # at all — the shape a typo makes. Retry by edit distance against the
+    # local table only; see the module docstring for why emptiness is the
+    # whole trigger and why this never runs upstream.
+    fuzzy_rows: list[dict] = []
+    if not divisions and local_table is not None and not _has_like_metacharacter(search_query):
+        fuzzy_rows = _query_divisions_fuzzy(local_table, search_query)
+        divisions = fuzzy_rows
+
     region_population = _region_population_lookup(local_table)
     divisions.sort(key=lambda r: _rank_key(r, search_query, region_population))
 
@@ -885,7 +1057,14 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
     # answer out to `limit`.
     has_exact_division = any(_effective_tier(c, search_query) == 3 for c in divisions)
     candidates = divisions
-    if len(candidates) < limit and not has_exact_division:
+    # #215: a fuzzy hit means the query is a misspelling we have a
+    # correction for, which also settles what the places half would be
+    # searching for — the typo, as a substring, against Overture's largest
+    # theme. That is the scan that answered "Sna Francisco" with "Snags N
+    # Burgs Cafe"; with San Francisco already in hand it can only add noise,
+    # so a fuzzy answer stands the fallback down the same way an exact
+    # division match does.
+    if len(candidates) < limit and not has_exact_division and not fuzzy_rows:
         # #83: bound the places scan to an anchor's vicinity whenever one
         # can be derived (a division match already in hand, or a trailing
         # location word in the query) instead of an unconstrained
@@ -939,6 +1118,11 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
             ),
         })
     result = {"results": out}
+    fuzzy_out = [row for row in candidates[:limit] if row.get("_fuzzy")]
+    if fuzzy_out:
+        # #215: unlike the skip notes below, this one accompanies real
+        # results — it says which spelling they actually answer.
+        result["note"] = _fuzzy_correction_note(fuzzy_out, search_query)
     if note and not out:
         # Only worth saying when the answer is empty: if divisions already
         # produced candidates, the skipped places half isn't what the caller

@@ -207,14 +207,159 @@ def test_significant_words_shares_the_resolve_place_rule():
     assert geocode._significant_tokens("the Blue Bottle") == ["Blue", "Bottle"]
 
 
-def test_misspelled_prefix_still_reaches_the_fallback_pending_215(monkeypatch):
-    # Documents the deliberate limit of this gate (#216 acceptance): a typo
-    # residual is "significant" by the >=3-chars/not-a-stopword rule and so
-    # still reaches the places scan. Fixing that needs the fuzzy tier of
-    # #215; when it lands, this expectation should change with it.
+def test_misspelled_prefix_reaches_the_fallback_without_the_fuzzy_tier(monkeypatch):
+    # This was #216's test_misspelled_prefix_still_reaches_the_fallback_pending_215.
+    # #215 landed, so the expectation moves: the typo residual only reaches
+    # the places scan where the fuzzy tier can't run at all — no local
+    # divisions table (cache off, as the default fixtures run), which is
+    # what this test still pins. With the table available it doesn't; see
+    # test_typo_query_runs_no_places_scan_at_all below.
     calls = _count_places_fallback(monkeypatch)
     geocode.geocode_detailed("Sna Brooklyn", limit=5)
     assert [q for q, _ in calls] == ["Sna"]
+
+
+# --- #215: fuzzy fallback tier for typos ----------------------------------
+# Live repro: "Berekley"/"Cinncinati" returned nothing, "Sna Francisco"
+# answered "Snags N Burgs Cafe" off the places fallback. The tier only runs
+# against the #43 local table, so every test here takes `geocode_cache`.
+
+
+def test_typo_resolves_to_the_correctly_spelled_division(geocode_cache):
+    results = geocode.geocode("Berekley", limit=5)
+    assert [r["name"] for r in results] == ["Berkeley"]
+    assert results[0]["id"] == "gers-div-berkeley"
+
+
+def test_typo_resolves_for_each_live_verified_probe(geocode_cache):
+    # The three probes from #215's live measurement, top-1 each.
+    for query, expected in [
+        ("Berekley", "Berkeley"),
+        ("Cinncinati", "Cincinnati"),
+        ("Sna Francisco", "San Francisco"),
+    ]:
+        results = geocode.geocode(query, limit=5)
+        assert results, f"{query!r} found nothing"
+        assert results[0]["name"] == expected, query
+
+
+def test_fuzzy_results_carry_a_note_naming_the_corrected_spelling(geocode_cache):
+    result = geocode.geocode_detailed("Cinncinati", limit=5)
+    assert result["results"][0]["name"] == "Cincinnati"
+    assert '"Cincinnati"' in result["note"]
+    assert "Cinncinati" in result["note"]
+
+
+def test_fuzzy_note_reaches_the_geocode_tool(geocode_cache):
+    payload = server.geocode("Berekley", limit=5)
+    assert payload["results"][0]["name"] == "Berkeley"
+    assert "Berkeley" in payload["note"]
+
+
+def test_typo_query_runs_no_places_scan_at_all(geocode_cache, monkeypatch):
+    # The #216 failure mode this closes: "Sna Francisco" must not reach a
+    # substring scan of the places theme for "Sna" (or for anything else).
+    calls = _count_places_fallback(monkeypatch)
+
+    results = geocode.geocode("Sna Francisco", limit=5)
+
+    assert calls == [], "a corrected typo must not fall through to the places theme"
+    assert results[0]["name"] == "San Francisco"
+
+
+def test_fuzzy_pass_never_scans_upstream(geocode_cache, monkeypatch):
+    # The tier is local-table-only by construction; assert it, since a
+    # similarity predicate against S3 has nothing to prune by and would
+    # read the whole divisions theme over the network.
+    def fail(*args, **kwargs):
+        raise AssertionError("the fuzzy tier must never scan upstream")
+
+    monkeypatch.setattr(geocode, "_query_divisions_from_upstream", fail)
+    monkeypatch.setattr(geocode, "_query_places_fallback", fail)
+
+    assert geocode.geocode("Berekley", limit=5)[0]["name"] == "Berkeley"
+
+
+def test_no_fuzzy_tier_without_a_local_table(monkeypatch):
+    # Cache off (the default fixture setup): no local table, so the fuzzy
+    # tier is simply unavailable rather than degrading to an upstream
+    # similarity scan.
+    calls = []
+    monkeypatch.setattr(
+        geocode, "_query_divisions_fuzzy",
+        lambda *a, **k: calls.append(a) or [],
+    )
+    assert geocode.geocode("Berekley", limit=5) == []
+    assert calls == []
+
+
+def test_literal_matches_are_untouched_by_the_fuzzy_tier(geocode_cache, monkeypatch):
+    # Regression guard: with the local table live, every query that already
+    # matched something literally must return exactly what it did before
+    # #215, and must not run the fuzzy pass at all.
+    def fail(*args, **kwargs):
+        raise AssertionError("fuzzy pass ran despite a literal match")
+
+    monkeypatch.setattr(geocode, "_query_divisions_fuzzy", fail)
+
+    assert [r["name"] for r in geocode.geocode("Springfield", limit=10)] == [
+        "Springfield", "Springfield",
+    ]
+    assert geocode.geocode("Brooklyn", limit=5)[0]["name"] == "Brooklyn"
+    # A substring-only match ("Brook" -> "Brooklyn"/"Downtown Brooklyn") is
+    # still a literal answer to what was typed: weak, but not a typo, so the
+    # trigger stays on emptiness alone.
+    assert "Brooklyn" in [r["name"] for r in geocode.geocode("Brook", limit=5)]
+    assert "note" not in geocode.geocode_detailed("Brooklyn", limit=5)
+
+
+def test_fuzzy_hits_rank_below_every_literal_tier(geocode_cache):
+    # A query that matches one division literally (substring, the weakest
+    # tier) and would fuzzy-match another: the literal row must come first
+    # and score higher, whatever the fuzzy row's population.
+    fuzzy_row = {
+        "id": "z", "name": "Berkeley", "subtype": "locality", "population": 10_000_000,
+        "admin_context": [], "_fuzzy": True, "_similarity": 0.99, "_tier": 1,
+    }
+    literal_row = {
+        "id": "a", "name": "Downtown Brooklyn", "subtype": "neighborhood",
+        "population": None, "admin_context": [],
+    }
+    assert geocode._rank_key(literal_row, "Brooklyn", {}) < geocode._rank_key(
+        fuzzy_row, "Brooklyn", {}
+    )
+    assert geocode._rank_score(fuzzy_row, "Brooklyn") < geocode._rank_score(
+        literal_row, "Brooklyn"
+    )
+    assert geocode._rank_score(fuzzy_row, "Brooklyn") < 0.4
+
+
+def test_fuzzy_threshold_rejects_merely_similar_names(geocode_cache):
+    # "Sna Brooklyn" vs "Brooklyn" is 0.89 jaro-winkler -- close, but not a
+    # typo of it, and below the threshold. Nothing comes back rather than a
+    # confident wrong answer.
+    assert geocode._FUZZY_SIMILARITY_THRESHOLD == 0.92
+    assert geocode.geocode("Nonexistentplacexyz123", limit=5) == []
+    rows = geocode._query_divisions_fuzzy(geocode._local_divisions_table(), "Sna Brooklyn")
+    assert rows == []
+
+
+def test_wildcard_queries_are_not_fuzzy_matched_either(geocode_cache):
+    # #165 made ILIKE metacharacters literal, so "Brook_yn" matches
+    # nothing; jaro-winkler would happily read the "_" as a typo and answer
+    # "Brooklyn" anyway, undoing that. Pinned here as well as in the #165
+    # test above, since this is the reason the exclusion exists.
+    assert geocode._has_like_metacharacter("Brook_yn")
+    assert not geocode._has_like_metacharacter("Berekley")
+    assert geocode.geocode("Brook_yn", limit=5) == []
+    assert geocode.geocode("Brook%", limit=5) == []
+
+
+def test_fuzzy_matching_folds_case_and_diacritics(geocode_cache):
+    # Same folding #53 uses: the fixture's canonical "São Paulo" has to be
+    # reachable from a plain-ASCII typo of it.
+    results = geocode.geocode("Sao Paluo", limit=5)
+    assert results[0]["name"] == "São Paulo"
 
 
 # --- reverse_geocode ---
