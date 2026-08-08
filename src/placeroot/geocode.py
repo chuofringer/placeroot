@@ -2918,14 +2918,32 @@ ADDRESS_MAX_LIMIT = 10
 # only stops a pathological query from turning into an unbounded OR list.
 _STREET_VARIANT_CAP = 16
 
-# A house-number token: digits only. Overture's `number` is a string and real
-# data carries "74B" and "12 bis", but this is the *query* side — a bare
-# integer at either end of the street half is the shape that is unambiguously
-# a house number ("1600 Amphitheatre Pkwy", "Hauptstraße 5"). Unit numbers
-# ("Apt 3", "#204") are deliberately out of scope: they sit in a separate
-# `unit` column, and guessing which trailing integer is which would silently
-# search for the wrong doorway.
-_HOUSE_NUMBER_RE = re.compile(r"^\d+$")
+# A house-number token: digits, optionally with one trailing letter. Overture's
+# `number` is a string and real data carries "74B" and "12 bis"; "221B Baker
+# Street" is the query shape that needs the letter (#229/R28), while "12 bis"
+# stays out of scope because it is two tokens and the second is a word. Unit
+# numbers ("Apt 3", "#204") are deliberately out of scope too: they sit in a
+# separate `unit` column, and guessing which trailing integer is which would
+# silently search for the wrong doorway.
+_HOUSE_NUMBER_RE = re.compile(r"^\d+[A-Za-z]?$")
+
+# Street-type words that come *first* in the languages that number their
+# streets rather than name them (#229/R28). "Calle 8" is the name of a
+# street in Miami, not house number 8 on a street called "Calle" — and the
+# same holds for Avenida 9, Carrera 7, Via 20. Deliberately no English
+# entries: an English street type leads only in rare cases ("Avenue 26" in
+# Los Angeles) and adding "avenue" here would cost more than it buys.
+_LEADING_STREET_TYPES = frozenset({
+    "calle", "avenida", "avda", "av", "carrera", "cra", "calzada", "camino",
+    "paseo", "diagonal", "transversal", "autopista", "rua", "rue", "via",
+    "viale", "corso", "strada", "vicolo", "travessa",
+})
+
+# Lowercase particles that make a leading integer part of the street's name
+# rather than a house number: "8 de Octubre", "4 de Julio", "1º de Mayo".
+_STREET_NAME_PARTICLES = frozenset({
+    "de", "del", "di", "du", "des", "da", "do", "la", "le", "el", "of",
+})
 
 # Columns the address scan reads before grouping. postal_city is read but
 # never returned: it is what "prefer the anchor's own municipality" sorts on
@@ -2982,13 +3000,30 @@ def _split_house_number(text: str) -> tuple[str | None, str]:
     Leading or trailing only, and never when it is the *whole* string — a
     query of nothing but digits is a postcode-shaped thing for geocode() to
     read, not a house number with an empty street.
+
+    Two locale rules keep a number that belongs to the *street name* out of
+    the number slot (#229/R28), because stripping it searches for a street
+    that does not exist and returns an honest-looking empty:
+
+    - a trailing number is not a house number when the first token is one of
+      the street-type words that lead in the numbered-street languages:
+      "Calle 8" (Miami), "Avenida 9", "Carrera 7". This is exactly the
+      opposite convention from German, where the street type is a *suffix*
+      glued to the name ("Hauptstraße 5"), which is why that case still
+      splits;
+    - a leading number is not a house number when the next token is a
+      lowercase particle: "8 de Octubre" is a street, "8 Octubre" would be a
+      doorway.
+
+    A wrong split here is worse than no split: the number lands in an equality
+    filter on `number`, so the scan silently searches a street nobody named.
     """
     tokens = text.split()
     if len(tokens) < 2:
         return None, text.strip()
-    if _HOUSE_NUMBER_RE.match(tokens[0]):
+    if _HOUSE_NUMBER_RE.match(tokens[0]) and tokens[1].lower() not in _STREET_NAME_PARTICLES:
         return tokens[0], " ".join(tokens[1:])
-    if _HOUSE_NUMBER_RE.match(tokens[-1]):
+    if _HOUSE_NUMBER_RE.match(tokens[-1]) and tokens[0].lower() not in _LEADING_STREET_TYPES:
         return tokens[-1], " ".join(tokens[:-1])
     return None, text.strip()
 
