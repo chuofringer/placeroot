@@ -6,8 +6,10 @@ _rank_key itself — the one search change that can move answers that are
 already right — so every ranking behaviour the earlier issues established
 needs to be pinned in a single place that fails loudly when it moves.
 
-Every entry here is an answer the pre-#221 ranking already got right, and
-every one is fixture-backed, so the corpus doubles as documentation of what
+Every entry in RANKING_CORPUS is an answer the pre-#221 ranking already got
+right and still gets right; FIXED_BY_221 holds the two it did not, kept
+separate so the "nothing moved" half of the corpus stays readable as such.
+Every entry is fixture-backed, so the corpus doubles as documentation of what
 the divisions fixture is *for*: each row here is the reason some pair of
 same-named rows exists in scripts/build_geocode_fixture.py.
 
@@ -25,7 +27,8 @@ What each group pins:
 - the #214 alternate-name search and its prominence-over-namesake rule —
   Munich/Tokyo/Moskva/Vienna/Pressburg, each against the population-less
   literal namesake the live probe actually returned;
-- the #215 fuzzy tier — the three live-verified typo probes.
+- the #215 fuzzy tier — the three live-verified typo probes;
+- #221 itself (FIXED_BY_221) — "Zurich" and "東京".
 
 Note Springfield resolves to the *Massachusetts* one here, not Missouri: the
 fixture carries only the IL/MA pair (#47), with their real populations. The
@@ -71,6 +74,20 @@ RANKING_CORPUS = [
     ("New York", "New York", ["United States"]),
     ("Brooklyn", "Brooklyn", ["United States", "New York"]),
 ]
+
+# The two answers #221 changes, kept out of the list above so that one reads
+# as exactly what it is: the set that was already right, before and after.
+# Appended below — the assertion is identical, the separation is documentation.
+FIXED_BY_221 = [
+    # A population-backed prefix match now outranks the exact-tier,
+    # population-less namesake: 東京都's 13.9M over a Nagano neighborhood.
+    ("東京", "東京都", ["Japan"]),
+    # And the diacritic-folded pass runs even though "Zurich" literally
+    # matched a populated (pop 190) Dutch village, which used to gate it off.
+    ("Zurich", "Zürich", ["Switzerland"]),
+]
+
+RANKING_CORPUS += FIXED_BY_221
 
 
 @pytest.mark.parametrize("query,name,admin_context", RANKING_CORPUS)

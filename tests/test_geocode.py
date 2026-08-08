@@ -5,17 +5,8 @@ from placeroot import geocode, overture, release, server
 
 from .conftest import ADDRESSES_FIXTURE_PATH, CENTER_LAT, CENTER_LON, DIVISIONS_FIXTURE_PATH
 
-
-@pytest.fixture
-def geocode_cache(tmp_path, monkeypatch):
-    """Enables the #43 local divisions table (default fixtures otherwise run
-    with PLACEROOT_CACHE=off, see conftest.offline_data) at an isolated,
-    per-test cache dir.
-    """
-    d = tmp_path / "placeroot-cache"
-    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(d))
-    monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
-    return d
+# The geocode_cache fixture (local #43 divisions table) lives in conftest.py
+# — test_geocode_ranking.py's #221 corpus needs the same one.
 
 
 def test_exact_name_match_ranks_above_prefix_and_substring():
@@ -556,6 +547,106 @@ def test_alt_names_do_not_feed_the_fuzzy_tier(geocode_cache):
     assert [r["name"] for r in geocode.geocode("Pressbrug", limit=5)] == []
 
 
+# --- #221: prominence can rescue a prefix match; the fold always runs -----
+# The broad "did any of this move an answer that was already right" question
+# is tests/test_geocode_ranking.py's; these pin the rule itself.
+
+
+def _row(id_, name, tier, population=None, **kw):
+    row = {
+        "id": id_, "name": name, "subtype": "locality", "region": None,
+        "population": population, "admin_context": [], "_tier": tier,
+    }
+    row.update(kw)
+    return row
+
+
+def _ranked(*rows):
+    return [r["id"] for r in sorted(rows, key=lambda r: geocode._rank_key(r, "Example", {}))]
+
+
+def test_populated_prefix_match_outranks_a_populationless_exact_one():
+    # The 東京 shape: exact-tier namesake with no population vs. a prefix
+    # match with millions behind it.
+    assert _ranked(
+        _row("a-exact-empty", "Example", 3),
+        _row("z-prefix-populous", "Exampleton", 2, population=13_929_286),
+    ) == ["z-prefix-populous", "a-exact-empty"]
+
+
+def test_a_populated_exact_match_still_beats_a_more_populated_prefix_one():
+    # The rescue is only *past a population-less row*. Two rows that both
+    # carry a population still order by tier first, however lopsided the
+    # populations are — "Portland" is not a worse answer than a bigger
+    # "Portland Heights".
+    assert _ranked(
+        _row("z-exact-small", "Example", 3, population=1_000),
+        _row("a-prefix-huge", "Exampleton", 2, population=10_000_000),
+    ) == ["z-exact-small", "a-prefix-huge"]
+
+
+def test_two_populationless_rows_still_order_by_tier():
+    assert _ranked(
+        _row("z-exact", "Example", 3),
+        _row("a-prefix", "Exampleton", 2),
+    ) == ["z-exact", "a-prefix"]
+
+
+def test_a_substring_match_cannot_leapfrog_a_strong_tier_however_populous():
+    # Prominence only reorders *within* the exact/prefix group: "York" is a
+    # substring of "New York", and a substring hit staying below every
+    # exact/prefix one is what keeps that from swallowing the query.
+    assert _ranked(
+        _row("z-exact-empty", "Example", 3),
+        _row("z-prefix-empty", "Exampleton", 2),
+        _row("a-substring-huge", "Not An Example At All", 1, population=10_000_000),
+    ) == ["z-exact-empty", "z-prefix-empty", "a-substring-huge"]
+
+
+def test_a_fuzzy_row_still_ranks_below_every_literal_tier():
+    # #215's ordering is ahead of all of this and must stay there — a
+    # correction of a *different* string can't be rescued by prominence.
+    assert _ranked(
+        _row("z-substring-empty", "Not An Example At All", 1),
+        _row("a-fuzzy-huge", "Exemple", 3, population=10_000_000, _fuzzy=True),
+    ) == ["z-substring-empty", "a-fuzzy-huge"]
+
+
+def test_prominent_prefix_division_wins_end_to_end(geocode_cache):
+    # Live (2026-07-22.0) this returned the Nagano neighborhood: 東京 is
+    # exactly its name and only a prefix of 東京都's.
+    results = geocode.geocode("東京", limit=5)
+    assert results[0]["name"] == "東京都"
+    assert results[0]["type"] == "locality"
+    # The namesake is not dropped, only ranked under it.
+    assert "東京" in [r["name"] for r in results]
+
+
+def test_diacritic_fold_runs_even_when_the_literal_match_has_a_population(
+    geocode_cache,
+):
+    # The gate #221 removed: "Zurich" literally matches a Dutch village that
+    # carries a population (190), which used to read as "the literal search
+    # already found something real" — so the folded pass never ran and
+    # Zürich (443k) was absent from the results entirely, not merely below.
+    results = geocode.geocode("Zurich", limit=5)
+    assert results[0]["name"] == "Zürich"
+    assert results[0]["admin_context"] == ["Switzerland"]
+    assert "Zurich" in [r["name"] for r in results]
+
+
+def test_the_fold_pass_also_runs_without_a_local_table():
+    # Nothing about the fold needs the #43 table — the upstream path folds
+    # names.primary the same way, so PLACEROOT_CACHE=off gets the fix too.
+    results = geocode.geocode("Zurich", limit=5)
+    assert results[0]["name"] == "Zürich"
+
+
+def test_an_accented_query_still_finds_itself(geocode_cache):
+    results = geocode.geocode("Zürich", limit=5)
+    assert results[0]["name"] == "Zürich"
+
+
 # --- reverse_geocode ---
 
 
@@ -829,10 +920,12 @@ def test_diacritic_query_is_reversible():
     assert results[0]["name"] == "São Paulo"
 
 
-def test_literal_exact_match_skips_variant_retry_entirely():
-    # "Saint Louis" is itself an exact literal match — the second pass
-    # should never even run (nothing to prove here beyond: it still finds
-    # the row via the plain literal path, same as any other exact query).
+def test_literal_exact_match_skips_the_abbreviation_retries():
+    # "Saint Louis" is itself an exact literal match, so the abbreviation
+    # half of the second pass never runs (#221 kept that gate; only the
+    # diacritic fold became unconditional). Nothing to prove here beyond:
+    # it still finds the row via the plain literal path, same as any other
+    # exact query.
     results = geocode.geocode("Saint Louis", limit=5)
     assert results[0]["name"] == "Saint Louis"
 

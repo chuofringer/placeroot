@@ -212,6 +212,31 @@ skipped — primary-only behavior, no error.
 
 The #215 fuzzy tier deliberately stays on primary names only; see
 _query_divisions_fuzzy.
+
+--- #221: prominence over tier, and the fold stops being gated ---
+
+Two coupled leftovers from the above, both measured live on 2026-07-22.0.
+
+Tier used to dominate _rank_key outright, so an exact-tier match beat every
+prefix-tier one regardless of what stood behind them: "東京" answered a
+population-less neighborhood in 長野県, because 東京 is exactly its name and
+only a prefix of 東京都's (13.6M). _rank_key now lets a known population
+outrank the tier *within* the exact/prefix group and only against a row
+carrying no population at all — the same prominence-over-namesake judgement
+#214 already made between literal and alternate-name hits, applied to the
+tier ladder. Two populated rows still order by tier first, and a substring
+hit still cannot leapfrog either. See _rank_key.
+
+And the #53 second pass was gated on "no exact/prefix literal match carries
+a population", which the diacritic half of it cannot live with: "Zurich"
+literally matches a Dutch village of 190 people, so the gate declared the
+literal search good enough and the folded pass never ran — Zürich (443k)
+was absent from the candidate pool entirely, since ILIKE '%Zurich%' never
+matches "Zürich". The folded pass now always runs; the abbreviation half
+stays gated. Live after: "Zurich" -> Zürich, CH; "東京" -> 東京都.
+
+tests/test_geocode_ranking.py pins the answers all of the above already got
+right, as a corpus, precisely because a _rank_key change can move them.
 """
 
 import logging
@@ -377,12 +402,49 @@ def _effective_tier(row: dict, query: str) -> int:
     return stored if stored is not None else _match_tier(row["name"], query)
 
 
+# #221: match tiers split into two groups for ranking. Exact (3) and prefix
+# (2) are both "the caller's string names this place"; substring (1) is only
+# "the caller's string occurs somewhere in this name", which is a far weaker
+# claim — "York" is a substring of "New York" and of eleven other things.
+# _rank_key orders by this group *before* prominence, and by the tier itself
+# only after; see its docstring.
+_STRONG_TIER = 2
+
+
 def _rank_key(row: dict, query: str, region_population: dict[str, int]):
-    """Sort key: (#215) literal-over-fuzzy, then match tier, then (#47)
-    population if known, else a documented proxy chain of subtype rank /
-    hierarchy depth / the row's own region's population, then (#53)
+    """Sort key: (#215) literal-over-fuzzy, then (#221) strong-vs-substring
+    tier group, then whether a population is known at all, then the match
+    tier, then (#47) population, else a documented proxy chain of subtype
+    rank / hierarchy depth / the row's own region's population, then (#53)
     literal-over-variant, then id for full determinism. All ascending
     (smaller sorts first).
+
+    Tier vs prominence (#221). Tier used to dominate outright, so any
+    exact-tier row beat every prefix-tier row no matter what stood behind
+    them: live, "東京" put a population-less Nagano neighborhood above 東京都
+    and its 13.9M people, because 東京 is exactly the neighborhood's name and
+    only a prefix of the prefecture's. The rule now is that a *known
+    population* outranks the tier, but only within the strong (exact/prefix)
+    group and only against a row with no population at all — the exact-tier
+    namesakes this rescues past are Overture rows with population NULL, and
+    that emptiness is itself the signal (#47) that the match is a spelling
+    coincidence rather than the place anyone means. Everything else is
+    unchanged and deliberately so: two populated rows still order by tier
+    first, so an exact match with 10k people still beats a prefix match with
+    10M ("Portland" is not a worse answer than "Portland Heights" because
+    the latter is bigger); two population-less rows still order by tier;
+    and a substring match still cannot leapfrog either, however populous,
+    because the group term sits ahead of the population one. This is the
+    same judgement #214 already made one level down — an alternate-name hit
+    (`_variant`) wins on its own prominence against a population-less
+    literal namesake, which is why "Munich" resolves to München — applied to
+    the tier ladder instead of the literal/variant one.
+
+    rank_score deliberately does *not* follow this (see _rank_score): it
+    answers "how well does this name match what you typed", where an exact
+    match really is a better match, so the top-ranked result can carry a
+    lower rank_score than the one below it. #53 already produced that shape
+    for variant hits; #221 only widens it.
 
     The #215 fuzzy term leads, ahead of even the tier: a fuzzy row matched
     a *different* string than the caller typed, so it belongs below every
@@ -409,8 +471,9 @@ def _rank_key(row: dict, query: str, region_population: dict[str, int]):
     return (
         1 if row.get("_fuzzy") else 0,
         -(row.get("_similarity") or 0.0),
-        -tier,
+        0 if tier >= _STRONG_TIER else 1,
         0 if population is not None else 1,
+        -tier,
         -(population or 0),
         -weight,
         depth,
@@ -1326,9 +1389,9 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
         and c.get("population") is not None
         for c in divisions
     )
-    if best_literal_tier < 2 or not literal_match_has_prominence:
-        seen_ids = {c["id"] for c in divisions}
-        variant_rows: list[dict] = []
+    seen_ids = {c["id"] for c in divisions}
+    variant_rows: list[dict] = []
+    if best_literal_tier < _STRONG_TIER or not literal_match_has_prominence:
         for variant_query in _abbreviation_variant_queries(search_query):
             for row in _query_divisions(variant_query, region_code, local_table):
                 if row["id"] not in seen_ids:
@@ -1339,14 +1402,34 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
                     row["_tier"] = _match_tier(row["name"], variant_query)
                     variant_rows.append(row)
                     seen_ids.add(row["id"])
-        stripped_query = _strip_diacritics(search_query)
-        for row in _query_divisions(stripped_query, region_code, local_table, fold_diacritics=True):
-            if row["id"] not in seen_ids:
-                row["_variant"] = True
-                row["_tier"] = _match_tier(row["name"], stripped_query)
-                variant_rows.append(row)
-                seen_ids.add(row["id"])
-        divisions = divisions + variant_rows
+
+    # #221: the diacritic-folded pass runs unconditionally, outside the
+    # "literal match lacks prominence" gate above. Under the gate it never
+    # ran for "Zurich": the literal ILIKE finds a Dutch village spelled
+    # exactly that, and it carries a population (190), so the gate read the
+    # literal search as having already found something real — while Zürich,
+    # 443k, was not merely ranked below but absent from the candidate pool
+    # entirely, since ILIKE '%Zurich%' does not match "Zürich". A prominence
+    # gate cannot work here: whether the folded spelling is worth looking
+    # for has nothing to do with how prominent the *unfolded* one turned out
+    # to be. So the pass always runs and _rank_key decides, which is what it
+    # is for. Cheap enough to do every time — one more predicate over the
+    # same local divisions table the literal pass just read (0.2s measured,
+    # #214).
+    #
+    # The abbreviation retries above stay gated: they fire one extra query
+    # per expandable token ("St." -> "Saint", "N." -> "North"), and unlike
+    # folding they rewrite the query into a genuinely different string, so
+    # running them against an already-good literal answer buys noise rather
+    # than reach.
+    stripped_query = _strip_diacritics(search_query)
+    for row in _query_divisions(stripped_query, region_code, local_table, fold_diacritics=True):
+        if row["id"] not in seen_ids:
+            row["_variant"] = True
+            row["_tier"] = _match_tier(row["name"], stripped_query)
+            variant_rows.append(row)
+            seen_ids.add(row["id"])
+    divisions = divisions + variant_rows
 
     # #215: the literal search (and its #53 variant retries) found nothing
     # at all — the shape a typo makes. Retry by edit distance against the
