@@ -301,6 +301,11 @@ GEOCODE_ANCHOR_AREAS = (
     # legitimately exists for: Springfield resolves to the MA one (155,929),
     # which has no boundary, and the IL runner-up supplies one.
     ("gers-div-springfield-il", "Springfield", "US", (-89.75, 39.72, -89.58, 39.84)),
+    # R28/#229: the quadrant repro (Washington's NW/SE streets) and the
+    # house-number-parse one ("Calle 8, Miami"), each needing a real extent
+    # for the scan step to be reached at all.
+    ("gers-div-washington-dc", "Washington", "US", (-77.12, 38.79, -76.90, 39.00)),
+    ("gers-div-miami", "Miami", "US", (-80.32, 25.70, -80.14, 25.86)),
 )
 
 
