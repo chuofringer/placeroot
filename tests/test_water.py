@@ -315,9 +315,10 @@ def test_a_named_containing_body_is_not_flagged_generalized(tmp_path):
 
 
 def test_a_large_polygon_that_does_not_contain_the_point_is_still_excluded(tmp_path):
-    """The generalized test is geometric, not containment-based: a
-    tile-scale polygon whose edge happens to run past the query point is a
-    grid cut as often as a real shore, so it never yields a distance."""
+    """The generalized test is not containment-based: a tile-scale *marine*
+    polygon (here class='sea' under subtype='physical') whose edge happens
+    to run past the query point is an arbitrary open-water closure as often
+    as a real shore, so it never yields a distance."""
     big_wkt = (
         f"POLYGON(({CENTER_LON - 0.5} {_north(100)}, {CENTER_LON - 0.5} {CENTER_LAT + 0.5}, "
         f"{CENTER_LON + 0.5} {CENTER_LAT + 0.5}, {CENTER_LON + 0.5} {_north(100)}, "
@@ -353,6 +354,166 @@ def test_a_small_physical_feature_is_not_treated_as_generalized(tmp_path):
         rows, _, _, _ = water.water_near(CENTER_LAT, CENTER_LON)
         assert [r["name"] for r in rows] == ["Test Falls"]
         assert rows[0]["distance_m"] == pytest.approx(60.0, abs=5.0)
+    finally:
+        water.set_data_path(None)
+
+
+# --- big lakes and rivers are not tile-cut ----------------------------------
+#
+# The gridded-ocean exclusion above must not spill onto the largest real
+# bodies of water. Live against release 2026-07-22.0, Lake Michigan is a
+# *single* subtype='lake' polygon spanning 3.29 x 4.49 degrees, Lago di
+# Como 0.322 x 0.357, Lake Geneva 0.783, the Mississippi 0.553 — none of
+# them cut by the 1-degree grid, all of them with real shorelines. A span
+# test applied to polygons in general deleted every one of them from the
+# distance list: a query 371 m from Lake Como came back with a 376 m
+# creek and no lake, and a query 992 m off Lake Michigan filtered to
+# water_class='lake' came back empty with an "arid, remote or unmapped"
+# note.
+
+# 0.4 x 0.4 degrees — well over the generalized span threshold, and a lake.
+_BIG_LAKE_SOUTH = _north(371)
+_BIG_LAKE_WKT = (
+    f"POLYGON(({CENTER_LON - 0.2} {_BIG_LAKE_SOUTH}, "
+    f"{CENTER_LON - 0.2} {_BIG_LAKE_SOUTH + 0.4}, "
+    f"{CENTER_LON + 0.2} {_BIG_LAKE_SOUTH + 0.4}, "
+    f"{CENTER_LON + 0.2} {_BIG_LAKE_SOUTH}, "
+    f"{CENTER_LON - 0.2} {_BIG_LAKE_SOUTH}))"
+)
+_BIG_LAKE_FEATURES = [
+    ("lake-big", _BIG_LAKE_WKT, "lake", "lake", "Lake Michigan", False, False),
+    (
+        "creek-1",
+        f"LINESTRING({CENTER_LON - 0.001} {_north(376)}, "
+        f"{CENTER_LON + 0.001} {_north(376)})",
+        "stream",
+        "stream",
+        "Torrente Cosia",
+        False,
+        False,
+    ),
+]
+
+
+@pytest.fixture
+def big_lake_fixture(tmp_path):
+    path = tmp_path / "water_big_lake.parquet"
+    _build_water_fixture(path, features=_BIG_LAKE_FEATURES)
+    water.set_data_path(str(path))
+    try:
+        yield path
+    finally:
+        water.set_data_path(None)
+
+
+def test_a_large_lake_outside_the_point_keeps_a_real_edge_distance(big_lake_fixture):
+    """371 m from a tile-scale lake must answer "the lake, 371 m", not "a
+    creek 376 m away and no lake at all" — the live Lago di Como repro."""
+    rows, _, in_range_count, containing = water.water_near(CENTER_LAT, CENTER_LON)
+    assert containing is None
+    assert [r["name"] for r in rows] == ["Lake Michigan", "Torrente Cosia"]
+    assert rows[0]["distance_m"] == pytest.approx(371.0, abs=5.0)
+    assert in_range_count == 2
+
+
+def test_a_class_filter_still_finds_a_large_lake(big_lake_fixture):
+    """water_class='lake' 371 m from a lake returned [] plus an "arid,
+    remote or unmapped" note — the live Lake Michigan repro."""
+    result = server.water_near(CENTER_LAT, CENTER_LON, water_class="lake")
+    assert [r["name"] for r in result["results"]] == ["Lake Michigan"]
+    assert "arid" not in result.get("note", "")
+
+
+def test_inside_a_large_lake_is_on_water_without_the_tile_cut_claim(big_lake_fixture):
+    """Standing in Lake Michigan is on_water — but the note must not
+    recite ocean facts (1-degree tiles, dry coastal land) about a lake."""
+    inside_lat = _BIG_LAKE_SOUTH + 0.2
+    rows, _, _, containing = water.water_near(inside_lat, CENTER_LON)
+    assert containing == {"water_body": "Lake Michigan", "generalized": False}
+    assert all(r["name"] != "Lake Michigan" for r in rows)
+    result = server.water_near(inside_lat, CENTER_LON)
+    assert result["on_water"] is True
+    assert result["water_body"] == "Lake Michigan"
+    assert "inside Lake Michigan" in result["note"]
+    assert "1-degree" not in result["note"]
+    assert "generalized" not in result["note"]
+
+
+# --- a subtype='ocean' filter is structurally unsatisfiable ------------------
+
+
+def test_ocean_subtype_filter_says_why_it_is_empty(ocean_fixture):
+    """subtype='ocean' can never match a distance row, because ocean rows
+    are reported through on_water. Left to the query it returns [] and the
+    empty-result note calls a pier "arid, remote or unmapped"."""
+    result = server.water_near(CENTER_LAT, CENTER_LON, subtype="ocean")
+    assert result["results"] == []
+    assert result["on_water"] is True
+    assert "arid" not in result["note"]
+    assert "on_water" in result["note"]
+
+
+def test_ocean_only_filter_recognises_substrings_but_not_ambiguous_ones():
+    assert water._ocean_only_filter("ocean", None) is True
+    assert water._ocean_only_filter("OCEAN", None) is True
+    assert water._ocean_only_filter("cea", None) is True
+    # 'o' also matches pond/reservoir, so the query still has to run.
+    assert water._ocean_only_filter("o", None) is False
+    assert water._ocean_only_filter("river", None) is False
+    assert water._ocean_only_filter(None, None) is False
+
+
+# --- degree-space nearest is not ground nearest -----------------------------
+
+
+def test_high_latitude_nearest_point_is_measured_on_the_ground(tmp_path):
+    """ST_ClosestPoint minimises *degree* distance, and a degree of
+    longitude is cos(lat) shorter than one of latitude. For this segment at
+    70 deg N the degree-space point is 4112.8 m away while the true nearest
+    point is 2518.5 m — 63% high, enough to push the feature outside a
+    3 km radius and delete it from the answer entirely."""
+    lat0, lon0 = 70.0, 10.0
+    wkt = f"LINESTRING({lon0 + 0.07} {lat0}, {lon0} {lat0 + 0.07})"
+    path = tmp_path / "water_high_lat.parquet"
+    _build_water_fixture(
+        path, features=[("fjord-1", wkt, "river", "river", "Nordkanal", False, False)]
+    )
+    water.set_data_path(str(path))
+    try:
+        rows, _, in_range_count, _ = water.water_near(lat0, lon0, radius_m=3000)
+        assert [r["name"] for r in rows] == ["Nordkanal"]
+        assert in_range_count == 1
+        assert rows[0]["distance_m"] == pytest.approx(2518.5, rel=0.01)
+    finally:
+        water.set_data_path(None)
+
+
+# --- NULL subtype is not a reason to drop a row -----------------------------
+
+
+def test_a_null_subtype_row_still_appears(tmp_path):
+    """`NOT (subtype = 'ocean' ...)` is NULL, not TRUE, for a NULL subtype,
+    and a NULL WHERE clause drops the row. Overture's subtype is nullable,
+    so an unlabelled pond next door would silently vanish."""
+    features = [
+        (
+            "nameless-1",
+            f"POINT({CENTER_LON} {_north(90)})",
+            None,
+            None,
+            "Unlabelled Water",
+            False,
+            False,
+        ),
+    ]
+    path = tmp_path / "water_null_subtype.parquet"
+    _build_water_fixture(path, features=features)
+    water.set_data_path(str(path))
+    try:
+        rows, _, in_range_count, _ = water.water_near(CENTER_LAT, CENTER_LON)
+        assert [r["name"] for r in rows] == ["Unlabelled Water"]
+        assert rows[0]["subtype"] is None
+        assert in_range_count == 1
     finally:
         water.set_data_path(None)
 

@@ -775,21 +775,38 @@ def infrastructure_at(
 
 
 def _water_notes(
-    payload: dict, in_range_count: int, containing: dict | None, radius_m: float
+    payload: dict,
+    in_range_count: int,
+    containing: dict | None,
+    radius_m: float,
+    ocean_only_filter: bool = False,
 ) -> dict:
     """Attach water_near's on_water/truncation/empty notes to the payload.
 
-    Three things a caller can get wrong here, so all three are said out
-    loud. (1) The point is inside a generalized ocean/sea polygon: those
+    Four things a caller can get wrong here, so all four are said out
+    loud. (1) The point is inside a generalized *marine* polygon: oceans
     are cut into 1-degree tiles and their landward edge swallows coastal
     land, so "inside" means at-or-near the water, and no shoreline
     distance is derivable from them at all (their boundaries carry phantom
-    grid cuts). (2) The rows shown are a slice — a canal district puts
-    hundreds of rows in a 500 m circle. (3) Nothing came back, which is a
-    real finding about an arid or unmapped place rather than a failure.
+    grid cuts). Inside a lake or a reservoir none of that applies — those
+    polygons are real, so the note says plainly which body you are in and
+    claims nothing about tiles. (2) The filter asked only for oceans,
+    which are reported through on_water and never as a distance row, so
+    the empty list means "wrong question", not "no water". (3) The rows
+    shown are a slice — a canal district puts hundreds of rows in a 500 m
+    circle. (4) Nothing came back, which is a real finding about an arid
+    or unmapped place rather than a failure.
     """
     shown = len(payload.get("results", []))
     notes = []
+    if ocean_only_filter:
+        notes.append(
+            "a subtype filter matching only 'ocean' cannot return distance rows: "
+            "Overture ships the ocean as generalized 1-degree tiles whose landward "
+            "edge covers dry land, so oceans are reported through \"on_water\" and "
+            "\"water_body\" instead. Drop the filter to see the nearest real water "
+            "features, or use water_class='bay' for a named coastal body."
+        )
     if containing is not None:
         payload["on_water"] = True
         if containing["water_body"]:
@@ -798,7 +815,7 @@ def _water_notes(
         if containing["generalized"]:
             notes.append(
                 f"this point falls inside Overture's generalized {body} polygon. "
-                "Those bodies are cut into 1-degree tiles and their landward edge "
+                "Oceans and seas are cut into 1-degree tiles and their landward edge "
                 "is coarse enough to cover dry coastal land, so read this as "
                 "'on or close to the water', not as a precise shoreline test — "
                 "and no distance to the coast is reported, because the tile "
@@ -813,7 +830,7 @@ def _water_notes(
             "narrow with a smaller radius or a filter, e.g. subtype='canal', "
             "subtype='river', water_class='lake'."
         )
-    elif shown == 0 and containing is None:
+    elif shown == 0 and containing is None and not ocean_only_filter:
         notes.append(
             f"no water features within {radius_m:g} m. base/water coverage is "
             "OSM-derived, so an arid, remote or unmapped area legitimately has "
@@ -853,13 +870,15 @@ def water_near(
     water_class="lake".
 
     "on_water": true plus "water_body" means the point is *inside* a water
-    polygon. For oceans, seas and big bays that is a coarse signal:
-    Overture cuts them into 1-degree tiles whose landward edge covers dry
-    coastal land, so a waterfront building reads as inside the ocean. Such
-    bodies are reported this way rather than as a bogus 0 m "nearest
-    water" row, and no distance-to-coast is derived from them (their tile
-    boundaries include phantom cuts through open water). The "note" says
-    which case applies.
+    polygon — a lake, a reservoir, a river. For oceans and seas that is a
+    coarse signal: Overture cuts them into 1-degree tiles whose landward
+    edge covers dry coastal land, so a waterfront building reads as inside
+    the ocean. Those bodies are reported this way rather than as a bogus
+    0 m "nearest water" row, and no distance-to-coast is derived from them
+    (their tile boundaries include phantom cuts through open water), which
+    also means subtype="ocean" cannot return distance rows. Lakes and
+    rivers carry none of that: however large, they appear in results with
+    a real edge distance. The "note" says which case applies.
 
     An empty results list is a valid answer: coverage is OSM-derived, and
     "no water within 500 m" is a real finding about an arid or unmapped
@@ -885,7 +904,10 @@ def water_near(
         "results": rows,
     }
     result = budget.apply_budget(result, "results")
-    result = _water_notes(result, in_range_count, containing, effective_radius_m)
+    result = _water_notes(
+        result, in_range_count, containing, effective_radius_m,
+        ocean_only_filter=water._ocean_only_filter(subtype, water_class),
+    )
     degraded = water.degraded_fields()
     if degraded:
         result["degraded_fields"] = degraded

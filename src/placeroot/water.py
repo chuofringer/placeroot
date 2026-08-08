@@ -14,9 +14,14 @@ Distance is measured to the closest point *on* each feature
 (ST_ClosestPoint), not to a centroid or a bbox corner: rows here are
 points, linestrings and polygons, and the centroid of a 3 km canal says
 nothing about how far the canal is from you — you can be standing on its
-bank. The planar-degree caveat and the antimeridian limitation are
-exactly infrastructure.py's; see that module's docstring, this one shares
-its distance expression (geo.haversine_sql) verbatim.
+bank. The closest point is taken in a cos(latitude)-scaled space rather
+than raw degrees (geo.closest_point_sql), because degree-space nearness
+is not ground nearness away from the equator: uncorrected, a diagonal
+feature reads ~25% too far at 60°N and ~63% at 70°N, which corrupts both
+the nearest-first ordering and the radius cutoff. The final metre is
+still a great circle (geo.haversine_sql, shared with every other theme).
+The antimeridian limitation is exactly infrastructure.py's; see that
+module's docstring.
 
 Cache theme key: "base_water", following land_use.py's composite
 "base_<type>" convention (underscore, not ':', because cache.tile_path
@@ -53,19 +58,28 @@ So a generalized row is reported by *containment*, not by distance:
 on_water=True plus water_body (the body's name, else its class, else its
 subtype), and the row is excluded from the distance list entirely.
 
-Detecting "generalized" (the part worth stating precisely, because the
-obvious rule is wrong): subtype is not a sufficient filter. Live counts
-over a Mediterranean box show subtype='physical' holding sea (span 14.6°)
-and strait (4.7°) alongside waterfall (0.00015°), cape and shoal — so
-excluding subtype='physical' would silently drop waterfalls, which are
-exactly the kind of feature this tool should report a real distance to.
-The signal that actually separates them is geometric: a *polygon* whose
-bbox spans a quarter degree or more (~28 km) has either been cut by the
-1-degree grid or is a generalized body of that scale, and in both cases
-its interior and its boundary lie about the shoreline. subtype='ocean' is
-OR'd in unconditionally so that a small sliver of an ocean tile at a
-corner is still treated as ocean. Everything else — every canal, stream,
-pond, small bay, waterfall — keeps a real ST_ClosestPoint distance.
+Detecting "generalized" (the part worth stating precisely, because two
+obvious rules are both wrong). Rule one, a subtype allowlist, is wrong on
+its own: subtype='physical' holds sea (span 14.6°) and strait (4.7°)
+alongside waterfall (0.00015°), cape and shoal, so excluding
+subtype='physical' would silently drop waterfalls. Rule two, a bare
+geometric span test over *any* polygon, is worse — it deletes the largest
+real lakes and rivers from the answer. Live against release 2026-07-22.0,
+Lake Michigan is a single subtype='lake' polygon spanning 3.29° × 4.49°,
+Lago di Como 0.322° × 0.357°; neither is tile-cut, and neither has a
+generalized coastline. Under the span-only rule a query 371 m from Lake
+Como returned a 376 m creek and no lake at all, and a query 992 m off
+Lake Michigan with water_class='lake' returned nothing plus an "arid,
+remote or unmapped" note.
+
+The rule that actually holds is: the tile-cut/generalized problem is a
+*marine* one. It applies to subtype='ocean' — the 1-degree grid, live
+maximum span 1.0014°, unconditionally, so a small corner sliver of a tile
+is still recognized as ocean — and to the handful of enormous
+class IN ('sea','strait') polygons, whose open ends are arbitrary cuts
+across water, gated by the same span test so a small strait keeps its
+distance. Everything else — every lake, river, canal, stream, pond, bay,
+waterfall, however large — keeps a real ST_ClosestPoint distance.
 
 A non-generalized polygon that contains the point (you are standing in a
 lake) is also reported as on_water rather than as a 0.0 m row, for the
@@ -116,13 +130,37 @@ MAX_ROWS = overture.MAX_ROWS  # same response-size cap every other tool uses
 # still decides membership, so the pad can only add candidates.
 _BBOX_PREFILTER_PAD = 1.002
 
-# A polygon whose bbox spans at least this many degrees (~28 km at the
-# equator) is treated as a generalized, 1-degree-tile-cut water body: its
-# interior swallows coastal land and its boundary carries phantom grid
-# cuts, so it is reported by containment (on_water/water_body) and never
-# by distance. See the module docstring for why a subtype allowlist is
-# not the right test.
+# A *marine* polygon whose bbox spans at least this many degrees (~28 km
+# at the equator) is treated as a generalized water body: its interior
+# swallows coastal land and its boundary carries phantom grid cuts or
+# arbitrary open-water closures, so it is reported by containment
+# (on_water/water_body) and never by distance. The span test applies only
+# to the ocean-like classes below — applied to any polygon it deletes Lake
+# Michigan (3.29° x 4.49°, one un-cut lake row) from the answer. See the
+# module docstring.
 _GENERALIZED_SPAN_DEG = 0.25
+
+# Overture's `subtype` values that are gridded coastline by construction.
+# Live max span of a subtype='ocean' row is 1.0014° — the 1-degree grid —
+# and every one of them is generalized regardless of how small the sliver
+# is, so these skip the span test entirely.
+_OCEAN_SUBTYPES = ("ocean",)
+
+# `class` values that ride subtype='physical' and describe an open marine
+# body rather than a discrete feature. Only generalized once they are
+# large: a 4.7° strait's ends are arbitrary cuts across water, a 200 m one
+# is a real place you can be a real distance from.
+_OCEAN_CLASSES = ("sea", "strait")
+
+# Overture base/water's `subtype` vocabulary, from a live scan of a
+# Europe-wide box. Used only to decide whether a caller's substring filter
+# can possibly match anything that survives the ocean exclusion — see
+# _ocean_only_filter. A value missing from this list simply means no
+# short-circuit, never a dropped row.
+_KNOWN_SUBTYPES = (
+    "canal", "human_made", "lake", "ocean", "physical", "pond", "reservoir",
+    "river", "spring", "stream", "wastewater", "water",
+)
 
 # How many containing polygons to pull back, smallest-area first. Only the
 # first is used (the most specific body containing the point); a second is
@@ -203,25 +241,73 @@ _BBOX_CONTAINS_POINT = (
 )
 
 
-def _generalized_expr(missing: set[str], geom_expr: str) -> str:
-    """SQL predicate: is this row a generalized, tile-cut water body?
+def _sql_list(values: tuple[str, ...]) -> str:
+    return ", ".join(f"'{v}'" for v in values)
 
-    Geometric, not a subtype allowlist — subtype='physical' holds both the
-    Mediterranean Sea and individual waterfalls (see the module docstring).
-    A polygon spanning >= _GENERALIZED_SPAN_DEG has been cut by Overture's
-    1-degree grid or is generalized at that scale either way, so neither
-    its interior nor its boundary can be trusted about the shoreline.
-    subtype='ocean' is included unconditionally so a small corner sliver of
-    an ocean tile is still recognized as ocean.
+
+def _generalized_expr(missing: set[str], geom_expr: str) -> str:
+    """SQL predicate: is this row a generalized, tile-cut marine body?
+
+    Two halves, both narrow on purpose (module docstring for the live
+    numbers). subtype='ocean' is unconditional: those rows *are* the
+    1-degree grid, and a corner sliver of a tile is as untrustworthy as a
+    whole one. class IN ('sea','strait') is gated on a
+    _GENERALIZED_SPAN_DEG polygon span, because 'physical' holds the
+    Mediterranean and individual waterfalls alike and only the enormous
+    ones have arbitrary boundaries.
+
+    What is deliberately *not* here is a span test over polygons in
+    general: Lake Michigan is one 3.29° x 4.49° subtype='lake' polygon
+    with a real, un-generalized shoreline, and a generic span test deletes
+    it — and Lake Geneva, and Lago di Como, and the Mississippi — from
+    every distance answer.
+
+    COALESCE, not a bare comparison: subtype/class are nullable upstream,
+    and `NULL = 'ocean'` is NULL, so the caller's `NOT (...)` would be NULL
+    too and silently drop every row with an unlabelled subtype.
     """
-    span = (
-        f"(bbox.xmax - bbox.xmin >= {_GENERALIZED_SPAN_DEG}"
-        f" OR bbox.ymax - bbox.ymin >= {_GENERALIZED_SPAN_DEG})"
-    )
-    large_polygon = f"({span} AND ST_Dimension({geom_expr}) = 2)"
-    if "subtype" in missing:
-        return large_polygon
-    return f"(subtype = 'ocean' OR {large_polygon})"
+    parts = []
+    if "subtype" not in missing:
+        parts.append(f"COALESCE(subtype, '') IN ({_sql_list(_OCEAN_SUBTYPES)})")
+    if "class" not in missing:
+        span = (
+            f"(bbox.xmax - bbox.xmin >= {_GENERALIZED_SPAN_DEG}"
+            f" OR bbox.ymax - bbox.ymin >= {_GENERALIZED_SPAN_DEG})"
+        )
+        parts.append(
+            f"(COALESCE(class, '') IN ({_sql_list(_OCEAN_CLASSES)})"
+            f" AND {span} AND ST_Dimension({geom_expr}) = 2)"
+        )
+    if not parts:
+        # Neither label is available, so ocean cannot be told from lake.
+        # Treating nothing as generalized is the safe degrade: containment
+        # still answers "you are inside X", and no real body is deleted.
+        return "FALSE"
+    return f"({' OR '.join(parts)})"
+
+
+def _ocean_only_filter(subtype: str | None, water_class: str | None) -> bool:
+    """Would these filters match *only* rows this module never distances?
+
+    subtype='ocean' rows are always excluded from the distance list, so
+    `water_near(..., subtype='ocean')` is structurally unsatisfiable: it
+    returns [] and, without this check, the empty-result note claims the
+    place is "arid, remote or unmapped" — which is a confidently wrong
+    answer to give someone standing on a pier.
+
+    The filter is a case-insensitive substring, so the test is: does it
+    match at least one known subtype, and is every subtype it matches an
+    ocean one? 'ocean', 'OCEAN' and 'cea' short-circuit; 'o' does not (it
+    also matches 'pond' and 'reservoir') and is left to the query. A
+    water_class filter is not considered here: class='ocean' rows are
+    excluded, but 'sea'/'strait' rows below the span threshold are not, so
+    a class filter can legitimately return something.
+    """
+    if not subtype:
+        return False
+    needle = subtype.lower()
+    matched = [s for s in _KNOWN_SUBTYPES if needle in s]
+    return bool(matched) and all(s in _OCEAN_SUBTYPES for s in matched)
 
 
 def _attribute_filters(
@@ -313,11 +399,13 @@ def water_near(
 
     containing is None, or {"water_body", "generalized"} for the most
     specific polygon containing the point. Rows for containing polygons and
-    for generalized, 1-degree-tile-cut bodies (ocean/sea/large bays) are
-    deliberately excluded from the distance list: the former would all be
-    0.0 m, and the latter's geometry lies about the shoreline in both
-    directions (its interior covers dry coastal land, its boundary carries
-    phantom grid cuts). See the module docstring.
+    for generalized marine bodies (subtype='ocean', plus huge sea/strait
+    polygons) are deliberately excluded from the distance list: the former
+    would all be 0.0 m, and the latter's geometry lies about the shoreline
+    in both directions (its interior covers dry coastal land, its boundary
+    carries phantom grid cuts). Large *lakes and rivers* are not excluded —
+    Lake Michigan and the Mississippi have real shorelines and appear with
+    real edge distances. See the module docstring.
 
     subtype/water_class narrow the search by Overture's subtype and class
     columns (case-insensitive substring, wildcards escaped). water_class is
@@ -347,6 +435,12 @@ def water_near(
 
     containing = _containing_body(lat, lon, missing, geom_expr, bbox)
 
+    # subtype='ocean' can never appear in the distance list, so a filter
+    # that matches nothing else has an answer already — and running the
+    # scan would only produce an empty list that reads as "no water here".
+    if _ocean_only_filter(subtype, water_class) and "subtype" not in missing:
+        return [], radius_m, 0, containing
+
     subtype_expr = "NULL" if "subtype" in missing else "subtype"
     class_expr = "NULL" if "class" in missing else "class"
     name_expr = "NULL" if "names" in missing else "names.primary"
@@ -364,6 +458,11 @@ def water_near(
         *_attribute_filters(missing, subtype, water_class, params),
     ]
 
+    # Latitude-corrected: raw ST_ClosestPoint picks the nearest point in
+    # degree space, which is the wrong point (and a distance up to ~63% too
+    # large at 70 deg N) anywhere but the equator. See geo.closest_point_sql.
+    nlon_expr, nlat_expr = geo.closest_point_sql(geom_expr)
+
     sql = f"""
         WITH nearest AS (
             SELECT
@@ -372,8 +471,8 @@ def water_near(
                 {class_expr}        AS class,
                 {salt_expr}         AS is_salt,
                 {intermittent_expr} AS is_intermittent,
-                ST_X(ST_ClosestPoint({geom_expr}, ST_Point($lon, $lat))) AS nlon,
-                ST_Y(ST_ClosestPoint({geom_expr}, ST_Point($lon, $lat))) AS nlat
+                {nlon_expr} AS nlon,
+                {nlat_expr} AS nlat
             FROM {_from_source(bbox)}
             WHERE {' AND '.join(filters)}
         ),
