@@ -463,6 +463,85 @@ def test_a_pair_just_inside_the_advertised_cap_is_accepted():
     assert radius_m <= routing.MODE_CONFIG["walk"]["max_radius_m"]
 
 
+def _isoceles_triple(base_m, apex_angle_deg, lat0=52.0, lon0=13.4):
+    """Isoceles triple: `base_m` wide, apex angle `apex_angle_deg`, apex north.
+
+    Laid out in local meters so the shape is exact; the caller re-measures
+    with haversine.
+    """
+    half = base_m / 2.0
+    height_m = half / math.tan(math.radians(apex_angle_deg / 2.0))
+    m_per_deg_lon = 111_320.0 * math.cos(math.radians(lat0))
+    return [
+        (lat0, lon0 - half / m_per_deg_lon),
+        (lat0, lon0 + half / m_per_deg_lon),
+        (lat0 + height_m / 111_320.0, lon0),
+    ]
+
+
+def test_a_triple_spanning_just_under_the_advertised_cap_is_accepted():
+    """Regression (#177 sweep): acceptance is on SPAN, not enclosing radius.
+
+    A 7.5km base with a 70-degree apex spans 7.5km — inside walk's 7520m
+    straight-line cap, so route() would route every one of its three pairs
+    happily. But its smallest enclosing circle has radius ~3990m, over the
+    3760m *radius* cap, because for n >= 3 the enclosing radius runs to
+    span / sqrt(3), not span / 2. Capping the enclosing radius (the first
+    cut of the containment fix) rejected this set outright with a
+    RouteTooLong quoting a 7980m "enclosing-circle diameter" — a number
+    larger than any actual separation between two of the stops.
+
+    So: accepted, contained with SNAP_RADIUS_M to spare, and the resulting
+    extraction radius stays inside the widened n >= 3 bound even though it
+    exceeds the pair-derived one.
+    """
+    stops = _isoceles_triple(7500.0, 70.0)
+    span_m = max(
+        routing._haversine_m(*a, *b) for a, b in itertools.combinations(stops, 2)
+    )
+    assert span_m < routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"]  # inside the cap
+
+    center_lat, center_lon, radius_m = routing._stops_extraction_geometry(stops, "walk")
+    enclosing_m = max(
+        routing._haversine_m(center_lat, center_lon, lat, lon) for lat, lon in stops
+    )
+    assert enclosing_m > routing.ROUTE_MAX_ENCLOSING_RADIUS_M["walk"]  # the old reject
+    assert min(_extraction_margins(stops, "walk")) >= routing.SNAP_RADIUS_M
+    # Needs the widened n >= 3 extraction bound, and stays inside it.
+    assert radius_m > routing.MODE_CONFIG["walk"]["max_radius_m"]
+    assert radius_m <= routing.STOPS_MAX_EXTRACTION_RADIUS_M["walk"]
+
+
+def test_the_widened_extraction_bound_covers_the_whole_accepted_span_range():
+    """The Jung-derived bound is the real ceiling: the worst case for n >= 3
+    is an equilateral triple at exactly the span cap, and even that fits."""
+    for mode in ("walk", "cycle", "drive"):
+        cap_m = routing.ROUTE_MAX_STRAIGHT_LINE_M[mode]
+        worst_enclosing_m = cap_m / math.sqrt(3.0)
+        needed_m = worst_enclosing_m * routing.RADIUS_BUFFER + routing.SNAP_RADIUS_M
+        assert needed_m <= routing.STOPS_MAX_EXTRACTION_RADIUS_M[mode]
+
+
+def test_a_stop_set_over_the_span_cap_is_still_rejected_honestly():
+    """The cap is enforced, and the error quotes a distance that two of the
+    stops really are apart — not a derived diameter nothing matches."""
+    stops = _isoceles_triple(routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"] * 1.2, 70.0)
+    with pytest.raises(routing.RouteTooLong) as excinfo:
+        routing._stops_extraction_geometry(stops, "walk")
+    span_m = max(
+        routing._haversine_m(*a, *b) for a, b in itertools.combinations(stops, 2)
+    )
+    assert excinfo.value.distance_m == pytest.approx(span_m, rel=1e-9)
+
+
+def test_isoceles_triple_on_the_fixture_grid_routes_end_to_end():
+    """The same 70-degree shape at fixture scale, through the real code path."""
+    stops = [fx.node_latlon(2, 2), fx.node_latlon(16, 2), fx.node_latlon(9, 12)]
+    result = routing.optimize_route(stops, mode="walk", roundtrip=True)
+    assert sorted(result["order"]) == [0, 1, 2]
+    assert result["total_distance_m"] > 0
+
+
 def test_equilateral_triple_on_the_fixture_grid_routes_end_to_end():
     """The same shape at fixture scale, through the real code path."""
     stops = [fx.node_latlon(2, 2), fx.node_latlon(14, 2), fx.node_latlon(8, 12)]

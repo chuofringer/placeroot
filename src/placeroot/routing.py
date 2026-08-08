@@ -87,9 +87,9 @@ candidates from the places theme against it — see that function for the
 detour cost model.
 
 Multi-stop ordering (#177): optimize_route() answers "what order should I
-visit these 2-10 stops in". One graph extraction covers every stop (the
-same center/radius/cap relation route() uses, applied to the stops'
-smallest enclosing circle — see _stops_extraction_geometry), all stops
+visit these 2-10 stops in". One graph extraction covers every stop —
+accepted on the same straight-line span cap route() uses, sized from the
+stops' smallest enclosing circle (see _stops_extraction_geometry) — all stops
 snap into it once, and n target-less Dijkstras fill an n x n directed
 cost matrix, which Held-Karp (solve_tsp) then solves exactly. Unroutable
 pairs fall back to a flagged straight-line estimate rather than failing
@@ -101,6 +101,7 @@ called explicitly here since this module needs the spatial extension.
 """
 
 import heapq
+import itertools
 import logging
 import math
 import threading
@@ -234,21 +235,49 @@ MODE_CONFIG = {
 # below it equivalent (the latter becomes a redundant safety net that
 # should essentially never fire, modulo floating point).
 #
-# The primitive both route() and optimize_route() enforce is really a cap on
-# the *enclosing radius* of the input points — the radius of the smallest
-# circle covering them, which is what the extraction radius is computed from
-# (enclosing_radius_m * RADIUS_BUFFER + SNAP_RADIUS_M <= max_radius_m).
-# For route()'s two points that circle is the diametral one, so its radius is
-# exactly straight_line_m / 2 and the familiar straight-line cap is just
-# twice the radius cap. Defining the radius cap first and deriving the
-# straight-line cap from it keeps optimize_route's n-stop check and route()'s
-# two-point check the same rule by construction, not by a matching constant.
+# The primitive both route() and optimize_route() enforce for *acceptance* is
+# the SPAN of the input points — the largest straight-line distance between
+# any two of them. For route()'s two points that is just their straight-line
+# distance; for optimize_route's n stops it is the widest pair. Same rule,
+# generalized, and it is the number the tool descriptions advertise.
+#
+# ROUTE_MAX_ENCLOSING_RADIUS_M is the two-point *radius* form of that same
+# cap (half the span), kept because route()'s extraction radius is derived
+# from it: enclosing_radius_m * RADIUS_BUFFER + SNAP_RADIUS_M <= max_radius_m.
 ROUTE_MAX_ENCLOSING_RADIUS_M = {
     mode: (cfg["max_radius_m"] - SNAP_RADIUS_M) / RADIUS_BUFFER
     for mode, cfg in MODE_CONFIG.items()
 }
 ROUTE_MAX_STRAIGHT_LINE_M = {
     mode: 2.0 * radius_m for mode, radius_m in ROUTE_MAX_ENCLOSING_RADIUS_M.items()
+}
+
+# ...but acceptance and extraction sizing are NOT the same number once there
+# are three or more stops. optimize_route sizes its single extraction circle
+# from the stops' smallest enclosing circle (SEC), and for n >= 3 the SEC
+# radius is bounded by Jung's theorem at span / sqrt(3) — an equilateral
+# triple attains it — not span / 2 as for a pair. Capping the SEC radius at
+# ROUTE_MAX_ENCLOSING_RADIUS_M would therefore quietly shrink the advertised
+# span cap by a factor of 2/sqrt(3) ~= 1.155 for n >= 3: stop sets with a
+# span just under the published cap (an isoceles triple with an apex angle
+# past ~74 degrees, say) would be rejected outright even though route()
+# would happily route every one of their pairs. So the span cap stays the
+# acceptance rule, and the extraction radius gets this separate, derived,
+# still-finite widened bound:
+#
+#   span_cap / sqrt(3) * RADIUS_BUFFER + SNAP_RADIUS_M
+#     = 2 / sqrt(3) * (max_radius_m - SNAP_RADIUS_M) + SNAP_RADIUS_M
+#
+# i.e. an n >= 3 extraction may reach ~1.15x the mode's isochrone radius cap
+# (walk 5.8km vs 5km, drive 70km vs 60km). Deliberate and bounded: it is the
+# price of honoring the advertised span cap, and graph size stays bounded by
+# MAX_GRAPH_SEGMENTS regardless. The 1% headroom absorbs the equirectangular
+# projection distortion in _minimum_enclosing_center, whose re-measured
+# haversine radius can land a hair over the exact planar Jung bound.
+JUNG_BOUND_HEADROOM = 1.01
+STOPS_MAX_EXTRACTION_RADIUS_M = {
+    mode: span_m / math.sqrt(3.0) * JUNG_BOUND_HEADROOM * RADIUS_BUFFER + SNAP_RADIUS_M
+    for mode, span_m in ROUTE_MAX_STRAIGHT_LINE_M.items()
 }
 ROUTE_MIN_RADIUS_M = 500.0  # extraction radius floor, so very-close points still get a real graph
 ROUTE_RADIUS_RETRY_FACTOR = 1.6  # widen-and-retry factor when the first extraction misses a path
@@ -821,6 +850,7 @@ def build_graph(
     mode: str = "walk",
     speed_m_s: float | None = None,
     want_shapes: bool = False,
+    radius_cap_m: float | None = None,
 ) -> Graph:
     """Street graph for `mode` within radius_m of (lat, lon).
 
@@ -832,7 +862,11 @@ def build_graph(
     carries has_shapes so the cache can refuse to serve a shapeless graph to
     a path request; see _get_or_build_graph.
 
-    Raises RadiusTooLarge if radius_m exceeds MODE_CONFIG[mode]'s cap,
+    radius_cap_m overrides the mode's MODE_CONFIG max_radius_m as the largest
+    radius this extraction may use; optimize_route passes the wider
+    STOPS_MAX_EXTRACTION_RADIUS_M for n >= 3 stops (see that constant).
+
+    Raises RadiusTooLarge if radius_m exceeds that cap,
     SchemaDegraded if the transportation dataset is missing geometry/bbox,
     UnsupportedMode for an unknown mode string, or UpstreamUnavailable if
     the remote scan fails.
@@ -854,7 +888,7 @@ def build_graph(
     if mode not in MODE_CONFIG:
         raise UnsupportedMode(mode)
     config = MODE_CONFIG[mode]
-    max_radius_m = config["max_radius_m"]
+    max_radius_m = radius_cap_m if radius_cap_m is not None else config["max_radius_m"]
     if radius_m > max_radius_m:
         raise RadiusTooLarge(radius_m, max_radius_m)
 
@@ -1402,6 +1436,7 @@ def _get_or_build_graph(
     mode: str,
     speed_m_s: float | None,
     want_shapes: bool = False,
+    radius_cap_m: float | None = None,
 ) -> Graph:
     """build_graph(...), reusing a cached graph when possible (#39).
 
@@ -1409,7 +1444,7 @@ def _get_or_build_graph(
     GRAPH_CACHE_MARGIN) extraction bbox fully contains the bbox this query
     actually needs, and the cache key (release, upstream source, mode,
     speed-baking) matches exactly. On a miss, a fresh graph is built for
-    GRAPH_CACHE_MARGIN x the requested radius (capped at the mode's max) so
+    GRAPH_CACHE_MARGIN x the requested radius (capped at radius_cap_m) so
     nearby repeat queries are likely to hit next time, and stored, evicting
     the least-recently-used entry once the cache exceeds GRAPH_CACHE_MAXSIZE.
 
@@ -1430,6 +1465,13 @@ def _get_or_build_graph(
     which the Graph doesn't retain, so "computing them later" is the same
     upstream scan the rebuild does — with the honesty of going through
     build_graph.
+
+    radius_cap_m defaults to the mode's MODE_CONFIG max_radius_m; optimize_route
+    passes the wider STOPS_MAX_EXTRACTION_RADIUS_M for n >= 3 stop sets (see
+    that constant). The cap is applied to the GRAPH_CACHE_MARGIN padding only
+    — an extraction_radius_m that already exceeds it raises RadiusTooLarge
+    rather than being silently clamped down to a circle that no longer covers
+    what the caller asked for.
     """
     release_key = release.resolve_release()
     upstream = _upstream_glob()
@@ -1446,10 +1488,15 @@ def _get_or_build_graph(
                 _graph_cache.move_to_end(key)
                 return entry.graph
 
-    max_radius_m = MODE_CONFIG[mode]["max_radius_m"]
-    padded_radius_m = min(extraction_radius_m * GRAPH_CACHE_MARGIN, max_radius_m)
+    cap_m = radius_cap_m if radius_cap_m is not None else MODE_CONFIG[mode]["max_radius_m"]
+    if extraction_radius_m > cap_m:
+        raise RadiusTooLarge(extraction_radius_m, cap_m)
+    padded_radius_m = min(extraction_radius_m * GRAPH_CACHE_MARGIN, cap_m)
+    # Only forward an explicit cap: the default path keeps build_graph's own
+    # MODE_CONFIG lookup.
+    extra = {} if radius_cap_m is None else {"radius_cap_m": radius_cap_m}
     graph = build_graph(
-        lat, lon, padded_radius_m, mode=mode, speed_m_s=speed_m_s, want_shapes=want_shapes
+        lat, lon, padded_radius_m, mode=mode, speed_m_s=speed_m_s, want_shapes=want_shapes, **extra
     )
     extraction_bbox = _bbox_around(lat, lon, padded_radius_m)
 
@@ -2411,32 +2458,59 @@ def _stops_extraction_geometry(
 ) -> tuple[float, float, float]:
     """(center_lat, center_lon, base_radius_m) for one graph covering every stop.
 
-    Deliberately the *same* relation route()/_shortest_path uses, generalized
-    from two points to n. route() centers on the two points' midpoint with
-    radius straight_line_m / 2 * RADIUS_BUFFER + SNAP_RADIUS_M — that is,
-    on the center of the smallest circle covering its inputs, with radius
-    (enclosing radius) * RADIUS_BUFFER + SNAP_RADIUS_M. Here the same holds
-    with the enclosing circle computed for the whole stop set
-    (_minimum_enclosing_center), so the two-stop case reproduces route()'s
-    geometry exactly and the n-stop case is the same rule.
+    Two separate jobs, deliberately decoupled — conflating them is what the
+    first cut of this function got wrong twice, once in each direction.
 
-    Containment is by *construction*, not by a geometric bound: the radius
-    is measured as the true haversine distance from the chosen center to the
-    furthest stop, then multiplied by RADIUS_BUFFER (>= 1) and padded by
-    SNAP_RADIUS_M. Every stop therefore sits at least SNAP_RADIUS_M inside
-    the extraction circle, whatever the center is — which is what the old
-    diametral-midpoint + Jung's-theorem argument got wrong: Jung's d/sqrt(3)
-    bound is about the enclosing circle's *circumcenter*, while the
-    diametral pair's midpoint can need up to sqrt(3)/2 ~= 0.866 * d, more
-    than the 0.625 * d that version allowed. An equilateral triple of stops
-    ~6.5km apart (inside walk's 7.5km cap) left its third stop outside the
-    extracted graph and failed with NoGraphNearby.
+    ACCEPTANCE is on the stop set's SPAN: the largest straight-line distance
+    between any two stops, checked against ROUTE_MAX_STRAIGHT_LINE_M[mode].
+    That is exactly the rule route() applies to its (only) pair, generalized
+    to n, and it is the number the tool descriptions advertise. Capping the
+    smallest-enclosing-circle RADIUS at ROUTE_MAX_ENCLOSING_RADIUS_M instead
+    would look equivalent — it is, for two points, where the enclosing circle
+    is the diametral one — but for n >= 3 the enclosing radius runs up to
+    span / sqrt(3) (Jung's theorem, attained by an equilateral triple), so it
+    would reject stop sets whose span is comfortably under the published cap:
+    an isoceles triple with a 7.5km base and an 80-degree apex spans 7492m,
+    inside walk's 7520m cap, yet has an enclosing radius of 4982m against a
+    3760m radius cap. Every pair of those stops routes fine through route();
+    the tour must not be refused.
 
-    Raises RouteTooLong if the stops' enclosing radius exceeds the mode's
-    ROUTE_MAX_ENCLOSING_RADIUS_M — the same cap route() enforces, reported
-    as a diameter against ROUTE_MAX_STRAIGHT_LINE_M (twice the radius cap)
-    so a two-stop call's message is identical to route()'s.
+    SIZING uses the smallest enclosing circle and nothing else: center from
+    _minimum_enclosing_center, radius = (true haversine distance from that
+    center to the furthest stop) * RADIUS_BUFFER + SNAP_RADIUS_M. Containment
+    is therefore by *construction*, not by a geometric bound — every stop
+    sits at least SNAP_RADIUS_M inside the circle whatever the center is.
+    That is what the original diametral-midpoint version got wrong in the
+    other direction: it centered on the diametral pair's midpoint, which can
+    be sqrt(3)/2 ~= 0.866 * span from the third vertex while covering only
+    0.625 * span + 300m, so an equilateral triple ~6.5km apart left its third
+    stop outside the extracted graph and failed with NoGraphNearby.
+
+    The consequence of accepting on span while sizing on the enclosing circle
+    is that an n >= 3 extraction radius can exceed the pair-derived radius cap
+    by up to 2/sqrt(3) ~= 1.155x. That widened bound is named and enforced as
+    STOPS_MAX_EXTRACTION_RADIUS_M (see it for why paying it is the honest
+    choice); _snap_all_stops passes it to the graph builder so the extraction
+    is never silently clamped back down to a circle that misses a stop.
+
+    Raises RouteTooLong if the span exceeds ROUTE_MAX_STRAIGHT_LINE_M[mode],
+    with route()'s own message for a two-stop call.
     """
+    span_m = max(
+        _haversine_m(alat, alon, blat, blon)
+        for (alat, alon), (blat, blon) in itertools.combinations(points, 2)
+    )
+    cap_m = ROUTE_MAX_STRAIGHT_LINE_M[mode]
+    if span_m > cap_m:
+        # For two stops this is route()'s exact wording; for more, the label
+        # names what was actually measured (the widest pair), never a derived
+        # diameter larger than any real separation.
+        if len(points) == 2:
+            raise RouteTooLong(span_m, cap_m)
+        raise RouteTooLong(
+            span_m, cap_m, label="the widest pair of stops' straight-line distance"
+        )
+
     if len(points) == 2:
         # Two stops are route()'s own case: take its expression verbatim
         # (great-circle midpoint, half the straight-line distance) so a pair
@@ -2444,33 +2518,38 @@ def _stops_extraction_geometry(
         # it arrives through route() or through optimize_route().
         (alat, alon), (blat, blon) = points
         center_lat, center_lon = _midpoint(alat, alon, blat, blon)
-        enclosing_radius_m = _haversine_m(alat, alon, blat, blon) / 2.0
+        enclosing_radius_m = span_m / 2.0
     else:
         center_lat, center_lon = _minimum_enclosing_center(points)
         enclosing_radius_m = max(
             _haversine_m(center_lat, center_lon, lat, lon) for lat, lon in points
         )
-    radius_cap_m = ROUTE_MAX_ENCLOSING_RADIUS_M[mode]
-    if enclosing_radius_m > radius_cap_m:
-        raise RouteTooLong(
-            2.0 * enclosing_radius_m,
-            ROUTE_MAX_STRAIGHT_LINE_M[mode],
-            label="the stops' enclosing-circle diameter",
-        )
 
     base_radius_m = max(
         enclosing_radius_m * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M
     )
-    if base_radius_m > MODE_CONFIG[mode]["max_radius_m"]:
-        # Redundant safety net, exactly as in _shortest_path: the cap is
-        # derived from max_radius_m through this very relation, so only
-        # floating-point edge cases can land here. Report the honest cap.
+    if base_radius_m > _stops_radius_cap_m(points, mode):
+        # Redundant safety net, exactly as in _shortest_path: the extraction
+        # cap is derived from the span cap through this very relation (via
+        # Jung's bound for n >= 3), so only floating-point / projection edge
+        # cases can land here. Report the honest, advertised span cap.
         raise RouteTooLong(
-            2.0 * enclosing_radius_m,
-            ROUTE_MAX_STRAIGHT_LINE_M[mode],
-            label="the stops' enclosing-circle diameter",
+            span_m, cap_m, label="the widest pair of stops' straight-line distance"
         )
     return center_lat, center_lon, base_radius_m
+
+
+def _stops_radius_cap_m(points: list[tuple[float, float]], mode: str) -> float:
+    """Largest extraction radius optimize_route may use for this stop set.
+
+    Two stops get route()'s own cap verbatim (MODE_CONFIG's max_radius_m), so
+    a pair arriving through optimize_route is treated bit-identically to one
+    arriving through route(). Three or more get the wider, Jung-derived
+    STOPS_MAX_EXTRACTION_RADIUS_M — see that constant.
+    """
+    if len(points) == 2:
+        return MODE_CONFIG[mode]["max_radius_m"]
+    return STOPS_MAX_EXTRACTION_RADIUS_M[mode]
 
 
 def _snap_all_stops(
@@ -2489,7 +2568,7 @@ def _snap_all_stops(
     labeled with the index of the stop that couldn't be snapped.
     """
     center_lat, center_lon, base_radius_m = _stops_extraction_geometry(points, mode)
-    max_radius_m = MODE_CONFIG[mode]["max_radius_m"]
+    max_radius_m = _stops_radius_cap_m(points, mode)
     radii_m = [base_radius_m]
     retry_radius_m = min(base_radius_m * ROUTE_RADIUS_RETRY_FACTOR, max_radius_m)
     if retry_radius_m > base_radius_m:
@@ -2497,7 +2576,14 @@ def _snap_all_stops(
 
     for i, radius_m in enumerate(radii_m):
         is_last = i == len(radii_m) - 1
-        graph = _get_or_build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None)
+        graph = _get_or_build_graph(
+            center_lat,
+            center_lon,
+            radius_m,
+            mode,
+            speed_m_s=None,
+            radius_cap_m=max_radius_m,
+        )
         if graph.node_count() == 0:
             if is_last:
                 raise NoGraphNearby(center_lat, center_lon, radius_m)
@@ -2660,8 +2746,8 @@ def optimize_route(
     """Cheapest visiting order over 2-10 stops — a small, exactly-solved TSP (#177).
 
     Answers "what order should I do these errands in": builds ONE street
-    graph covering every stop (see _stops_extraction_geometry — the same
-    center/radius/cap relation route() uses, applied to the stops'
+    graph covering every stop (see _stops_extraction_geometry — accepted on
+    the same straight-line span cap route() uses, sized from the stops'
     smallest enclosing circle), snaps all of them into it once, fills an n x n cost matrix with
     n target-less Dijkstras (_cost_matrices — one per stop, not one per
     pair), and solves it exactly with Held-Karp (solve_tsp). No polyline or
@@ -2684,11 +2770,11 @@ def optimize_route(
     leg carries "estimated": true, and the response carries a note naming
     every estimated leg. Raises UnsupportedMode for an unknown mode,
     ValueError for a bad stop count / start_index / non-finite coordinate,
-    RouteTooLong if the smallest circle covering the stops is wider than
-    the mode's straight-line cap (rejected before any extraction, the same
-    enclosing-radius rule route() applies to its two points), and
-    NoGraphNearby — labeled with the offending stop's index — if some stop
-    never snaps to a usable street node.
+    RouteTooLong if the widest pair of stops is further apart than the
+    mode's straight-line cap (rejected before any extraction — the very
+    same span rule route() applies to its two points), and NoGraphNearby —
+    labeled with the offending stop's index — if some stop never snaps to a
+    usable street node.
 
     Returns {"order", "legs", "total_distance_m", "total_duration_s",
     "mode", "roundtrip"}, plus "truncated"/"note" when the street graph hit
