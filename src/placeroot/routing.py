@@ -271,9 +271,16 @@ ROUTE_MAX_STRAIGHT_LINE_M = {
 # i.e. an n >= 3 extraction may reach ~1.15x the mode's isochrone radius cap
 # (walk 5.8km vs 5km, drive 70km vs 60km). Deliberate and bounded: it is the
 # price of honoring the advertised span cap, and graph size stays bounded by
-# MAX_GRAPH_SEGMENTS regardless. The 1% headroom absorbs the equirectangular
-# projection distortion in _minimum_enclosing_center, whose re-measured
-# haversine radius can land a hair over the exact planar Jung bound.
+# MAX_GRAPH_SEGMENTS regardless. The flat 1% headroom absorbs floating-point
+# noise plus the equirectangular projection distortion in
+# _minimum_enclosing_center at low-to-mid latitudes, whose re-measured
+# haversine radius can land over the exact planar Jung bound. That
+# distortion is NOT bounded by 1% though — the projection's lon scale uses
+# cos(mid-lat) while the true scale at each stop is cos(lat), a relative
+# error of ~ tan(lat) * lat_extent/2 that reaches ~1.6% at 65N and ~2.8% at
+# 75N over a near-cap drive span — so _stops_radius_cap_m adds a
+# latitude-aware term on top of this constant; the dict below is the
+# distortion-free (equatorial) bound.
 JUNG_BOUND_HEADROOM = 1.01
 STOPS_MAX_EXTRACTION_RADIUS_M = {
     mode: span_m / math.sqrt(3.0) * JUNG_BOUND_HEADROOM * RADIUS_BUFFER + SNAP_RADIUS_M
@@ -2490,8 +2497,9 @@ def _stops_extraction_geometry(
     is that an n >= 3 extraction radius can exceed the pair-derived radius cap
     by up to 2/sqrt(3) ~= 1.155x. That widened bound is named and enforced as
     STOPS_MAX_EXTRACTION_RADIUS_M (see it for why paying it is the honest
-    choice); _snap_all_stops passes it to the graph builder so the extraction
-    is never silently clamped back down to a circle that misses a stop.
+    choice); _snap_and_cost_stops passes it to the graph builder so the
+    extraction is never silently clamped back down to a circle that misses a
+    stop.
 
     Raises RouteTooLong if the span exceeds ROUTE_MAX_STRAIGHT_LINE_M[mode],
     with route()'s own message for a two-stop call.
@@ -2545,27 +2553,58 @@ def _stops_radius_cap_m(points: list[tuple[float, float]], mode: str) -> float:
     Two stops get route()'s own cap verbatim (MODE_CONFIG's max_radius_m), so
     a pair arriving through optimize_route is treated bit-identically to one
     arriving through route(). Three or more get the wider, Jung-derived
-    STOPS_MAX_EXTRACTION_RADIUS_M — see that constant.
+    STOPS_MAX_EXTRACTION_RADIUS_M — see that constant — widened further by a
+    latitude-aware distortion allowance: _minimum_enclosing_center chooses
+    its center in an equirectangular projection whose lon scale (cos of the
+    set's mid-latitude) is off by ~ tan(lat) * lat_extent/2 relative at each
+    stop, so the re-measured haversine radius can exceed the planar Jung
+    bound by about that fraction — past the flat JUNG_BOUND_HEADROOM from
+    ~65 degrees latitude up. Without this term a near-cap, near-equilateral
+    triple at high latitude was wrongly rejected route_too_long by the
+    safety net in _stops_extraction_geometry even though every pair of its
+    stops is inside the published span cap. The full lat_extent (twice the
+    mid-to-edge first-order estimate) is a deliberate cushion — the same
+    scale error also perturbs the projected span the planar bound is taken
+    over — and the whole headroom is clamped at sqrt(3), i.e. a cap of
+    span_cap * RADIUS_BUFFER + SNAP_RADIUS_M: a center further from a stop
+    than the whole span is worse than centering on any stop and deserves to
+    be caught, and near the poles (where tan blows up) the safety net would
+    otherwise be vacuous.
     """
     if len(points) == 2:
         return MODE_CONFIG[mode]["max_radius_m"]
-    return STOPS_MAX_EXTRACTION_RADIUS_M[mode]
+    lats = [lat for lat, _ in points]
+    lat_extent_rad = math.radians(max(lats) - min(lats))
+    worst_tan = max(abs(math.tan(math.radians(lat))) for lat in lats)
+    headroom = min(JUNG_BOUND_HEADROOM + worst_tan * lat_extent_rad, math.sqrt(3.0))
+    span_cap_m = ROUTE_MAX_STRAIGHT_LINE_M[mode]
+    return span_cap_m / math.sqrt(3.0) * headroom * RADIUS_BUFFER + SNAP_RADIUS_M
 
 
-def _snap_all_stops(
+def _snap_and_cost_stops(
     points: list[tuple[float, float]], mode: str
-) -> tuple[Graph, list[str]]:
-    """(graph, snapped node id per stop) — ONE extraction covering every stop.
+) -> tuple[Graph, list[list[float]], list[list[float]], set[tuple[int, int]]]:
+    """(graph, time matrix, distance matrix, estimated cells) for the stop set.
 
     The whole point of the shared extraction: an n-stop tour needs an n x n
     cost matrix, and building a graph per pair would mean up to 90 upstream
     scans for 10 stops. Instead one graph covers the whole stop set (see
-    _stops_extraction_geometry) and every stop snaps into it once.
+    _stops_extraction_geometry), every stop snaps into it once, and the
+    matrices come from n target-less Dijkstras over it (_cost_matrices).
 
-    Widen-and-retry mirrors _shortest_path: a non-final radius that yields
-    an empty graph or fails to snap some stop just moves on to the next,
-    larger radius; only the last radius's failure raises NoGraphNearby,
-    labeled with the index of the stop that couldn't be snapped.
+    Widen-and-retry mirrors _shortest_path — including on connectivity, not
+    just on snapping. A non-final radius that yields an empty graph or fails
+    to snap some stop just moves on to the next, larger radius; only the
+    last radius's failure raises NoGraphNearby, labeled with the index of
+    the stop that couldn't be snapped. And a radius at which every stop
+    snaps but some matrix cell is unreachable also retries wider before
+    settling for estimates: the connecting road can bulge just outside the
+    base circle exactly as a shortest path can in _shortest_path, and
+    returning straight-line "estimated" legs for a pair that route() would
+    route via its own 1.6x retry would be both wrong-ish and inconsistent.
+    A snap failure at the wider radius (the size cap can truncate segments
+    away) falls back to the smaller radius's estimated matrices rather than
+    raising, and if both radii produce estimates the one with fewer wins.
     """
     center_lat, center_lon, base_radius_m = _stops_extraction_geometry(points, mode)
     max_radius_m = _stops_radius_cap_m(points, mode)
@@ -2574,6 +2613,7 @@ def _snap_all_stops(
     if retry_radius_m > base_radius_m:
         radii_m.append(retry_radius_m)
 
+    best: tuple[Graph, list[list[float]], list[list[float]], set[tuple[int, int]]] | None = None
     for i, radius_m in enumerate(radii_m):
         is_last = i == len(radii_m) - 1
         graph = _get_or_build_graph(
@@ -2585,7 +2625,7 @@ def _snap_all_stops(
             radius_cap_m=max_radius_m,
         )
         if graph.node_count() == 0:
-            if is_last:
+            if is_last and best is None:
                 raise NoGraphNearby(center_lat, center_lon, radius_m)
             continue
         nodes: list[str] = []
@@ -2596,12 +2636,19 @@ def _snap_all_stops(
                 failed_idx = idx
                 break
             nodes.append(node)
-        if failed_idx is None:
-            return graph, nodes
-        if is_last:
-            flat, flon = points[failed_idx]
-            raise NoGraphNearby(flat, flon, radius_m, label=f"stops[{failed_idx}]")
-    raise AssertionError("unreachable: the last radius always returns or raises")
+        if failed_idx is not None:
+            if is_last and best is None:
+                flat, flon = points[failed_idx]
+                raise NoGraphNearby(flat, flon, radius_m, label=f"stops[{failed_idx}]")
+            continue
+        time_m, dist_m, estimated = _cost_matrices(graph, nodes, points, mode)
+        if not estimated:
+            return graph, time_m, dist_m, estimated
+        if best is None or len(estimated) < len(best[3]):
+            best = (graph, time_m, dist_m, estimated)
+    if best is None:  # pragma: no cover - the last radius returns, records, or raises
+        raise AssertionError("unreachable: the last radius returns, records, or raises")
+    return best
 
 
 def _estimated_cell(
@@ -2750,7 +2797,9 @@ def optimize_route(
     the same straight-line span cap route() uses, sized from the stops'
     smallest enclosing circle), snaps all of them into it once, fills an n x n cost matrix with
     n target-less Dijkstras (_cost_matrices — one per stop, not one per
-    pair), and solves it exactly with Held-Karp (solve_tsp). No polyline or
+    pair, retried once at a wider radius if any cell is unreachable, just
+    as route() retries its path search — see _snap_and_cost_stops), and
+    solves it exactly with Held-Karp (solve_tsp). No polyline or
     geometry comes back, same as route() (#161): just the order, the legs'
     distance/duration, and the totals.
 
@@ -2799,8 +2848,7 @@ def optimize_route(
         )
 
     points = [(float(lat), float(lon)) for lat, lon in stops]
-    graph, nodes = _snap_all_stops(points, mode)
-    time_m, dist_m, estimated = _cost_matrices(graph, nodes, points, mode)
+    graph, time_m, dist_m, estimated = _snap_and_cost_stops(points, mode)
 
     order = solve_tsp(time_m, start_index=start_index, roundtrip=roundtrip)
     pairs = list(zip(order, order[1:]))

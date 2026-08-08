@@ -291,6 +291,92 @@ def test_estimated_cell_is_straight_line_times_the_detour_factor():
     assert seconds == pytest.approx(distance_m / routing.DEFAULT_SPEED_M_S)
 
 
+# Two stops ~850m apart, and two hand-built graphs standing in for the base
+# and retry extractions: at the base radius each stop has its own 5-node
+# street fragment (big enough to be a snappable component) with nothing
+# connecting them; the wider extraction also holds the connecting chain —
+# the "road that bulges just outside the base circle" scenario.
+RETRY_STOP_A = (40.0, -74.0)
+RETRY_STOP_B = (40.0, -73.99)
+
+
+def _cluster(graph, prefix, lat, lon):
+    """A 5-node chained street fragment starting at (lat, lon)."""
+    ids = [f"{prefix}{i}" for i in range(5)]
+    for i, node_id in enumerate(ids):
+        graph.add_node(node_id, lat, lon + i * 0.0001)
+    for a, b in zip(ids, ids[1:]):
+        graph.add_edge(a, b, 10.0, 10.0)
+    return ids
+
+
+def _disconnected_and_connected_graphs():
+    """(graph without the connector, graph with it), same stops snappable."""
+    small = routing.Graph()
+    a_ids = _cluster(small, "a", *RETRY_STOP_A)
+    b_ids = _cluster(small, "b", *RETRY_STOP_B)
+
+    big = routing.Graph()
+    _cluster(big, "a", *RETRY_STOP_A)
+    _cluster(big, "b", *RETRY_STOP_B)
+    big.add_edge(a_ids[-1], b_ids[0], 850.0, 850.0)
+    return small, big
+
+
+def _patched_extractions(monkeypatch, graphs):
+    """Serve `graphs` from _get_or_build_graph in order; record the radii."""
+    radii = []
+
+    def fake_get_or_build_graph(lat, lon, radius_m, mode, **kwargs):
+        radii.append(radius_m)
+        return graphs[min(len(radii), len(graphs)) - 1]
+
+    monkeypatch.setattr(routing, "_get_or_build_graph", fake_get_or_build_graph)
+    return radii
+
+
+def test_unreachable_pair_retries_at_the_wider_radius_before_estimating(monkeypatch):
+    """Regression: the widen-and-retry loop must retry on *connectivity*, not
+    just on snapping — exactly as _shortest_path does. Two stops whose only
+    connecting road bulges just outside the base circle snap fine at the
+    base radius, so without this the retry never fired and the pair came
+    back as straight-line "estimated" legs that route() would have routed
+    via its own 1.6x retry."""
+    small, big = _disconnected_and_connected_graphs()
+    radii = _patched_extractions(monkeypatch, [small, big])
+
+    result = routing.optimize_route([RETRY_STOP_A, RETRY_STOP_B], mode="walk")
+    assert "estimated" not in result
+    assert all("estimated" not in leg for leg in result["legs"])
+    assert len(radii) == 2
+    assert radii[1] == pytest.approx(radii[0] * routing.ROUTE_RADIUS_RETRY_FACTOR)
+
+
+def test_snap_failure_at_the_retry_radius_falls_back_to_the_estimated_matrix(monkeypatch):
+    """The wider extraction can lose a stop's fragment to the segment cap;
+    that must fall back to the base radius's estimated answer, never raise
+    NoGraphNearby for a stop that already snapped."""
+    small, _ = _disconnected_and_connected_graphs()
+    empty_near_b = routing.Graph()
+    _cluster(empty_near_b, "a", *RETRY_STOP_A)  # stop B has nothing to snap to
+    radii = _patched_extractions(monkeypatch, [small, empty_near_b])
+
+    result = routing.optimize_route([RETRY_STOP_A, RETRY_STOP_B], mode="walk")
+    assert len(radii) == 2
+    assert result["estimated"] is True
+    assert any(leg.get("estimated") for leg in result["legs"])
+
+
+def test_still_unreachable_at_the_retry_radius_is_estimated_not_an_error(monkeypatch):
+    """A genuinely disconnected pair stays an estimate after both radii."""
+    small, _ = _disconnected_and_connected_graphs()
+    radii = _patched_extractions(monkeypatch, [small, small])
+
+    result = routing.optimize_route([RETRY_STOP_A, RETRY_STOP_B], mode="walk")
+    assert len(radii) == 2
+    assert result["estimated"] is True
+
+
 # --- validation and caps -------------------------------------------------
 
 
@@ -520,6 +606,70 @@ def test_the_widened_extraction_bound_covers_the_whole_accepted_span_range():
         worst_enclosing_m = cap_m / math.sqrt(3.0)
         needed_m = worst_enclosing_m * routing.RADIUS_BUFFER + routing.SNAP_RADIUS_M
         assert needed_m <= routing.STOPS_MAX_EXTRACTION_RADIUS_M[mode]
+
+
+def _geodesic_destination(lat, lon, bearing_deg, distance_m):
+    """Great-circle destination point — exact spherical, not projected."""
+    earth_r = 6_371_000.0
+    bearing = math.radians(bearing_deg)
+    d = distance_m / earth_r
+    lat1, lon1 = math.radians(lat), math.radians(lon)
+    lat2 = math.asin(
+        math.sin(lat1) * math.cos(d) + math.cos(lat1) * math.sin(d) * math.cos(bearing)
+    )
+    lon2 = lon1 + math.atan2(
+        math.sin(bearing) * math.sin(d) * math.cos(lat1),
+        math.cos(d) - math.sin(lat1) * math.sin(lat2),
+    )
+    return math.degrees(lat2), math.degrees(lon2)
+
+
+def test_a_near_cap_equilateral_triple_at_high_latitude_is_accepted():
+    """Regression: the Jung-bound headroom must be latitude-aware.
+
+    Three stops equally spaced on a geodesic circle at 82N, every pair
+    ~95.4km apart — just under drive's straight-line cap, so route() would
+    happily route each pair. The equirectangular projection inside
+    _minimum_enclosing_center scales longitudes by cos(mid-lat) while the
+    true scale at each stop is cos(lat), an error of ~ tan(lat) *
+    lat_extent/2 (~1.7% here) — so the chosen center's re-measured haversine
+    radius lands ~1.3% over the planar span/sqrt(3) bound, past the flat 1%
+    JUNG_BOUND_HEADROOM. Under the old constant cap the safety net in
+    _stops_extraction_geometry rejected this set route_too_long; the
+    latitude-aware cap in _stops_radius_cap_m accepts it.
+    """
+    circumradius_m = 55_093.5
+    stops = [
+        _geodesic_destination(82.0, 20.0, 60.0 + 120.0 * k, circumradius_m)
+        for k in range(3)
+    ]
+    span_m = max(
+        routing._haversine_m(*a, *b) for a, b in itertools.combinations(stops, 2)
+    )
+    assert span_m < routing.ROUTE_MAX_STRAIGHT_LINE_M["drive"]  # inside the cap
+
+    # The distortion really does overshoot the old constant cap: this is the
+    # case the old code rejected, not a set that fit all along.
+    _, _, radius_m = routing._stops_extraction_geometry(stops, "drive")
+    assert radius_m > routing.STOPS_MAX_EXTRACTION_RADIUS_M["drive"]
+    assert radius_m <= routing._stops_radius_cap_m(stops, "drive")
+    assert min(_extraction_margins(stops, "drive")) >= routing.SNAP_RADIUS_M
+
+
+def test_the_latitude_aware_cap_reduces_to_the_constant_at_low_latitude():
+    """Near the equator the distortion term is negligible: the per-set cap
+    is the published constant plus a vanishing sliver, and it is clamped at
+    the sqrt(3) ceiling (center-on-a-stop coverage) toward the poles rather
+    than growing without bound with tan(lat)."""
+    equator = [(0.0, 0.0), (0.01, 0.01), (-0.01, 0.02)]
+    assert routing._stops_radius_cap_m(equator, "walk") == pytest.approx(
+        routing.STOPS_MAX_EXTRACTION_RADIUS_M["walk"], rel=1e-3
+    )
+
+    polar = [(89.99, 0.0), (89.2, 10.0), (89.5, -120.0)]
+    span_cap_m = routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"]
+    ceiling_m = span_cap_m * routing.RADIUS_BUFFER + routing.SNAP_RADIUS_M
+    assert routing._stops_radius_cap_m(polar, "walk") == pytest.approx(ceiling_m)
 
 
 def test_a_stop_set_over_the_span_cap_is_still_rejected_honestly():
