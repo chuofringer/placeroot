@@ -35,6 +35,7 @@ from placeroot import (
     overture,
     prompts,
     release,
+    resources,
     routing,
     simplify,
     tool_profiles,
@@ -1312,18 +1313,12 @@ def data_version() -> dict:
     the process lifetime — this tool just reports that cached value, it
     doesn't re-check upstream, so it's small and has no upstream DB
     dependency.
+
+    The body is resources.data_version_payload(), shared verbatim with the
+    placeroot://data-version MCP resource so the two surfaces cannot drift
+    (issue #195); tests/test_resources.py asserts they stay equal.
     """
-    info = release.resolve_release_info()
-    release_str = info["release"]
-    return {
-        "release": release_str,
-        "release_date": release_str.rsplit(".", 1)[0],
-        "source": info["source"],
-        "note": (
-            "Overture ships ~monthly; resolved once at server start and "
-            "cached for the process."
-        ),
-    }
+    return resources.data_version_payload()
 
 
 _UNSET = object()
@@ -1350,6 +1345,11 @@ def build_server(spec=_UNSET) -> MCPServer:
                 title=_TOOL_TITLES[name],
                 annotations=_TOOL_ANNOTATIONS.get(name, _READ_ONLY_ANNOTATIONS),
             )(fn)
+    # Resources are registered whatever the selection: they never appear in
+    # tools/list, so they cost a subset install nothing, and
+    # placeroot://data-version is worth having precisely when the
+    # data_version tool was left out of the selection (#195).
+    resources.register(server)
     # One line at startup naming what got registered. An empty or
     # whitespace-only PLACEROOT_TOOLS is legal and means "everything", which
     # is indistinguishable from a subset that silently didn't apply unless

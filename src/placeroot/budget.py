@@ -15,6 +15,11 @@ import os
 
 DEFAULT_TOKEN_BUDGET = 2000
 
+# Divisor of the chars/4 heuristic, named so the other places that estimate
+# a payload's size (resources.py sizes its served text, which is indented
+# and so can't go through estimate_tokens) measure in the same unit.
+CHARS_PER_TOKEN = 4
+
 # Stripped from rows, in this order, if dropping rows alone isn't enough
 # to fit a single remaining row within budget.
 OPTIONAL_FIELD_PRIORITY = ["confidence", "operating_status", "category", "basic_category"]
@@ -27,7 +32,7 @@ def token_budget() -> int:
 
 def estimate_tokens(obj) -> int:
     """chars/4 heuristic for estimated token count of obj's JSON form."""
-    return len(json.dumps(obj, default=str)) // 4
+    return len(json.dumps(obj, default=str)) // CHARS_PER_TOKEN
 
 
 def fit_rows(

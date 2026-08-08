@@ -17,6 +17,10 @@ from root to leaf (the row's own slug is always the last segment).
 
 import importlib.resources
 
+# Overture schema tag the bundled CSV was taken from; see data/README.md,
+# which is the thing to update in lockstep when the snapshot is refreshed.
+SCHEMA_VERSION = "v1.9.0"
+
 _CATEGORIES: list[dict] | None = None
 
 
@@ -46,6 +50,25 @@ def _load_categories() -> list[dict]:
 
     _CATEGORIES = rows
     return _CATEGORIES
+
+
+def taxonomy_summary() -> dict:
+    """Shape of the taxonomy: {"total": int, "top_level": [(name, count), ...]}.
+
+    `top_level` is every root segment of the taxonomy paths with how many
+    slugs sit beneath it, ordered by descending count then name — a stable
+    order that does not depend on CSV row order or dict iteration. Backs
+    the `placeroot://categories` resource (resources.py), which is a
+    summary precisely because the full 2,100-slug list belongs behind
+    search_categories rather than in every conversation's context.
+    """
+    rows = _load_categories()
+    counts: dict[str, int] = {}
+    for row in rows:
+        if row["path"]:
+            counts[row["path"][0]] = counts.get(row["path"][0], 0) + 1
+    top_level = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return {"total": len(rows), "top_level": top_level}
 
 
 def _match_rank(slug: str, query: str) -> int | None:
