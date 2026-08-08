@@ -1,6 +1,6 @@
 """PLACEROOT_TOOLS: load only the tools an install actually uses (issue #182).
 
-The whole 26-tool surface costs ~9.6k estimated tokens of JSON schema in
+The whole 26-tool surface costs ~10.6k estimated tokens of JSON schema in
 every conversation, paid before the agent asks anything. Most installs use
 a slice of it. This module is the single registry mapping a profile name to
 its tools, plus the parser for the `PLACEROOT_TOOLS` env var; server.py
@@ -87,7 +87,7 @@ PROFILES: dict[str, frozenset[str]] = {
     }),
 }
 
-# Registered under every profile. data_version is ~120 tokens of schema and
+# Registered under every profile. data_version is ~180 tokens of schema and
 # it is the only way an agent can tell which Overture release backs the
 # answers it is being given — orientation that every other answer depends
 # on, at a cost too small to be worth making optional.
