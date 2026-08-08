@@ -296,6 +296,55 @@ def build_divisions() -> list[tuple]:
         population=475_503,
         common={"de": "Preßburg", "hu": "Pozsony"},
     )
+    # #221: the two pairs the ranking fix is measured on, each mirroring the
+    # live 2026-07-22.0 shape the R26 probes hit.
+    #
+    # "Zurich" literally matches this tiny Dutch village — and it carries a
+    # population, so the #53 "literal match lacks prominence" gate saw a
+    # good-enough literal answer and never ran the diacritic-folded pass that
+    # is the only way to reach "Zürich" at all (ILIKE '%Zurich%' does not
+    # match "Zürich"). The fold now always runs and ranking decides.
+    add(
+        "gers-div-zurich-ch", "Zürich", "locality", "CH", "CH-ZH",
+        47.37, 8.54, _chain("Switzerland", "Zürich"),
+        population=443_037,
+    )
+    add(
+        "gers-div-zurich-nl", "Zurich", "locality", "NL", "NL-FR",
+        53.13, 5.38, _chain("Netherlands", "Friesland", "Zurich"),
+        population=190,
+    )
+    # "東京" is only a *prefix* of 東京都 (13.9M) but an *exact* match for this
+    # population-less Nagano neighborhood, which is what tier-dominates-
+    # prominence ranking put first. 東京都 already exists above.
+    add(
+        "gers-div-tokyo-nagano", "東京", "neighborhood", "JP", "JP-20",
+        36.65, 138.18, _chain("Japan", "長野県", "東京"),
+    )
+    # #221 regression corpus: two same-named pairs where *both* sides carry a
+    # population, so they pin that populated-vs-populated ordering is
+    # untouched by the prominence rescue — Cambridge UK over Cambridge MA,
+    # Portland OR over Portland ME (real figures, both directions checkable).
+    add(
+        "gers-div-cambridge-gb", "Cambridge", "locality", "GB", "GB-ENG",
+        52.21, 0.12, _chain("United Kingdom", "England", "Cambridge"),
+        population=145_700,
+    )
+    add(
+        "gers-div-cambridge-ma", "Cambridge", "locality", "US", "US-MA",
+        42.37, -71.11, _chain("United States", "Massachusetts", "Cambridge"),
+        population=118_403,
+    )
+    add(
+        "gers-div-portland-or", "Portland", "locality", "US", "US-OR",
+        45.52, -122.68, _chain("United States", "Oregon", "Portland"),
+        population=652_503,
+    )
+    add(
+        "gers-div-portland-me", "Portland", "locality", "US", "US-ME",
+        43.66, -70.26, _chain("United States", "Maine", "Portland"),
+        population=68_408,
+    )
     # #188: a division in a country the addresses theme does NOT cover (GB is
     # not one of addresses.COVERED_COUNTRIES), so address_at has somewhere to
     # resolve "this coordinate is in an uncovered country" from. Deliberately
