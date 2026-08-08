@@ -11,6 +11,7 @@ stays safe under that concurrency.
 """
 
 import argparse
+import inspect
 import logging
 import math
 import os
@@ -63,6 +64,15 @@ DEFAULT_HTTP_PORT = 8321
 # and so never reaches tools/list (issue #182).
 _TOOL_FUNCS: dict[str, Callable] = {}
 
+# The PLACEROOT_TOOLS=progressive meta-tools (issue #210), kept out of
+# _TOOL_FUNCS deliberately: they are a way to reach the surface, not part of
+# it. Everything that reasons about "the tools PlaceRoot has" — the profile
+# definitions, the coverage guard, placeroot_capabilities' own catalog, what
+# placeroot_call will dispatch to — reads _TOOL_FUNCS, and none of those
+# should grow an entry because a meta-tool exists. Titles and annotations
+# still live in the shared dicts below, so registration is one code path.
+_META_TOOL_FUNCS: dict[str, Callable] = {}
+
 # Human-readable display title per tool, keyed by function name (issue #193).
 _TOOL_TITLES: dict[str, str] = {}
 
@@ -113,8 +123,24 @@ _WRITES_A_FILE_ANNOTATIONS = ToolAnnotations(
 # here gets _READ_ONLY_ANNOTATIONS.
 _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {}
 
+# placeroot_call reaches every tool, render_map included, so it inherits the
+# weakest claim any of them makes rather than its own: a dispatcher that
+# advertised readOnlyHint would hand a filesystem write the approval-free
+# path, and the client cannot see which tool a given call will land on.
+# destructive_hint stays False because nothing behind it deletes or
+# overwrites; idempotent_hint False because render_map's timestamped output
+# means a repeat call is not a no-op.
+_DISPATCH_ANNOTATIONS = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
 
-def _tool(title: str, annotations: ToolAnnotations | None = None) -> Callable[[Callable], Callable]:
+
+def _tool(
+    title: str, annotations: ToolAnnotations | None = None, meta: bool = False
+) -> Callable[[Callable], Callable]:
     """Mark a function as an MCP tool with a display title.
 
     Replaces a direct @mcp.tool(). `title` is required rather than
@@ -125,6 +151,10 @@ def _tool(title: str, annotations: ToolAnnotations | None = None) -> Callable[[C
     behavior is not a pure read — pass it at the definition site, next to
     the code that does the writing, so the claim and the behavior are read
     together. Everything else is annotated centrally in build_server().
+
+    `meta` routes the function into _META_TOOL_FUNCS instead: a
+    PLACEROOT_TOOLS=progressive meta-tool is registered exactly like any
+    other tool but is not one of the tools PlaceRoot offers (issue #210).
     """
     if not isinstance(title, str) or not title.strip():
         # Catches the bare `@_tool` (no call) mistake, which would otherwise
@@ -132,7 +162,7 @@ def _tool(title: str, annotations: ToolAnnotations | None = None) -> Callable[[C
         raise TypeError("@_tool requires a non-empty display title, e.g. @_tool(\"Find places\")")
 
     def register(fn: Callable) -> Callable:
-        _TOOL_FUNCS[fn.__name__] = fn
+        (_META_TOOL_FUNCS if meta else _TOOL_FUNCS)[fn.__name__] = fn
         _TOOL_TITLES[fn.__name__] = title
         if annotations is not None:
             _TOOL_ANNOTATIONS[fn.__name__] = annotations
@@ -1636,6 +1666,98 @@ def data_version() -> dict:
     return resources.data_version_payload()
 
 
+# ---------------------------------------------------------------------------
+# PLACEROOT_TOOLS=progressive: the meta surface (issue #210).
+# ---------------------------------------------------------------------------
+
+
+def _arg_summary(fn: Callable) -> str:
+    """A tool's parameters as `required,optional?` — the catalog's arg column.
+
+    Names only, no types: the catalog's budget is the whole point (28 tools
+    have to fit in well under 1k tokens), and the names here are already
+    self-describing (lat, radius_m, limit, category). A caller that guesses
+    a type wrong gets placeroot_call's bad_request naming what the tool
+    accepts, which is cheaper than paying for the types on every catalog
+    read.
+    """
+    return ",".join(
+        name if param.default is inspect.Parameter.empty else f"{name}?"
+        for name, param in inspect.signature(fn).parameters.items()
+    )
+
+
+def _catalog_entry(name: str, fn: Callable) -> str:
+    """`name(args) one-line summary` for one tool.
+
+    The summary is the first paragraph of the tool's own docstring — the
+    same text whose full version is the tool's MCP description on the full
+    surface — so the catalog cannot describe a tool differently from how
+    the tool describes itself, and a reworded tool updates here for free.
+    """
+    doc = inspect.getdoc(fn) or ""
+    summary = " ".join(doc.split("\n\n")[0].split())
+    return f"{name}({_arg_summary(fn)}) {summary}"
+
+
+@_tool("PlaceRoot capabilities", meta=True)
+def placeroot_capabilities() -> dict:
+    """List every PlaceRoot tool: what it answers and what arguments it takes.
+
+    Read this once, then call anything it lists through placeroot_call.
+    The catalog is generated from the tools themselves, so it is always the
+    complete set for this build.
+    """
+    return {
+        "tools": [_catalog_entry(name, fn) for name, fn in _TOOL_FUNCS.items()],
+        "count": len(_TOOL_FUNCS),
+        "usage": (
+            "Call any of these with placeroot_call(tool=<name>, args={...}). "
+            "A trailing ? marks an optional argument; everything else is required. "
+            "Answers come back exactly as the tool would return them directly."
+        ),
+    }
+
+
+@_tool("Call a PlaceRoot tool", annotations=_DISPATCH_ANNOTATIONS, meta=True)
+def placeroot_call(tool: str, args: dict | None = None) -> dict:
+    """Run one PlaceRoot tool by name, with its arguments.
+
+    `tool` is a name from placeroot_capabilities; `args` is an object of that
+    tool's arguments (omit it for the ones that take none). The answer is the
+    tool's own, unchanged. An unknown name comes back as an error listing the
+    valid ones.
+    """
+    fn = _TOOL_FUNCS.get(tool)
+    if fn is None:
+        return {
+            "error": "unknown_tool",
+            "detail": (
+                f"{tool!r} is not a PlaceRoot tool. Call placeroot_capabilities "
+                "for what each one does and what it takes."
+            ),
+            "valid_tools": sorted(_TOOL_FUNCS),
+        }
+    call_args = {} if args is None else args
+    if not isinstance(call_args, dict):
+        return {
+            "error": "bad_request",
+            "detail": (
+                f"args must be an object of {tool}'s arguments, got "
+                f"{type(call_args).__name__}; it accepts: {_arg_summary(fn)}"
+            ),
+        }
+    # Bind before calling so a wrong/missing/misspelled argument is reported
+    # as this dispatcher's bad_request. Calling fn(**args) blind would let
+    # the same TypeError arrive from inside the tool's own body, where it
+    # would surface as a crash rather than as advice about the arguments.
+    try:
+        inspect.signature(fn).bind(**call_args)
+    except TypeError as e:
+        return {"error": "bad_request", "detail": f"{tool}: {e}", "accepts": _arg_summary(fn)}
+    return fn(**call_args)
+
+
 _UNSET = object()
 
 
@@ -1651,7 +1773,10 @@ def build_server(spec=_UNSET) -> MCPServer:
         spec = os.environ.get("PLACEROOT_TOOLS")
     selected = tool_profiles.resolve(spec, set(_TOOL_FUNCS))
     server = MCPServer("placeroot", instructions=BASE_INSTRUCTIONS)
-    for name, fn in _TOOL_FUNCS.items():
+    # One registry for the loop: `progressive` selects meta-tool names, every
+    # other selection selects only real ones, so the two never mix in a
+    # single server even though they are registered by the same code.
+    for name, fn in {**_TOOL_FUNCS, **_META_TOOL_FUNCS}.items():
         if name in selected:
             # Title + hints are applied here, once, for every selected tool —
             # so a subset profile (PLACEROOT_TOOLS=core) is annotated exactly
@@ -1673,7 +1798,13 @@ def build_server(spec=_UNSET) -> MCPServer:
     # tools/list, so they cost a subset install nothing, and a workflow is
     # still worth reading when one of its steps is unavailable. Each one
     # renders a note naming the tools this selection left out (#194).
-    prompts.register(server, selected)
+    #
+    # Under `progressive` nothing is left out — every tool is reachable
+    # through placeroot_call — so the prompts are told the full surface is
+    # available. Passing the three meta-tool names instead would put a note
+    # on every prompt disowning the tools its own steps depend on.
+    reachable = set(_TOOL_FUNCS) if selected & tool_profiles.PROGRESSIVE_TOOLS else selected
+    prompts.register(server, reachable)
     requested = (spec or "").strip() or tool_profiles.ALL
     logger.info(
         "registered %d of %d tools (PLACEROOT_TOOLS=%s)",
