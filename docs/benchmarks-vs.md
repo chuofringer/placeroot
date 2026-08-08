@@ -50,7 +50,18 @@ never are.
 - **Our answers come from the committed fixtures**, through the same
   `placeroot.server` functions the MCP server exposes, reusing
   `benchmarks/token_efficiency.py`'s scenario machinery so the two benchmarks
-  cannot drift apart.
+  cannot drift apart — and they are then **snapshotted too**, into
+  [`benchmarks/competitors/placeroot_answers.json`](../benchmarks/competitors/placeroot_answers.json),
+  which records the platform they were captured on. Routing and geometry do
+  floating-point work whose last digits differ between operating systems, and a
+  digit is a character, and characters are what chars/4 counts: a live rerun of
+  these scenarios lands a token or two away on Linux from where it lands on
+  macOS. Publishing from a snapshot is what lets the page be drift-guarded byte
+  for byte everywhere instead of only on the machine that last regenerated it.
+  The live run still happens in the test suite, as a tolerance check that fails
+  if the snapshot drifts from what the code now answers. Only PlaceRoot's
+  *schema surface* is read live — it is platform-independent text, and reading
+  it live is what makes a newly added tool move this page.
 - **One ruler for everyone.** Token counts are the chars/4 heuristic that
   `placeroot.budget.estimate_tokens` already uses to enforce PlaceRoot's own
   response budget, applied identically to all three servers. Unlike
@@ -91,10 +102,11 @@ restates each of these caveats next to the numbers they qualify.
 
 <!-- BEGIN GENERATED: benchmarks/competitor_comparison.py -->
 
-Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Competitor figures come from the snapshots in `benchmarks/competitors/`; PlaceRoot's are measured live against the committed test fixtures. No network, either way.
+Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Every answer figure below — theirs and ours alike — comes from a snapshot committed under `benchmarks/competitors/`; PlaceRoot's schema surface is read live from the tool registry. No network, either way.
 
 - Token counting method: **chars/4 heuristic — `placeroot.budget.estimate_tokens`, applied identically to all three servers**
 - Snapshots captured: **2026-08-08**
+- PlaceRoot's own answers were captured on **macOS-26.3.1-arm64-arm-64bit** (Python 3.11.15, Overture `2026-07-22.0`) and are snapshotted rather than recomputed here: floating-point differences in routing and geometry change digit counts between platforms, so a live rerun costs a few tokens more or less on Linux than on macOS. A tolerance test reruns them for real and fails if this snapshot drifts from what the code now answers.
 - Schema surface, whole install: PlaceRoot **12198** tokens (28 tools) · Mapbox **29295** (29 tools) · Google Maps **655** (7 tools)
 - Schema surface, the six tools each server needs for the scenarios below: PlaceRoot **3513** · Mapbox **13129** (3.7x ours) · Google Maps **500** (5 tools — no isochrone tool exists)
 - Whole-install surface: Mapbox is **2.4x** PlaceRoot's, on 29 tools against 28
@@ -127,6 +139,8 @@ Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Com
 | `matrix_3x3` — 3x3 distance matrix between six points. | **107** | **245** (127 minified) | not measured |
 
 Competitor answers are their real servers' output: each server was run over stdio with its upstream HTTP calls pointed at a local stub replying with the vendor's own documented example response for that endpoint (`benchmarks/competitors/upstream_examples/`). Both pretty-print their JSON with two-space indentation, so the whitespace-free count is shown alongside. PlaceRoot serializes compact, which is why its two numbers are equal.
+
+PlaceRoot's answers were captured the same way, on macOS-26.3.1-arm64-arm-64bit: the six scenarios run through the same `placeroot.server` functions the MCP server exposes, answered from the committed fixtures with the Overture release pinned and the tile cache off.
 
 ### What these numbers are not
 
@@ -161,4 +175,8 @@ MAPBOX_MCP_DIR=./mcp-server GOOGLE_MAPS_MCP_SRC=./servers-archived/src/google-ma
 
 # then update commit hashes and dates in benchmarks/competitors/provenance.json
 uv run python benchmarks/competitor_comparison.py --write
+
+# re-snapshot our own answers as well (records the capturing platform), after a
+# change to what a tool returns:
+uv run python benchmarks/competitor_comparison.py --capture-answers --write
 ```

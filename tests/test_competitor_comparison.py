@@ -5,12 +5,20 @@ output: the whole point of a published head-to-head is that its numbers are
 reproducible, so the generated region of docs/benchmarks-vs.md has to match
 what the script produces right now, byte for byte. That is only safe because
 the comparison deliberately uses a fixed estimator (chars/4, never tiktoken)
-and reads competitor figures from vendored snapshots rather than the network.
+and reads *every* answer figure — the competitors' and our own — from vendored
+snapshots rather than recomputing them. Our answers are snapshotted for the
+same reason theirs are captured once: floating-point differences in routing and
+geometry change digit counts between platforms, so a live rerun of the
+scenarios costs a token or two more on Linux than on macOS, and byte-identity
+would be unachievable across CI runners. The live run is not lost — it moves
+into `test_vendored_placeroot_answers_match_a_live_run_within_tolerance`, which
+fails if the snapshot rots.
 
 If this test fails after a legitimate change — a tool added, a response shape
 edited, a snapshot refreshed — the fix is to rerun:
 
-    uv run python benchmarks/competitor_comparison.py --write
+    uv run python benchmarks/competitor_comparison.py --write   # doc only
+    uv run python benchmarks/competitor_comparison.py --capture-answers --write
 
 benchmarks/ isn't part of the installed package, so the script is loaded by
 file path, the same way tests/test_benchmark_script.py loads its sibling.
@@ -98,12 +106,57 @@ def test_upstream_examples_are_json_and_all_are_used():
 
 
 def test_placeroot_answers_every_scenario_from_fixtures_without_network():
-    answers = competitor_comparison.placeroot_answers()
+    answers = competitor_comparison.live_placeroot_answers()
     assert len(answers) == len(competitor_comparison.SCENARIOS)
     for answer in answers:
         assert answer.tokens > 0
         # PlaceRoot serializes compact, so there is no whitespace to strip.
         assert answer.minified_tokens == answer.tokens
+
+
+def test_our_answers_are_vendored_with_the_platform_they_were_captured_on():
+    """Same honesty bar we hold the competitors to: say where a number came from."""
+    snapshot = json.loads(competitor_comparison.PLACEROOT_ANSWERS_PATH.read_text())
+    assert snapshot["captured_on"]
+    assert snapshot["python"]
+    assert snapshot["overture_release"]
+    assert snapshot["method"]
+    captured = {row["scenario"] for row in snapshot["answers"]}
+    assert captured == {key for key, _question, _call in competitor_comparison.SCENARIOS}
+    for row in snapshot["answers"]:
+        assert row["response_text"].strip()
+
+
+def test_vendored_placeroot_answers_match_a_live_run_within_tolerance():
+    """The vendored snapshot of our own answers must not rot as the code changes.
+
+    Deliberately a tolerance, not an equality: routing and geometry do
+    floating-point work whose last digits differ between platforms, so a live
+    rerun lands a few characters — and therefore a token or two, at chars/4 —
+    away from the snapshot. Observed between this repo's macOS and Linux CI
+    runners: route_a_to_b 41 vs 42 tokens, isochrone_15min 208 vs 205. That is
+    the whole reason the published page is built from the snapshot rather than
+    from a live run; pinning equality here would just move the platform
+    dependence into this test.
+
+    A real change in what a tool answers moves the number far more than that
+    and fails here, with the fix being:
+
+        uv run python benchmarks/competitor_comparison.py --capture-answers --write
+    """
+    live = {answer.scenario: answer for answer in competitor_comparison.live_placeroot_answers()}
+    vendored = {
+        answer.scenario: answer for answer in competitor_comparison.vendored_placeroot_answers()
+    }
+    assert live.keys() == vendored.keys()
+    for scenario, snapshot in vendored.items():
+        observed = live[scenario].tokens
+        tolerance = max(10, snapshot.tokens * 0.05)
+        assert abs(observed - snapshot.tokens) <= tolerance, (
+            f"{scenario}: live run answers {observed} tokens, snapshot says "
+            f"{snapshot.tokens} — rerun "
+            "`uv run python benchmarks/competitor_comparison.py --capture-answers --write`"
+        )
 
 
 def test_the_same_estimator_is_applied_to_everyone():
@@ -129,7 +182,12 @@ def test_write_replaces_only_the_generated_region(tmp_path):
     reason="PLACEROOT_TOOLS narrows the registry, so the committed schema surface won't match",
 )
 def test_committed_doc_matches_a_fresh_run():
-    """The drift guard. Rerun the script with --write if this fails."""
+    """The drift guard, byte for byte.
+
+    Safe to pin exactly because every answer figure comes from a committed
+    snapshot and the estimator is fixed; the only live input is the schema
+    surface, which is platform-independent text.
+    """
     text = competitor_comparison.DOC_PATH.read_text()
     start = text.index(competitor_comparison.GENERATED_BEGIN)
     end = text.index(competitor_comparison.GENERATED_END) + len(
@@ -143,6 +201,8 @@ def test_committed_doc_matches_a_fresh_run():
 
 def test_doc_states_the_method_and_the_limitations():
     text = competitor_comparison.DOC_PATH.read_text()
+    snapshot = json.loads(competitor_comparison.PLACEROOT_ANSWERS_PATH.read_text())
+    assert snapshot["captured_on"] in text, "the page must say where our own answers were captured"
     assert "## Honest limitations" in text
     assert "keyless" in text and "live-data" in text
     assert "once per conversation" in text and "per call" in text

@@ -13,13 +13,22 @@ mapbox-mcp/tools_list.json        verbatim `tools/list` reply from their real se
 google-maps-archived/
   tools_list.json                 their MAPS_TOOLS array, evaluated out of index.ts
 answers.json                      what each competitor server really returned, per scenario
+placeroot_answers.json            our own answers, snapshotted the same way, plus the
+                                  platform they were captured on (floating-point digit
+                                  counts differ across OSes, so publishing from a live
+                                  run would make the page platform-dependent)
 upstream_examples/*.json          the vendors' own documented example API responses,
                                   fed to their servers through a local stub during capture
 capture/                          the scripts that produced all of the above (need network,
                                   need Node, run by hand — never by CI or by pytest)
 ```
 
-Refreshing a snapshot: see the last section of
+`placeroot_answers.json` is ours, not a third party's, and is refreshed with
+`uv run python benchmarks/competitor_comparison.py --capture-answers --write`.
+A tolerance test reruns those scenarios for real on every `pytest` and fails if
+the snapshot has drifted from what the code now answers.
+
+Refreshing a competitor snapshot: see the last section of
 [`../../docs/benchmarks-vs.md`](../../docs/benchmarks-vs.md) for the exact
 commands, then update the commit hashes and `captured` date in
 `provenance.json` and rerun

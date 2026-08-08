@@ -1,0 +1,38 @@
+{
+  "captured_on": "macOS-26.3.1-arm64-arm-64bit",
+  "python": "3.11.15",
+  "overture_release": "2026-07-22.0",
+  "method": "benchmarks/competitor_comparison.py --capture-answers: the six scenarios run through the same placeroot.server functions the MCP server exposes, answered from the committed fixtures in tests/fixtures/ with the Overture release pinned and the tile cache off. Snapshotted rather than recomputed at publish time because floating-point differences in routing and geometry change digit counts between platforms, which would make the generated page platform-dependent.",
+  "answers": [
+    {
+      "scenario": "geocode_address",
+      "question": "Geocode one address / place name.",
+      "response_text": "{\"results\":[{\"name\":\"Brooklyn\",\"type\":\"locality\",\"lat\":40.7,\"lon\":-73.9,\"id\":\"gers-div-brooklyn\",\"admin_context\":[\"United States\",\"New York\"],\"rank_score\":1.04},{\"name\":\"Downtown Brooklyn\",\"type\":\"neighborhood\",\"lat\":40.701,\"lon\":-73.901,\"id\":\"gers-div-downtown-brooklyn\",\"admin_context\":[\"United States\",\"New York\",\"Brooklyn\"],\"rank_score\":0.42}]}"
+    },
+    {
+      "scenario": "reverse_geocode",
+      "question": "What address is at this coordinate?",
+      "response_text": "{\"address\":{\"street\":\"Main St\",\"number\":\"74B\",\"postcode\":\"11201\"},\"lat\":40.7,\"lon\":-73.9,\"distance_m\":0.0,\"admin_context\":[\"United States\",\"New York\",\"Brooklyn\"],\"source\":\"address\"}"
+    },
+    {
+      "scenario": "nearest_coffee",
+      "question": "Coffee shops near this point.",
+      "response_text": "{\"results\":[{\"id\":\"68cf6f90c6fddf43e71f6a409cca2b99\",\"name\":\"Cluster Place 160\",\"category\":\"coffee_shop\",\"basic_category\":\"coffee_shop\",\"operating_status\":\"in business\",\"confidence\":0.67,\"brand\":null,\"has_website\":false,\"has_phone\":false,\"lat\":40.699798,\"lon\":-73.899751,\"distance_m\":31.0},{\"id\":\"41b764a2b9ea71e97088d733d7f5898c\",\"name\":\"Cluster Place 000\",\"category\":\"coffee_shop\",\"basic_category\":\"coffee_shop\",\"operating_status\":\"permanently closed\",\"confidence\":0.63,\"brand\":null,\"has_website\":false,\"has_phone\":false,\"lat\":40.699636,\"lon\":-73.900576,\"distance_m\":63.0},{\"id\":\"7f192e986f8adc403ac5c1e38157a30e\",\"name\":\"Cluster Place 104\",\"category\":\"coffee_shop\",\"basic_category\":\"coffee_shop\",\"operating_status\":\"in business\",\"confidence\":0.88,\"brand\":null,\"has_website\":false,\"has_phone\":false,\"lat\":40.700003,\"lon\":-73.898479,\"distance_m\":128.0},{\"id\":\"40800b36379734bf1430798b95033875\",\"name\":\"Cluster Place 056\",\"category\":\"coffee_shop\",\"basic_category\":\"coffee_shop\",\"operating_status\":\"in business\",\"confidence\":0.96,\"brand\":null,\"has_website\":false,\"has_phone\":false,\"lat\":40.700292,\"lon\":-73.898317,\"distance_m\":145.0},{\"id\":\"3d22e4093d5123bdaebdf214dc41569f\",\"name\":\"Cluster Place 176\",\"category\":\"coffee_shop\",\"basic_category\":\"coffee_shop\",\"operating_status\":\"permanently closed\",\"confidence\":0.56,\"brand\":null,\"has_website\":false,\"has_phone\":false,\"lat\":40.701393,\"lon\":-73.899763,\"distance_m\":156.0},{\"id\":\"5f3ff865da8d4c596ea7f40d14130894\",\"name\":\"Cluster Place 048\",\"category\":\"coffee_shop\",\"basic_category\":\"coffee_shop\",\"operating_status\":\"in business\",\"confidence\":0.76,\"brand\":null,\"has_website\":false,\"has_phone\":false,\"lat\":40.698534,\"lon\":-73.898986,\"distance_m\":184.0},{\"id\":\"42beef28cecc1ad0d31138f7be5facb9\",\"name\":\"Cluster Place 096\",\"category\":\"coffee_shop\",\"basic_category\":\"coffee_shop\",\"operating_status\":\"in business\",\"confidence\":0.5,\"brand\":null,\"has_website\":false,\"has_phone\":false,\"lat\":40.698322,\"lon\":-73.898847,\"distance_m\":210.0},{\"id\":\"c3e4d8279247711e822e995284d4f2d8\",\"name\":\"Cluster Place 128\",\"category\":\"coffee_shop\",\"basic_category\":\"coffee_shop\",\"operating_status\":\"in business\",\"confidence\":0.56,\"brand\":null,\"has_website\":false,\"has_phone\":false,\"lat\":40.6984,\"lon\":-73.898515,\"distance_m\":217.0},{\"id\":\"debc8944aea9657c477693675d6be2ea\",\"name\":\"Cluster Place 024\",\"category\":\"coffee_shop\",\"basic_category\":\"coffee_shop\",\"operating_status\":\"in business\",\"confidence\":0.82,\"brand\":null,\"has_website\":false,\"has_phone\":false,\"lat\":40.701439,\"lon\":-73.901866,\"distance_m\":224.0},{\"id\":\"e4ff564c65bca8b302638b78d07d3a3c\",\"name\":\"Cluster Place 120\",\"category\":\"coffee_shop\",\"basic_category\":\"coffee_shop\",\"operating_status\":\"in business\",\"confidence\":0.8,\"brand\":null,\"has_website\":false,\"has_phone\":false,\"lat\":40.699729,\"lon\":-73.902633,\"distance_m\":224.0}]}"
+    },
+    {
+      "scenario": "route_a_to_b",
+      "question": "Route from A to B.",
+      "response_text": "{\"distance_m\":300.0,\"duration_s\":214.3,\"mode\":\"walk\",\"from\":{\"lat\":40.74179861889442,\"lon\":-73.98762611416362},\"to\":{\"lat\":40.74449658371219,\"lon\":-73.98762611416362}}"
+    },
+    {
+      "scenario": "isochrone_15min",
+      "question": "How far can I get in 15 minutes?",
+      "response_text": "{\"center\":{\"lat\":40.748992608123544,\"lon\":-73.97813057088754},\"minutes\":15,\"mode\":\"walk\",\"speed_m_s\":1.4,\"polygon\":{\"type\":\"Polygon\",\"coordinates\":[[[-73.97813057088754,40.747907028242956],[-73.97670764730812,40.747907028242956],[-73.97670764730812,40.748992608123544],[-73.97741910909782,40.748992608123544],[-73.97741910909782,40.749535398063834],[-73.97670764730812,40.749535398063834],[-73.97670764730812,40.75007818800413],[-73.97741910909782,40.75007818800413],[-73.97813057088754,40.75007818800413],[-73.97813057088754,40.748992608123544],[-73.97741910909782,40.748992608123544],[-73.97741910909782,40.74844981818325],[-73.97813057088754,40.74844981818325],[-73.97813057088754,40.747907028242956]]]},\"polygon_method\":\"concave_boundary\",\"stats\":{\"reachable_nodes\":301,\"max_radius_m\":1044.0,\"area_km2\":0.0216},\"truncated\":true}"
+    },
+    {
+      "scenario": "matrix_3x3",
+      "question": "3x3 distance matrix between six points.",
+      "response_text": "{\"elements\":[{\"origin_idx\":0,\"dest_idx\":0,\"distance_m\":0},{\"origin_idx\":0,\"dest_idx\":1,\"distance_m\":300},{\"origin_idx\":0,\"dest_idx\":2,\"distance_m\":300},{\"origin_idx\":1,\"dest_idx\":0,\"distance_m\":300},{\"origin_idx\":1,\"dest_idx\":1,\"distance_m\":0},{\"origin_idx\":1,\"dest_idx\":2,\"distance_m\":424},{\"origin_idx\":2,\"dest_idx\":0,\"distance_m\":300},{\"origin_idx\":2,\"dest_idx\":1,\"distance_m\":424},{\"origin_idx\":2,\"dest_idx\":2,\"distance_m\":0}]}"
+    }
+  ]
+}

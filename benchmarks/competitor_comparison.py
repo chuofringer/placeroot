@@ -8,17 +8,28 @@ other MCP servers an agent might install for spatial questions:
 - **Google Maps MCP**, the archived Anthropic reference server
   (github.com/modelcontextprotocol/servers-archived, `src/google-maps`).
 
-Everything about the competitors comes from snapshots vendored under
-`benchmarks/competitors/`, with repo, commit and capture date recorded in
-`benchmarks/competitors/provenance.json`. Nothing here touches the network:
-their tool lists and their answers were captured once, by the scripts in
-`benchmarks/competitors/capture/`, and committed. PlaceRoot's own numbers are
-measured live — schema surface from the registry, answers from the committed
-test fixtures — reusing `token_efficiency`'s machinery so the two benchmarks
-cannot drift apart.
+Every published figure is a pure function of committed files. Competitor tool
+lists and answers are snapshots under `benchmarks/competitors/`, captured once
+by the scripts in `benchmarks/competitors/capture/`, with repo, commit and
+capture date in `benchmarks/competitors/provenance.json`. *Our* answers are
+snapshotted the same way, in `benchmarks/competitors/placeroot_answers.json` —
+held to the rule we hold them to, and for a concrete reason: routing and
+geometry do floating-point work whose last digits differ between platforms, so
+a live rerun of the scenarios costs a few tokens more or less on Linux than on
+macOS, and a page rebuilt from live numbers could never be drift-guarded byte
+for byte. The live run still happens — in the tolerance test in
+tests/test_competitor_comparison.py, which fails if the snapshot rots.
+
+PlaceRoot's *schema surface* is still read live from the registry: it is exact
+integer-free text, identical on every platform, and reading it live is what
+makes a newly added tool move this page.
 
     uv run python benchmarks/competitor_comparison.py           # print the report
     uv run python benchmarks/competitor_comparison.py --write   # + update docs/benchmarks-vs.md
+    uv run python benchmarks/competitor_comparison.py --capture-answers  # re-snapshot ours
+
+Scenario machinery is reused from `token_efficiency` so the two benchmarks
+cannot drift apart.
 
 Token counting is the **chars/4 heuristic**, `placeroot.budget.estimate_tokens`,
 applied identically to all three servers. Unlike `token_efficiency.py` this
@@ -32,6 +43,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import platform
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +52,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 COMPETITORS = Path(__file__).resolve().parent / "competitors"
+PLACEROOT_ANSWERS_PATH = COMPETITORS / "placeroot_answers.json"
 DOC_PATH = REPO_ROOT / "docs" / "benchmarks-vs.md"
 GENERATED_BEGIN = "<!-- BEGIN GENERATED: benchmarks/competitor_comparison.py -->"
 GENERATED_END = "<!-- END GENERATED -->"
@@ -53,7 +66,7 @@ token_efficiency = importlib.util.module_from_spec(_SPEC)
 sys.modules.setdefault("token_efficiency", token_efficiency)
 _SPEC.loader.exec_module(token_efficiency)
 
-from placeroot import server  # noqa: E402
+from placeroot import release, server  # noqa: E402
 from placeroot.budget import CHARS_PER_TOKEN  # noqa: E402
 from tests._routing_fixture import build_routing_fixture as fx  # noqa: E402
 from tests.conftest import CENTER_LAT, CENTER_LON  # noqa: E402
@@ -250,7 +263,20 @@ def minified_tokens(text: str) -> int | None:
     return count_tokens(wire_json(parsed))
 
 
-def placeroot_answers() -> list[Answer]:
+def live_placeroot_answers() -> list[Answer]:
+    """Run the six scenarios for real, against the committed fixtures.
+
+    Deterministic on any one machine, but *not* across machines: routing and
+    geometry do floating-point work whose last digits differ between
+    platforms, and a digit is a character, and characters are what chars/4
+    counts. Observed on this benchmark: `route_a_to_b` 41 tokens on macOS
+    against 42 on Linux, `isochrone_15min` 208 against 205.
+
+    So this is not what the published table is built from — see
+    `vendored_placeroot_answers()`. It is what
+    `--capture-answers` records, and what the tolerance test in
+    tests/test_competitor_comparison.py checks the recording against.
+    """
     answers = []
     with fixture_data():
         for key, _question, call in SCENARIOS:
@@ -268,6 +294,66 @@ def placeroot_answers() -> list[Answer]:
                 )
             )
     return answers
+
+
+def vendored_placeroot_answers() -> list[Answer]:
+    """Our own answers, snapshotted the same way the competitors' are.
+
+    Holding all three servers to one rule — the published numbers come from
+    committed files — is what makes `render_generated_section()` a pure
+    function of the repo and lets the drift guard be byte-exact everywhere
+    instead of only on the machine that last regenerated the page.
+    """
+    known = {key for key, _q, _c in SCENARIOS}
+    answers = []
+    for row in json.loads(PLACEROOT_ANSWERS_PATH.read_text())["answers"]:
+        if row["scenario"] not in known:
+            raise KeyError(f"placeroot_answers.json holds an unknown scenario: {row['scenario']}")
+        text = row["response_text"]
+        answers.append(
+            Answer(
+                server=PLACEROOT,
+                scenario=row["scenario"],
+                tokens=count_tokens(text),
+                chars=len(text),
+                minified_tokens=count_tokens(text),
+            )
+        )
+    return answers
+
+
+def capture_placeroot_answers() -> None:
+    """Rewrite the vendored snapshot of our own answers from a live run.
+
+    Run by hand, on the machine whose platform the snapshot then records —
+    exactly like the competitors' capture scripts, and for the same reason:
+    a published number has to name where it came from.
+    """
+    with fixture_data():
+        rows = []
+        for key, question, call in SCENARIOS:
+            payload = call()
+            if "error" in payload:
+                raise RuntimeError(f"{key}: PlaceRoot answered with an error: {payload}")
+            rows.append(
+                {"scenario": key, "question": question, "response_text": wire_json(payload)}
+            )
+    snapshot = {
+        "captured_on": platform.platform(),
+        "python": platform.python_version(),
+        "overture_release": release.PINNED_RELEASE,
+        "method": (
+            "benchmarks/competitor_comparison.py --capture-answers: the six scenarios run "
+            "through the same placeroot.server functions the MCP server exposes, answered "
+            "from the committed fixtures in tests/fixtures/ with the Overture release pinned "
+            "and the tile cache off. Snapshotted rather than recomputed at publish time "
+            "because floating-point differences in routing and geometry change digit counts "
+            "between platforms, which would make the generated page platform-dependent."
+        ),
+        "answers": rows,
+    }
+    PLACEROOT_ANSWERS_PATH.write_text(json.dumps(snapshot, indent=2) + "\n")
+    print(f"Wrote {PLACEROOT_ANSWERS_PATH}", file=sys.stderr)
 
 
 def snapshot_answers() -> list[Answer]:
@@ -292,7 +378,10 @@ def snapshot_answers() -> list[Answer]:
 
 
 def answer_index() -> dict[tuple[str, str], Answer]:
-    return {(a.server, a.scenario): a for a in placeroot_answers() + snapshot_answers()}
+    return {
+        (a.server, a.scenario): a
+        for a in vendored_placeroot_answers() + snapshot_answers()
+    }
 
 
 # ----------------------------------------------------------------------
@@ -381,6 +470,7 @@ def render_generated_section() -> str:
         for k in measured
     )
 
+    ours_snapshot = json.loads(PLACEROOT_ANSWERS_PATH.read_text())
     not_measured = provenance["answers"]["not_measured"]
     understatements = provenance["answers"]["known_understatements"]
 
@@ -389,12 +479,19 @@ def render_generated_section() -> str:
             GENERATED_BEGIN,
             "",
             "Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. "
-            "Competitor figures come from the snapshots in `benchmarks/competitors/`; "
-            "PlaceRoot's are measured live against the committed test fixtures. No network, "
-            "either way.",
+            "Every answer figure below — theirs and ours alike — comes from a snapshot "
+            "committed under `benchmarks/competitors/`; PlaceRoot's schema surface is read "
+            "live from the tool registry. No network, either way.",
             "",
             f"- Token counting method: **{TOKENIZER_LABEL}**",
             f"- Snapshots captured: **{provenance['captured']}**",
+            f"- PlaceRoot's own answers were captured on **{ours_snapshot['captured_on']}** "
+            f"(Python {ours_snapshot['python']}, Overture "
+            f"`{ours_snapshot['overture_release']}`) and are snapshotted rather than "
+            "recomputed here: floating-point differences in routing and geometry change "
+            "digit counts between platforms, so a live rerun costs a few tokens more or "
+            "less on Linux than on macOS. A tolerance test reruns them for real and fails "
+            "if this snapshot drifts from what the code now answers.",
             f"- Schema surface, whole install: PlaceRoot **{ours.tokens}** tokens "
             f"({ours.tool_count} tools) · Mapbox **{mapbox.tokens}** ({mapbox.tool_count} tools) "
             f"· Google Maps **{google.tokens}** ({google.tool_count} tools)",
@@ -427,6 +524,11 @@ def render_generated_section() -> str:
             "two-space indentation, so the whitespace-free count is shown alongside. "
             "PlaceRoot serializes compact, which is why its two numbers are equal.",
             "",
+            f"PlaceRoot's answers were captured the same way, on "
+            f"{ours_snapshot['captured_on']}: the six scenarios run through the same "
+            "`placeroot.server` functions the MCP server exposes, answered from the "
+            "committed fixtures with the Overture release pinned and the tile cache off.",
+            "",
             "### What these numbers are not",
             "",
             *[f"- {line}" for line in understatements],
@@ -455,7 +557,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="rewrite the generated numbers section of docs/benchmarks-vs.md",
     )
+    parser.add_argument(
+        "--capture-answers",
+        action="store_true",
+        help=(
+            "re-snapshot PlaceRoot's own scenario answers into "
+            "benchmarks/competitors/placeroot_answers.json from a live fixture run, "
+            "recording the platform it was captured on"
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.capture_answers:
+        capture_placeroot_answers()
 
     section = render_generated_section()
     print(section)
