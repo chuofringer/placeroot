@@ -94,6 +94,26 @@ Prompts cost **zero tokens in `tools/list`** — a client fetches them only on `
 
 They are also registered under **every** `PLACEROOT_TOOLS` selection, including subsets that drop tools a prompt names — a workflow is still worth reading when one step is unavailable, and it costs a subset install nothing. When the active selection excludes a referenced tool, the rendered prompt ends with a note naming it and telling the agent to route around the gap rather than to attempt a call that would fail.
 
+## Resources
+
+Two MCP **resources** expose the server's argument-free lookups as attachable context, so you can pin them into a conversation without spending a tool call:
+
+| Resource | Contents |
+|---|---|
+| `placeroot://data-version` | The resolved Overture release, its date, and how it was resolved (discovery, env override, or the pinned fallback). Same values the `data_version` tool returns — one shared code path, so they cannot drift. |
+| `placeroot://categories` | Summary of the place-category taxonomy: all 22 top-level categories with how many slugs sit under each, plus how to get an exact slug. ~530 tokens — a summary, not the 2,117-slug CSV, which stays behind `search_categories`. |
+
+In Claude Code they auto-complete as @-mentions:
+
+```
+@placeroot:placeroot://data-version
+@placeroot:placeroot://categories
+```
+
+Claude Desktop and Cursor list them in their own attachment pickers.
+
+Like prompts, resources are registered under **every** `PLACEROOT_TOOLS` selection: they never appear in `tools/list`, so gating them would save a subset install nothing. A test asserts `tools/list` is byte-identical with and without them registered.
+
 ## Loading fewer tools (`PLACEROOT_TOOLS`)
 
 All 25 tool schemas cost roughly **9.2k tokens** of every conversation's context, paid before the agent asks anything — about the cost of 70 median answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS` selects which tools get registered. Unselected tools are never registered and never appear in `tools/list`.
