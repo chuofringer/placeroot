@@ -47,6 +47,16 @@ machinery, the raw-payload comparator helpers) is also exercised offline in
 rest of the test suite uses — `uv run pytest` runs that as part of the
 normal suite, no network required.
 
+## The other half of the cost: the schema surface
+
+This benchmark measures the tokens an *answer* costs. The tool schemas cost
+tokens too — ~7.6k estimated tokens across all 22 tools, paid once per
+conversation before the agent asks anything, which is roughly 56 median
+answers' worth. That side isn't reduced by better answers; it's reduced by
+registering fewer tools. See `PLACEROOT_TOOLS` in the top-level README
+(issue #182) for the profiles and their measured per-profile surface —
+`core` is ~54% smaller, `routing` ~76%.
+
 ## Task categories and what "raw" means per category
 
 Every task calls placeroot's tool(s) through `placeroot.server`'s plain

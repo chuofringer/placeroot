@@ -15,6 +15,7 @@ import logging
 import math
 import os
 import threading
+from collections.abc import Callable
 
 from mcp.server.mcpserver import MCPServer
 
@@ -32,6 +33,7 @@ from placeroot import (
     release,
     routing,
     simplify,
+    tool_profiles,
 )
 from placeroot import geocode as geocoding
 
@@ -45,10 +47,20 @@ BASE_INSTRUCTIONS = (
     "raising limit."
 )
 
-mcp = MCPServer("placeroot", instructions=BASE_INSTRUCTIONS)
-
 DEFAULT_HTTP_HOST = "127.0.0.1"
 DEFAULT_HTTP_PORT = 8321
+
+# Every @_tool function, in definition order. Registration is deferred to
+# build_server() so PLACEROOT_TOOLS can select a subset *before* anything is
+# registered — a tool outside the selection never reaches the MCP server,
+# and so never reaches tools/list (issue #182).
+_TOOL_FUNCS: dict[str, Callable] = {}
+
+
+def _tool(fn: Callable) -> Callable:
+    """Mark a function as an MCP tool. Replaces a direct @mcp.tool()."""
+    _TOOL_FUNCS[fn.__name__] = fn
+    return fn
 
 
 def _upstream_error(e: Exception) -> dict:
@@ -121,7 +133,7 @@ def _with_category_hint(payload: dict, category: str | None, widen_hint: str) ->
     return payload
 
 
-@mcp.tool()
+@_tool
 def find_places(
     lat: float | None = None,
     lon: float | None = None,
@@ -271,7 +283,7 @@ def find_places(
     return _with_category_hint(payload, category, widen_hint="widen radius_m")
 
 
-@mcp.tool()
+@_tool
 def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
     """Summarize what's in an area: total places and top categories.
 
@@ -290,7 +302,7 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
     return _with_degraded_fields(budget.apply_budget(result, "top_categories"))
 
 
-@mcp.tool()
+@_tool
 def place_details(
     id: str | None = None,
     name: str | None = None,
@@ -339,7 +351,7 @@ def place_details(
     return _with_degraded_fields(result)
 
 
-@mcp.tool()
+@_tool
 def within_distance(
     lat: float,
     lon: float,
@@ -368,7 +380,7 @@ def within_distance(
     return _with_degraded_fields(result)
 
 
-@mcp.tool()
+@_tool
 def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
     """Straight-line (great-circle) distance in meters between every origin and destination.
 
@@ -420,7 +432,7 @@ def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
     return budget.apply_budget({"elements": elements}, "elements")
 
 
-@mcp.tool()
+@_tool
 def compare_areas(areas: list[dict], radius_m: float = 1000) -> dict:
     """Compare 2-5 areas side by side: category mix, density, and what differs.
 
@@ -454,7 +466,7 @@ def compare_areas(areas: list[dict], radius_m: float = 1000) -> dict:
     return _with_degraded_fields(budget.apply_budget(result, "differentiators"))
 
 
-@mcp.tool()
+@_tool
 def admin_lookup(lat: float, lon: float) -> dict:
     """Containing admin hierarchy for a point: neighborhood up to country.
 
@@ -478,7 +490,7 @@ def admin_lookup(lat: float, lon: float) -> dict:
     return budget.apply_budget(result, "chain")
 
 
-@mcp.tool()
+@_tool
 def summarize_buildings(
     lat: float, lon: float, radius_m: float = buildings.DEFAULT_SUMMARIZE_RADIUS_M
 ) -> dict:
@@ -507,7 +519,7 @@ def summarize_buildings(
     return _with_buildings_degraded_fields(result)
 
 
-@mcp.tool()
+@_tool
 def buildings_at(
     lat: float,
     lon: float,
@@ -538,7 +550,7 @@ def buildings_at(
     return _with_buildings_degraded_fields(budget.apply_budget({"results": rows}, "results"))
 
 
-@mcp.tool()
+@_tool
 def land_use_at(lat: float, lon: float) -> dict:
     """What kind of land is this: land use and land cover classification at a point.
 
@@ -573,7 +585,7 @@ def land_use_at(lat: float, lon: float) -> dict:
     return result
 
 
-@mcp.tool()
+@_tool
 def geocode(query: str, limit: int = 5) -> dict:
     """Free-text place name -> ranked candidate locations, from Overture divisions and places.
 
@@ -600,7 +612,7 @@ def geocode(query: str, limit: int = 5) -> dict:
     return payload
 
 
-@mcp.tool()
+@_tool
 def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
     """Geocode up to 20 free-text queries in one call, one best match each.
 
@@ -643,7 +655,7 @@ def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
     return budget.apply_budget({"results": rows}, "results")
 
 
-@mcp.tool()
+@_tool
 def search_categories(query: str, limit: int = 8) -> dict:
     """Free text -> valid Overture category slugs, for find_places'/
     summarize_area's `category` param.
@@ -665,7 +677,7 @@ def search_categories(query: str, limit: int = 8) -> dict:
     return budget.apply_budget({"results": rows}, "results")
 
 
-@mcp.tool()
+@_tool
 def resolve_place(
     query: str,
     near_lat: float | None = None,
@@ -703,7 +715,7 @@ def resolve_place(
     return budget.apply_budget({"results": rows}, "results")
 
 
-@mcp.tool()
+@_tool
 def resolve_place_batch(gers_ids: list[str]) -> dict:
     """Resolve up to 25 GERS ids to compact place rows in one call.
 
@@ -749,7 +761,7 @@ def resolve_place_batch(gers_ids: list[str]) -> dict:
     return budget.apply_budget({"results": rows}, "results")
 
 
-@mcp.tool()
+@_tool
 def reverse_geocode(lat: float, lon: float) -> dict:
     """Point -> nearest address (street/number/postcode) and its containing division chain.
 
@@ -768,7 +780,7 @@ def reverse_geocode(lat: float, lon: float) -> dict:
         return _upstream_error(e)
 
 
-@mcp.tool()
+@_tool
 def reverse_geocode_batch(points: list[dict]) -> dict:
     """Reverse-geocode many points in one call, to cut N round-trips down to one.
 
@@ -812,7 +824,7 @@ def reverse_geocode_batch(points: list[dict]) -> dict:
     return budget.apply_budget({"results": rows}, "results")
 
 
-@mcp.tool()
+@_tool
 def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
     """Simplify a GeoJSON geometry to fit a token budget, reporting what was lost.
 
@@ -828,7 +840,7 @@ def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
     except simplify.InvalidGeometry as e:
         return {"error": "invalid_geometry", "detail": e.detail}
 
-@mcp.tool()
+@_tool
 def render_map(result: dict | list, title: str | None = None, inline: bool = False) -> dict:
     """Render find_places/summarize_area JSON (or caller-supplied GeoJSON) as a map.
 
@@ -848,7 +860,7 @@ def render_map(result: dict | list, title: str | None = None, inline: bool = Fal
     """
     return mapview.write_artifact(result, title=title, inline=inline)
 
-@mcp.tool()
+@_tool
 def isochrone(
     lat: float,
     lon: float,
@@ -906,7 +918,7 @@ def isochrone(
         return {"error": "bad_request", "detail": str(e)}
 
 
-@mcp.tool()
+@_tool
 def route(
     from_lat: float,
     from_lon: float,
@@ -967,7 +979,7 @@ def route(
         return {"error": "bad_request", "detail": str(e)}
 
 
-@mcp.tool()
+@_tool
 def data_version() -> dict:
     """Which Overture Maps release backs the answers from every other tool.
 
@@ -989,6 +1001,36 @@ def data_version() -> dict:
             "cached for the process."
         ),
     }
+
+
+_UNSET = object()
+
+
+def build_server(spec=_UNSET) -> MCPServer:
+    """An MCPServer with the PLACEROOT_TOOLS-selected subset registered.
+
+    `spec` defaults to reading the env var, and is a parameter only so
+    tests can build a server for a given selection without touching the
+    process environment. See tool_profiles.py for the grammar; None means
+    "unset", i.e. the full surface.
+    """
+    if spec is _UNSET:
+        spec = os.environ.get("PLACEROOT_TOOLS")
+    selected = tool_profiles.resolve(spec, set(_TOOL_FUNCS))
+    server = MCPServer("placeroot", instructions=BASE_INSTRUCTIONS)
+    for name, fn in _TOOL_FUNCS.items():
+        if name in selected:
+            server.tool()(fn)
+    return server
+
+
+try:
+    mcp = build_server()
+except tool_profiles.InvalidToolSelection as e:
+    # Fail fast, at import, with the message and nothing else — an operator
+    # who typo'd a profile name gets told which names are valid rather than
+    # a traceback, and never a server that quietly loaded everything.
+    raise SystemExit(f"placeroot: {e}") from e
 
 
 def _warm_start() -> None:

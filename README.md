@@ -59,6 +59,43 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 | `simplify_geometry` | Any geometry → simplified to fit a token budget |
 | `data_version` | Which Overture release the answers are drawn from |
 
+## Loading fewer tools (`PLACEROOT_TOOLS`)
+
+All 22 tool schemas cost roughly **7.6k tokens** of every conversation's context, paid before the agent asks anything — about the cost of 56 median answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS` selects which tools get registered. Unselected tools are never registered and never appear in `tools/list`.
+
+```json
+{
+  "mcpServers": {
+    "placeroot": {
+      "command": "uvx",
+      "args": ["placeroot"],
+      "env": { "PLACEROOT_TOOLS": "core" }
+    }
+  }
+}
+```
+
+The value is a comma-separated list of profile names, tool names, or both — the union of everything named:
+
+| `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
+|---|---:|---:|---:|
+| unset / `all` (default) | 22 | ~7,650 | — |
+| `search` | 10 | ~3,880 | 49% |
+| `core` | 8 | ~3,530 | 54% |
+| `routing` | 5 | ~1,870 | 76% |
+| `analysis` | 7 | ~1,620 | 79% |
+| `geometry` | 3 | ~730 | 90% |
+
+- **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `summarize_area`, `route`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering.
+- **`search`** — the find/name/identify family: `find_places`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, and `search_categories`.
+- **`routing`** — `route`, `isochrone`, `distance_matrix`, `within_distance`.
+- **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `admin_lookup`.
+- **`geometry`** — `simplify_geometry`, `render_map`.
+
+`data_version` is registered under every profile: it is ~120 tokens and the only way an agent can tell which Overture release backs its answers.
+
+Profiles may overlap, and a list may mix them with bare tool names — `PLACEROOT_TOOLS=routing,find_places` or `PLACEROOT_TOOLS=find_places,geocode,route`. A name that is neither a profile nor a tool **fails at startup** with the list of valid names, rather than quietly falling back to loading everything.
+
 ## Why
 
 Agents are bad at maps. Existing map tools either require vendor API keys or return payloads far too large for a context window. PlaceRoot's rule: every answer fits in a couple of thousand tokens, and anything bigger comes back as a summary.
