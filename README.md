@@ -11,7 +11,7 @@ PlaceRoot is an MCP server that answers spatial questions from [Overture Maps](h
 
 ## Why PlaceRoot
 
-It is the only keyless MCP server that does real graph routing over global open map data. `isochrone` and `route` walk an actual street graph built from Overture's transportation segments — not a straight-line approximation — anywhere on Earth, with no key, no signup, and no per-call quota. All 23 tools work that way.
+It is the only keyless MCP server that does real graph routing over global open map data. `isochrone` and `route` walk an actual street graph built from Overture's transportation segments — not a straight-line approximation — anywhere on Earth, with no key, no signup, and no per-call quota. All 24 tools work that way.
 
 What it deliberately does not do, because Overture's open data does not carry it:
 
@@ -47,7 +47,7 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 
 ## What it can do
 
-**23 tools**, all returning compact, budgeted answers. Several single-item tools have a `*_batch` sibling that collapses many calls into one round-trip.
+**24 tools**, all returning compact, budgeted answers. Several single-item tools have a `*_batch` sibling that collapses many calls into one round-trip.
 
 | Tool | Answers |
 |---|---|
@@ -61,6 +61,7 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 | `summarize_buildings` | Building stock in an area: count, footprint area, height and use mix |
 | `buildings_at` | Nearest building footprints to a point |
 | `land_use_at` | What kind of land is this: land use and land cover classification at a point |
+| `infrastructure_at` | Infrastructure near a point, nearest first — filter by `subtype`/`infra_class` (e.g. `bridge`, `tower`) to see past the street furniture |
 | `geocode` | Free-text place name → ranked candidates with coordinates and admin context (`geocode_batch` for many at once) |
 | `resolve_place` | Free-text place reference → stable ids an agent can hold onto across turns (`resolve_place_batch`) |
 | `reverse_geocode` | Point → nearest address plus its containing admin areas (`reverse_geocode_batch`) |
