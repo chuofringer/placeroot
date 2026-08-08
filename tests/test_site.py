@@ -26,6 +26,10 @@ _ALLOWED_EXTERNAL_HOSTS = (
     "pypi.org",
     "docs.astral.sh",
     "placeroot.dev",  # og:image / canonical absolute URLs in meta tags
+    # Developer-credit links (footer): the maintainer's site and siblings.
+    "vibemapper.dev",
+    "funradar.app",
+    "flood.live",
 )
 
 # src=/href= values pointing at an external origin.
