@@ -67,27 +67,30 @@ Generated 2026-08-07 by `uv run python benchmarks/token_efficiency.py --write`.
 
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-07-22.0`
-- Tools registered: **22**
-- Total schema surface: **7376 tokens** (29528 chars, 29606 bytes)
-- Schema cost per tool: min 126, median 267, max 1281 tokens
+- Tools registered: **25**
+- Total schema surface: **9192 tokens** (36799 chars, 36907 bytes)
+- Schema cost per tool: min 126, median 284, max 1285 tokens
 - Median scenario response: **131 tokens** (range 41-702)
-- Break-even: the schema surface costs about as much as **56 median answers**
+- Break-even: the schema surface costs about as much as **70 median answers**
 
 ### Schema surface (paid once per conversation)
 
 | tool | description tokens | inputSchema tokens | total tokens | total chars |
 |---|---:|---:|---:|---:|
-| `find_places` | 942 | 296 | **1281** | 5124 |
-| `route` | 458 | 88 | **575** | 2302 |
+| `find_places` | 946 | 296 | **1285** | 5141 |
+| `places_along_route` | 473 | 167 | **669** | 2678 |
+| `infrastructure_at` | 494 | 118 | **646** | 2587 |
+| `route` | 461 | 88 | **578** | 2313 |
 | `isochrone` | 374 | 115 | **513** | 2052 |
+| `gers_lookup` | 385 | 74 | **486** | 1947 |
 | `place_details` | 259 | 158 | **437** | 1751 |
 | `resolve_place` | 265 | 91 | **384** | 1537 |
 | `render_map` | 243 | 85 | **349** | 1399 |
-| `land_use_at` | 271 | 41 | **336** | 1346 |
+| `land_use_at` | 274 | 41 | **339** | 1359 |
 | `distance_matrix` | 224 | 78 | **326** | 1304 |
 | `resolve_place_batch` | 237 | 42 | **304** | 1217 |
 | `geocode` | 221 | 44 | **284** | 1136 |
-| `search_categories` | 197 | 46 | **267** | 1070 |
+| `search_categories` | 201 | 46 | **272** | 1088 |
 | `buildings_at` | 151 | 91 | **259** | 1038 |
 | `geocode_batch` | 176 | 58 | **258** | 1034 |
 | `compare_areas` | 174 | 61 | **255** | 1020 |
@@ -99,7 +102,7 @@ Generated 2026-08-07 by `uv run python benchmarks/token_efficiency.py --write`.
 | `reverse_geocode` | 111 | 42 | **170** | 682 |
 | `data_version` | 112 | 16 | **144** | 577 |
 | `summarize_area` | 53 | 57 | **126** | 506 |
-| **all 22 tools** | 5166 | 1718 | **7376** | 29528 |
+| **all 25 tools** | 6532 | 2077 | **9192** | 36799 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 
@@ -125,7 +128,7 @@ conclusion rather than the evidence. `benchmarks/token_benchmark.py` (issue
 versus the raw Overture payload an agent would otherwise have had to read
 itself — and the ratios there run into the hundreds and thousands.
 
-**The schema surface is the real cost, and it is not small.** At 22 tools it
+**The schema surface is the real cost, and it is not small.** At 25 tools it
 is thousands of tokens, paid before the agent does anything. The break-even
 line in the generated section is the honest framing: the schemas cost roughly
 what several dozen answers cost. An agent that asks two spatial questions in
