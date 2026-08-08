@@ -526,18 +526,32 @@ class Graph:
         # street being one-way for cars doesn't disconnect it as a
         # geometric/topological fragment).
         self._undirected_neighbors: dict[str, set[str]] = {}
-        # (node_a, node_b) -> (weight, [(lon, lat), ...], dropped_m): the
-        # source segment's shape vertices strictly *between* the two nodes,
-        # in a -> b order, plus how far GRAPH_SHAPE_EPSILON_M pruning moved
-        # the retained shape off the source geometry. Only edges that
-        # actually bend carry an entry, so a grid of straight segments
-        # stores nothing. Read back through shape_between() so an emitted
-        # route line follows the real road rather than cutting the chord
-        # across every curve (#161 sweep). Parallel edges between the same
-        # node pair keep the lowest-weight shape, which is the one dijkstra
-        # would have taken.
+        # True when this graph was built with want_shapes (build_graph) and
+        # therefore carries edge shape vertices. False graphs are cheaper by
+        # ~31% of their memory and are never handed to a path request — see
+        # _get_or_build_graph's cache-lookup rule.
+        self.has_shapes: bool = False
+        # (from_node, to_node) -> (weight, [(lon, lat), ...], dropped_m,
+        # reversed): the source segment's shape vertices strictly *between*
+        # the two nodes, plus how far GRAPH_SHAPE_EPSILON_M pruning moved the
+        # retained shape off the source geometry. Only edges that actually
+        # bend carry an entry, so a grid of straight segments stores nothing.
+        # Read back through shape_between() so an emitted route line follows
+        # the real road rather than cutting the chord across every curve
+        # (#161 sweep).
+        #
+        # Keyed by the DIRECTION OF TRAVEL, exactly the identity dijkstra
+        # resolves: an undirected edge registers under both (a, b) and
+        # (b, a) — the second sharing the very same vertex list object, with
+        # `reversed` set so shape_between hands it back in travel order —
+        # while a one-way edge registers only under the direction it can
+        # actually be traversed. Within a direction, parallel edges keep the
+        # lowest weight, which is the one dijkstra would have taken. Keying
+        # by unordered node pair instead (and falling back to (b, a) without
+        # comparing weights) let a *heavier* parallel edge's geometry be
+        # emitted for a traversal dijkstra made over a lighter one.
         self._edge_shapes: dict[
-            tuple[str, str], tuple[float, list[tuple[float, float]], float]
+            tuple[str, str], tuple[float, list[tuple[float, float]], float, bool]
         ] = {}
 
     def add_node(self, node_id: str, lat: float, lon: float) -> None:
@@ -567,25 +581,45 @@ class Graph:
         # would put the emitted line right back on the chord while reporting
         # a deviation of 0.0.
         if shape or shape_dropped_m:
-            existing = self._edge_shapes.get((a, b))
-            if existing is None or weight < existing[0]:
-                self._edge_shapes[(a, b)] = (weight, shape or [], shape_dropped_m)
+            vertices = shape or []
+            self._register_shape(a, b, weight, vertices, shape_dropped_m, False)
+            if not directed:
+                # Same list object, flagged for reversal on read: the mirror
+                # entry costs a dict slot, not a second copy of the geometry.
+                self._register_shape(b, a, weight, vertices, shape_dropped_m, True)
+
+    def _register_shape(
+        self,
+        frm: str,
+        to: str,
+        weight: float,
+        vertices: list[tuple[float, float]],
+        dropped_m: float,
+        is_reversed: bool,
+    ) -> None:
+        existing = self._edge_shapes.get((frm, to))
+        if existing is None or weight < existing[0]:
+            self._edge_shapes[(frm, to)] = (weight, vertices, dropped_m, is_reversed)
 
     def shape_between(self, a: str, b: str) -> tuple[list[tuple[float, float]], float]:
         """(shape vertices strictly between `a` and `b` in a -> b order, meters dropped).
 
-        Empty and 0.0 when the edge is a straight chord (or unknown). An
-        undirected edge is stored once, under the orientation build_graph
-        walked the source segment in, so the reverse orientation is served
-        by reversing the stored vertex list.
+        Empty and 0.0 when the edge is a straight chord (or unknown, or this
+        graph carries no shapes at all).
+
+        Resolves the same way dijkstra does: among the edges traversable from
+        `a` to `b`, the lowest-weight one. That matters whenever parallel
+        edges connect the same pair — an undirected 50-weight edge bulging
+        north plus a one-way 100-weight edge bulging south, say. Serving the
+        stored (b, a) entry without comparing weights returned the south
+        bulge for a traversal dijkstra made over the north one, so the
+        emitted line was a road the route never used.
         """
         entry = self._edge_shapes.get((a, b))
-        if entry is not None:
-            return entry[1], entry[2]
-        entry = self._edge_shapes.get((b, a))
-        if entry is not None:
-            return list(reversed(entry[1])), entry[2]
-        return [], 0.0
+        if entry is None:
+            return [], 0.0
+        _, vertices, dropped_m, is_reversed = entry
+        return (list(reversed(vertices)) if is_reversed else vertices), dropped_m
 
     def node_count(self) -> int:
         return len(self.adjacency)
@@ -715,9 +749,22 @@ def _oneway_allowed(access_restrictions: list | None, mode: str) -> tuple[bool, 
 
 
 def build_graph(
-    lat: float, lon: float, radius_m: float, mode: str = "walk", speed_m_s: float | None = None
+    lat: float,
+    lon: float,
+    radius_m: float,
+    mode: str = "walk",
+    speed_m_s: float | None = None,
+    want_shapes: bool = False,
 ) -> Graph:
     """Street graph for `mode` within radius_m of (lat, lon).
+
+    want_shapes decides whether the per-edge shape vertices route(
+    include_path=True) needs are computed and retained (Graph.shape_between).
+    They cost ~31% of the graph's memory plus an RDP pass per edge, and
+    isochrone — the heaviest user of the graph cache — never reads them, so
+    they are off by default and requested explicitly. The resulting Graph
+    carries has_shapes so the cache can refuse to serve a shapeless graph to
+    a path request; see _get_or_build_graph.
 
     Raises RadiusTooLarge if radius_m exceeds MODE_CONFIG[mode]'s cap,
     SchemaDegraded if the transportation dataset is missing geometry/bbox,
@@ -812,6 +859,7 @@ def build_graph(
         )
 
     graph = Graph()
+    graph.has_shapes = want_shapes
     graph.weight_is_time = bake_time
     graph.truncated = truncated
     excluded_classes = config["excluded_classes"]
@@ -876,7 +924,9 @@ def build_graph(
             # nodes that is shorter than the length the router charges for
             # it (#161 sweep: a Conzelman Rd switchback came back as a
             # 2-point line 851 m short of its own distance_m).
-            shape, dropped_m = _edge_shape(points, cum, at_a, at_b)
+            shape, dropped_m = (
+                _edge_shape(points, cum, at_a, at_b) if want_shapes else ([], 0.0)
+            )
             if forward_allowed and backward_allowed:
                 graph.add_edge(
                     id_a, id_b, weight, edge_length_m, directed=False,
@@ -1280,7 +1330,12 @@ def clear_graph_cache() -> None:
 
 
 def _get_or_build_graph(
-    lat: float, lon: float, extraction_radius_m: float, mode: str, speed_m_s: float | None
+    lat: float,
+    lon: float,
+    extraction_radius_m: float,
+    mode: str,
+    speed_m_s: float | None,
+    want_shapes: bool = False,
 ) -> Graph:
     """build_graph(...), reusing a cached graph when possible (#39).
 
@@ -1291,6 +1346,24 @@ def _get_or_build_graph(
     GRAPH_CACHE_MARGIN x the requested radius (capped at the mode's max) so
     nearby repeat queries are likely to hit next time, and stored, evicting
     the least-recently-used entry once the cache exceeds GRAPH_CACHE_MAXSIZE.
+
+    want_shapes is a *subsumption* dimension, not part of the cache key. Edge
+    shapes are only read by route(include_path=True), while isochrone — which
+    dominates the cache — never touches them, so building them unconditionally
+    charged every isochrone ~31% extra graph memory across up to
+    GRAPH_CACHE_MAXSIZE cached graphs. But keying on want_shapes instead would
+    store the same area twice, and a plain want_shapes-in-the-key miss risks
+    the opposite failure: quietly handing a shapeless graph to a path request,
+    whose line would then chord every curve while reporting 0.0 deviation.
+
+    So a shape-bearing graph satisfies *any* request, and a shapeless one only
+    satisfies want_shapes=False. A path request that finds only a shapeless
+    entry rebuilds with shapes and overwrites it (same cache key), upgrading
+    the area for everyone rather than doubling it. Lazy in-place enrichment
+    isn't available: the shape vertices come from the source segment geometry,
+    which the Graph doesn't retain, so "computing them later" is the same
+    upstream scan the rebuild does — with the honesty of going through
+    build_graph.
     """
     release_key = release.resolve_release()
     upstream = _upstream_glob()
@@ -1301,13 +1374,17 @@ def _get_or_build_graph(
         for key, entry in _graph_cache.items():
             if key[:4] != key_prefix:
                 continue
+            if want_shapes and not entry.graph.has_shapes:
+                continue
             if _bbox_contains(entry.bbox, needed_bbox):
                 _graph_cache.move_to_end(key)
                 return entry.graph
 
     max_radius_m = MODE_CONFIG[mode]["max_radius_m"]
     padded_radius_m = min(extraction_radius_m * GRAPH_CACHE_MARGIN, max_radius_m)
-    graph = build_graph(lat, lon, padded_radius_m, mode=mode, speed_m_s=speed_m_s)
+    graph = build_graph(
+        lat, lon, padded_radius_m, mode=mode, speed_m_s=speed_m_s, want_shapes=want_shapes
+    )
     extraction_bbox = _bbox_around(lat, lon, padded_radius_m)
 
     with _graph_cache_lock:
@@ -1589,11 +1666,18 @@ def _path_linestring(
     line[0], line[-1] = coords[0], coords[-1]
     if budget.estimate_tokens({"path": geometry}) > max_tokens:
         return None
-    # Two things move the emitted line off the source geometry: the token-fit
-    # simplification here, and the GRAPH_SHAPE_EPSILON_M pruning build_graph
-    # already did. Report the larger — reporting only the first is how a
-    # perfectly-fitting curvy route came back claiming 0.0.
-    return geometry, max(simplified["max_deviation_m"], shape_dropped_m)
+    # Two things move the emitted line off the source geometry, and they
+    # COMPOSE rather than compete: build_graph's GRAPH_SHAPE_EPSILON_M pruning
+    # displaced the retained vertices from the source roads by up to
+    # shape_dropped_m, and the token-fit simplification here displaced the
+    # emitted line from those already-pruned vertices by up to
+    # max_deviation_m. A vertex can be pruned 2m one way and then simplified
+    # 40m further the same way, so the true bound is the sum; reporting the
+    # larger of the two understates it (and reporting only the second is how
+    # a perfectly-fitting curvy route came back claiming 0.0). The sum is a
+    # bound, not a measurement — the two displacements can also partly cancel
+    # — which is what "max_deviation" claims.
+    return geometry, simplified["max_deviation_m"] + shape_dropped_m
 
 
 def route(
@@ -1645,9 +1729,10 @@ def route(
     include_path=True additionally returns "path", a GeoJSON LineString
     tracing the route from A's snapped node to B's — following each
     traversed segment's own shape vertices, not chords between
-    intersections — and "path_max_deviation_m", how far the simplified line
-    strays from that full-fidelity road geometry (0.0 when nothing was
-    dropped, which for a curvy route means the whole shape fit). It is omitted entirely
+    intersections — and "path_max_deviation_m", a bound on how far the
+    emitted line strays from the source road geometry: the build-time shape
+    pruning and the token-fit simplification displace it in turn, so the two
+    are summed (0.0 only when neither dropped anything). It is omitted entirely
     by default — compact-first: most callers want the distance and duration,
     and the polyline is by far the largest thing this tool can return. The
     line is fitted to whatever of the token budget the rest of the response
@@ -1661,7 +1746,9 @@ def route(
     drive, duration_s comes from baked per-edge time weights while
     distance_m is summed length_m independently, so no such identity holds.
     """
-    graph, found = _shortest_path(from_lat, from_lon, to_lat, to_lon, mode)
+    graph, found = _shortest_path(
+        from_lat, from_lon, to_lat, to_lon, mode, want_shapes=include_path
+    )
     if found is None:
         return _no_route_result(from_lat, from_lon, to_lat, to_lon, mode)
 
@@ -1728,8 +1815,14 @@ def _shortest_path(
     to_lat: float,
     to_lon: float,
     mode: str,
+    want_shapes: bool = False,
 ) -> tuple[Graph, tuple[float, float, list[tuple[str, float]]] | None]:
     """(graph, (duration_s, distance_m, path)) for the A->B min-time path.
+
+    want_shapes asks the extraction for per-edge shape vertices; only
+    route(include_path=True) needs them (_path_linestring). places_along_route
+    reads the node sequence and nothing else, so it leaves them off and gets
+    the cheaper graph.
 
     The shared machinery behind route() and places_along_route(): input
     validation, the straight-line/radius caps, the widen-and-retry
@@ -1790,7 +1883,9 @@ def _shortest_path(
         # routes over the same area — and route()/isochrone() over the same
         # area — reuse one extraction instead of paying a fresh multi-second
         # upstream scan each call.
-        graph = _get_or_build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None)
+        graph = _get_or_build_graph(
+            center_lat, center_lon, radius_m, mode, speed_m_s=None, want_shapes=want_shapes
+        )
         if graph.node_count() == 0:
             if is_last and not snapped_both:
                 raise NoGraphNearby(center_lat, center_lon, radius_m)

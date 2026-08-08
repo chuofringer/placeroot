@@ -12,7 +12,7 @@ import math
 
 import pytest
 
-from placeroot import budget, routing, server
+from placeroot import budget, routing, server, simplify
 
 from ._routing_fixture import build_routing_fixture as fx
 
@@ -157,7 +157,7 @@ def test_route_retry_radius_used_after_empty_first_graph():
     retry radius, which here succeeds."""
     calls: list[float] = []
 
-    def fake_build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None):
+    def fake_build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None, **kwargs):
         calls.append(radius_m)
         if len(calls) == 1:
             return routing.Graph()  # empty: node_count() == 0
@@ -191,7 +191,7 @@ def test_route_retry_radius_used_after_snap_failure():
     empty graph."""
     calls: list[float] = []
 
-    def fake_build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None):
+    def fake_build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None, **kwargs):
         calls.append(radius_m)
         g = routing.Graph()
         g.add_node("src", FROM_LAT, FROM_LON)
@@ -224,7 +224,7 @@ def test_route_prefers_no_route_when_retry_radius_fails_after_earlier_snap_succe
     known to be on real street graphs and simply disconnected."""
     calls: list[float] = []
 
-    def fake_build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None):
+    def fake_build_graph(center_lat, center_lon, radius_m, mode, speed_m_s=None, **kwargs):
         calls.append(radius_m)
         if len(calls) == 1:
             g = routing.Graph()
@@ -678,3 +678,167 @@ def test_server_route_schema_exposes_include_path_defaulting_to_false():
     assert prop.get("type") == "boolean"
     assert prop.get("default") is False
     assert "include_path" not in schema.get("required", [])
+
+
+# --- shape identity: the geometry emitted must be the edge dijkstra used ----
+
+
+def _parallel_edge_graph():
+    """A--B twice: an undirected 50-weight edge bulging north, and a one-way
+    B->A 100-weight edge bulging south.
+
+    Dijkstra travelling B->A takes the 50-weight undirected edge (it is
+    traversable in both directions and cheaper), so B->A's geometry is the
+    north bulge, read backwards.
+    """
+    graph = routing.Graph()
+    graph.add_node("A", 37.800000, -122.400000)
+    graph.add_node("B", 37.800000, -122.394000)
+    north = [(-122.398000, 37.801000), (-122.396000, 37.801000)]
+    south = [(-122.396000, 37.799000), (-122.398000, 37.799000)]
+    graph.has_shapes = True
+    graph.add_edge("A", "B", 50.0, 50.0, directed=False, shape=north)
+    graph.add_edge("B", "A", 100.0, 100.0, directed=True, shape=south)
+    return graph, north, south
+
+
+def test_shape_between_picks_the_edge_dijkstra_would_traverse():
+    """Regression (#161 sweep): shape lookup used to fall back to the (b, a)
+    key without comparing weights, so a *parallel* edge's geometry — one
+    dijkstra never traversed — was emitted for the traversal.
+
+    Here B->A resolves to the stored (B, A) entry (the one-way south bulge,
+    weight 100) under the old rule, while dijkstra actually crosses the
+    undirected north bulge at weight 50.
+    """
+    graph, north, south = _parallel_edge_graph()
+
+    # The cheapest B->A edge really is the undirected one.
+    assert min(w for nb, w, _ in graph.adjacency["B"] if nb == "A") == 50.0
+
+    shape, _ = graph.shape_between("B", "A")
+    assert shape == list(reversed(north))
+    assert shape != south
+
+    # ...and the forward direction is unchanged.
+    assert graph.shape_between("A", "B")[0] == north
+
+
+def test_emitted_path_follows_the_traversed_parallel_edge():
+    """The same thing end to end through _path_linestring: the emitted
+    LineString runs north of the chord (the edge dijkstra used), not south."""
+    graph, north, _ = _parallel_edge_graph()
+    geometry, _ = routing._path_linestring(graph, [("B", 0.0), ("A", 50.0)], 500)
+    interior = geometry["coordinates"][1:-1]
+    assert all(lat > 37.800000 for _lon, lat in interior)
+
+
+def test_a_one_way_edges_shape_is_not_offered_for_the_forbidden_direction():
+    """Shapes are keyed by direction of travel, so a one-way edge's geometry
+    never answers for the direction it cannot be driven."""
+    graph = routing.Graph()
+    graph.add_node("A", 37.800000, -122.400000)
+    graph.add_node("B", 37.800000, -122.394000)
+    graph.has_shapes = True
+    graph.add_edge("A", "B", 50.0, 50.0, directed=True, shape=[(-122.397000, 37.801000)])
+    assert graph.shape_between("A", "B")[0] == [(-122.397000, 37.801000)]
+    assert graph.shape_between("B", "A") == ([], 0.0)
+
+
+# --- shapes are opt-in, and the cache never downgrades a path request ------
+
+
+def test_isochrone_graphs_carry_no_edge_shapes():
+    """Isochrone never reads shapes; building them anyway charged every
+    cached isochrone graph ~31% extra memory, x GRAPH_CACHE_MAXSIZE."""
+    routing.clear_graph_cache()
+    routing.isochrone(*SWITCHBACK_START, minutes=5, mode="walk")
+    entries = list(routing._graph_cache.values())
+    assert entries
+    assert all(not entry.graph.has_shapes for entry in entries)
+    assert all(not entry.graph._edge_shapes for entry in entries)
+    routing.clear_graph_cache()
+
+
+def test_build_graph_without_shapes_reports_no_shape_and_no_deviation():
+    graph = routing.build_graph(*SWITCHBACK_START, 1500.0, mode="walk")
+    assert graph.has_shapes is False
+    assert graph._edge_shapes == {}
+    assert graph.shape_between(*list(graph.adjacency)[:2]) == ([], 0.0)
+
+
+def test_a_path_request_is_never_served_a_shapeless_cached_graph():
+    """The shared cache is the trap: isochrone warms an area with a
+    shapeless graph, and a later route(include_path=True) over the same
+    center must still get road-following geometry rather than silently
+    inheriting the cheap graph and chording every curve.
+
+    Same assertion as the switchback test, but with the cache pre-poisoned.
+    """
+    routing.clear_graph_cache()
+    routing.isochrone(*SWITCHBACK_START, minutes=15, mode="walk")
+    assert all(not e.graph.has_shapes for e in routing._graph_cache.values())
+
+    result = routing.route(*SWITCHBACK_START, *SWITCHBACK_END, mode="walk", include_path=True)
+    coords = result["path"]["coordinates"]
+    assert len(coords) > 2
+    assert _linestring_length_m(coords) == pytest.approx(result["distance_m"], rel=0.02)
+    # The area was upgraded in place, not duplicated: some cached graph for
+    # this area now carries shapes.
+    assert any(e.graph.has_shapes for e in routing._graph_cache.values())
+    routing.clear_graph_cache()
+
+
+def test_a_shape_bearing_cached_graph_still_serves_shapeless_requests():
+    """Subsumption runs one way only — the richer graph answers everything,
+    so warming with a path request doesn't force a second extraction."""
+    routing.clear_graph_cache()
+    routing.route(*SWITCHBACK_START, *SWITCHBACK_END, mode="walk", include_path=True)
+    before = len(routing._graph_cache)
+    assert before
+    routing.route(*SWITCHBACK_START, *SWITCHBACK_END, mode="walk")
+    assert len(routing._graph_cache) == before
+    routing.clear_graph_cache()
+
+
+# --- deviation composes ----------------------------------------------------
+
+
+def test_path_deviation_sums_pruning_and_simplification():
+    """Regression (#161 sweep): the two displacements COMPOSE.
+
+    Build-time pruning moves the retained vertices off the source roads;
+    token-fit simplification then moves the emitted line off those
+    already-pruned vertices. A vertex pruned 7.5m one way and simplified
+    30m further the same way is 37.5m off the road, so reporting max() of
+    the two understates what the caller is told is a maximum.
+    """
+    graph = routing.Graph()
+    graph.add_node("A", 37.800000, -122.400000)
+    graph.add_node("B", 37.800000, -122.390000)
+    graph.has_shapes = True
+    zigzag = [
+        (-122.400000 + 0.000500 * i, 37.800000 + (0.000300 if i % 2 else -0.000300))
+        for i in range(1, 20)
+    ]
+    dropped_m = 7.5
+    graph.add_edge("A", "B", 900.0, 900.0, shape=zigzag, shape_dropped_m=dropped_m)
+
+    path = [("A", 0.0), ("B", 900.0)]
+    coords = [[-122.400000, 37.800000], *[[lon, lat] for lon, lat in zigzag]]
+    coords.append([-122.390000, 37.800000])
+
+    # Generous budget: nothing is simplified away, so the whole deviation is
+    # the build-time pruning.
+    _, full_dev = routing._path_linestring(graph, path, 4000)
+    assert full_dev == pytest.approx(dropped_m)
+
+    # Tight budget: simplification bites, and its deviation ADDS to pruning's.
+    tight_tokens = 90
+    _, tight_dev = routing._path_linestring(graph, path, tight_tokens)
+    simplify_dev = simplify.simplify_geometry(
+        {"type": "LineString", "coordinates": coords}, max_tokens=tight_tokens
+    )["max_deviation_m"]
+    assert simplify_dev > 0
+    assert tight_dev == pytest.approx(simplify_dev + dropped_m)
+    assert tight_dev > max(simplify_dev, dropped_m)  # the old, understating rule
