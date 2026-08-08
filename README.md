@@ -9,6 +9,18 @@ PlaceRoot is an MCP server that answers spatial questions from [Overture Maps](h
 - **Boundary-accurate.** Search inside a named place's real administrative polygon, not just a guessed radius circle.
 - **Zero setup.** Reads Overture's public data directly — nothing to install beyond the server itself, no key, no database.
 
+## Why PlaceRoot
+
+It is the only keyless MCP server that does real graph routing over global open map data. `isochrone` and `route` walk an actual street graph built from Overture's transportation segments — not a straight-line approximation — anywhere on Earth, with no key, no signup, and no per-call quota. All 22 tools work that way.
+
+What it deliberately does not do, because Overture's open data does not carry it:
+
+- **No live traffic.** Routing is free-flow; durations do not reflect current conditions.
+- **No opening hours.** Places carry categories, brands and contacts, not schedules.
+- **No ratings or photos.** There is no review corpus and no imagery behind these answers.
+
+If a question needs one of those three, a commercial maps API is the right tool. For where things are, what is around them, and what is reachable from them, PlaceRoot answers without a key.
+
 ## Quick start
 
 Add to Claude Desktop / Claude Code:
@@ -59,7 +71,7 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 | `simplify_geometry` | Any geometry → simplified to fit a token budget |
 | `data_version` | Which Overture release the answers are drawn from |
 
-## Why
+## Design notes
 
 Agents are bad at maps. Existing map tools either require vendor API keys or return payloads far too large for a context window. PlaceRoot's rule: every answer fits in a couple of thousand tokens, and anything bigger comes back as a summary.
 
