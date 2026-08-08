@@ -162,7 +162,7 @@ def tools_registered_now() -> set[str]:
 
 
 def derive_new_tools(since_tag: str | None) -> list[str]:
-    """Tools registered now but not at `since_tag`, in registration order."""
+    """Tools registered now but not at `since_tag`, sorted alphabetically."""
     if since_tag is None:
         return []
     previous = tools_registered_at(since_tag)

@@ -11,6 +11,14 @@ name: Prepare Release
 #
 # Actions → Prepare Release → Run workflow, then review + merge the PR it
 # opens. Merging it deploys the site (deploy-site.yml, on push to main).
+#
+# NOTE: the PR is pushed and opened with the workflow's GITHUB_TOKEN, and
+# GitHub does not trigger on:push/on:pull_request workflows for events that
+# token creates — so the release PR carries NO ci.yml checks and no site
+# preview. The "Verify the bumped tree" step below (ruff + the full offline
+# pytest suite, including the site sync guards) is the verification for that
+# PR. If main ever gains required status checks, switch the checkout/push/PR
+# steps to a GitHub App or PAT token so CI runs on the PR.
 on:
   workflow_dispatch:
     inputs:

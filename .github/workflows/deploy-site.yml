@@ -37,10 +37,12 @@ on:
     types: [published]
   workflow_dispatch:
 
-# Serialize per branch: two pushes to the same branch queue; different
-# branches deploy in parallel (each is its own preview).
+# Serialize per deploy target: two deploys of the same branch queue; different
+# branches deploy in parallel (each is its own preview). Release events run
+# under a tag ref but deploy production, so they share main's group — a
+# merge-then-publish sequence can't race two production deploys.
 concurrency:
-  group: deploy-site-${{ github.ref }}
+  group: deploy-site-${{ github.event_name == 'release' && 'refs/heads/main' || github.ref }}
   cancel-in-progress: false
 
 env:

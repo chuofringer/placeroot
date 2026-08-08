@@ -137,7 +137,8 @@ def test_plan_changes_refuses_a_no_op_bump():
 
 
 def test_plan_changes_writes_nothing():
-    before = {p: p.read_text(encoding="utf-8") for p in bump_version.SITE_PAGES}
+    paths = [*bump_version.SITE_PAGES, bump_version.PYPROJECT, bump_version.NPM_PACKAGE]
+    before = {p: p.read_text(encoding="utf-8") for p in paths}
     bump_version.plan_changes("99.0.0", ["route"], None)
     for path, text in before.items():
         assert path.read_text(encoding="utf-8") == text, f"{path.name} was mutated"
