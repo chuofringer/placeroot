@@ -992,9 +992,12 @@ def places_along_route(
     round trip off and back on, not a re-routed detour — and along_m, how
     far along the route from the origin that place sits, so "roughly
     halfway" is answerable. Results are ordered by along_m (route order,
-    reading as an itinerary) rather than by detour cost, and capped at
-    limit. The response also carries {"route": {"distance_m", "duration_s",
-    "mode"}} for the underlying route.
+    reading as an itinerary) rather than by detour cost. When more than
+    limit places are on the way, the response is an even sample spanning the
+    whole route — never just the first limit, which would drop the far end
+    of the journey — and carries "truncated": true saying so. It also
+    carries {"route": {"distance_m", "duration_s", "mode"}} for the
+    underlying route.
 
     category and name narrow the search exactly as they do in find_places
     (category matches Overture's taxonomy, e.g. 'coffee_shop'; name is a

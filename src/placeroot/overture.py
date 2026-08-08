@@ -563,7 +563,10 @@ def find_places(
 # bound it, so a dense city between two points could otherwise pull an
 # unbounded candidate set into Python for the per-place corridor test. Same
 # "honest partial rather than unbounded" idiom as routing.MAX_GRAPH_SEGMENTS
-# — the caller sees whether the cap was hit and can say so.
+# — the caller sees whether the cap was hit and can say so. A cap always
+# slices by the query's ORDER BY rather than by geography, so callers
+# covering an extended shape should spend this budget over several small
+# boxes (see routing.CORRIDOR_BBOX_CHUNKS) rather than one large one.
 BBOX_MAX_CANDIDATES = 500
 
 
@@ -572,6 +575,7 @@ def find_places_in_bbox(
     category: str | None = None,
     name: str | None = None,
     limit: int = BBOX_MAX_CANDIDATES,
+    near: tuple[float, float] | None = None,
 ) -> tuple[list[dict], bool]:
     """Places whose point falls in an (xmin, ymin, xmax, ymax) box.
 
@@ -588,6 +592,16 @@ def find_places_in_bbox(
     ordered by name then id so the row set is deterministic. category/name
     narrow results with exactly the same semantics as find_places (shared
     _place_category_name_filters).
+
+    `near` is an optional (lat, lon) the rows are ranked by proximity to
+    instead — it decides *which* rows survive `limit` when the box holds
+    more than that, so a capped query returns the places closest to the
+    point of interest rather than an alphabetical slice. The ranking is a
+    cheap planar squared distance (longitude scaled by cos(lat)), which is
+    plenty for an ordering the caller re-measures exactly afterwards; name
+    and id still break ties so the row set stays deterministic. Pass it only
+    for an in-range box: the expression compares raw longitudes, so it would
+    rank the far side of an antimeridian-crossing box as distant.
 
     Returns (rows, capped); capped is True when the query hit `limit` rows,
     meaning the box holds more matching places than were returned and the
@@ -606,6 +620,18 @@ def find_places_in_bbox(
         filters.append("names.primary IS NOT NULL")
     filters.extend(_place_category_name_filters(missing, category, name, params))
 
+    order_by = "name, id"
+    if near is not None:
+        near_lat, near_lon = near
+        params["near_lat"] = near_lat
+        params["near_lon"] = near_lon
+        params["near_coslat"] = max(math.cos(math.radians(near_lat)), 1e-6)
+        order_by = (
+            "(bbox.ymin - $near_lat) * (bbox.ymin - $near_lat)"
+            " + ((bbox.xmin - $near_lon) * $near_coslat)"
+            " * ((bbox.xmin - $near_lon) * $near_coslat), name, id"
+        )
+
     exprs = _place_select_exprs(missing)
     sql = f"""
         SELECT
@@ -622,7 +648,7 @@ def find_places_in_bbox(
             round(bbox.xmin, 6)                 AS lon
         FROM {_from_source(bbox)}
         WHERE {' AND '.join(filters)}
-        ORDER BY name, id
+        ORDER BY {order_by}
         LIMIT {limit}
     """
     try:

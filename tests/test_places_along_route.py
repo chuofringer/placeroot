@@ -72,18 +72,9 @@ BEYOND_LATLON = _offset(*_beyond_east, BEYOND_NORTH_M, 0)
 FAR_LATLON = fx.node_latlon(18, 18)
 
 
-@pytest.fixture
-def corridor_places(tmp_path):
-    """Point the places theme at a fixture built around the routing grid."""
+def _write_places(tmp_path, rows, filename="corridor_places.parquet"):
+    """Build a one-off places parquet from _place_row tuples and activate it."""
     con = duckdb.connect()
-    rows = [
-        _place_row("p-start", "Start Deli", *NEAR_START_LATLON),
-        _place_row("p-mid", "Midway Coffee", *MID_LATLON,
-                   category="coffee_shop", basic_category="coffee_shop"),
-        _place_row("p-end", "Journey's End Bar", *NEAR_END_LATLON),
-        _place_row("p-beyond", "Off Corridor Diner", *BEYOND_LATLON),
-        _place_row("p-far", "Far Corner Shop", *FAR_LATLON),
-    ]
     con.execute("""
         CREATE TABLE places (
             id VARCHAR,
@@ -107,9 +98,22 @@ def corridor_places(tmp_path):
     con.executemany(
         "INSERT INTO places VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
     )
-    places_path = tmp_path / "corridor_places.parquet"
+    places_path = tmp_path / filename
     con.execute(f"COPY places TO '{places_path}' (FORMAT PARQUET)")
     overture.set_data_path(str(places_path))
+
+
+@pytest.fixture
+def corridor_places(tmp_path):
+    """Point the places theme at a fixture built around the routing grid."""
+    _write_places(tmp_path, [
+        _place_row("p-start", "Start Deli", *NEAR_START_LATLON),
+        _place_row("p-mid", "Midway Coffee", *MID_LATLON,
+                   category="coffee_shop", basic_category="coffee_shop"),
+        _place_row("p-end", "Journey's End Bar", *NEAR_END_LATLON),
+        _place_row("p-beyond", "Off Corridor Diner", *BEYOND_LATLON),
+        _place_row("p-far", "Far Corner Shop", *FAR_LATLON),
+    ])
     yield
 
 
@@ -187,9 +191,13 @@ def test_name_filter_composes(corridor_places):
     assert [r["name"] for r in result["results"]] == ["Start Deli"]
 
 
-def test_limit_caps_results_keeping_route_order(corridor_places):
+def test_limit_samples_across_the_route_rather_than_taking_a_prefix(corridor_places):
+    """limit=2 over three corridor places keeps the first and the last, not the
+    first two: a prefix would drop the end of the journey silently."""
     result = _corridor(limit=2)
-    assert [r["name"] for r in result["results"]] == ["Start Deli", "Midway Coffee"]
+    assert [r["name"] for r in result["results"]] == ["Start Deli", "Journey's End Bar"]
+    assert result["truncated"] is True
+    assert "even sample" in result["note"]
 
 
 def test_route_block_matches_the_route_tool(corridor_places):
@@ -277,6 +285,162 @@ def test_truncated_flag_when_graph_is_truncated(corridor_places, monkeypatch):
     assert "size cap" in result["note"]
 
 
+# --- regressions: candidate coverage, truncation, mid-segment distance -------
+
+
+@pytest.fixture
+def alphabetical_decoy_places(tmp_path):
+    """A dense cluster of alphabetically-early places at the route's midpoint.
+
+    599 of them, more than overture.BBOX_MAX_CANDIDATES, all packed against
+    the middle path node — plus one match at the far end. A single query over
+    the whole route's bounding box fills its 500-row cap with "Aaa Shop"
+    rows and never sees the cafe at the end at all; the cluster sits at the
+    route's centre, so ranking that one query by distance from the centre
+    instead would bury the cafe just as thoroughly. Only per-chunk boxes,
+    each with their own share of the budget, reach it.
+    """
+    decoy_lat, decoy_lon = _offset(*fx.node_latlon(2, 4), 30.0, 90)
+    rows = [
+        _place_row(f"decoy-{i:03d}", f"Aaa Shop {i:03d}",
+                   *_offset(decoy_lat, decoy_lon, float(i % 20), 0))
+        for i in range(599)
+    ]
+    rows.append(_place_row("p-zzz", "Zzz Cafe", *_offset(TO_LAT, TO_LON, 20.0, 90),
+                           category="coffee_shop", basic_category="coffee_shop"))
+    _write_places(tmp_path, rows, "decoy_places.parquet")
+    yield
+
+
+def test_dense_alphabetical_cluster_does_not_hide_places_further_along(
+    alphabetical_decoy_places,
+):
+    """Coverage is spatially uniform, not alphabetical: the 599-strong cluster
+    at the start exhausts its own chunk's share of the candidate budget, but
+    the chunk covering the route's end still finds the cafe 20m off it."""
+    result = _corridor(max_detour_m=50.0, limit=overture.MAX_ROWS)
+    names = [r["name"] for r in result["results"]]
+    assert "Zzz Cafe" in names
+    assert names[-1] == "Zzz Cafe"  # last along the route
+    assert sum(1 for n in names if n.startswith("Aaa Shop")) > 0
+
+    # A category filter narrows to it too — the cluster never crowded it out
+    # of the candidate set in the first place.
+    only_cafes = _corridor(max_detour_m=50.0, category="coffee_shop")
+    assert [r["name"] for r in only_cafes["results"]] == ["Zzz Cafe"]
+
+
+@pytest.fixture
+def twelve_delis(tmp_path):
+    """12 delis spread evenly along the whole 300m route, 40m east of it."""
+    rows = []
+    for k in range(12):
+        base = _offset(FROM_LAT, FROM_LON, 300.0 * k / 11.0, 0)
+        rows.append(_place_row(f"deli-{k:02d}", f"Deli {k:02d}", *_offset(*base, 40.0, 90)))
+    _write_places(tmp_path, rows, "deli_places.parquet")
+    yield
+
+
+def test_over_limit_results_span_the_whole_route_and_flag_truncation(twelve_delis):
+    """12 matches at limit=10: the answer reaches the end of the route instead
+    of stopping two-thirds of the way along, and says it dropped some."""
+    result = _corridor(max_detour_m=100.0, limit=10)
+    names = [r["name"] for r in result["results"]]
+
+    assert len(names) == 10
+    assert names[0] == "Deli 00"
+    assert names[-1] == "Deli 11"
+    assert names == sorted(names)  # still route order
+    assert result["truncated"] is True
+    assert "12 places are on the way" in result["note"]
+    assert "even sample" in result["note"]
+
+    # The final third of the route is represented, which a rows[:limit]
+    # prefix (Deli 00..Deli 09) would not be.
+    assert result["results"][-1]["along_m"] == pytest.approx(300.0, abs=5.0)
+
+    # Under the limit, nothing is dropped and nothing is flagged.
+    full = _corridor(max_detour_m=100.0, limit=12)
+    assert len(full["results"]) == 12
+    assert "truncated" not in full
+
+
+@pytest.fixture
+def mid_segment_place(tmp_path):
+    """One place 60m from the middle of the route's first 100m segment.
+
+    Its distance to the nearest path *node* is sqrt(50^2 + 60^2) ~= 78m, so a
+    node-only corridor test excludes it at max_detour_m=70 even though the
+    route passes 60m away.
+    """
+    midpoint = _offset(FROM_LAT, FROM_LON, 50.0, 0)  # halfway to node (2, 3)
+    _write_places(tmp_path, [
+        _place_row("p-block", "Mid Block Bakery", *_offset(*midpoint, 60.0, 90)),
+    ], "mid_segment_places.parquet")
+    yield
+
+
+def test_place_beside_a_segment_midpoint_counts_as_on_the_way(mid_segment_place):
+    """Distance is measured to the route polyline, not to its nodes."""
+    place_latlon = _offset(*_offset(FROM_LAT, FROM_LON, 50.0, 0), 60.0, 90)
+    nearest_node_m = min(
+        routing._haversine_m(*place_latlon, *fx.node_latlon(2, j)) for j in (2, 3, 4, 5)
+    )
+    assert nearest_node_m == pytest.approx(78.1, abs=1.0)  # would fail a 70m node test
+
+    result = _corridor(max_detour_m=70.0)
+    assert [r["name"] for r in result["results"]] == ["Mid Block Bakery"]
+    row = result["results"][0]
+    assert row["detour_m"] == pytest.approx(2 * 60.0, abs=1.0)
+    # along_m is interpolated along the segment, not snapped to an endpoint.
+    assert row["along_m"] == pytest.approx(50.0, abs=2.0)
+
+
+def test_point_to_segment_measures_perpendicular_distance_and_position():
+    a_lat, a_lon = FROM_LAT, FROM_LON
+    b_lat, b_lon = fx.node_latlon(2, 3)  # 100m due north of a
+    p_lat, p_lon = _offset(*_offset(a_lat, a_lon, 25.0, 0), 40.0, 90)
+
+    dist_m, t = routing._point_to_segment_m(p_lat, p_lon, a_lat, a_lon, b_lat, b_lon)
+    assert dist_m == pytest.approx(40.0, abs=0.5)
+    assert t == pytest.approx(0.25, abs=0.01)
+
+    # Past the far end: clamped to B, so the distance is to B itself.
+    beyond = _offset(b_lat, b_lon, 30.0, 0)
+    dist_m, t = routing._point_to_segment_m(*beyond, a_lat, a_lon, b_lat, b_lon)
+    assert t == 1.0
+    assert dist_m == pytest.approx(30.0, abs=0.5)
+
+
+def test_corridor_bbox_wraps_instead_of_spanning_the_globe_at_the_seam():
+    """A path straddling the antimeridian gets a tight box running past +180
+    (which overture folds into two in-range boxes), not a whole latitude band."""
+    xmin, ymin, xmax, ymax = routing._corridor_bbox(
+        [(-17.5, 179.98), (-17.5, -179.98)], 100.0
+    )
+    assert xmin > 179.0
+    assert xmax > 180.0
+    assert xmax - xmin < 1.0
+    assert ymin < -17.5 < ymax
+
+
+def test_path_chunks_overlap_so_every_segment_is_covered():
+    points = [(0.0, float(i), float(i)) for i in range(41)]
+    chunks = routing._path_chunks(points, 20)
+
+    assert len(chunks) == 20
+    assert chunks[0][0] == points[0]
+    assert chunks[-1][-1] == points[-1]
+    # Each chunk ends where the next begins, so no segment falls between two.
+    for earlier, later in zip(chunks, chunks[1:]):
+        assert earlier[-1] == later[0]
+    assert sum(len(c) - 1 for c in chunks) == len(points) - 1
+
+    # Degenerate inputs stay usable rather than producing empty chunks.
+    assert routing._path_chunks(points[:1], 20) == [points[:1]]
+    assert routing._path_chunks(points[:2], 20) == [points[:2]]
+
+
 # --- path tracking ----------------------------------------------------------
 
 
@@ -299,17 +463,6 @@ def test_dijkstra_path_to_target_returns_the_node_chain():
     assert duration_s > 0
 
 
-def test_dijkstra_to_target_still_returns_only_totals():
-    """route()'s existing caller keeps its 2-tuple contract after the path
-    variant was factored out underneath it."""
-    graph = routing._get_or_build_graph(
-        *routing._midpoint(FROM_LAT, FROM_LON, TO_LAT, TO_LON), 800.0, "walk", None
-    )
-    source = routing.snap_to_graph(graph, FROM_LAT, FROM_LON)
-    target = routing.snap_to_graph(graph, TO_LAT, TO_LON)
-    assert len(routing._dijkstra_to_target(graph, source, target, 1.4)) == 2
-
-
 def test_subsample_path_keeps_both_ends_and_respects_the_cap():
     path = [(f"n{i}", float(i)) for i in range(100)]
     sampled = routing._subsample_path(path, 10)
@@ -317,6 +470,19 @@ def test_subsample_path_keeps_both_ends_and_respects_the_cap():
     assert sampled[0] == path[0]
     assert sampled[-1] == path[-1]
     assert routing._subsample_path(path, 500) == path
+
+
+def test_sample_evenly_returns_exactly_count_items_spanning_the_input():
+    items = list(range(1000))
+    for count in (2, 3, 7, 10, 999):
+        sampled = routing._sample_evenly(items, count)
+        assert len(sampled) == count
+        assert sampled[0] == items[0]
+        assert sampled[-1] == items[-1]
+        assert sampled == sorted(sampled)
+    assert routing._sample_evenly(items, 1) == [0]
+    assert routing._sample_evenly(items, 0) == []
+    assert routing._sample_evenly([1, 2], 5) == [1, 2]
 
 
 # --- server tool ------------------------------------------------------------
