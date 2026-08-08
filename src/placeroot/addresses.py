@@ -53,8 +53,29 @@ address with) are essential; every other column degrades to NULL and is
 reported in `degraded_fields`, so a mid-alpha column rename costs attributes
 rather than the whole tool.
 
-Not routed through cache.py's tile cache — same data path _nearest_address
-uses today. That is issue #189's question, deliberately not answered here.
+--- Tile cache ---
+
+Address scans go through cache.py's tile cache under theme "addresses", the
+same way places/buildings/land_use do (issue #189) — a repeat query in an
+already-materialized area reads local parquet instead of re-paying the ~5s
+S3 scan. `_from_source` is this module's copy of the three-line pattern each
+themed module carries (overture._from_source hardcodes type_="place"); it is
+also what geocode._nearest_address calls, so reverse_geocode's address hop
+and address_at share one data path and one set of tiles.
+
+Tiles are materialized SELECT *, as for every other theme. The theme is 7x
+the rows of places (474M vs 68.7M), which raised the fair question of
+whether a per-theme, column-pruned materialization was needed to keep tiles
+inside cache.DEFAULT_MAX_MB. Measured against release 2026-07-22.0, it is
+not: the densest tile we have (tx=-74, ty=40 — Manhattan and most of the
+NYC metro) is 124.9 MB / 1,994,339 address points, against 113.6 MB for the
+*places* tile covering the identical square. Copying only the eight columns
+this module selects produced a byte-identical 124.9 MB, because an address
+point carries almost nothing else — the row count is high but each row is
+tiny, and pruning a schema that is already narrow buys nothing. So there is
+no per-theme column list to keep in sync with REQUIRED_COLUMNS, and the
+existing LRU cap governs addresses tiles exactly as it governs every other
+theme's.
 """
 
 import logging
@@ -62,7 +83,7 @@ from typing import NamedTuple
 
 import duckdb
 
-from placeroot import db, geo, overture
+from placeroot import cache, db, geo, overture, release
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +182,33 @@ def _upstream_glob() -> str:
     return overture._upstream_glob(THEME, type_=TYPE_)
 
 
+def _from_source(bbox: tuple[float, float, float, float]) -> str:
+    """SQL FROM-clause source for an addresses query: local cache tiles, or upstream.
+
+    Mirrors buildings._from_source / land_use._from_source, pinned to this
+    module's theme+type — see the module docstring's "Tile cache" section for
+    why it can't reuse overture._from_source (which hardcodes type_="place").
+
+    Public to the package rather than to this module alone: geocode's
+    reverse_geocode address hop calls it too, so both address readers share
+    one set of tiles.
+    """
+    upstream = _upstream_glob()
+    if cache.enabled():
+        try:
+            with db.conn_lock:
+                paths = cache.local_paths_for_query(
+                    db.shared_conn(), release.resolve_release(), THEME, bbox, upstream,
+                    db.new_connection,
+                )
+        except duckdb.Error as e:
+            raise overture.UpstreamUnavailable(str(e)) from e
+        if paths:
+            joined = ", ".join(f"'{p}'" for p in paths)
+            return f"read_parquet([{joined}])"
+    return f"read_parquet('{upstream}', hive_partitioning=1)"
+
+
 def _check_schema(glob: str) -> list[str]:
     """Missing REQUIRED_COLUMNS for glob, raising SchemaDegraded if any are essential.
 
@@ -219,20 +267,25 @@ def _row_to_result(row: tuple) -> dict:
 
 
 def _scan_addresses(
-    glob: str, columns: str, lat: float, lon: float, radius_m: int, limit: int
+    columns: str, lat: float, lon: float, radius_m: int, limit: int
 ) -> list[tuple]:
     """One radius pass: the `limit` nearest address rows within radius_m.
 
     Split out of the widening loop so the loop can decide, between passes,
     whether widening is worth another remote scan at all (see address_at).
+
+    Reads through the tile cache when one covers this bbox — hence no `glob`
+    parameter: _from_source resolves the source per bbox, and a widening loop
+    is exactly the case where the second pass should reuse what the first
+    materialized.
     """
-    bbox_filter, distance_filter, params, _bbox, _radius = overture.area_geometry(
+    bbox_filter, distance_filter, params, bbox, _radius = overture.area_geometry(
         lat, lon, radius_m
     )
     sql = f"""
         SELECT {columns},
                round({overture.DISTANCE_EXPR}, 1) AS distance_m
-        FROM read_parquet('{glob}', hive_partitioning=1)
+        FROM {_from_source(bbox)}
         WHERE {bbox_filter} AND {distance_filter}
         ORDER BY distance_m, street NULLS LAST, number NULLS LAST
         LIMIT {limit}
@@ -468,7 +521,7 @@ def address_at(lat: float, lon: float, limit: int = DEFAULT_LIMIT) -> dict:
     rows: list[tuple] = []
     country: Country | None = None
     for radius_m in SEARCH_RADII_M:
-        rows = _scan_addresses(glob, columns, lat, lon, radius_m, limit)
+        rows = _scan_addresses(columns, lat, lon, radius_m, limit)
         if len(rows) >= limit:
             break
         if not rows and country is None:
