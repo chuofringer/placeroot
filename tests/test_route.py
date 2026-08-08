@@ -170,13 +170,13 @@ def test_route_retry_radius_used_after_empty_first_graph():
             return None
         return "src" if (lat, lon) == (FROM_LAT, FROM_LON) else "dst"
 
-    def fake_dijkstra_to_target(graph, source, target, speed):
-        return (10.0, 5.0)
+    def fake_dijkstra_path_to_target(graph, source, target, speed):
+        return (10.0, 5.0, [(source, 0.0), (target, 5.0)])
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(routing, "build_graph", fake_build_graph)
         mp.setattr(routing, "snap_to_graph", fake_snap_to_graph)
-        mp.setattr(routing, "_dijkstra_to_target", fake_dijkstra_to_target)
+        mp.setattr(routing, "_dijkstra_path_to_target", fake_dijkstra_path_to_target)
         result = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
 
     assert len(calls) == 2  # first radius attempted, then the retry
@@ -202,13 +202,13 @@ def test_route_retry_radius_used_after_snap_failure():
             return None  # first radius: this endpoint fails to snap
         return "src" if (lat, lon) == (FROM_LAT, FROM_LON) else "dst"
 
-    def fake_dijkstra_to_target(graph, source, target, speed):
-        return (10.0, 5.0)
+    def fake_dijkstra_path_to_target(graph, source, target, speed):
+        return (10.0, 5.0, [(source, 0.0), (target, 5.0)])
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(routing, "build_graph", fake_build_graph)
         mp.setattr(routing, "snap_to_graph", fake_snap_to_graph)
-        mp.setattr(routing, "_dijkstra_to_target", fake_dijkstra_to_target)
+        mp.setattr(routing, "_dijkstra_path_to_target", fake_dijkstra_path_to_target)
         result = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
 
     assert len(calls) == 2
@@ -237,13 +237,13 @@ def test_route_prefers_no_route_when_retry_radius_fails_after_earlier_snap_succe
             return None
         return "src" if (lat, lon) == (FROM_LAT, FROM_LON) else "dst"
 
-    def fake_dijkstra_to_target(graph, source, target, speed):
+    def fake_dijkstra_path_to_target(graph, source, target, speed):
         return None  # no path found on the successfully-snapped first graph
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(routing, "build_graph", fake_build_graph)
         mp.setattr(routing, "snap_to_graph", fake_snap_to_graph)
-        mp.setattr(routing, "_dijkstra_to_target", fake_dijkstra_to_target)
+        mp.setattr(routing, "_dijkstra_path_to_target", fake_dijkstra_path_to_target)
         result = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
 
     assert len(calls) == 2
