@@ -77,6 +77,43 @@ def haversine_sql(
     )
 
 
+def closest_point_sql(
+    geom_expr: str, lat_param: str = "lat", lon_param: str = "lon"
+) -> tuple[str, str]:
+    """(lon_expr, lat_expr) for the point on geom_expr truly nearest the query point.
+
+    ST_ClosestPoint minimizes distance in *degree* space, and a degree of
+    longitude is cos(latitude) shorter on the ground than a degree of
+    latitude. Away from the equator the point it returns is therefore not
+    the nearest one: on a diagonal segment the resulting distance is ~25%
+    too large at 60 deg N and ~63% too large at 70 deg N. That number then
+    feeds both the nearest-first ORDER BY and the `<= radius_m` in-range
+    test, so the error does not merely misreport a distance — it silently
+    drops real features in Norway, Alaska and Iceland and can rank a
+    farther feature first.
+
+    The fix is to run the search in a locally equal-scale space: scale
+    longitude by cos(query latitude) for both the row geometry and the
+    query point (a local equirectangular projection, and over the few
+    kilometres a radius query spans the latitude term is effectively
+    constant), take the closest point there, then divide the longitude back
+    out. The caller haversines the recovered lon/lat exactly as before, so
+    the distance is still a true great-circle metre — only the *choice* of
+    point changes, and it changes to the right one.
+
+    The cos factor is floored at 1e-9 so a query exactly at a pole cannot
+    divide by zero; at that floor the search degenerates to "nearest in
+    latitude", which is the correct answer at a pole, where every longitude
+    meets.
+    """
+    k = f"greatest(cos(radians(${lat_param})), 1e-9)"
+    scaled = (
+        f"ST_ClosestPoint(ST_Scale({geom_expr}, {k}, 1.0),"
+        f" ST_Point(${lon_param} * {k}, ${lat_param}))"
+    )
+    return f"ST_X({scaled}) / {k}", f"ST_Y({scaled})"
+
+
 def bbox_around(lat: float, lon: float, radius_m: float) -> tuple[float, float, float, float]:
     """Square bounding box guaranteed to contain the radius_m circle around (lat, lon).
 
