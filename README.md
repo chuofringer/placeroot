@@ -81,12 +81,12 @@ The value is a comma-separated list of profile names, tool names, or both — th
 |---|---:|---:|---:|
 | unset / `all` (default) | 22 | ~7,650 | — |
 | `search` | 10 | ~3,880 | 49% |
-| `core` | 8 | ~3,530 | 54% |
+| `core` | 9 | ~3,810 | 50% |
 | `routing` | 5 | ~1,870 | 76% |
 | `analysis` | 7 | ~1,620 | 79% |
 | `geometry` | 3 | ~730 | 90% |
 
-- **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `summarize_area`, `route`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering.
+- **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
 - **`search`** — the find/name/identify family: `find_places`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, and `search_categories`.
 - **`routing`** — `route`, `isochrone`, `distance_matrix`, `within_distance`.
 - **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `admin_lookup`.
@@ -94,7 +94,7 @@ The value is a comma-separated list of profile names, tool names, or both — th
 
 `data_version` is registered under every profile: it is ~120 tokens and the only way an agent can tell which Overture release backs its answers.
 
-Profiles may overlap, and a list may mix them with bare tool names — `PLACEROOT_TOOLS=routing,find_places` or `PLACEROOT_TOOLS=find_places,geocode,route`. A name that is neither a profile nor a tool **fails at startup** with the list of valid names, rather than quietly falling back to loading everything.
+Profiles may overlap, and a list may mix them with bare tool names — `PLACEROOT_TOOLS=routing,find_places` or `PLACEROOT_TOOLS=find_places,geocode,route`. A name that is neither a profile nor a tool **fails at startup** with the list of valid names, rather than quietly falling back to loading everything. The server logs one line at startup naming what it registered (`registered 9 of 22 tools (PLACEROOT_TOOLS=core)`), so a selection that didn't apply — an empty value, a variable that never reached the process — is visible rather than silently the full 22.
 
 ## Why
 

@@ -154,8 +154,8 @@ def find_places(
     Three mutually exclusive modes:
     - Point + radius: pass lat and lon (radius_m defaults to 1000m).
       Results are nearest-first, within a circle around (lat, lon).
-    - Division polygon: pass division_id (a GERS id, e.g. from admin_lookup's
-      chain) instead of lat/lon. Results are every matching place whose
+    - Division polygon: pass division_id (a GERS division id, e.g. one from
+      an admin-hierarchy chain) instead of lat/lon. Results are every matching place whose
       point falls inside that division's true boundary polygon — no radius
       to guess, and no circle clipping a coastline or straddling a border.
       Results are ordered by name (there's no reference point to rank
@@ -555,8 +555,8 @@ def land_use_at(lat: float, lon: float) -> dict:
     """What kind of land is this: land use and land cover classification at a point.
 
     From Overture's base theme (issue #167) — PlaceRoot's first tool over
-    base, distinct from find_places/summarize_area (those cover discrete
-    POIs, not the land itself). Returns {"lat", "lon", "land_use":
+    base, distinct from the place-search and area-summary tools (those cover
+    discrete POIs, not the land itself). Returns {"lat", "lon", "land_use":
     {"subtype", "class", "name"} or null, "land_cover": {"subtype",
     "class"} or null}. No raw geometry (design rule: answers, not data).
 
@@ -657,8 +657,8 @@ def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
 
 @_tool
 def search_categories(query: str, limit: int = 8) -> dict:
-    """Free text -> valid Overture category slugs, for find_places'/
-    summarize_area's `category` param.
+    """Free text -> valid Overture category slugs, for the `category` param
+    the place-search and area-summary tools take.
 
     Lookup only — no geo filtering, no upstream dataset dependency; matches
     against a bundled snapshot of Overture's places taxonomy (pinned to
@@ -842,11 +842,11 @@ def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
 
 @_tool
 def render_map(result: dict | list, title: str | None = None, inline: bool = False) -> dict:
-    """Render find_places/summarize_area JSON (or caller-supplied GeoJSON) as a map.
+    """Render place-search or area-summary JSON (or caller-supplied GeoJSON) as a map.
 
     Writes ONE self-contained HTML file — inline CSS/JS, vector markers with
-    labels and click popups, polygon/line shapes (including
-    routing.isochrone()'s {"polygon": ..., "stats": {...}} output), a scale
+    labels and click popups, polygon/line shapes (including reachability
+    output shaped {"polygon": ..., "stats": {...}}), a scale
     bar, attribution, no CDN, no tile server, no API key, zero network
     requests when opened — to PLACEROOT_ARTIFACT_DIR (default: alongside the
     tile cache directory). The file itself is the artifact; this tool's
@@ -932,16 +932,16 @@ def route(
     Overture's transportation theme around the two points and returns
     {"distance_m", "duration_s", "mode", "from", "to"} for the fastest path
     — no polyline/geometry (that's a separate tool). mode is "walk",
-    "cycle", or "drive" (default), same cost model as isochrone (walk 1.4
-    m/s, cycle 4.2 m/s, drive per-edge from Overture's speed_limits or a
-    class-based default table). drive's duration is a posted-speed model
+    "cycle", or "drive" (default), on the same cost model every routing tool
+    uses (walk 1.4 m/s, cycle 4.2 m/s, drive per-edge from Overture's
+    speed_limits or a class-based default table). drive's duration is a posted-speed model
     with no live traffic; all modes snap each endpoint to the nearest
     usable street-graph node (real routes rarely start/end exactly on a
     segment).
 
     Each mode has a straight-line-distance cap on the two points, rejected
     before any graph is built (see routing.ROUTE_MAX_STRAIGHT_LINE_M, derived
-    per-mode from the same extraction-radius cap isochrone uses — roughly
+    per-mode from the shared graph-extraction radius cap — roughly
     walk 7.5km, cycle 23.5km, drive 95.5km) — real road distance only ever
     exceeds straight-line, so anything past the cap can't produce a route
     worth extracting for anyway; returns {"error": "route_too_long"} with
@@ -1021,6 +1021,17 @@ def build_server(spec=_UNSET) -> MCPServer:
     for name, fn in _TOOL_FUNCS.items():
         if name in selected:
             server.tool()(fn)
+    # One line at startup naming what got registered. An empty or
+    # whitespace-only PLACEROOT_TOOLS is legal and means "everything", which
+    # is indistinguishable from a subset that silently didn't apply unless
+    # the server says which it did.
+    requested = (spec or "").strip() or tool_profiles.ALL
+    logger.info(
+        "registered %d of %d tools (PLACEROOT_TOOLS=%s)",
+        len(selected),
+        len(_TOOL_FUNCS),
+        requested,
+    )
     return server
 
 

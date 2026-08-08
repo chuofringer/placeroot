@@ -7,6 +7,8 @@ degraded into post-hoc hiding, these would still be the tests that catch it.
 """
 
 import asyncio
+import logging
+import re
 
 import pytest
 
@@ -47,6 +49,7 @@ def test_core_profile():
         "reverse_geocode",
         "place_details",
         "resolve_place",
+        "search_categories",
         "summarize_area",
         "route",
         "data_version",
@@ -138,6 +141,70 @@ def test_profiles_name_no_tool_that_does_not_exist():
     for name, members in tool_profiles.PROFILES.items():
         unknown = set(members) - _all_names()
         assert not unknown, f"profile {name!r} names nonexistent tool(s): {sorted(unknown)}"
+
+
+def test_a_typo_inside_a_profile_definition_fails_at_build(monkeypatch):
+    """The inverse of the coverage test: a bad name in PROFILES must not be silent.
+
+    Before this, `selected |= PROFILES[entry]` trusted the definition, so a
+    typo just dropped that tool from the profile with nothing to notice —
+    unlike a typo in the env var, which fails loudly.
+    """
+    monkeypatch.setitem(
+        tool_profiles.PROFILES, "core", frozenset({"find_places", "find_playces"})
+    )
+    with pytest.raises(tool_profiles.InvalidProfileDefinition) as excinfo:
+        server.build_server("core")
+    assert "find_playces" in str(excinfo.value)
+
+
+def test_a_typo_inside_an_unselected_profile_still_fails(monkeypatch):
+    """Checked on every build, including the default one, not just when selected."""
+    monkeypatch.setitem(tool_profiles.PROFILES, "geometry", frozenset({"render_maps"}))
+    with pytest.raises(tool_profiles.InvalidProfileDefinition):
+        server.build_server(None)
+
+
+def test_build_server_logs_the_active_selection(caplog):
+    with caplog.at_level(logging.INFO, logger="placeroot.server"):
+        server.build_server("core")
+    assert "PLACEROOT_TOOLS=core" in caplog.text
+    assert f"registered {len(tool_profiles.PROFILES['core']) + 1} of" in caplog.text
+
+
+@pytest.mark.parametrize("spec", [None, "", "   "])
+def test_the_full_surface_is_logged_as_all(spec, caplog):
+    """Empty and whitespace specs load everything; the log has to say so."""
+    with caplog.at_level(logging.INFO, logger="placeroot.server"):
+        server.build_server(spec)
+    assert f"registered {len(_all_names())} of {len(_all_names())} tools" in caplog.text
+    assert "PLACEROOT_TOOLS=all" in caplog.text
+
+
+def test_no_profile_describes_a_tool_it_does_not_register():
+    """A tool's description must not name a tool the agent cannot see.
+
+    Under a subset, an instruction like "check the slug with
+    search_categories" points at nothing — the agent's recovery path from a
+    zero-result answer dead-ends. Fix a hit either by adding the named tool
+    to the profile or by describing the other tool by what it does instead
+    of by name; both are legitimate, and which one depends on whether the
+    reference is a next step or just context.
+
+    The match is on tool names as whole words, so a description that uses
+    "route" or "geocode" as ordinary English will trip this. That's the
+    intended sensitivity: rephrase rather than exempt.
+    """
+    all_names = _all_names()
+    dangling: list[str] = []
+    for profile in sorted(tool_profiles.PROFILES):
+        tools = asyncio.run(server.build_server(profile).list_tools())
+        absent = all_names - {t.name for t in tools}
+        for tool in tools:
+            named = sorted(a for a in absent if re.search(rf"\b{a}\b", tool.description or ""))
+            if named:
+                dangling.append(f"{profile}/{tool.name} -> {', '.join(named)}")
+    assert not dangling, "descriptions naming unregistered tools:\n" + "\n".join(dangling)
 
 
 def test_a_subset_server_still_calls_the_tools_it_kept():

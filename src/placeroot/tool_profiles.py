@@ -23,12 +23,20 @@ PROFILES: dict[str, frozenset[str]] = {
     # to B. Deliberately excludes every batch sibling (a round-trip
     # optimization, not a capability), the buildings/land-use themes, and
     # the geometry/rendering tools.
+    #
+    # search_categories is here despite being a lookup rather than an
+    # answer: find_places' and summarize_area's `category` filter takes
+    # Overture taxonomy slugs, and a wrong slug returns zero results with a
+    # note telling the agent to check the slug with search_categories. Under
+    # a profile that dropped it, core's likeliest failure mode would end at
+    # a hint pointing to a tool the agent cannot call.
     "core": frozenset({
         "find_places",
         "geocode",
         "reverse_geocode",
         "place_details",
         "resolve_place",
+        "search_categories",
         "summarize_area",
         "route",
     }),
@@ -83,6 +91,32 @@ class InvalidToolSelection(ValueError):
     """PLACEROOT_TOOLS named something that is neither a profile nor a tool."""
 
 
+class InvalidProfileDefinition(ValueError):
+    """A PROFILES entry names a tool that does not exist."""
+
+
+def _check_profile_definitions(known_tools: set[str]) -> None:
+    """Every name in every profile must be a real tool.
+
+    A typo inside PROFILES would otherwise just drop that tool from the
+    profile: the selection is a union, so the bad name contributes nothing
+    and nothing complains. Checked on every resolve(), including the
+    default full-surface path, so the failure lands at startup on every
+    install rather than only on the ones that select the broken profile.
+    """
+    bad = {
+        name: sorted(set(members) - known_tools)
+        for name, members in PROFILES.items()
+        if not set(members) <= known_tools
+    }
+    if bad:
+        detail = "; ".join(f"{name}: {', '.join(missing)}" for name, missing in sorted(bad.items()))
+        raise InvalidProfileDefinition(
+            f"PROFILES names tool(s) that do not exist ({detail}). "
+            f"Known tools: {', '.join(sorted(known_tools))}."
+        )
+
+
 def resolve(spec: str | None, known_tools: set[str]) -> set[str]:
     """Tool names to register for `spec`, given the full set of known tools.
 
@@ -91,11 +125,13 @@ def resolve(spec: str | None, known_tools: set[str]) -> set[str]:
     profile name or a tool name, matched case-insensitively, and the result
     is their union plus ALWAYS_INCLUDED.
 
-    Raises InvalidToolSelection on an entry that matches neither. Failing
-    loudly is the point: a typo that quietly fell back to the full surface
-    would leave the operator paying for the tools they meant to drop, with
-    nothing to notice.
+    Raises InvalidToolSelection on an entry that matches neither, and
+    InvalidProfileDefinition if a profile itself names a tool that doesn't
+    exist. Failing loudly is the point: a typo that quietly fell back to
+    the full surface would leave the operator paying for the tools they
+    meant to drop, with nothing to notice.
     """
+    _check_profile_definitions(known_tools)
     if spec is None:
         return set(known_tools)
     entries = [part.strip().lower() for part in spec.split(",")]

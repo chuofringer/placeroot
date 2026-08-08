@@ -55,7 +55,7 @@ conversation before the agent asks anything, which is roughly 56 median
 answers' worth. That side isn't reduced by better answers; it's reduced by
 registering fewer tools. See `PLACEROOT_TOOLS` in the top-level README
 (issue #182) for the profiles and their measured per-profile surface —
-`core` is ~54% smaller, `routing` ~76%.
+`core` is ~50% smaller, `routing` ~76%.
 
 ## Task categories and what "raw" means per category
 
