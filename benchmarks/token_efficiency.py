@@ -21,8 +21,8 @@ run, no network.
     uv run python benchmarks/token_efficiency.py --write   # + update docs/benchmarks.md
 
 Tokenizer: see `resolve_tokenizer()` — the project has no tokenizer
-dependency and this benchmark does not add one, so unless `tiktoken` or
-`anthropic` happens to be importable in the environment, counts are the
+dependency and this benchmark does not add one, so unless `tiktoken`
+happens to be importable in the environment, counts are the
 documented chars/4 heuristic `placeroot.budget.estimate_tokens` already
 uses to enforce the server's own token budget. Exact character and byte
 counts are reported alongside every estimate so a reader with a real
