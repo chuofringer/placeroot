@@ -14,6 +14,7 @@ import asyncio
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from placeroot import budget, server, tool_profiles
 from tests._routing_fixture import build_routing_fixture as fx
@@ -173,8 +174,14 @@ def test_required_and_optional_args_are_distinguished():
 
 # --- Dispatch ---------------------------------------------------------------
 
+
+# Argument values are written at the tool's own declared types (radius_m is a
+# float, not an int): dispatch validates through the tool's pydantic model, so
+# an int handed to a float parameter comes back normalized to 1000.0 — exactly
+# as it would over tools/call — and a mistyped literal here would be measuring
+# that normalization rather than the round trip.
 ROUND_TRIPS = [
-    ("find_places", {"lat": CENTER_LAT, "lon": CENTER_LON, "radius_m": 1000, "limit": 5}),
+    ("find_places", {"lat": CENTER_LAT, "lon": CENTER_LON, "radius_m": 1000.0, "limit": 5}),
     ("geocode", {"query": "Brooklyn", "limit": 5}),
     (
         "route",
@@ -186,7 +193,7 @@ ROUND_TRIPS = [
             "mode": "walk",
         },
     ),
-    ("summarize_area", {"lat": CENTER_LAT, "lon": CENTER_LON, "radius_m": 1000}),
+    ("summarize_area", {"lat": CENTER_LAT, "lon": CENTER_LON, "radius_m": 1000.0}),
     ("data_version", {}),
 ]
 
@@ -245,6 +252,80 @@ def test_non_object_args_is_a_bad_request():
     result = server.placeroot_call("geocode", ["Brooklyn"])
     assert result["error"] == "bad_request"
     assert "geocode" in result["detail"]
+
+
+# --- Argument types (R28 HIGH-3) --------------------------------------------
+#
+# The catalog ships argument names without types, so a caller guessing a type
+# wrong is the expected path, not the exotic one. Dispatch therefore validates
+# through each tool's own pydantic model — the one the SDK builds for a direct
+# tools/call — so a wrong type is this dispatcher's bad_request and a coercible
+# one reaches the tool exactly as it would over the wire.
+
+
+def test_a_string_where_a_list_belongs_is_rejected_not_iterated():
+    """`queries="paris"` used to iterate the string: five per-character
+    geocodes, a wrong answer with no error and five times the scan.
+    """
+    result = server.placeroot_call("geocode_batch", {"queries": "paris"})
+    assert result["error"] == "bad_request"
+    assert "queries" in result["detail"]
+    assert result["accepts"] == server._arg_summary(server.geocode_batch)
+
+
+def test_a_stringy_number_is_coerced_the_way_a_direct_call_coerces_it():
+    """`limit="5"` used to raise a raw TypeError out of the dispatcher."""
+    through = server.placeroot_call("geocode", {"query": "Brooklyn", "limit": "5"})
+    direct = server.geocode(query="Brooklyn", limit=5)
+    assert json.dumps(through, default=str, sort_keys=True) == json.dumps(
+        direct, default=str, sort_keys=True
+    )
+
+
+def test_a_bad_type_is_rejected_before_the_tool_writes_anything(tmp_path, monkeypatch):
+    """render_map with a string `result` used to write a junk artifact."""
+    monkeypatch.setenv("PLACEROOT_ARTIFACT_DIR", str(tmp_path))
+    result = server.placeroot_call("render_map", {"result": "hello"})
+    assert result["error"] == "bad_request"
+    assert "result" in result["detail"]
+    assert list(tmp_path.iterdir()) == []
+
+
+TYPE_PARITY = [
+    ("geocode", {"query": "Brooklyn", "limit": "5"}, {"query": "Brooklyn", "limit": 5}),
+    (
+        "find_places",
+        {"lat": str(CENTER_LAT), "lon": str(CENTER_LON), "radius_m": "1000", "limit": "5"},
+        {"lat": CENTER_LAT, "lon": CENTER_LON, "radius_m": 1000, "limit": 5},
+    ),
+]
+
+
+@pytest.mark.parametrize("tool,stringy,typed", TYPE_PARITY, ids=[t for t, _, _ in TYPE_PARITY])
+def test_coerced_dispatch_matches_the_direct_call_byte_for_byte(tool, stringy, typed):
+    direct = getattr(server, tool)(**typed)
+    through = server.placeroot_call(tool, stringy)
+    assert json.dumps(through, default=str, sort_keys=True) == json.dumps(
+        direct, default=str, sort_keys=True
+    )
+
+
+def test_an_uncoercible_value_is_rejected_by_the_same_model_the_sdk_uses():
+    """Parity on the rejection side: what the tool's own arg model refuses,
+    dispatch refuses too, rather than handing the tool a value it cannot use.
+    """
+    with pytest.raises(ValidationError):
+        server._arg_metadata(server.geocode).validate_arguments({"query": "x", "limit": "many"})
+    result = server.placeroot_call("geocode", {"query": "x", "limit": "many"})
+    assert result["error"] == "bad_request"
+    assert "limit" in result["detail"]
+    assert result["accepts"] == "query,limit?"
+
+
+def test_the_validation_detail_is_advice_not_a_pydantic_dump():
+    result = server.placeroot_call("geocode", {"query": "x", "limit": "many"})
+    assert "https://errors.pydantic.dev" not in result["detail"]
+    assert result["detail"].startswith("geocode: ")
 
 
 def test_a_tools_own_error_is_passed_through_unchanged():

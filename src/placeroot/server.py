@@ -11,6 +11,7 @@ stays safe under that concurrency.
 """
 
 import argparse
+import functools
 import inspect
 import logging
 import math
@@ -19,7 +20,9 @@ import threading
 from collections.abc import Callable
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.utilities.func_metadata import func_metadata
 from mcp.types import ToolAnnotations
+from pydantic import ValidationError
 
 from placeroot import (
     addresses,
@@ -1687,6 +1690,33 @@ def _arg_summary(fn: Callable) -> str:
     )
 
 
+@functools.cache
+def _arg_metadata(fn: Callable):
+    """The tool's own argument model — the one the SDK validates calls against.
+
+    `server.tool()(fn)` builds exactly this via func_metadata when the tool is
+    registered, so validating dispatch through it is not a second, parallel
+    notion of what the tool accepts: a value that reaches the function through
+    placeroot_call has been through the same coercions (str "5" -> int 5,
+    a JSON-string list -> list) as one that arrives over tools/call. Built
+    once per function and cached, because the model construction is the
+    expensive part and the tools are a fixed set.
+    """
+    return func_metadata(fn)
+
+
+def _validation_detail(e: ValidationError) -> str:
+    """A pydantic ValidationError as one line of advice per bad argument.
+
+    The raw repr carries a URL, an input echo and a type tag per error —
+    tokens a caller retrying the call cannot use. Field name plus message is
+    what tells it which argument to fix and to what.
+    """
+    return "; ".join(
+        f"{'.'.join(str(p) for p in err['loc']) or 'args'}: {err['msg']}" for err in e.errors()
+    )
+
+
 def _catalog_entry(name: str, fn: Callable) -> str:
     """`name(args) one-line summary` for one tool.
 
@@ -1751,11 +1781,21 @@ def placeroot_call(tool: str, args: dict | None = None) -> dict:
     # as this dispatcher's bad_request. Calling fn(**args) blind would let
     # the same TypeError arrive from inside the tool's own body, where it
     # would surface as a crash rather than as advice about the arguments.
+    # Binding is names-only, so the types go through the tool's own pydantic
+    # model below — the same one the SDK validates a direct call against.
     try:
         inspect.signature(fn).bind(**call_args)
     except TypeError as e:
         return {"error": "bad_request", "detail": f"{tool}: {e}", "accepts": _arg_summary(fn)}
-    return fn(**call_args)
+    try:
+        validated = _arg_metadata(fn).validate_arguments(call_args)
+    except ValidationError as e:
+        return {
+            "error": "bad_request",
+            "detail": f"{tool}: {_validation_detail(e)}",
+            "accepts": _arg_summary(fn),
+        }
+    return fn(**validated)
 
 
 _UNSET = object()
