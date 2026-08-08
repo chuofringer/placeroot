@@ -57,6 +57,26 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * 6371000 * math.asin(math.sqrt(a))
 
 
+def haversine_sql(
+    lat_expr: str, lon_expr: str, lat_param: str = "lat", lon_param: str = "lon"
+) -> str:
+    """SQL great-circle distance (meters, R=6371000) between a row expression and a param point.
+
+    lat_expr/lon_expr are SQL expressions naming the row's coordinates
+    (a bbox corner, a CTE column, ST_Y(...)); lat_param/lon_param name the
+    DuckDB named parameters holding the query point. Same formula, same
+    radius, as haversine_m() and overture.DISTANCE_EXPR — one place to read
+    it, so the themes can't drift apart on what "distance" means.
+    """
+    return (
+        "2 * 6371000 * asin(sqrt("
+        f"pow(sin(radians({lat_expr} - ${lat_param}) / 2), 2)"
+        f" + cos(radians(${lat_param})) * cos(radians({lat_expr}))"
+        f" * pow(sin(radians({lon_expr} - ${lon_param}) / 2), 2)"
+        "))"
+    )
+
+
 def bbox_around(lat: float, lon: float, radius_m: float) -> tuple[float, float, float, float]:
     """Square bounding box guaranteed to contain the radius_m circle around (lat, lon).
 
