@@ -1323,6 +1323,16 @@ def _query_alt_names(
     if region_code:
         region_filter = "AND d.region = $region_code"
         params["region_code"] = region_code
+    # One row per division, not per matching alternate (#214/R28). A
+    # division carries many alternates and one query hits several of them at
+    # once -- Quebec City is filed as "Ville de Québec" with "Quebec City",
+    # "Quebec" and "Quebec Stadt" all folded separately -- which put the same
+    # GERS id in the answer three times, each duplicate spending one of the
+    # caller's `limit` slots on a place already listed. The window keeps the
+    # best-matching alternate (the same tier-then-prominence order the LIMIT
+    # applies), so the LIMIT counts distinct divisions instead of being
+    # diluted by repeats of one.
+    tier_order = _match_tier_order_sql("a.alt_name")
     sql = f"""
         SELECT d.id, d.name, d.subtype, d.country, d.region, d.lat, d.lon,
                d.admin_chain, d.population, a.alt_name, a.alt_display
@@ -1330,7 +1340,10 @@ def _query_alt_names(
         JOIN read_parquet('{table_path}') d ON d.id = a.id
         WHERE a.alt_name ILIKE $pattern ESCAPE '\\'
         {region_filter}
-        ORDER BY {_match_tier_order_sql("a.alt_name")}
+        QUALIFY row_number() OVER (
+            PARTITION BY d.id ORDER BY {tier_order}, a.alt_name
+        ) = 1
+        ORDER BY {tier_order}
         LIMIT {DIVISION_OVERFETCH}
     """
     try:

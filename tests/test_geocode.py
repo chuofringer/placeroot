@@ -400,6 +400,23 @@ def test_alt_hit_returns_the_canonical_name_and_names_what_matched(geocode_cache
     assert top["matched_name"] == "Munich"
 
 
+def test_a_division_appears_once_however_many_alternates_match(geocode_cache):
+    """R28 (#214/#222): Quebec City is filed under "Ville de Québec" with
+    "Quebec City", "Quebec" and "Quebec Stadt" among its alternates -- three
+    of them matching one query, and the alt-name search returned one row per
+    matching alternate. The same GERS id three times, each duplicate burning
+    one of the caller's `limit` slots."""
+    results = geocode.geocode("Quebec", limit=5)
+
+    ids = [r["id"] for r in results]
+    assert ids, "the fixture carries a Québec with English alternates"
+    assert len(ids) == len(set(ids))
+    top = results[0]
+    assert top["name"] == "Ville de Québec"
+    # The best-matching alternate is the one kept, not an arbitrary one.
+    assert top["matched_name"] == "Quebec"
+
+
 def test_matched_name_is_absent_on_ordinary_literal_matches(geocode_cache):
     # The only response-shape change #214 makes is this optional field, and
     # it must not appear on rows that matched names.primary.

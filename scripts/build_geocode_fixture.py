@@ -296,6 +296,17 @@ def build_divisions() -> list[tuple]:
         population=475_503,
         common={"de": "Preßburg", "hu": "Pozsony"},
     )
+    # #214/R28: a division several of whose alternates match one query.
+    # Quebec City's Overture primary is "Ville de Québec" and its common
+    # names include "Quebec City", "Quebec" and localized variants -- three
+    # separate folded alternates, all matching "Quebec", which returned the
+    # same GERS id three times, one row per alternate.
+    add(
+        "gers-div-quebec-city", "Ville de Québec", "locality", "CA", "CA-QC",
+        46.81, -71.21, _chain("Canada", "Québec", "Ville de Québec"),
+        population=549_459,
+        common={"en": "Quebec City", "es": "Quebec", "de": "Quebec Stadt"},
+    )
     # #221: the two pairs the ranking fix is measured on, each mirroring the
     # live 2026-07-22.0 shape the R26 probes hit.
     #
