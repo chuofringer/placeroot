@@ -145,6 +145,48 @@ def test_directionals_expand_anywhere_in_a_street_name():
     assert geocode._token_variants("north", leading=False) == []
 
 
+# --- quadrants and prefix matching (R28 MED-5, #229) -----------------------
+
+
+@pytest.mark.parametrize(
+    "typed,reached",
+    [
+        ("Pennsylvania Avenue NW", "Pennsylvania Ave NW"),
+        ("Pennsylvania Avenue Northwest", "Pennsylvania Ave NW"),
+        ("K Street NE", "K St NE"),
+        ("M Street SW", "M St SW"),
+        ("Independence Avenue SE", "Independence Ave SE"),
+    ],
+)
+def test_quadrant_suffixes_expand_both_ways(typed, reached):
+    variants = [v.lower() for v in geocode._street_variants(typed)]
+    assert reached.lower() in variants
+
+
+def test_quadrant_street_is_found_end_to_end():
+    result = geocode.geocode_address("1600 Pennsylvania Avenue NW, Washington")
+
+    assert _streets(result) == [("1600", "PENNSYLVANIA AVE NW")]
+    assert result["anchor"]["name"] == "Washington"
+
+
+def test_a_street_without_its_quadrant_still_finds_the_quadrants():
+    """The prefix match: a caller who leaves the quadrant off gets every
+    street that carries one, as separate rows — not one merged answer that
+    hides which of them it means."""
+    result = geocode.geocode_address("Pennsylvania Avenue, Washington", limit=10)
+
+    streets = {r["street"] for r in result["results"]}
+    assert streets == {"PENNSYLVANIA AVE NW", "PENNSYLVANIA AVE SE"}
+    assert len(result["results"]) == 3
+
+
+def test_the_empty_note_does_not_overclaim_which_spellings_were_tried():
+    result = geocode.geocode_address("Nonexistent Avenue, Washington")
+    assert result["results"] == []
+    assert "prefix" in result["note"]
+
+
 def test_street_variants_stay_capped():
     many = "North East Street Avenue Road Drive Lane Court Place"
     assert len(geocode._street_variants(many)) <= geocode._STREET_VARIANT_CAP

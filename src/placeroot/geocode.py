@@ -1135,6 +1135,19 @@ _STREET_SUFFIX_VARIANTS: dict[str, list[str]] = {
     "place": ["Pl"], "pl": ["Place"],
 }
 
+# #229/R28: the quadrant suffix, which is part of the street name in every
+# city that has one -- Washington DC's "PENNSYLVANIA AVE NW" is a different
+# street from "PENNSYLVANIA AVE SE", and Overture writes the abbreviated
+# form. Kept out of _CARDINAL_VARIANTS because those are single letters
+# whose expansion is only safe on a leading token, while a quadrant is
+# unambiguous wherever it appears in a street field.
+_STREET_QUADRANT_VARIANTS: dict[str, list[str]] = {
+    "nw": ["Northwest"], "northwest": ["NW"],
+    "ne": ["Northeast"], "northeast": ["NE"],
+    "sw": ["Southwest"], "southwest": ["SW"],
+    "se": ["Southeast"], "southeast": ["SE"],
+}
+
 
 def _token_variants(token: str, leading: bool, street: bool = False) -> list[str]:
     """Alternate spellings for one query token.
@@ -1149,6 +1162,7 @@ def _token_variants(token: str, leading: bool, street: bool = False) -> list[str
     variants = list(_ABBR_VARIANTS.get(key, []))
     if street:
         variants += _STREET_SUFFIX_VARIANTS.get(key, [])
+        variants += _STREET_QUADRANT_VARIANTS.get(key, [])
     if leading or street:
         variants += _CARDINAL_VARIANTS.get(key, [])
     return variants
@@ -2798,7 +2812,15 @@ def _scan_addresses_in_bbox(
                     "xmax": xmax, "ymax": ymax}
     street_sql = []
     for i, pattern in enumerate(street_patterns):
-        params[f"s{i}"] = overture._like_escape(pattern)
+        # Prefix, not equality (#229/R28): US street names carry a trailing
+        # quadrant or directional that a caller routinely leaves off, and
+        # "Pennsylvania Avenue" must still find "PENNSYLVANIA AVE NW". The
+        # variant map handles the caller who *does* type it; this handles
+        # the one who doesn't. Honest because the group key keeps the
+        # variants apart -- NW and SE come back as separate rows, with
+        # distinct_in_range saying how many there were -- rather than
+        # collapsing into one answer that hides which street it means.
+        params[f"s{i}"] = overture._like_escape(pattern) + "%"
         street_sql.append(f"street ILIKE ${f's{i}'} ESCAPE '\\'")
     number_sql = ""
     if number is not None and "number" not in missing:
@@ -2898,7 +2920,9 @@ def _address_empty_note(origin: tuple[float, float], street: str) -> str:
         )
     return (
         f"no address point in this city matches \"{street}\" (abbreviated and "
-        f"spelled-out spellings were both tried). Coverage inside a covered country "
+        f"spelled-out spellings were both tried, and the match is a prefix one, so a "
+        f"quadrant or directional suffix in the data -- \"AVE NW\" -- would have been "
+        f"found too). Coverage inside a covered country "
         f"is partial -- the addresses theme is alpha and carries {covered} countries "
         f"-- so this may be a gap in the data rather than a missing street. Check "
         f"the spelling, or drop the house number to see whether the street itself "
@@ -3006,7 +3030,9 @@ def geocode_address(
        across a border are the normal case, not the exception.
     3. Scan the addresses theme inside that extent, through the same tile
        cache address_at reads, matching `street` against every USPS
-       abbreviation/expansion of the query (Parkway<->Pkwy, W<->West, ...).
+       abbreviation/expansion of the query (Parkway<->Pkwy, W<->West,
+       NW<->Northwest, ...) as a *prefix*, so a street written with a
+       quadrant suffix is found by a query without one.
     4. Deduplicate to distinct number|street|postcode, nearest the anchor's
        own reference point first. The postcode is in the key because a city
        bbox is not a municipality (#229): without it, the 1 Main St of every

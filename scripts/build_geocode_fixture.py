@@ -435,6 +435,23 @@ def build_divisions() -> list[tuple]:
         52.52, 13.405, _chain("Germany", "Berlin"),
         population=3_677_472,
     )
+    # R28/#229: the quadrant case. Washington's streets carry NW/NE/SW/SE as
+    # part of the name, and Overture writes the abbreviation -- so
+    # "Pennsylvania Avenue NW" only matches through the quadrant variant map,
+    # and a bare "Pennsylvania Avenue" only through a prefix match.
+    add(
+        "gers-div-washington-dc", "Washington", "locality", "US", "US-DC",
+        38.9072, -77.0369, _chain("United States", "District of Columbia", "Washington"),
+        population=689_545,
+    )
+    # R28/#229: the house-number parse case. "Calle 8" is the *street*; a
+    # rule that strips a trailing integer searches for a street named
+    # "Calle" and finds nothing.
+    add(
+        "gers-div-miami", "Miami", "locality", "US", "US-FL",
+        25.7617, -80.1918, _chain("United States", "Florida", "Miami"),
+        population=442_241,
+    )
     # #188: a division in a country the addresses theme does NOT cover (GB is
     # not one of addresses.COVERED_COUNTRIES), so address_at has somewhere to
     # resolve "this coordinate is in an uncovered country" from. Deliberately
@@ -523,6 +540,17 @@ STREET_CLUSTERS = (
     # the trailing-house-number parse ("Hauptstraße 5").
     ("Hauptstraße", "DE", "10827", "Berlin", None, 52.5200, 13.4050,
      ("5", "7", "9"), 1),
+    # R28/#229: one street name, two quadrants -- different streets, and
+    # neither is reachable from "Pennsylvania Avenue NW" without the
+    # quadrant variant map or from "Pennsylvania Avenue" without a prefix
+    # match. They stay separate rows in the answer, which is the point.
+    ("PENNSYLVANIA AVE NW", "US", "20500", "Washington", "DC", 38.8977, -77.0365,
+     ("1600", "1700"), 1),
+    ("PENNSYLVANIA AVE SE", "US", "20003", "Washington", "DC", 38.8810, -76.9900,
+     ("1600",), 1),
+    # R28/#229: Calle Ocho. The street name ends in the digit.
+    ("CALLE 8", "US", "33135", "Miami", "FL", 25.7650, -80.2200,
+     ("1", "3", "5"), 1),
 )
 
 # Spacing between consecutive house numbers along a street, and between the
