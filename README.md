@@ -35,7 +35,7 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 
 ## What it can do
 
-**22 tools**, all returning compact, budgeted answers. Several single-item tools have a `*_batch` sibling that collapses many calls into one round-trip.
+**23 tools**, all returning compact, budgeted answers. Several single-item tools have a `*_batch` sibling that collapses many calls into one round-trip.
 
 | Tool | Answers |
 |---|---|
@@ -52,6 +52,7 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 | `geocode` | Free-text place name → ranked candidates with coordinates and admin context (`geocode_batch` for many at once) |
 | `resolve_place` | Free-text place reference → stable ids an agent can hold onto across turns (`resolve_place_batch`) |
 | `reverse_geocode` | Point → nearest address plus its containing admin areas (`reverse_geocode_batch`) |
+| `gers_lookup` | Any GERS id → the entity it names (place, division, or building), what it's inside, and the building at its point |
 | `search_categories` | Free text → the right Overture category slug to filter `find_places` by |
 | `isochrone` | The area reachable within N minutes on foot, bike, or car |
 | `route` | Shortest-path distance and duration between two points, on foot, bike, or car |

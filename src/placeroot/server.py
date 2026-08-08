@@ -26,6 +26,7 @@ from placeroot import (
     divisions,
     errors,
     geo,
+    gers,
     land_use,
     mapview,
     overture,
@@ -747,6 +748,53 @@ def resolve_place_batch(gers_ids: list[str]) -> dict:
     except overture.SchemaDegraded as e:
         return _schema_error(e)
     return budget.apply_budget({"results": rows}, "results")
+
+
+@mcp.tool()
+def gers_lookup(id: str, near_lat: float | None = None, near_lon: float | None = None) -> dict:
+    """Any GERS id -> what it is, across themes, plus its cheap cross-theme joins.
+
+    The reverse of every other tool: hand back an id one of them returned
+    (a place, a division, or a building) and get the entity it names —
+    {"id", "theme", "type", "name", "lat", "lon", "summary", "related"} —
+    without needing to know which theme it came from. summary carries a few
+    theme-specific fields (place: category, confidence, brand; division:
+    subtype, country, region; building: class, height, floors); related
+    carries the containing division, plus the building at the point when
+    the id is a place. Never geometry.
+
+    Also pass near_lat/near_lon — the lat/lon of the row the id came from —
+    whenever you have them: the lookup is an id scan across up to three
+    themes, and the hint narrows each one to a ~50km box instead of a
+    full-theme scan. Omitting it still works, just much slower on a cold id.
+
+    Transportation segment/connector ids are not resolvable yet and come
+    back as not_found. Returns {"error": "not_found"} if no theme claims
+    the id, {"error": "bad_request"} for an empty or malformed id or an
+    out-of-range hint, or a structured {"error": ...} if upstream is
+    unavailable.
+    """
+    if near_lat is not None and near_lon is not None:
+        coord_error = _invalid_coord(near_lat, near_lon)
+        if coord_error is not None:
+            return coord_error
+    try:
+        result = gers.gers_lookup(id, near_lat, near_lon)
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    if result is None:
+        return {
+            "error": "not_found",
+            "detail": (
+                f"no places, divisions, or buildings entity matched GERS id {id!r} "
+                "(transportation segments are not resolvable yet)"
+            ),
+        }
+    return result
 
 
 @mcp.tool()
