@@ -68,6 +68,8 @@ PROFILES: dict[str, frozenset[str]] = {
         "isochrone",
         "distance_matrix",
         "within_distance",
+        # Multi-stop ordering over the same street graph route() uses.
+        "optimize_route",
     }),
     # Characterizing an area rather than locating a thing in it.
     "analysis": frozenset({
