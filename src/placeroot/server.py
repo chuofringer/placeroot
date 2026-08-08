@@ -18,6 +18,7 @@ import threading
 from collections.abc import Callable
 
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
 from placeroot import (
     budget,
@@ -58,11 +59,82 @@ DEFAULT_HTTP_PORT = 8321
 # and so never reaches tools/list (issue #182).
 _TOOL_FUNCS: dict[str, Callable] = {}
 
+# Human-readable display title per tool, keyed by function name (issue #193).
+_TOOL_TITLES: dict[str, str] = {}
 
-def _tool(fn: Callable) -> Callable:
-    """Mark a function as an MCP tool. Replaces a direct @mcp.tool()."""
-    _TOOL_FUNCS[fn.__name__] = fn
-    return fn
+# The behavioral hints a PlaceRoot tool carries (MCP `annotations`).
+# This is the default, and 24 of the 25 tools take it unchanged because they
+# are pure reads:
+#   read_only_hint  — the tool writes nothing anywhere the caller can see;
+#                     the only side effect is a local parquet tile cache,
+#                     which is invisible to the caller and to the upstream
+#                     data. render_map is the exception: it writes an HTML
+#                     file to disk, so it overrides this (see below).
+#   destructive_hint/idempotent_hint — spelled out even though the spec says
+#                     they only matter when read_only_hint is false, because
+#                     clients that predate readOnlyHint-aware gating still
+#                     read them, and "false/true" is the honest answer.
+#   open_world_hint — False: the domain of interaction is one fixed, pinned
+#                     Overture Maps release (see data_version), not the open
+#                     web. Nothing here searches or fetches arbitrary URLs,
+#                     so a client can reason about the blast radius as
+#                     closed even though the bytes come over the network.
+# Shared instance: ToolAnnotations is treated as immutable here, and the
+# per-tool `title` rides on the top-level Tool.title field instead (which is
+# what the current spec prefers), so one object serves every registration.
+_READ_ONLY_ANNOTATIONS = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
+
+# render_map creates a new timestamped HTML file under the map output
+# directory on every call. readOnlyHint is what clients gate auto-approval
+# on, so claiming it here would hand a filesystem write the approval-free
+# path meant for pure lookups. It is:
+#   read_only_hint   False — it writes a file (mapview.py, mkdir + write_bytes)
+#   destructive_hint False — the filename carries a timestamp, so it only
+#                    ever adds; it never overwrites or deletes anything
+#   idempotent_hint  False — two identical calls leave two distinct files
+#   open_world_hint  False — same closed, pinned domain as everything else
+_WRITES_A_FILE_ANNOTATIONS = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
+
+# Per-tool annotation overrides, keyed by function name. Anything absent
+# here gets _READ_ONLY_ANNOTATIONS.
+_TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {}
+
+
+def _tool(title: str, annotations: ToolAnnotations | None = None) -> Callable[[Callable], Callable]:
+    """Mark a function as an MCP tool with a display title.
+
+    Replaces a direct @mcp.tool(). `title` is required rather than
+    defaulted so a new tool cannot ship untitled: forgetting it is a
+    TypeError at import, not a silently unannotated entry in tools/list.
+
+    `annotations` overrides the read-only default for the rare tool whose
+    behavior is not a pure read — pass it at the definition site, next to
+    the code that does the writing, so the claim and the behavior are read
+    together. Everything else is annotated centrally in build_server().
+    """
+    if not isinstance(title, str) or not title.strip():
+        # Catches the bare `@_tool` (no call) mistake, which would otherwise
+        # bind the tool name to this decorator instead of to the function.
+        raise TypeError("@_tool requires a non-empty display title, e.g. @_tool(\"Find places\")")
+
+    def register(fn: Callable) -> Callable:
+        _TOOL_FUNCS[fn.__name__] = fn
+        _TOOL_TITLES[fn.__name__] = title
+        if annotations is not None:
+            _TOOL_ANNOTATIONS[fn.__name__] = annotations
+        return fn
+
+    return register
 
 
 def _upstream_error(e: Exception) -> dict:
@@ -143,7 +215,7 @@ def _with_category_hint(payload: dict, category: str | None, widen_hint: str) ->
     return payload
 
 
-@_tool
+@_tool("Find places")
 def find_places(
     lat: float | None = None,
     lon: float | None = None,
@@ -293,7 +365,7 @@ def find_places(
     return _with_category_hint(payload, category, widen_hint="widen radius_m")
 
 
-@_tool
+@_tool("Summarize area")
 def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
     """Summarize what's in an area: total places and top categories.
 
@@ -312,7 +384,7 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
     return _with_degraded_fields(budget.apply_budget(result, "top_categories"))
 
 
-@_tool
+@_tool("Place details")
 def place_details(
     id: str | None = None,
     name: str | None = None,
@@ -361,7 +433,7 @@ def place_details(
     return _with_degraded_fields(result)
 
 
-@_tool
+@_tool("Check within distance")
 def within_distance(
     lat: float,
     lon: float,
@@ -390,7 +462,7 @@ def within_distance(
     return _with_degraded_fields(result)
 
 
-@_tool
+@_tool("Distance matrix")
 def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
     """Straight-line (great-circle) distance in meters between every origin and destination.
 
@@ -442,7 +514,7 @@ def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
     return budget.apply_budget({"elements": elements}, "elements")
 
 
-@_tool
+@_tool("Compare areas")
 def compare_areas(areas: list[dict], radius_m: float = 1000) -> dict:
     """Compare 2-5 areas side by side: category mix, density, and what differs.
 
@@ -476,7 +548,7 @@ def compare_areas(areas: list[dict], radius_m: float = 1000) -> dict:
     return _with_degraded_fields(budget.apply_budget(result, "differentiators"))
 
 
-@_tool
+@_tool("Admin hierarchy lookup")
 def admin_lookup(lat: float, lon: float) -> dict:
     """Containing admin hierarchy for a point: neighborhood up to country.
 
@@ -500,7 +572,7 @@ def admin_lookup(lat: float, lon: float) -> dict:
     return budget.apply_budget(result, "chain")
 
 
-@_tool
+@_tool("Summarize buildings")
 def summarize_buildings(
     lat: float, lon: float, radius_m: float = buildings.DEFAULT_SUMMARIZE_RADIUS_M
 ) -> dict:
@@ -529,7 +601,7 @@ def summarize_buildings(
     return _with_buildings_degraded_fields(result)
 
 
-@_tool
+@_tool("Buildings near a point")
 def buildings_at(
     lat: float,
     lon: float,
@@ -560,7 +632,7 @@ def buildings_at(
     return _with_buildings_degraded_fields(budget.apply_budget({"results": rows}, "results"))
 
 
-@_tool
+@_tool("Land use at a point")
 def land_use_at(lat: float, lon: float) -> dict:
     """What kind of land is this: land use and land cover classification at a point.
 
@@ -632,7 +704,7 @@ def _with_infrastructure_truncation(
     return payload
 
 
-@_tool
+@_tool("Infrastructure near a point")
 def infrastructure_at(
     lat: float,
     lon: float,
@@ -698,7 +770,7 @@ def infrastructure_at(
     return result
 
 
-@_tool
+@_tool("Geocode a place name")
 def geocode(query: str, limit: int = 5) -> dict:
     """Free-text place name -> ranked candidate locations, from Overture divisions and places.
 
@@ -725,7 +797,7 @@ def geocode(query: str, limit: int = 5) -> dict:
     return payload
 
 
-@_tool
+@_tool("Geocode names in batch")
 def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
     """Geocode up to 20 free-text queries in one call, one best match each.
 
@@ -768,7 +840,7 @@ def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
     return budget.apply_budget({"results": rows}, "results")
 
 
-@_tool
+@_tool("Search categories")
 def search_categories(query: str, limit: int = 8) -> dict:
     """Free text -> valid Overture category slugs, for the `category` param
     the place-search and area-summary tools take.
@@ -790,7 +862,7 @@ def search_categories(query: str, limit: int = 8) -> dict:
     return budget.apply_budget({"results": rows}, "results")
 
 
-@_tool
+@_tool("Resolve place to GERS id")
 def resolve_place(
     query: str,
     near_lat: float | None = None,
@@ -828,7 +900,7 @@ def resolve_place(
     return budget.apply_budget({"results": rows}, "results")
 
 
-@_tool
+@_tool("Resolve GERS ids in batch")
 def resolve_place_batch(gers_ids: list[str]) -> dict:
     """Resolve up to 25 GERS ids to compact place rows in one call.
 
@@ -874,7 +946,7 @@ def resolve_place_batch(gers_ids: list[str]) -> dict:
     return budget.apply_budget({"results": rows}, "results")
 
 
-@_tool
+@_tool("Look up a GERS id")
 def gers_lookup(id: str, near_lat: float | None = None, near_lon: float | None = None) -> dict:
     """Any GERS id -> what it is, across themes, plus its cheap cross-theme joins.
 
@@ -934,7 +1006,7 @@ def gers_lookup(id: str, near_lat: float | None = None, near_lon: float | None =
     return result
 
 
-@_tool
+@_tool("Reverse geocode a point")
 def reverse_geocode(lat: float, lon: float) -> dict:
     """Point -> nearest address (street/number/postcode) and its containing division chain.
 
@@ -953,7 +1025,7 @@ def reverse_geocode(lat: float, lon: float) -> dict:
         return _upstream_error(e)
 
 
-@_tool
+@_tool("Reverse geocode points in batch")
 def reverse_geocode_batch(points: list[dict]) -> dict:
     """Reverse-geocode many points in one call, to cut N round-trips down to one.
 
@@ -997,7 +1069,7 @@ def reverse_geocode_batch(points: list[dict]) -> dict:
     return budget.apply_budget({"results": rows}, "results")
 
 
-@_tool
+@_tool("Simplify geometry")
 def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
     """Simplify a GeoJSON geometry to fit a token budget, reporting what was lost.
 
@@ -1013,7 +1085,7 @@ def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
     except simplify.InvalidGeometry as e:
         return {"error": "invalid_geometry", "detail": e.detail}
 
-@_tool
+@_tool("Render map", annotations=_WRITES_A_FILE_ANNOTATIONS)
 def render_map(result: dict | list, title: str | None = None, inline: bool = False) -> dict:
     """Render place-search or area-summary JSON (or caller-supplied GeoJSON) as a map.
 
@@ -1033,7 +1105,7 @@ def render_map(result: dict | list, title: str | None = None, inline: bool = Fal
     """
     return mapview.write_artifact(result, title=title, inline=inline)
 
-@_tool
+@_tool("Reachable area (isochrone)")
 def isochrone(
     lat: float,
     lon: float,
@@ -1091,7 +1163,7 @@ def isochrone(
         return {"error": "bad_request", "detail": str(e)}
 
 
-@_tool
+@_tool("Route between two points")
 def route(
     from_lat: float,
     from_lon: float,
@@ -1152,7 +1224,7 @@ def route(
         return {"error": "bad_request", "detail": str(e)}
 
 
-@_tool
+@_tool("Places along a route")
 def places_along_route(
     from_lat: float,
     from_lon: float,
@@ -1229,7 +1301,7 @@ def places_along_route(
     return _with_category_hint(payload, category, widen_hint="widen max_detour_m")
 
 
-@_tool
+@_tool("Data version")
 def data_version() -> dict:
     """Which Overture Maps release backs the answers from every other tool.
 
@@ -1270,7 +1342,13 @@ def build_server(spec=_UNSET) -> MCPServer:
     server = MCPServer("placeroot", instructions=BASE_INSTRUCTIONS)
     for name, fn in _TOOL_FUNCS.items():
         if name in selected:
-            server.tool()(fn)
+            # Title + hints are applied here, once, for every selected tool —
+            # so a subset profile (PLACEROOT_TOOLS=core) is annotated exactly
+            # like the full surface.
+            server.tool(
+                title=_TOOL_TITLES[name],
+                annotations=_TOOL_ANNOTATIONS.get(name, _READ_ONLY_ANNOTATIONS),
+            )(fn)
     # One line at startup naming what got registered. An empty or
     # whitespace-only PLACEROOT_TOOLS is legal and means "everything", which
     # is indistinguishable from a subset that silently didn't apply unless

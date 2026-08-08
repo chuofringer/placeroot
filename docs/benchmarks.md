@@ -68,41 +68,41 @@ Generated 2026-08-07 by `uv run python benchmarks/token_efficiency.py --write`.
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-07-22.0`
 - Tools registered: **25**
-- Total schema surface: **9192 tokens** (36799 chars, 36907 bytes)
-- Schema cost per tool: min 126, median 284, max 1285 tokens
+- Total schema surface: **10031 tokens** (40158 chars, 40266 bytes)
+- Schema cost per tool: min 158, median 317, max 1316 tokens
 - Median scenario response: **131 tokens** (range 41-702)
-- Break-even: the schema surface costs about as much as **70 median answers**
+- Break-even: the schema surface costs about as much as **77 median answers**
 
 ### Schema surface (paid once per conversation)
 
 | tool | description tokens | inputSchema tokens | total tokens | total chars |
 |---|---:|---:|---:|---:|
-| `find_places` | 946 | 296 | **1285** | 5141 |
-| `places_along_route` | 473 | 167 | **669** | 2678 |
-| `infrastructure_at` | 494 | 118 | **646** | 2587 |
-| `route` | 461 | 88 | **578** | 2313 |
-| `isochrone` | 374 | 115 | **513** | 2052 |
-| `gers_lookup` | 385 | 74 | **486** | 1947 |
-| `place_details` | 259 | 158 | **437** | 1751 |
-| `resolve_place` | 265 | 91 | **384** | 1537 |
-| `render_map` | 243 | 85 | **349** | 1399 |
-| `land_use_at` | 274 | 41 | **339** | 1359 |
-| `distance_matrix` | 224 | 78 | **326** | 1304 |
-| `resolve_place_batch` | 237 | 42 | **304** | 1217 |
-| `geocode` | 221 | 44 | **284** | 1136 |
-| `search_categories` | 201 | 46 | **272** | 1088 |
-| `buildings_at` | 151 | 91 | **259** | 1038 |
-| `geocode_batch` | 176 | 58 | **258** | 1034 |
-| `compare_areas` | 174 | 61 | **255** | 1020 |
-| `within_distance` | 128 | 104 | **252** | 1008 |
-| `summarize_buildings` | 154 | 58 | **231** | 925 |
-| `reverse_geocode_batch` | 142 | 48 | **211** | 844 |
-| `simplify_geometry` | 129 | 58 | **208** | 832 |
-| `admin_lookup` | 145 | 41 | **206** | 824 |
-| `reverse_geocode` | 111 | 42 | **170** | 682 |
-| `data_version` | 112 | 16 | **144** | 577 |
-| `summarize_area` | 53 | 57 | **126** | 506 |
-| **all 25 tools** | 6532 | 2077 | **9192** | 36799 |
+| `find_places` | 946 | 296 | **1316** | 5267 |
+| `places_along_route` | 473 | 167 | **703** | 2813 |
+| `infrastructure_at` | 494 | 118 | **682** | 2729 |
+| `route` | 461 | 88 | **613** | 2452 |
+| `isochrone` | 374 | 115 | **548** | 2193 |
+| `gers_lookup` | 385 | 74 | **519** | 2079 |
+| `place_details` | 259 | 158 | **469** | 1879 |
+| `resolve_place` | 265 | 91 | **419** | 1676 |
+| `render_map` | 243 | 85 | **381** | 1524 |
+| `land_use_at` | 274 | 41 | **373** | 1493 |
+| `distance_matrix` | 224 | 78 | **358** | 1434 |
+| `resolve_place_batch` | 237 | 42 | **339** | 1357 |
+| `geocode` | 221 | 44 | **317** | 1271 |
+| `search_categories` | 201 | 46 | **305** | 1220 |
+| `buildings_at` | 151 | 91 | **293** | 1175 |
+| `geocode_batch` | 176 | 58 | **292** | 1171 |
+| `compare_areas` | 174 | 61 | **287** | 1148 |
+| `within_distance` | 128 | 104 | **286** | 1144 |
+| `summarize_buildings` | 154 | 58 | **264** | 1059 |
+| `reverse_geocode_batch` | 142 | 48 | **247** | 990 |
+| `simplify_geometry` | 129 | 58 | **241** | 964 |
+| `admin_lookup` | 145 | 41 | **240** | 961 |
+| `reverse_geocode` | 111 | 42 | **205** | 820 |
+| `data_version` | 112 | 16 | **176** | 704 |
+| `summarize_area` | 53 | 57 | **158** | 635 |
+| **all 25 tools** | 6532 | 2077 | **10031** | 40158 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 
@@ -134,8 +134,17 @@ line in the generated section is the honest framing: the schemas cost roughly
 what several dozen answers cost. An agent that asks two spatial questions in
 a session spends far more context on *being able to* ask than on the answers.
 
-**Our schemas are description-heavy, not schema-heavy.** Roughly 70% of the
-surface is prose descriptions, not JSON `inputSchema`. That is the opposite
+**Tool annotations cost about a tenth of a token budget line.** Declaring MCP
+`annotations` (readOnlyHint and friends) plus a display `title` on all 25
+tools — issue #193 — added **839 tokens** to the schema surface (9192 →
+10031, +9.1%; ~134 chars per tool). That is the price of letting a client
+know, before it prompts the user, which calls touch nothing — 24 of the 25
+are pure lookups, and `render_map`, which writes an HTML file, says so. It is
+paid once per conversation and it is worth it, but it is not free, and it is
+one more reason the fix for schema surface is fewer *loaded* tools.
+
+**Our schemas are description-heavy, not schema-heavy.** Roughly two-thirds of
+the surface is prose descriptions, not JSON `inputSchema`. That is the opposite
 of the usual failure mode (see the citation below, where the worst-measured
 server is 97% `inputSchema`), and it is mostly a good sign — the bytes buy
 disambiguation an agent actually uses, like `find_places`' three mutually
