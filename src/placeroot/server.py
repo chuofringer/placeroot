@@ -32,6 +32,7 @@ from placeroot import (
     land_use,
     mapview,
     overture,
+    prompts,
     release,
     routing,
     simplify,
@@ -1275,6 +1276,11 @@ def build_server(spec=_UNSET) -> MCPServer:
     # whitespace-only PLACEROOT_TOOLS is legal and means "everything", which
     # is indistinguishable from a subset that silently didn't apply unless
     # the server says which it did.
+    # Prompts are registered whatever the selection: they are not part of
+    # tools/list, so they cost a subset install nothing, and a workflow is
+    # still worth reading when one of its steps is unavailable. Each one
+    # renders a note naming the tools this selection left out (#194).
+    prompts.register(server, selected)
     requested = (spec or "").strip() or tool_profiles.ALL
     logger.info(
         "registered %d of %d tools (PLACEROOT_TOOLS=%s)",
