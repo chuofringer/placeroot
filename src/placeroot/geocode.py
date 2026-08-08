@@ -380,7 +380,9 @@ _PLACES_FALLBACK_RADIUS_M = 30_000
 # Subdirectory (under cache.cache_dir()/<release>/) for the #43 materialized
 # divisions name table — kept distinct from cache.py's own places/<theme>
 # tile layout so the two never collide on a filename, even though they
-# share the same cache dir and eviction pool.
+# share the same cache dir. Named in cache.PROTECTED_SUBDIRS, which keeps
+# the LRU tile sweep off these tables entirely (#230) — they are whole-theme
+# derived tables, not re-fetchable-per-tile cache entries.
 _DIVISIONS_TABLE_SUBDIR = "geocode-divisions"
 _DIVISIONS_TABLE_FILENAME = "table.parquet"
 # #214: the alternate-name table, written alongside the primary one.
@@ -1365,6 +1367,57 @@ def _query_alt_names(
     return result
 
 
+def _restore_vanished_tables(
+    local_table: str, alt_table: str | None
+) -> tuple[str | None, str | None] | None:
+    """Rebuild whichever local table has disappeared between the moment it was
+    resolved and the moment a query tried to read it (#230).
+
+    Returns None when both files are still on disk — nothing vanished, so the
+    error the caller caught is a real query failure and must be re-raised.
+    Otherwise returns the (local_table, alt_table) the caller should retry
+    with, either of which may be None if its rebuild failed: a None local
+    table means "fall back to the direct upstream scan", the same thing it
+    means everywhere else in this module.
+
+    This is the one place the #214/#224 one-shot flags are deliberately
+    RELAXED. Those flags exist so a *persistent* failure (no network, a
+    release without names.common, an unrebuildable pre-#224 table) costs one
+    attempt per process instead of one per geocode call, and that reasoning is
+    untouched: nothing here re-attempts a build that merely failed. A file
+    that existed a moment ago and is gone now is a different event — a
+    deletion, not a failed build — and leaving the flags set would strand the
+    install on primary-name-only search (or bbox-less anchoring) for the rest
+    of the process over a file that can be rebuilt right now.
+    """
+    glob = overture.upstream_glob(theme="divisions", type_="division")
+    path = Path(local_table)
+    alt_path = path.with_name(_ALT_NAMES_TABLE_FILENAME)
+    if not path.exists():
+        logger.warning(
+            "local divisions table at %s vanished mid-query (evicted or deleted "
+            "underneath us); rebuilding rather than reporting upstream as down", path
+        )
+        _DIVISIONS_BBOX_CHECKED.discard(str(path))
+        _ALT_BUILD_ATTEMPTED.discard(str(alt_path))
+        try:
+            # Writes the alt half too, from the same upstream read.
+            _materialize_divisions_table(path, glob)
+        except (duckdb.Error, overture.UpstreamUnavailable) as e:
+            logger.warning(
+                "rebuild of the vanished divisions table failed, falling back to "
+                "direct upstream scans: %s", e,
+            )
+            return None, None
+        return str(path), str(alt_path) if alt_path.exists() else None
+    if alt_table is not None and not Path(alt_table).exists():
+        logger.warning("alternate-name table at %s vanished mid-query; rebuilding", alt_table)
+        _ALT_BUILD_ATTEMPTED.discard(alt_table)
+        _try_materialize_alt_names_table(alt_path, glob)
+        return local_table, alt_table if alt_path.exists() else None
+    return None
+
+
 def _query_divisions(
     query: str,
     region_code: str | None,
@@ -1381,20 +1434,51 @@ def _query_divisions(
     variant retries leave it None, because the alternate side already folds
     case and diacritics itself, so re-running it on a diacritic-stripped
     spelling of the same query can only return rows this pass already has.
+
+    A local read that fails because its table is no longer there (#230:
+    evicted, or deleted out from under the process, after _local_divisions_table
+    handed the path back) is not an upstream outage and must not be reported as
+    one — see _restore_vanished_tables. Exactly one retry: the rebuild either
+    put the file back, in which case the retry reads it, or it didn't, in which
+    case this drops to the upstream scan below.
     """
     if local_table is not None:
-        name_expr = "strip_accents(name)" if fold_diacritics else "name"
-        rows = _query_divisions_from_local(local_table, query, region_code, name_expr)
-        if alt_table is not None:
-            seen = {r["id"] for r in rows}
-            rows = rows + [
-                r
-                for r in _query_alt_names(alt_table, local_table, query, region_code)
-                if r["id"] not in seen
-            ]
-        return rows
+        try:
+            return _query_divisions_local(
+                local_table, query, region_code, fold_diacritics, alt_table
+            )
+        except overture.UpstreamUnavailable:
+            restored = _restore_vanished_tables(local_table, alt_table)
+            if restored is None:
+                raise  # both tables present: a real query failure
+            local_table, alt_table = restored
+        if local_table is not None:
+            return _query_divisions_local(
+                local_table, query, region_code, fold_diacritics, alt_table
+            )
     name_expr = "strip_accents(names.primary)" if fold_diacritics else "names.primary"
     return _query_divisions_from_upstream(query, region_code, name_expr)
+
+
+def _query_divisions_local(
+    local_table: str,
+    query: str,
+    region_code: str | None,
+    fold_diacritics: bool,
+    alt_table: str | None,
+) -> list[dict]:
+    """The local half of _query_divisions: primary-name matches, plus the #214
+    alternate-name matches for ids the primary pass didn't already return."""
+    name_expr = "strip_accents(name)" if fold_diacritics else "name"
+    rows = _query_divisions_from_local(local_table, query, region_code, name_expr)
+    if alt_table is not None:
+        seen = {r["id"] for r in rows}
+        rows = rows + [
+            r
+            for r in _query_alt_names(alt_table, local_table, query, region_code)
+            if r["id"] not in seen
+        ]
+    return rows
 
 
 # --- #215: fuzzy fallback tier ------------------------------------------

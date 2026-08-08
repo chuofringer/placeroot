@@ -15,8 +15,11 @@ the right trade for a point-radius search tool (queries cluster
 geographically and get reused), but it would be a poor fit for a workload
 that scans arbitrary large regions once each.
 
-Eviction is mtime-based LRU over the whole cache directory, capped by
-total size (not by file count or age), and re-checked after every write.
+Eviction is mtime-based LRU over the cache directory, capped by total size
+(not by file count or age), and re-checked after every write. It sweeps
+tiles only: derived whole-theme tables that other modules materialize under
+the same root are exempt, and don't count toward the cap — see
+PROTECTED_SUBDIRS and evict_if_needed (#230).
 
 Query-first, materialize-later (issue #31): a COPY that pulls a whole tile
 out of upstream costs seconds, and a caller shouldn't block a user-facing
@@ -432,8 +435,51 @@ def _is_claimed_locked(path: str, now: float) -> bool:
     return deadline is not None and deadline > now
 
 
+# --- #230: cache-dir subtrees the LRU sweep must never touch ---------------
+#
+# The sweep below is an LRU over *tiles*: files a query can always re-fetch
+# one at a time, cheaply, from upstream. Not everything under the cache root
+# is a tile. geocode.py materializes two whole-theme derived tables into
+# <cache_dir>/<release>/geocode-divisions/ -- the #43 divisions name table
+# and the #214 alternate-name table -- and they are the exact worst case for
+# a size-ranked, mtime-ordered sweep: built once at first geocode call, so
+# permanently the *oldest* files on disk, and by far the largest (~250MB and
+# ~95MB live), so always first out the door. Evicting one costs minutes of
+# rebuild, not a tile COPY, and it happens under any query that pushes a
+# default cache over cap -- the mid-query eviction observed in #230 surfaced
+# as a false UpstreamUnavailable on an entirely healthy upstream, then
+# rebuilt straight back over the cap and evicted again: thrash.
+#
+# So this subtree is exempt from the sweep, and its bytes are left out of
+# the accounting too. Counting bytes it can never free would make the sweep
+# strictly worse -- ~345MB of unevictable tables against a 500MB default cap
+# would have every pass delete every tile and still report itself over. The
+# size cap therefore governs the evictable tile pool; the geocode tables are
+# a separate, bounded, one-build-per-release cost that rolls over on its own
+# when Overture publishes a new release (the path is release-keyed).
+#
+# Deliberately a named subtree rather than a positive "does this look like a
+# tile path" test: tile layout has already moved once (#63 added the
+# fingerprint dir, and pre-#63 tiles still sitting directly under <theme>/
+# must keep aging out -- see test_eviction_counts_old_layout_tiles_toward_cap
+# and the module docstring's "Old-layout tiles" section). A path matcher
+# would have to encode every layout the sweep should still reach, and would
+# silently strand files the day it was outgrown. An exemption list only has
+# to name what is not a tile.
+PROTECTED_SUBDIRS = ("geocode-divisions",)
+
+
+def _is_protected(path: Path) -> bool:
+    """True for a cached file the LRU sweep must not consider -- see
+    PROTECTED_SUBDIRS."""
+    return any(part in PROTECTED_SUBDIRS for part in path.parts)
+
+
 def evict_if_needed() -> None:
     """Delete least-recently-used cached tiles until under the size cap.
+
+    Files under a PROTECTED_SUBDIRS directory (#230) are not tiles and take
+    no part in this at all: not deleted, not counted toward the total.
 
     Tiles currently claimed by an in-flight query (see claim_paths, #142)
     are skipped rather than deleted: evicting one out from under a query
@@ -446,7 +492,7 @@ def evict_if_needed() -> None:
     root = cache_dir()
     if not root.exists():
         return
-    files = list(root.rglob("*.parquet"))
+    files = [p for p in root.rglob("*.parquet") if not _is_protected(p)]
     files.sort(key=lambda p: p.stat().st_mtime)
     total = sum(f.stat().st_size for f in files)
     cap = max_bytes()

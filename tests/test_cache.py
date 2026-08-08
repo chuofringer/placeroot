@@ -482,6 +482,38 @@ def test_eviction_counts_old_layout_tiles_toward_cap(con, cache_dir, monkeypatch
     assert not old_tile.exists()  # evicted: it was the oldest file on disk
 
 
+def test_geocode_tables_survive_an_over_cap_eviction(con, cache_dir, monkeypatch):
+    """#230: the #43/#214 geocode tables live under the cache root but are not
+    tiles. They are built once (so permanently the oldest files on disk) and
+    are the largest things there, i.e. exactly what a plain mtime-ordered LRU
+    deletes first — and deleting one costs minutes of rebuild plus a false
+    upstream_unavailable mid-query. Tiles must still evict around them, and
+    their bytes must not count toward the cap either (or a cap smaller than
+    the tables would delete every tile on every pass, forever).
+    """
+    tables_dir = cache.cache_dir() / RELEASE / "geocode-divisions"
+    tables_dir.mkdir(parents=True)
+    table = tables_dir / "table.parquet"
+    alt = tables_dir / "alt_names.parquet"
+    old = time.time() - 10_000
+    for f in (table, alt):
+        f.write_bytes(b"0" * 50_000)  # oldest AND biggest: first out under plain LRU
+        os.utime(f, (old, old))
+
+    # A cap far under the tables' own size: if they counted, no tile could
+    # ever fit and the sweep would clear the whole cache every pass.
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", str(5000 / 1024 / 1024))
+    tiles = [(-74, 40), (-75, 40), (-76, 40), (15, 78)]
+    paths = [cache.ensure_tile(con, RELEASE, THEME, t, str(FIXTURE_PATH)) for t in tiles]
+
+    assert table.exists(), "the #43 divisions table was evicted"
+    assert alt.exists(), "the #214 alternate-name table was evicted"
+    surviving_tiles = [p for p in paths if p.exists()]
+    assert len(surviving_tiles) < len(paths), "eviction never ran"
+    assert surviving_tiles, "protected tables' bytes counted toward the cap"
+    assert paths[-1].exists()  # LRU still keeps the newest tile
+
+
 def test_inflight_dedup_key_includes_fingerprint(con, cache_dir, monkeypatch):
     """Two queries that miss the same tile coordinates but resolve to
     *different* schema fingerprints must each trigger their own background

@@ -1,7 +1,7 @@
 import duckdb
 import pytest
 
-from placeroot import geocode, overture, release, server
+from placeroot import cache, geocode, overture, release, server
 
 from .conftest import ADDRESSES_FIXTURE_PATH, CENTER_LAT, CENTER_LON, DIVISIONS_FIXTURE_PATH
 
@@ -684,6 +684,127 @@ def test_bbox_columns_are_never_exposed_in_a_tool_response(geocode_cache):
     for result in geocode.geocode("Brooklyn", limit=5):
         assert not any(k.startswith("bbox") for k in result)
     assert "bbox" not in str(geocode.resolve_place("Brooklyn"))
+
+
+# --- #230: a table evicted/deleted mid-query is not an upstream outage ----
+# The cache half of this (the LRU sweep no longer touches geocode-divisions/)
+# lives in test_cache.py; these pin the race that remains — a table that goes
+# away between _local_divisions_table() handing back its path and the query
+# reading it, e.g. an external `rm -rf` of the cache dir, or an install still
+# running a pre-#230 sweep in another process.
+
+
+def test_geocode_tables_are_named_in_the_cache_evictions_exemption_list():
+    # The wiring the whole fix hangs on: rename the subdir on one side only
+    # and eviction silently starts sweeping these tables again.
+    assert geocode._DIVISIONS_TABLE_SUBDIR in cache.PROTECTED_SUBDIRS
+
+
+def test_table_vanishing_mid_query_rebuilds_instead_of_reporting_upstream_down(
+    geocode_cache, monkeypatch
+):
+    # The live #230 failure: the divisions table is resolved, evicted, and
+    # only then read — which surfaced as UpstreamUnavailable (retry_advised)
+    # against a perfectly healthy upstream. It must rebuild and answer.
+    geocode.geocode("Brooklyn", limit=1)
+    table = _divisions_table_path(geocode_cache)
+    alt = _alt_table_path(geocode_cache)
+    # One-shot flags set, as they would be after a normal first call: the
+    # rebuild has to clear them for this path (see _restore_vanished_tables)
+    # or the alt table stays gone for the rest of the process.
+    monkeypatch.setattr(geocode, "_DIVISIONS_BBOX_CHECKED", {str(table)})
+    monkeypatch.setattr(geocode, "_ALT_BUILD_ATTEMPTED", {str(alt)})
+
+    real = geocode._query_divisions_from_local
+    reads = []
+
+    def racing(table_path, query, region_code, name_match_expr="name"):
+        reads.append(table_path)
+        if len(reads) == 1:  # eviction lands between resolve and read
+            table.unlink()
+            alt.unlink()
+        return real(table_path, query, region_code, name_match_expr)
+
+    monkeypatch.setattr(geocode, "_query_divisions_from_local", racing)
+    real_build = geocode._materialize_divisions_table
+    builds = []
+
+    def counted(path, glob):
+        builds.append(path)
+        return real_build(path, glob)
+
+    monkeypatch.setattr(geocode, "_materialize_divisions_table", counted)
+
+    # "Munich" only resolves through the alt table, so a right answer here
+    # proves both halves came back, not just the primary one.
+    assert geocode.geocode("Munich", limit=5)[0]["name"] == "München"
+    assert len(reads) >= 2  # the read was retried, not surfaced as an error
+    assert len(builds) == 1  # and the vanished table was rebuilt exactly once
+    assert table.exists() and alt.exists()
+    assert str(table) not in geocode._DIVISIONS_BBOX_CHECKED
+    assert str(alt) not in geocode._ALT_BUILD_ATTEMPTED
+
+
+def test_alt_table_alone_vanishing_mid_query_is_also_survivable(geocode_cache, monkeypatch):
+    # The 95MB half is the likelier casualty of a size-capped sweep. Losing it
+    # must not fail the query either — worst case the answer degrades to
+    # primary names, exactly as it does on an install that never had one.
+    geocode.geocode("Brooklyn", limit=1)
+    alt = _alt_table_path(geocode_cache)
+    monkeypatch.setattr(geocode, "_ALT_BUILD_ATTEMPTED", {str(alt)})
+    real = geocode._query_alt_names
+    reads = []
+
+    def racing(alt_table, table_path, query, region_code):
+        reads.append(alt_table)
+        if len(reads) == 1:
+            alt.unlink()
+        return real(alt_table, table_path, query, region_code)
+
+    monkeypatch.setattr(geocode, "_query_alt_names", racing)
+
+    assert geocode.geocode("Munich", limit=5)[0]["name"] == "München"
+    assert alt.exists()
+
+
+def test_a_real_local_query_failure_is_still_upstream_unavailable(geocode_cache, monkeypatch):
+    # The retry is narrow: it triggers on a *missing file*, not on any local
+    # read that fails. With both tables on disk, an error is a real error and
+    # must still reach the caller rather than being swallowed or retried.
+    geocode.geocode("Brooklyn", limit=1)
+    calls = []
+
+    def boom(*a, **kw):
+        calls.append(a)
+        raise overture.UpstreamUnavailable("genuinely broken")
+
+    monkeypatch.setattr(geocode, "_query_divisions_from_local", boom)
+    with pytest.raises(overture.UpstreamUnavailable):
+        geocode.geocode("Munich", limit=5)
+    assert len(calls) == 1  # no retry
+
+
+def test_pre_214_alt_table_rebuild_is_still_once_per_process(geocode_cache, monkeypatch):
+    # Reconciles with #214/#224: this fix relaxes the one-shot flags ONLY for
+    # a table that vanished after being resolved. A build that merely *fails*
+    # is still attempted once per process — the case those flags exist for.
+    # (test_missing_alt_table_is_rebuilt_once_per_process covers the same
+    # invariant from the resolve side; this one proves the mid-query path
+    # doesn't hand out extra attempts behind its back.)
+    geocode.geocode("Brooklyn", limit=1)
+    _alt_table_path(geocode_cache).unlink()
+    monkeypatch.setattr(geocode, "_ALT_BUILD_ATTEMPTED", set())
+    attempts = []
+
+    def counted(path, glob):
+        attempts.append(glob)
+        raise duckdb.Error("no upstream here")
+
+    monkeypatch.setattr(geocode, "_materialize_alt_names_table", counted)
+    geocode.geocode("Munich", limit=5)
+    geocode.geocode("Vienna", limit=5)
+    geocode.geocode("Brooklyn", limit=5)
+    assert len(attempts) == 1
 
 
 # --- #221: prominence can rescue a prefix match; the fold always runs -----
