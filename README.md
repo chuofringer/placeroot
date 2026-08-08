@@ -81,6 +81,7 @@ uv run ruff check .
 ## Docs
 
 - [ROADMAP.md](ROADMAP.md) — where this is going · [PLAN.md](PLAN.md) — product plan and positioning
+- [docs/benchmarks.md](docs/benchmarks.md) — token efficiency: per-answer cost, and the schema surface it's paid against
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) — how releases reach PyPI + npm
 - [docs/WEBSITE.md](docs/WEBSITE.md) — the marketing site: serve locally and deploy
 - [docs/MIRROR.md](docs/MIRROR.md) · [docs/METRICS.md](docs/METRICS.md) · [docs/launch/](docs/launch/)
