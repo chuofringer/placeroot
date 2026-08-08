@@ -1,0 +1,145 @@
+{
+  "manifest_version": "0.4",
+  "name": "placeroot",
+  "display_name": "PlaceRoot",
+  "version": "0.5.0",
+  "description": "Ground AI agents in open map data. MCP server for Overture Maps — compact answers, no API key.",
+  "long_description": "PlaceRoot answers spatial questions from the Overture Maps public data release — nearby places, geocoding, admin hierarchy, buildings, land use, isochrones and routing — with no API key, no signup and no vendor platform. Every tool returns a compact, ranked answer sized for an agent's context window instead of a raw GeoJSON dump, and every place carries its Overture GERS id so an agent can hold onto it across turns.",
+  "author": {
+    "name": "Vibe Mapper",
+    "email": "chuo.fringer@gmail.com"
+  },
+  "homepage": "https://placeroot.dev",
+  "documentation": "https://placeroot.dev/how-it-works.html",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chuofringer/placeroot"
+  },
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "overture-maps",
+    "geospatial",
+    "ai-agents",
+    "openstreetmap",
+    "duckdb"
+  ],
+  "server": {
+    "type": "uv",
+    "entry_point": "src/placeroot/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${__dirname}",
+        "placeroot"
+      ]
+    }
+  },
+  "tools": [
+    {
+      "name": "find_places",
+      "description": "Find named places, either near a point or inside an area's boundary."
+    },
+    {
+      "name": "summarize_area",
+      "description": "Summarize what's in an area: total places and top categories."
+    },
+    {
+      "name": "place_details",
+      "description": "One place, in full: addresses, websites, phones, socials, brand, source attribution, GERS id, confidence, and operating status."
+    },
+    {
+      "name": "within_distance",
+      "description": "Is the nearest place matching category/name within max_distance_m of (lat, lon)?"
+    },
+    {
+      "name": "distance_matrix",
+      "description": "Straight-line (great-circle) distance in meters between every origin and destination."
+    },
+    {
+      "name": "compare_areas",
+      "description": "Compare 2-5 areas side by side: category mix, density, and what differs."
+    },
+    {
+      "name": "admin_lookup",
+      "description": "Containing admin hierarchy for a point: neighborhood up to country."
+    },
+    {
+      "name": "summarize_buildings",
+      "description": "Summarize building footprints in an area: count, footprint area, height/floor coverage, mix."
+    },
+    {
+      "name": "buildings_at",
+      "description": "Nearest building footprints to a point, nearest first."
+    },
+    {
+      "name": "land_use_at",
+      "description": "What kind of land is this: land use and land cover classification at a point."
+    },
+    {
+      "name": "geocode",
+      "description": "Free-text place name -> ranked candidate locations, from Overture divisions and places."
+    },
+    {
+      "name": "geocode_batch",
+      "description": "Geocode up to 20 free-text queries in one call, one best match each."
+    },
+    {
+      "name": "search_categories",
+      "description": "Free text -> valid Overture category slugs, for find_places'/ summarize_area's `category` param."
+    },
+    {
+      "name": "resolve_place",
+      "description": "Free-text place reference -> ranked, typed GERS ids to hold onto."
+    },
+    {
+      "name": "resolve_place_batch",
+      "description": "Resolve up to 25 GERS ids to compact place rows in one call."
+    },
+    {
+      "name": "reverse_geocode",
+      "description": "Point -> nearest address (street/number/postcode) and its containing division chain."
+    },
+    {
+      "name": "reverse_geocode_batch",
+      "description": "Reverse-geocode many points in one call, to cut N round-trips down to one."
+    },
+    {
+      "name": "simplify_geometry",
+      "description": "Simplify a GeoJSON geometry to fit a token budget, reporting what was lost."
+    },
+    {
+      "name": "render_map",
+      "description": "Render find_places/summarize_area JSON (or caller-supplied GeoJSON) as a map."
+    },
+    {
+      "name": "isochrone",
+      "description": "Isochrone: the area reachable from (lat, lon) within `minutes`, by mode."
+    },
+    {
+      "name": "route",
+      "description": "Route: shortest-path distance and duration between two points, by mode."
+    },
+    {
+      "name": "places_along_route",
+      "description": "Places on the way from A to B: corridor search along the route, ranked by detour."
+    },
+    {
+      "name": "data_version",
+      "description": "Which Overture Maps release backs the answers from every other tool."
+    }
+  ],
+  "tools_generated": false,
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "runtimes": {
+      "python": ">=3.11"
+    }
+  }
+}
