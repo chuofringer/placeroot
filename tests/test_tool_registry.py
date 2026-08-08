@@ -1,7 +1,7 @@
 """Every tool-shaped function in server.py must be registered over MCP.
 
 Regression guard for the class of bug PR #60 found: server.isochrone
-shipped without its @mcp.tool() decorator — callable as a plain function
+shipped without its tool decorator — callable as a plain function
 (so every direct-call test passed) but absent from the MCP registry.
 """
 
@@ -11,7 +11,7 @@ import inspect
 from placeroot import server
 
 # Public module-level functions that are deliberately NOT MCP tools.
-NON_TOOLS = {"main", "parse_transport_args"}
+NON_TOOLS = {"main", "parse_transport_args", "build_server"}
 
 
 def _intended_tool_names() -> set[str]:
@@ -33,7 +33,7 @@ def test_every_tool_function_is_registered():
     missing = intended - registered
     assert not missing, (
         f"tool functions defined in server.py but not registered over MCP "
-        f"(missing @mcp.tool()?): {sorted(missing)}"
+        f"(missing @_tool?): {sorted(missing)}"
     )
     # And nothing registered that isn't a module function (drift the other way).
     unknown = registered - intended
