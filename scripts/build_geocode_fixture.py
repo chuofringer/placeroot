@@ -345,6 +345,63 @@ def build_divisions() -> list[tuple]:
         43.66, -70.26, _chain("United States", "Maine", "Portland"),
         population=68_408,
     )
+    # #222/R28: the four cross-border wrong answers the prominence rescue
+    # produced when any non-null population counted as prominence. Each pair
+    # is the same shape: the place the caller means carries no population in
+    # Overture and matches the query exactly; a different place in a
+    # different country matches it only as a *prefix* and carries a
+    # placeholder population (the live rows carry 1), which used to be
+    # enough to leapfrog the exact match. _PROMINENCE_RESCUE_FLOOR is what
+    # they now fail to clear.
+    add(
+        "gers-div-rafah-ps", "Rafah", "locality", "PS", "PS-GZ",
+        31.29, 34.25, _chain("Palestine", "Gaza Strip", "Rafah"),
+    )
+    # The Saudi decoy reaches the query through an alternate spelling (the
+    # transliterations of رفحاء vary); the alternate is what makes the
+    # prefix relation to "Rafah" explicit, and the alt-name path is where
+    # the live hit came from.
+    add(
+        "gers-div-rafha-sa", "Rafha", "locality", "SA", "SA-04",
+        29.62, 43.49, _chain("Saudi Arabia", "Northern Borders", "Rafha"),
+        population=1, common={"en": "Rafaha"},
+    )
+    add(
+        "gers-div-johor-my", "Johor", "region", "MY", "MY-01",
+        1.94, 103.36, _chain("Malaysia", "Johor"),
+    )
+    add(
+        "gers-div-johor-bahru", "Johor Bahru", "locality", "MY", "MY-01",
+        1.49, 103.74, _chain("Malaysia", "Johor", "Johor Bahru"), population=1,
+    )
+    add(
+        "gers-div-enga-pg", "Enga", "region", "PG", "PG-EPW",
+        -5.35, 143.55, _chain("Papua New Guinea", "Enga"),
+    )
+    add(
+        "gers-div-engativa-co", "Engativá", "locality", "CO", "CO-DC",
+        4.71, -74.11, _chain("Colombia", "Bogotá", "Engativá"), population=1,
+    )
+    add(
+        "gers-div-plateau-lc", "Plateau", "neighborhood", "LC", "LC-11",
+        13.83, -60.95, _chain("Saint Lucia", "Castries", "Plateau"),
+    )
+    add(
+        "gers-div-plateau-central-bf", "Plateau-Central", "region", "BF", "BF-11",
+        12.25, -0.75, _chain("Burkina Faso", "Plateau-Central"), population=1,
+    )
+    # #222/R28 positive control: the rescue itself must keep working. 河南 is
+    # exactly the name of a population-less county in Qinghai and only a
+    # prefix of 河南省 and its 99M people — the same shape as 東京/東京都
+    # above, and the one a floor set too high would break.
+    add(
+        "gers-div-henan-cn", "河南省", "region", "CN", "CN-HA",
+        33.88, 113.61, _chain("China", "河南省"), population=99_365_000,
+    )
+    add(
+        "gers-div-henan-qinghai", "河南", "locality", "CN", "CN-QH",
+        34.73, 101.61, _chain("China", "青海省", "河南"),
+    )
     # #223: the divisions the postcode answer names. "Mission District" is the
     # locality-ish row nearest the synthetic 94110 US cluster below, so
     # geocode("94110") can report *where* the centroid is rather than bare

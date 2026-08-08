@@ -28,7 +28,11 @@ What each group pins:
   Munich/Tokyo/Moskva/Vienna/Pressburg, each against the population-less
   literal namesake the live probe actually returned;
 - the #215 fuzzy tier — the three live-verified typo probes;
-- #221 itself (FIXED_BY_221) — "Zurich" and "東京".
+- #221 itself (FIXED_BY_221) — "Zurich" and "東京";
+- the R28 prominence floor (FIXED_BY_R28_PROMINENCE_FLOOR) — the four
+  live cross-border answers a placeholder population of 1 bought, plus
+  the positive control (河南) that pins the rescue still firing when the
+  prominence is real.
 
 Note Springfield resolves to the *Massachusetts* one here, not Missouri: the
 fixture carries only the IL/MA pair (#47), with their real populations. The
@@ -88,6 +92,33 @@ FIXED_BY_221 = [
 ]
 
 RANKING_CORPUS += FIXED_BY_221
+
+# R28 against PR #222: the prominence rescue #221 introduced was gated on
+# `population is not None`, and Overture's population column carries
+# placeholder 1s and 0s — so a *prefix* match with one fictional inhabitant
+# outranked an exact match with no figure at all. Four live wrong answers,
+# three of them across a border. The floor (_PROMINENCE_RESCUE_FLOOR) is
+# what they now fail to clear; the positive control below is what stops the
+# floor from being a cure worse than the disease.
+FIXED_BY_R28_PROMINENCE_FLOOR = [
+    # ...and Rafha, Saudi Arabia, reached through an alternate spelling.
+    ("Rafah", "Rafah", ["Palestine", "Gaza Strip"]),
+    # ...and Johor Bahru, the city inside the state that was asked for.
+    ("Johor", "Johor", ["Malaysia"]),
+    # ...and Engativá, a locality of Bogotá.
+    ("Enga", "Enga", ["Papua New Guinea"]),
+    # ...and Plateau-Central, a region of Burkina Faso.
+    ("Plateau", "Plateau", ["Saint Lucia", "Castries"]),
+]
+
+# The rescue still has to fire when the prominence is real: 河南 is a
+# population-less county in Qinghai and only a prefix of 河南省 (99M).
+# Same shape as 東京 above, and the case a floor set too high would break.
+PROMINENCE_RESCUE_STILL_FIRES = [
+    ("河南", "河南省", ["China"]),
+]
+
+RANKING_CORPUS += FIXED_BY_R28_PROMINENCE_FLOOR + PROMINENCE_RESCUE_STILL_FIRES
 
 
 @pytest.mark.parametrize("query,name,admin_context", RANKING_CORPUS)

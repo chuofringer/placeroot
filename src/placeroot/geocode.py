@@ -537,11 +537,34 @@ def _effective_tier(row: dict, query: str) -> int:
 # only after; see its docstring.
 _STRONG_TIER = 2
 
+# #222/R28: how much population a *lower-tier* row needs before its
+# prominence is allowed to outrank a higher-tier match that has none.
+#
+# The rescue below exists for 東京都 (13.9M) over a population-less Nagano
+# neighborhood — a real city beating a spelling coincidence. But it was
+# gated on `population is not None`, and Overture's population column is
+# full of placeholder 1s and 0s: any row carrying one of those counted as
+# "prominent" and leapfrogged an exact match on the strength of a single
+# fictional inhabitant. Live, that answered "Rafah" with Rafha in Saudi
+# Arabia, "Johor" (the Malaysian state) with Johor Bahru, "Enga" (the PNG
+# province) with Engativá in Bogotá, and "Plateau" in St Lucia with
+# Plateau-Central in Burkina Faso — four wrong answers, three of them
+# across a border.
+#
+# 50k is the scale at which the rescue's own argument holds: a place that
+# size is plausibly the one a bare name means, and a place below it is not
+# prominent enough to overrule the caller's literal spelling. It is a
+# floor on the *rescue*, not on ranking generally — two rows at the same
+# tier still order by population all the way down to 1, where a smaller
+# real number is still better evidence than no number at all.
+_PROMINENCE_RESCUE_FLOOR = 50_000
+
 
 def _rank_key(row: dict, query: str, region_population: dict[str, int]):
     """Sort key: (#215) literal-over-fuzzy, then (#221) strong-vs-substring
-    tier group, then whether a population is known at all, then the match
-    tier, then (#47) population, else a documented proxy chain of subtype
+    tier group, then whether the row's prominence can outrank the tier at
+    all, then the match tier, then (#47) population, else a documented proxy
+    chain of subtype
     rank / hierarchy depth / the row's own region's population, then (#53)
     literal-over-variant, then id for full determinism. All ascending
     (smaller sorts first).
@@ -550,12 +573,14 @@ def _rank_key(row: dict, query: str, region_population: dict[str, int]):
     exact-tier row beat every prefix-tier row no matter what stood behind
     them: live, "東京" put a population-less Nagano neighborhood above 東京都
     and its 13.9M people, because 東京 is exactly the neighborhood's name and
-    only a prefix of the prefecture's. The rule now is that a *known
-    population* outranks the tier, but only within the strong (exact/prefix)
-    group and only against a row with no population at all — the exact-tier
-    namesakes this rescues past are Overture rows with population NULL, and
-    that emptiness is itself the signal (#47) that the match is a spelling
-    coincidence rather than the place anyone means. Everything else is
+    only a prefix of the prefecture's. The rule now is that a population of
+    at least _PROMINENCE_RESCUE_FLOOR outranks the tier, but only within the
+    strong (exact/prefix) group and only against a row with no population at
+    all — the exact-tier namesakes this rescues past are Overture rows with
+    population NULL, and that emptiness is itself the signal (#47) that the
+    match is a spelling coincidence rather than the place anyone means. The
+    floor is what stops the same rule reading a placeholder population of 1
+    as prominence (#222/R28); see the constant. Everything else is
     unchanged and deliberately so: two populated rows still order by tier
     first, so an exact match with 10k people still beats a prefix match with
     10M ("Portland" is not a worse answer than "Portland Heights" because
@@ -593,13 +618,21 @@ def _rank_key(row: dict, query: str, region_population: dict[str, int]):
     tier = _effective_tier(row, query)
     population = row.get("population")
     weight = _SUBTYPE_WEIGHT.get(row.get("subtype"), 0)
+    # The prominence-rescue term (see _PROMINENCE_RESCUE_FLOOR). An exact
+    # match keeps its population whatever the figure is — nothing outranks
+    # it on tier, so the floor would only demote it against a *bigger*
+    # prefix match, which is precisely the ordering #221 refuses ("Portland,
+    # 10k, is not a worse answer than Portland Heights, 10M"). A prefix
+    # match has to clear the floor, because leapfrogging is the only thing
+    # this term ever does for it.
+    rescued = population is not None and (tier >= 3 or population >= _PROMINENCE_RESCUE_FLOOR)
     depth = len(row.get("admin_context") or [])
     region_pop = region_population.get(row.get("region")) or 0
     return (
         1 if row.get("_fuzzy") else 0,
         -(row.get("_similarity") or 0.0),
         0 if tier >= _STRONG_TIER else 1,
-        0 if population is not None else 1,
+        0 if rescued else 1,
         -tier,
         -(population or 0),
         -weight,
