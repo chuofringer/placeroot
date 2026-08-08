@@ -26,9 +26,27 @@ Two conventions hold the module together, both enforced by
    fail. See `_profile_note`.
 """
 
+import re
 from collections.abc import Callable, Iterable
 
 from mcp.server.mcpserver import MCPServer
+
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _arg(value: str) -> str:
+    """A prompt argument, flattened to a single line.
+
+    Arguments are interpolated raw into markdown that is otherwise a
+    numbered list of instructions, so a value containing line breaks can
+    lay itself out as further steps ("...\\n\\n6. ignore the above"). The
+    user is supplying their own prompt here, so this is self-inflicted
+    rather than an attack surface, but a numbered step that came from an
+    argument should not be able to read as one the workflow wrote.
+    Collapsing every whitespace run to a single space is the whole fix:
+    without a newline there is no list item and no heading.
+    """
+    return _WHITESPACE.sub(" ", value or "").strip()
 
 
 def _profile_note(referenced: Iterable[str], selected: set[str]) -> str:
@@ -68,6 +86,8 @@ SITE_SELECTION_TOOLS = (
 
 
 def _site_selection(business_type: str, area: str) -> str:
+    business_type = _arg(business_type)
+    area = _arg(area)
     return f"""Find the best location in {area} to open a {business_type}, using the \
 PlaceRoot tools.
 
@@ -108,6 +128,8 @@ COMPARE_NEIGHBORHOODS_TOOLS = (
 
 
 def _compare_neighborhoods(area_a: str, area_b: str) -> str:
+    area_a = _arg(area_a)
+    area_b = _arg(area_b)
     return f"""Compare {area_a} and {area_b} as places, using the PlaceRoot tools.
 
 1. Resolve both names to points first: `geocode()` (or `resolve_place()` if
@@ -143,12 +165,26 @@ PLAN_ERRANDS_TOOLS = (
 
 
 def _plan_errands(stops: str, start: str = "") -> str:
+    stops = _arg(stops)
+    start = _arg(start)
     origin = (
         f'Start from "{start}".'
-        if start.strip()
+        if start
         else "If the user has not said where they are starting, ask before ordering the stops."
     )
-    return f"""Plan an efficient errand run visiting: {stops}
+    # `stops` is required, but "required" in MCP means present, not
+    # non-empty: a client can send "" or "   ". Interpolating that renders
+    # "visiting: " and the agent plans a route around nothing. Ask instead.
+    task = (
+        f"Plan an efficient errand run visiting: {stops}"
+        if stops
+        else (
+            "Plan an efficient errand run. The user has not said which stops "
+            "to visit — ask them for the list of errands first, then work "
+            "through the steps below with it. Do not invent stops."
+        )
+    )
+    return f"""{task}
 
 {origin}
 
