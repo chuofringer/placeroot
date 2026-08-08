@@ -2562,8 +2562,10 @@ _STREET_VARIANT_CAP = 16
 # search for the wrong doorway.
 _HOUSE_NUMBER_RE = re.compile(r"^\d+$")
 
-# Columns read off an address row, in the order _address_row unpacks them.
-_ADDRESS_SELECT_COLUMNS = ("number", "street", "unit", "postcode", "country")
+# Columns the address scan reads before grouping. postal_city is read but
+# never returned: it is what "prefer the anchor's own municipality" sorts on
+# (see _scan_addresses_in_bbox).
+_ADDRESS_SELECT_COLUMNS = ("number", "street", "unit", "postcode", "country", "postal_city")
 
 # One anchor bbox per (release, division_id) per process. The division_area
 # lookup below is an id-filtered scan of a theme with no bbox to prune by --
@@ -2715,6 +2717,7 @@ def _scan_addresses_in_bbox(
     street_patterns: list[str],
     number: str | None,
     limit: int,
+    locality: str | None = None,
 ) -> tuple[list[tuple], int, int]:
     """Deduplicated address rows inside `bbox`, nearest `origin` first.
 
@@ -2730,6 +2733,24 @@ def _scan_addresses_in_bbox(
     San Francisco is 2,980 rows collapsing to 900 distinct number|street
     pairs (R27, live) — an undeduplicated top-5 is five spellings of the same
     doorway. Grouping happens in SQL so the wire never carries the 2,980.
+
+    The group key is (number, street, postcode), not (number, street)
+    (#229, R28). A city bbox is not a municipality: Boston's box covers
+    Hingham, Charlestown and Cambridge, all of which have a 1 Main St, and
+    grouping without the postcode collapsed three real, different doorways
+    into one arbitrarily-chosen row — an answer that is wrong rather than
+    merely incomplete. The postcode is the cheapest field that separates
+    them; a real point-in-polygon municipality test would be correct for
+    the rest but costs a polygon join per row, which this scan is not the
+    place for. `locality` (the anchor's own name) breaks the remaining tie
+    softly: rows whose postal_city is the anchor's municipality sort ahead
+    of the neighbours that share its bbox, before distance decides.
+
+    `unit` is likewise no longer an arg_min pick off the group. A doorway
+    with 458 units (live: 1 Franklin St, Boston) has no "the" unit, and
+    naming whichever one happened to sit nearest is a guess dressed as a
+    fact. It comes back only when the group carries exactly one distinct
+    unit; otherwise the count does, as `unit_count`.
 
     Reads through addresses._from_source, so this shares the #202 tile cache
     with address_at and reverse_geocode's address hop: the second query in a
@@ -2750,6 +2771,13 @@ def _scan_addresses_in_bbox(
     if number is not None and "number" not in missing:
         params["number"] = number
         number_sql = " AND number = $number"
+    # Rows in the anchor's own municipality first. A soft preference, not a
+    # filter: postal_city is missing on plenty of real rows, and dropping
+    # those would turn a partial field into an invisible coverage hole.
+    locality_rank = "0"
+    if locality and "postal_city" not in missing:
+        params["locality"] = locality
+        locality_rank = "CASE WHEN lower(postal_city) = lower($locality) THEN 0 ELSE 1 END"
     sql = f"""
         WITH matched AS (
             SELECT {columns},
@@ -2761,21 +2789,23 @@ def _scan_addresses_in_bbox(
               AND ({" OR ".join(street_sql)}){number_sql}
         ),
         grouped AS (
-            SELECT number, street,
-                   arg_min(unit, d) AS unit,
-                   arg_min(postcode, d) AS postcode,
+            SELECT number, street, postcode,
+                   count(DISTINCT unit) AS unit_count,
+                   CASE WHEN count(DISTINCT unit) = 1 THEN min(unit) END AS unit,
                    arg_min(country, d) AS country,
+                   min({locality_rank}) AS locality_rank,
                    round(arg_min(lat, d), 6) AS lat,
                    round(arg_min(lon, d), 6) AS lon,
                    round(min(d), 1) AS distance_m,
                    count(*) AS n
-            FROM matched GROUP BY number, street
+            FROM matched GROUP BY number, street, postcode
         )
-        SELECT number, street, unit, postcode, country, lat, lon, distance_m,
+        SELECT number, street, unit, unit_count, postcode, country, lat, lon, distance_m,
                count(*) OVER () AS distinct_in_range,
                sum(n) OVER () AS matched_rows
         FROM grouped
-        ORDER BY distance_m, street NULLS LAST, number NULLS LAST
+        ORDER BY locality_rank, distance_m, street NULLS LAST, number NULLS LAST,
+                 postcode NULLS LAST
         LIMIT {limit}
     """
     try:
@@ -2790,8 +2820,13 @@ def _scan_addresses_in_bbox(
 
 def _address_row(row: tuple) -> dict:
     """One grouped row -> the response shape. unit/postcode are dropped when
-    null, the same padding-is-not-an-answer rule address_at applies."""
-    number, street, unit, postcode, country, lat, lon, distance_m = row[:8]
+    null, the same padding-is-not-an-answer rule address_at applies.
+
+    `unit_count` replaces `unit` when the doorway carries more than one
+    (#229, R28): "which of the 458 units" is a question this tool cannot
+    answer, and naming one of them would be a fabricated answer to it.
+    """
+    number, street, unit, unit_count, postcode, country, lat, lon, distance_m = row[:9]
     out = {
         "number": number,
         "street": street,
@@ -2805,6 +2840,8 @@ def _address_row(row: tuple) -> dict:
     for field in ("unit", "postcode"):
         if not out[field]:
             del out[field]
+    if unit_count and unit_count > 1:
+        out["unit_count"] = int(unit_count)
     return out
 
 
@@ -2937,8 +2974,10 @@ def geocode_address(
     3. Scan the addresses theme inside that extent, through the same tile
        cache address_at reads, matching `street` against every USPS
        abbreviation/expansion of the query (Parkway<->Pkwy, W<->West, ...).
-    4. Deduplicate to distinct number|street, nearest the anchor's own
-       reference point first.
+    4. Deduplicate to distinct number|street|postcode, nearest the anchor's
+       own reference point first. The postcode is in the key because a city
+       bbox is not a municipality (#229): without it, the 1 Main St of every
+       town the box overlaps collapses into one row.
 
     Returns {"results": [{number, street, unit?, postcode?, country,
     distance_m, lat, lon}, ...], "anchor": {name, id, country,
@@ -2998,7 +3037,7 @@ def geocode_address(
     origin = (anchor["lat"], anchor["lon"])
     patterns = _street_variants(street)
     rows, distinct_in_range, matched_rows = _scan_addresses_in_bbox(
-        bbox, origin, patterns, number, limit
+        bbox, origin, patterns, number, limit, locality=anchor["name"]
     )
     payload: dict = {
         "results": [_address_row(r) for r in rows],

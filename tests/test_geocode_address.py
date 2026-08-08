@@ -182,6 +182,53 @@ def test_a_city_with_no_boundary_extent_declines_to_guess_one():
     assert "address_at(" in result["note"]
 
 
+# --- dedup does not merge municipalities (R28 HIGH-4, #229) ----------------
+
+
+def test_same_number_in_two_municipalities_stays_two_rows():
+    """A city bbox is not a municipality: San Francisco's box spills over
+    into Daly City, and both have a 1 MAIN ST. Live, Boston's box covers
+    Hingham, Charlestown and Cambridge the same way, and grouping on
+    (number, street) alone merged all three into one arbitrary row."""
+    result = geocode.geocode_address("Main St, San Francisco", limit=10)
+
+    rows = [(r["number"], r["street"], r["postcode"]) for r in result["results"]]
+    assert ("1", "MAIN ST", "94112") in rows
+    assert ("1", "MAIN ST", "94014") in rows
+    assert len(rows) == len(set(rows))
+    # Both municipalities' 1 and 3 survive as their own rows.
+    assert len([r for r in rows if r[1] == "MAIN ST"]) == 4
+    # ...and the distinct count agrees with the key that produced the rows.
+    assert result.get("distinct_in_range", len(rows)) == len(rows)
+
+
+def test_anchor_municipality_sorts_ahead_of_a_bbox_neighbour():
+    result = geocode.geocode_address("Main St, San Francisco", limit=10)
+    postcodes = [r["postcode"] for r in result["results"]]
+    # Both San Francisco rows come before either Daly City row, even though
+    # the Daly City ones are not the farthest from the anchor point.
+    assert postcodes.index("94112") < postcodes.index("94014")
+
+
+def test_a_doorway_with_many_units_reports_the_count_not_a_guess():
+    """arg_min(unit, d) over 458 units at 1 Franklin St is a nondeterministic
+    pick presented as a fact. Three units in the fixture make the same point."""
+    result = geocode.geocode_address("1 Franklin Street, San Francisco")
+
+    row = result["results"][0]
+    assert row["number"] == "1"
+    assert "unit" not in row
+    assert row["unit_count"] == 3
+
+
+def test_a_doorway_with_one_unit_still_names_it():
+    result = geocode.geocode_address("3 Franklin Street, San Francisco")
+
+    row = result["results"][0]
+    assert row["unit"] == "Suite 900"
+    assert "unit_count" not in row
+
+
 # --- the anchor is never in another country (R28 HIGH-1, #229) -------------
 
 
