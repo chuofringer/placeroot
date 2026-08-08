@@ -13,7 +13,13 @@ import pytest
 
 from placeroot import addresses, overture, server
 
-from .conftest import ADDRESSES_FIXTURE_PATH, CENTER_LAT, CENTER_LON
+from .conftest import (
+    ADDRESSES_FIXTURE_PATH,
+    CENTER_LAT,
+    CENTER_LON,
+    DIVISION_AREAS_FIXTURE_PATH,
+    DIVISIONS_FIXTURE_PATH,
+)
 
 # scripts/build_geocode_fixture.py's UNCOVERED_LAT/LON: a GB coordinate, in a
 # country that is not in addresses.COVERED_COUNTRIES.
@@ -137,7 +143,9 @@ def test_covered_country_with_nothing_nearby_says_so_differently():
     note = result["note"]
     assert "no Overture address coverage" not in note
     assert "covered by" in note
-    assert "United States" in note
+    # The country label comes from the polygon that *contains* the point in
+    # division_areas.parquet, which build_fixture.py names "United Testland".
+    assert "United Testland (US)" in note
 
 
 def test_unknown_country_note_when_no_division_identifies_the_point():
@@ -145,6 +153,196 @@ def test_unknown_country_note_when_no_division_identifies_the_point():
     result = addresses.address_at(0.0, 0.0)
     assert result["results"] == []
     assert "could not be checked" in result["note"]
+
+
+# --- how the country behind the note is resolved ---
+#
+# The reviewer's shape for the border bug: a *foreign* division point sits
+# nearer the query than any domestic one, while the polygon that actually
+# contains the query is domestic. Nearest-division answers GB and reports the
+# coordinate as uncovered; containment answers US and reports it as covered.
+
+BORDER_LAT, BORDER_LON = 40.75, -73.50  # far from the address grid: no rows
+
+
+def _write_border_divisions(tmp_path):
+    """(division_area path, division path) for the nearest-vs-containing case.
+
+    One US country polygon covering BORDER_LAT/LON; two division *points* —
+    a GB one 2.2 km south (the nearest label) and a US one 5.5 km north.
+    """
+    con = duckdb.connect()
+    con.execute("INSTALL spatial; LOAD spatial;")
+    areas = tmp_path / "border_division_areas.parquet"
+    divisions = tmp_path / "border_divisions.parquet"
+    con.execute(f"""
+        COPY (
+            SELECT 'gers-div-area-us' AS id,
+                   {{'primary': 'United States'}} AS names,
+                   'country' AS subtype,
+                   'US' AS country,
+                   {{'xmin': -73.8, 'ymin': 40.5, 'xmax': -73.2, 'ymax': 41.0}} AS bbox,
+                   ST_AsWKB(ST_GeomFromText(
+                       'POLYGON((-73.8 40.5, -73.2 40.5, -73.2 41.0, -73.8 41.0, -73.8 40.5))'
+                   )) AS geometry
+        ) TO '{areas}' (FORMAT PARQUET)
+    """)
+    con.execute(f"""
+        COPY (
+            SELECT * FROM (VALUES
+                ('gers-div-gb-near', {{'xmin': -73.5, 'ymin': 40.73,
+                                       'xmax': -73.5, 'ymax': 40.73}},
+                 'GB', [[{{'name': 'United Kingdom'}}]]),
+                ('gers-div-us-far',  {{'xmin': -73.5, 'ymin': 40.80,
+                                       'xmax': -73.5, 'ymax': 40.80}},
+                 'US', [[{{'name': 'United States'}}]])
+            ) AS t(id, bbox, country, hierarchies)
+        ) TO '{divisions}' (FORMAT PARQUET)
+    """)
+    return areas, divisions
+
+
+def _point_divisions_at(areas, divisions):
+    # The bare theme override is what type=division_area lookups resolve to;
+    # the per-type one is what the nearest-division fallback reads.
+    overture.set_data_path(str(areas), theme="divisions")
+    overture.set_data_path(str(divisions), theme="divisions", type_="division")
+    overture.clear_division_geometry_cache()
+
+
+def test_country_comes_from_the_containing_polygon_not_the_nearest_label(tmp_path):
+    """Regression: a nearer foreign division must not decide the country.
+
+    Pre-fix this resolved GB (2.2 km) over US (5.5 km) and reported a covered
+    coordinate as having no Overture address coverage at all.
+    """
+    _point_divisions_at(*_write_border_divisions(tmp_path))
+    country = addresses._country_at(BORDER_LAT, BORDER_LON)
+    assert country.status == addresses.RESOLVED
+    assert country.code == "US"
+    assert country.name == "United States"
+
+
+def test_border_coordinate_is_reported_as_covered_not_uncovered(tmp_path):
+    """The same case end to end: the note must not claim the theme has no data."""
+    _point_divisions_at(*_write_border_divisions(tmp_path))
+    result = addresses.address_at(BORDER_LAT, BORDER_LON)
+    assert result["results"] == []
+    note = result["note"]
+    assert "no Overture address coverage" not in note
+    assert "United States (US) is covered by" in note
+
+
+def test_nearest_division_is_still_the_fallback_when_nothing_contains_the_point(tmp_path):
+    """Containment can legitimately find nothing (offshore); the label then wins."""
+    _areas, divisions = _write_border_divisions(tmp_path)
+    empty_areas = tmp_path / "no_areas.parquet"
+    duckdb.connect().execute(
+        f"COPY (SELECT * FROM read_parquet('{_areas}') WHERE false) "
+        f"TO '{empty_areas}' (FORMAT PARQUET)"
+    )
+    _point_divisions_at(empty_areas, divisions)
+    country = addresses._country_at(BORDER_LAT, BORDER_LON)
+    assert country.status == addresses.RESOLVED
+    assert country.code == "GB"
+
+
+# --- a failed lookup is not a fact about the data ---
+
+
+def test_failed_country_lookup_is_worded_as_a_lookup_failure(tmp_path):
+    missing = tmp_path / "gone" / "*.parquet"
+    _point_divisions_at(missing, missing)
+    result = addresses.address_at(UNCOVERED_LAT, UNCOVERED_LON)
+    assert result["results"] == []
+    note = result["note"]
+    assert "did not complete" in note
+    assert "retrying may resolve it" in note
+    # The claim it must NOT make: that the dataset has no division here.
+    assert "no division in the active dataset" not in note
+    assert "no Overture address coverage" not in note
+
+
+def test_failed_country_lookup_status_is_distinct_from_not_found(tmp_path):
+    """A scan that errors reports lookup_failed; empty data reports not_found."""
+    missing = tmp_path / "gone" / "*.parquet"
+    _point_divisions_at(missing, missing)
+    assert addresses._country_at(CENTER_LAT, CENTER_LON).status == addresses.LOOKUP_FAILED
+    # Null Island against the real fixtures: nothing contains it, nothing is near.
+    _point_divisions_at(DIVISION_AREAS_FIXTURE_PATH, DIVISIONS_FIXTURE_PATH)
+    assert addresses._country_at(0.0, 0.0).status == addresses.NOT_FOUND
+
+
+def test_a_containment_failure_does_not_become_a_not_found_verdict(tmp_path, monkeypatch):
+    """Containment broken + fallback finds nothing must stay lookup_failed."""
+    monkeypatch.setattr(
+        addresses, "_country_by_containment", lambda lat, lon: addresses.Country(
+            addresses.LOOKUP_FAILED
+        )
+    )
+    assert addresses._country_at(0.0, 0.0).status == addresses.LOOKUP_FAILED
+
+
+# --- scan count ---
+
+
+def _count_address_scans(monkeypatch):
+    calls = []
+    original = addresses._scan_addresses
+
+    def counting(*args, **kwargs):
+        calls.append(args[3:5])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(addresses, "_scan_addresses", counting)
+    return calls
+
+
+def test_uncovered_country_stops_after_the_first_address_radius(monkeypatch):
+    """Widening cannot find data the theme does not carry for this country."""
+    calls = _count_address_scans(monkeypatch)
+    result = addresses.address_at(UNCOVERED_LAT, UNCOVERED_LON)
+    assert "no Overture address coverage" in result["note"]
+    assert len(calls) == 1, f"expected one address scan, got {calls}"
+
+
+def test_covered_country_still_widens_through_every_radius(monkeypatch):
+    calls = _count_address_scans(monkeypatch)
+    addresses.address_at(COVERED_BUT_EMPTY_LAT, COVERED_BUT_EMPTY_LON)
+    assert len(calls) == len(addresses.SEARCH_RADII_M)
+
+
+def test_a_populated_coordinate_needs_only_the_narrowest_radius(monkeypatch):
+    calls = _count_address_scans(monkeypatch)
+    addresses.address_at(CENTER_LAT, CENTER_LON)
+    assert len(calls) == 1
+
+
+# --- dependent territories ---
+
+
+def test_territories_resolve_coverage_through_their_parent_feed():
+    """Martinique's address points are filed under FR, so MQ is covered."""
+    for territory in ("MQ", "GP", "RE", "GF", "YT", "NC", "PF", "PM", "BL", "MF"):
+        assert addresses._TERRITORY_PARENT[territory] == "FR"
+        assert addresses._is_covered(territory)
+    assert addresses._is_covered("AX")  # Aland, filed under FI
+    assert addresses._is_covered("NF")  # Norfolk Island, filed under AU
+
+
+def test_territories_without_address_data_are_not_claimed_as_covered():
+    """Verified live against 2026-07-22.0: zero address rows in any of these."""
+    for territory in ("PR", "VI", "GU", "MP", "AS", "AW", "CW", "BQ"):
+        assert territory not in addresses._TERRITORY_PARENT
+        assert not addresses._is_covered(territory)
+
+
+def test_a_territory_note_names_the_territory_and_the_parent_feed():
+    note = addresses._coverage_note(
+        addresses.Country(addresses.RESOLVED, "MQ", "Martinique")
+    )
+    assert "Martinique (MQ) is covered" in note
+    assert "carried under FR" in note
 
 
 def test_covered_countries_matches_overtures_published_count():

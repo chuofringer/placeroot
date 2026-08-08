@@ -25,6 +25,17 @@ isn't in the addresses theme at all" or "this country is covered but nothing
 was found within the search radius". Both are structured, non-error results —
 "no data" is a real answer to a spatial question, not a failure.
 
+The country behind that note is resolved by *containment* — the same
+ST_Contains-over-division_area test admin_lookup runs — and not by taking the
+nearest labelled division point. The difference is not academic: division
+points sit kilometres apart, so a nearest-point answer is wrong wherever the
+closest label happens to belong to the other side of a border, which is a
+km-scale error band rather than a metres-one, and lands squarely on HK/CN,
+SG/MY, PL/BY, FI/RU and EE/RU. Nearest-division survives only as a fallback
+for coordinates no polygon contains at all (offshore, mostly). A third
+outcome exists and is reported distinctly: the lookup can simply *fail*, and
+that is worded as our scan failing, never as a fact about the world.
+
 --- No id ---
 
 Deliberately absent from every row: the address point's `id`. Overture
@@ -47,10 +58,11 @@ uses today. That is issue #189's question, deliberately not answered here.
 """
 
 import logging
+from typing import NamedTuple
 
 import duckdb
 
-from placeroot import overture
+from placeroot import db, geo, overture
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +81,10 @@ MAX_LIMIT = 5
 # empty just because its nearest doorway is down the road.
 SEARCH_RADII_M = (200, 1000, 5000)
 
-# Radii for the containing-country lookup (divisions theme), only ever run
-# when the address query came back empty and the answer needs a coverage
-# explanation. Wider than the address radii because divisions are sparse.
+# Radii for the *fallback* nearest-division country lookup, only reached when
+# the point-in-polygon pass finds no containing division at all (a coordinate
+# offshore, or a dataset without division_area geometry). Wider than the
+# address radii because divisions are sparse.
 _COUNTRY_RADII_M = (2000, 20000, 100000)
 
 REQUIRED_COLUMNS = [
@@ -109,6 +122,39 @@ COVERED_COUNTRIES = frozenset({
     "IT", "JP", "LI", "LT", "LU", "LV", "MX", "NL", "NO", "NZ",
     "PL", "PT", "RS", "SG", "SI", "SK", "TW", "US", "UY",
 })
+
+# Dependent territories that Overture's divisions theme labels with their own
+# ISO 3166-1 code, but whose address points are carried in the *parent*
+# country's data and tagged with the parent's code. Without this map a query
+# in, say, Martinique resolves country "MQ", finds MQ absent from
+# COVERED_COUNTRIES and reports "no coverage" for a territory that has tens of
+# thousands of address points.
+#
+# Every entry below was verified against release 2026-07-22.0 by counting
+# address rows in the territory's main settlement — they are the territories
+# that actually have data, not every territory that theoretically could:
+#   MQ/GP/RE/GF/YT/NC/PF/PM/BL/MF -> FR, AX -> FI, NF -> AU.
+# Deliberately absent, because the same check found *zero* address rows for
+# them: PR, VI, GU, MP, AS (US), and AW/CW/BQ (NL). Mapping those to their
+# parent would claim coverage the theme does not have — the opposite error,
+# and the worse one, since it turns an honest "no data here" into a silent
+# empty list. The territory's own code and name are still what the response
+# reports; this mapping only decides which coverage sentence is true.
+_TERRITORY_PARENT = {
+    "MQ": "FR", "GP": "FR", "RE": "FR", "GF": "FR", "YT": "FR",
+    "NC": "FR", "PF": "FR", "PM": "FR", "BL": "FR", "MF": "FR",
+    "AX": "FI",
+    "NF": "AU",
+}
+
+
+def _is_covered(code: str) -> bool:
+    """Does the addresses theme carry data for this ISO code's country?
+
+    Resolves dependent territories to the parent whose feed carries their
+    points first — see _TERRITORY_PARENT.
+    """
+    return _TERRITORY_PARENT.get(code, code) in COVERED_COUNTRIES
 
 
 def _upstream_glob() -> str:
@@ -172,53 +218,126 @@ def _row_to_result(row: tuple) -> dict:
     return result
 
 
-def _query_addresses(lat: float, lon: float, limit: int) -> list[dict]:
-    """The `limit` nearest address points, nearest first; [] if none are near.
+def _scan_addresses(
+    glob: str, columns: str, lat: float, lon: float, radius_m: int, limit: int
+) -> list[tuple]:
+    """One radius pass: the `limit` nearest address rows within radius_m.
 
-    Raises overture.SchemaDegraded if the dataset can't answer at all, or
-    overture.UpstreamUnavailable if the scan fails.
+    Split out of the widening loop so the loop can decide, between passes,
+    whether widening is worth another remote scan at all (see address_at).
     """
-    glob = _upstream_glob()
-    missing = set(_check_schema(glob))
-    columns = ", ".join(_column_expr(c, missing) for c in _SELECT_COLUMNS)
-    rows: list[tuple] = []
-    for radius_m in SEARCH_RADII_M:
-        bbox_filter, distance_filter, params, _bbox, _radius = overture.area_geometry(
-            lat, lon, radius_m
-        )
-        sql = f"""
-            SELECT {columns},
-                   round({overture.DISTANCE_EXPR}, 1) AS distance_m
-            FROM read_parquet('{glob}', hive_partitioning=1)
-            WHERE {bbox_filter} AND {distance_filter}
-            ORDER BY distance_m, street NULLS LAST, number NULLS LAST
-            LIMIT {limit}
-        """
-        try:
-            with overture._conn_lock:
-                rows = overture.conn().execute(sql, params).fetchall()
-        except duckdb.Error as e:
-            raise overture.UpstreamUnavailable(str(e)) from e
-        if len(rows) >= limit:
-            break
-    return [_row_to_result(r) for r in rows]
+    bbox_filter, distance_filter, params, _bbox, _radius = overture.area_geometry(
+        lat, lon, radius_m
+    )
+    sql = f"""
+        SELECT {columns},
+               round({overture.DISTANCE_EXPR}, 1) AS distance_m
+        FROM read_parquet('{glob}', hive_partitioning=1)
+        WHERE {bbox_filter} AND {distance_filter}
+        ORDER BY distance_m, street NULLS LAST, number NULLS LAST
+        LIMIT {limit}
+    """
+    try:
+        with overture._conn_lock:
+            return overture.conn().execute(sql, params).fetchall()
+    except duckdb.Error as e:
+        raise overture.UpstreamUnavailable(str(e)) from e
 
 
-def _country_at(lat: float, lon: float) -> tuple[str | None, str | None]:
-    """(ISO 3166-1 alpha-2 code, country name) containing the point, or (None, None).
+# --- Which country is this? ------------------------------------------------
+#
+# Three-state on purpose. "We looked and no division covers this point" (an
+# ocean coordinate, or a dataset with no divisions in range) and "the lookup
+# itself broke" are different answers, and the note has to say which: the
+# first is a fact about the data, the second is a fact about our scan, and
+# printing the second as the first is how a transient S3 error turns into a
+# confident, wrong statement about the world.
+RESOLVED = "resolved"
+NOT_FOUND = "not_found"
+LOOKUP_FAILED = "lookup_failed"
 
-    Read off the nearest divisions row — the same theme and the same
-    expanding-radius shape geocode._nearest_division uses — rather than a
-    point-in-polygon test against division_area: this only ever runs to
-    explain an *empty* address answer, where a nearest-division approximation
-    (wrong only for a point sitting within metres of a national border) is
-    worth far more than a second polygon scan. Degrades to (None, None) on
-    any schema or query trouble; the caller then says so rather than guessing.
+
+class Country(NamedTuple):
+    """Outcome of the containing-country lookup behind a coverage note."""
+
+    status: str
+    code: str | None = None
+    name: str | None = None
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} ({self.code})" if self.name else str(self.code)
+
+
+# division_area rows whose names.primary is the name of the country-level
+# entity. Overture files dependent territories (Martinique, Guam, Aland) as
+# subtype "dependency" rather than "country", and those are exactly the rows
+# _TERRITORY_PARENT cares about, so both count.
+_COUNTRY_SUBTYPES = ("country", "dependency")
+
+
+def _country_by_containment(lat: float, lon: float) -> Country:
+    """The country actually *containing* the point, via ST_Contains on division_area.
+
+    The same point-in-polygon path divisions.admin_lookup runs, narrowed to
+    the country columns: bbox prunes remote row groups, ST_Contains decides.
+    """
+    try:
+        db.ensure_spatial()
+    except duckdb.Error as e:
+        logger.warning("spatial extension unavailable for coverage lookup: %s", e)
+        return Country(LOOKUP_FAILED)
+    glob = overture.upstream_glob(theme="divisions", type_="division_area")
+    missing = set(
+        overture.missing_columns(glob, ["country", "geometry", "bbox", "names", "subtype"])
+    )
+    if "country" in missing or "geometry" in missing:
+        return Country(LOOKUP_FAILED)
+    geom = geo.geom_expr(glob)
+    name_expr = "NULL" if "names" in missing else "names.primary"
+    subtype_expr = "NULL" if "subtype" in missing else "subtype"
+    bbox_prefilter = (
+        "bbox.xmin <= $lon AND bbox.xmax >= $lon"
+        " AND bbox.ymin <= $lat AND bbox.ymax >= $lat AND "
+        if "bbox" not in missing
+        else ""
+    )
+    sql = f"""
+        SELECT country, {name_expr} AS name, {subtype_expr} AS subtype,
+               ST_Area({geom}) AS area
+        FROM read_parquet('{glob}', hive_partitioning=1)
+        WHERE {bbox_prefilter}country IS NOT NULL
+          AND ST_Contains({geom}, ST_Point($lon, $lat))
+        ORDER BY area ASC
+    """
+    try:
+        with db.conn_lock:
+            rows = db.shared_conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
+    except duckdb.Error as e:
+        logger.warning("containment country lookup for address coverage failed: %s", e)
+        return Country(LOOKUP_FAILED)
+    if not rows:
+        return Country(NOT_FOUND)
+    # Code off the smallest containing polygon (the most specific division
+    # that covers the point); name off the largest country/dependency-level
+    # one, which is the entity a reader would call the country.
+    code = rows[0][0]
+    named = [r for r in rows if r[2] in _COUNTRY_SUBTYPES and r[1]]
+    name = named[-1][1] if named else None
+    return Country(RESOLVED, code, name)
+
+
+def _country_by_nearest(lat: float, lon: float) -> Country:
+    """Fallback: the nearest type=division row's country, at widening radii.
+
+    An approximation — it answers with whichever labelled division point is
+    closest, which near a border can be the wrong side of it — so it only
+    runs when containment found nothing to be exact about.
     """
     glob = overture.upstream_glob(theme="divisions", type_="division")
     missing = set(overture.missing_columns(glob, ["country", "hierarchies"]))
     if "country" in missing:
-        return None, None
+        return Country(LOOKUP_FAILED)
     # hierarchies[1] is the first containing-chain path, top-level ancestor
     # (the country) first — the same structure geocode._admin_context reads.
     name_expr = "NULL" if "hierarchies" in missing else "hierarchies[1][1].name"
@@ -238,18 +357,42 @@ def _country_at(lat: float, lon: float) -> tuple[str | None, str | None]:
             with overture._conn_lock:
                 row = overture.conn().execute(sql, params).fetchone()
         except duckdb.Error as e:
-            logger.warning("country lookup for address coverage note failed: %s", e)
-            return None, None
+            logger.warning("nearest-division country lookup failed: %s", e)
+            return Country(LOOKUP_FAILED)
         if row:
-            return row[0], row[1]
-    return None, None
+            return Country(RESOLVED, row[0], row[1])
+    return Country(NOT_FOUND)
 
 
-def _coverage_note(lat: float, lon: float) -> str:
+def _country_at(lat: float, lon: float) -> Country:
+    """Which country contains this coordinate, for the coverage note.
+
+    Containment first (exact), nearest-division second (approximate) and only
+    when containment has nothing to say. The fallback's verdict is never
+    upgraded into a claim containment did not support: if containment merely
+    *errored*, a fallback miss stays LOOKUP_FAILED rather than becoming
+    NOT_FOUND, because "no division covers this point" was never established.
+    """
+    contained = _country_by_containment(lat, lon)
+    if contained.status == RESOLVED:
+        return contained
+    nearest = _country_by_nearest(lat, lon)
+    if nearest.status == RESOLVED:
+        return nearest
+    return contained if contained.status == NOT_FOUND else Country(LOOKUP_FAILED)
+
+
+def _coverage_note(country: Country) -> str:
     """Why an address query came back empty — never left to an unexplained []."""
-    code, name = _country_at(lat, lon)
     widest = SEARCH_RADII_M[-1]
-    if code is None:
+    if country.status == LOOKUP_FAILED:
+        return (
+            f"no address point within {widest} m. The divisions lookup that would say "
+            "which country this coordinate is in did not complete (an upstream or "
+            "dataset problem on our side, not a statement about the data), so address "
+            "coverage could not be checked here — retrying may resolve it."
+        )
+    if country.status == NOT_FOUND:
         return (
             f"no address point within {widest} m, and no division in the active dataset "
             "identifies this coordinate's country, so its address coverage could not be "
@@ -257,18 +400,20 @@ def _coverage_note(lat: float, lon: float) -> str:
             f"{len(COVERED_COUNTRIES)} countries, so an empty result may mean no data "
             "rather than no addresses."
         )
-    label = f"{name} ({code})" if name else code
-    if code not in COVERED_COUNTRIES:
+    label = country.label
+    if not _is_covered(country.code):
         return (
             f"no Overture address coverage for {label}. The addresses theme is alpha and "
             f"carries data for {len(COVERED_COUNTRIES)} countries; this is not one of "
             "them, so this empty result means no data, not no addresses. Try "
             "reverse_geocode, which falls back to the containing admin areas."
         )
+    parent = _TERRITORY_PARENT.get(country.code)
+    via = f", whose address points are carried under {parent}" if parent else ""
     return (
         f"no address point within {widest} m of this coordinate. {label} is covered by "
-        "Overture's addresses theme, but coverage inside a covered country is partial, "
-        "so this may be a gap in the data rather than an unaddressed location."
+        f"Overture's addresses theme{via}, but coverage inside a covered country is "
+        "partial, so this may be a gap in the data rather than an unaddressed location."
     )
 
 
@@ -280,15 +425,37 @@ def address_at(lat: float, lon: float, limit: int = DEFAULT_LIMIT) -> dict:
     empty, a "note" saying why — see _coverage_note. `degraded_fields` is
     added when the active dataset is missing non-essential columns.
 
+    The radius widening stops early when the first (narrowest, cheapest) pass
+    finds nothing *and* the coordinate turns out to be in a country the theme
+    does not carry at all: 5 km cannot conjure data that does not exist in the
+    dataset, so the answer is already known and the two wider remote scans are
+    pure latency. Covered countries still widen exactly as before.
+
     Raises overture.SchemaDegraded if the dataset lacks bbox or street, and
     overture.UpstreamUnavailable if the remote scan fails; server.py maps
     both to structured errors like every other tool.
     """
     limit = max(1, min(int(limit), MAX_LIMIT))
-    results = _query_addresses(lat, lon, limit)
-    payload: dict = {"results": results}
-    if not results:
-        payload["note"] = _coverage_note(lat, lon)
+    glob = _upstream_glob()
+    missing = set(_check_schema(glob))
+    columns = ", ".join(_column_expr(c, missing) for c in _SELECT_COLUMNS)
+
+    rows: list[tuple] = []
+    country: Country | None = None
+    for radius_m in SEARCH_RADII_M:
+        rows = _scan_addresses(glob, columns, lat, lon, radius_m, limit)
+        if len(rows) >= limit:
+            break
+        if not rows and country is None:
+            country = _country_at(lat, lon)
+            if country.status == RESOLVED and not _is_covered(country.code):
+                break
+
+    payload: dict = {"results": [_row_to_result(r) for r in rows]}
+    if not rows:
+        if country is None:  # only reachable if SEARCH_RADII_M is ever emptied
+            country = _country_at(lat, lon)
+        payload["note"] = _coverage_note(country)
     degraded = degraded_fields()
     if degraded:
         payload["degraded_fields"] = degraded

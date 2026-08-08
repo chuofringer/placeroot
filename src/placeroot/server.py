@@ -1050,7 +1050,10 @@ def address_at(lat: float, lon: float, limit: int = addresses.DEFAULT_LIMIT) -> 
     Latin America outside Brazil, Mexico, Chile, Colombia and Uruguay. An
     empty results list is a valid answer, never an error, and always carries
     a "note" saying whether the country is outside the theme's coverage
-    entirely or is covered but had nothing within the search radius.
+    entirely or is covered but had nothing within the search radius. That
+    country is the one whose division polygon contains the point, so the note
+    stays correct next to a border; if the lookup behind it cannot run, the
+    note says so rather than asserting anything about the data.
 
     Returns a structured {"error": ...} if upstream is unavailable, if the
     dataset is missing the bbox/street columns this depends on, or for an
