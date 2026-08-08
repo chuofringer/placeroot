@@ -74,6 +74,43 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 | `simplify_geometry` | Any geometry → simplified to fit a token budget |
 | `data_version` | Which Overture release the answers are drawn from |
 
+## Loading fewer tools (`PLACEROOT_TOOLS`)
+
+All 25 tool schemas cost roughly **9.2k tokens** of every conversation's context, paid before the agent asks anything — about the cost of 70 median answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS` selects which tools get registered. Unselected tools are never registered and never appear in `tools/list`.
+
+```json
+{
+  "mcpServers": {
+    "placeroot": {
+      "command": "uvx",
+      "args": ["placeroot"],
+      "env": { "PLACEROOT_TOOLS": "core" }
+    }
+  }
+}
+```
+
+The value is a comma-separated list of profile names, tool names, or both — the union of everything named:
+
+| `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
+|---|---:|---:|---:|
+| unset / `all` (default) | 25 | ~9,190 | — |
+| `search` | 11 | ~4,240 | 54% |
+| `core` | 10 | ~4,350 | 53% |
+| `routing` | 5 | ~1,810 | 80% |
+| `analysis` | 8 | ~2,210 | 76% |
+| `geometry` | 3 | ~700 | 92% |
+
+- **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `places_along_route`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
+- **`search`** — the find/name/identify family: `find_places`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, `search_categories`, and `gers_lookup`.
+- **`routing`** — `route`, `isochrone`, `distance_matrix`, `within_distance`.
+- **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `admin_lookup`.
+- **`geometry`** — `simplify_geometry`, `render_map`.
+
+`data_version` is registered under every profile: it is ~120 tokens and the only way an agent can tell which Overture release backs its answers.
+
+Profiles may overlap, and a list may mix them with bare tool names — `PLACEROOT_TOOLS=routing,find_places` or `PLACEROOT_TOOLS=find_places,geocode,route`. A name that is neither a profile nor a tool **fails at startup** with the list of valid names, rather than quietly falling back to loading everything. The server logs one line at startup naming what it registered (`registered 10 of 25 tools (PLACEROOT_TOOLS=core)`), so a selection that didn't apply — an empty value, a variable that never reached the process — is visible rather than silently the full 25.
+
 ## Design notes
 
 Agents are bad at maps. Existing map tools either require vendor API keys or return payloads far too large for a context window. PlaceRoot's rule: every answer fits in a couple of thousand tokens, and anything bigger comes back as a summary.

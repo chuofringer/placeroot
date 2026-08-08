@@ -15,6 +15,7 @@ import logging
 import math
 import os
 import threading
+from collections.abc import Callable
 
 from mcp.server.mcpserver import MCPServer
 
@@ -34,6 +35,7 @@ from placeroot import (
     release,
     routing,
     simplify,
+    tool_profiles,
 )
 from placeroot import geocode as geocoding
 
@@ -47,10 +49,20 @@ BASE_INSTRUCTIONS = (
     "raising limit."
 )
 
-mcp = MCPServer("placeroot", instructions=BASE_INSTRUCTIONS)
-
 DEFAULT_HTTP_HOST = "127.0.0.1"
 DEFAULT_HTTP_PORT = 8321
+
+# Every @_tool function, in definition order. Registration is deferred to
+# build_server() so PLACEROOT_TOOLS can select a subset *before* anything is
+# registered — a tool outside the selection never reaches the MCP server,
+# and so never reaches tools/list (issue #182).
+_TOOL_FUNCS: dict[str, Callable] = {}
+
+
+def _tool(fn: Callable) -> Callable:
+    """Mark a function as an MCP tool. Replaces a direct @mcp.tool()."""
+    _TOOL_FUNCS[fn.__name__] = fn
+    return fn
 
 
 def _upstream_error(e: Exception) -> dict:
@@ -131,7 +143,7 @@ def _with_category_hint(payload: dict, category: str | None, widen_hint: str) ->
     return payload
 
 
-@mcp.tool()
+@_tool
 def find_places(
     lat: float | None = None,
     lon: float | None = None,
@@ -152,8 +164,8 @@ def find_places(
     Three mutually exclusive modes:
     - Point + radius: pass lat and lon (radius_m defaults to 1000m).
       Results are nearest-first, within a circle around (lat, lon).
-    - Division polygon: pass division_id (a GERS id, e.g. from admin_lookup's
-      chain) instead of lat/lon. Results are every matching place whose
+    - Division polygon: pass division_id (a GERS division id, e.g. one from
+      an admin-hierarchy chain) instead of lat/lon. Results are every matching place whose
       point falls inside that division's true boundary polygon — no radius
       to guess, and no circle clipping a coastline or straddling a border.
       Results are ordered by name (there's no reference point to rank
@@ -281,7 +293,7 @@ def find_places(
     return _with_category_hint(payload, category, widen_hint="widen radius_m")
 
 
-@mcp.tool()
+@_tool
 def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
     """Summarize what's in an area: total places and top categories.
 
@@ -300,7 +312,7 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
     return _with_degraded_fields(budget.apply_budget(result, "top_categories"))
 
 
-@mcp.tool()
+@_tool
 def place_details(
     id: str | None = None,
     name: str | None = None,
@@ -349,7 +361,7 @@ def place_details(
     return _with_degraded_fields(result)
 
 
-@mcp.tool()
+@_tool
 def within_distance(
     lat: float,
     lon: float,
@@ -378,7 +390,7 @@ def within_distance(
     return _with_degraded_fields(result)
 
 
-@mcp.tool()
+@_tool
 def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
     """Straight-line (great-circle) distance in meters between every origin and destination.
 
@@ -430,7 +442,7 @@ def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
     return budget.apply_budget({"elements": elements}, "elements")
 
 
-@mcp.tool()
+@_tool
 def compare_areas(areas: list[dict], radius_m: float = 1000) -> dict:
     """Compare 2-5 areas side by side: category mix, density, and what differs.
 
@@ -464,7 +476,7 @@ def compare_areas(areas: list[dict], radius_m: float = 1000) -> dict:
     return _with_degraded_fields(budget.apply_budget(result, "differentiators"))
 
 
-@mcp.tool()
+@_tool
 def admin_lookup(lat: float, lon: float) -> dict:
     """Containing admin hierarchy for a point: neighborhood up to country.
 
@@ -488,7 +500,7 @@ def admin_lookup(lat: float, lon: float) -> dict:
     return budget.apply_budget(result, "chain")
 
 
-@mcp.tool()
+@_tool
 def summarize_buildings(
     lat: float, lon: float, radius_m: float = buildings.DEFAULT_SUMMARIZE_RADIUS_M
 ) -> dict:
@@ -517,7 +529,7 @@ def summarize_buildings(
     return _with_buildings_degraded_fields(result)
 
 
-@mcp.tool()
+@_tool
 def buildings_at(
     lat: float,
     lon: float,
@@ -548,13 +560,13 @@ def buildings_at(
     return _with_buildings_degraded_fields(budget.apply_budget({"results": rows}, "results"))
 
 
-@mcp.tool()
+@_tool
 def land_use_at(lat: float, lon: float) -> dict:
     """What kind of land is this: land use and land cover classification at a point.
 
     From Overture's base theme (issue #167) — PlaceRoot's first tool over
-    base, distinct from find_places/summarize_area (those cover discrete
-    POIs, not the land itself). Returns {"lat", "lon", "land_use":
+    base, distinct from the place-search and area-summary tools (those cover
+    discrete POIs, not the land itself). Returns {"lat", "lon", "land_use":
     {"subtype", "class", "name"} or null, "land_cover": {"subtype",
     "class"} or null}. No raw geometry (design rule: answers, not data).
 
@@ -620,7 +632,7 @@ def _with_infrastructure_truncation(
     return payload
 
 
-@mcp.tool()
+@_tool
 def infrastructure_at(
     lat: float,
     lon: float,
@@ -686,7 +698,7 @@ def infrastructure_at(
     return result
 
 
-@mcp.tool()
+@_tool
 def geocode(query: str, limit: int = 5) -> dict:
     """Free-text place name -> ranked candidate locations, from Overture divisions and places.
 
@@ -713,7 +725,7 @@ def geocode(query: str, limit: int = 5) -> dict:
     return payload
 
 
-@mcp.tool()
+@_tool
 def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
     """Geocode up to 20 free-text queries in one call, one best match each.
 
@@ -756,10 +768,10 @@ def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
     return budget.apply_budget({"results": rows}, "results")
 
 
-@mcp.tool()
+@_tool
 def search_categories(query: str, limit: int = 8) -> dict:
-    """Free text -> valid Overture category slugs, for find_places'/
-    summarize_area's `category` param.
+    """Free text -> valid Overture category slugs, for the `category` param
+    the place-search and area-summary tools take.
 
     Lookup only — no geo filtering, no upstream dataset dependency; matches
     against a bundled snapshot of Overture's places taxonomy (pinned to
@@ -778,7 +790,7 @@ def search_categories(query: str, limit: int = 8) -> dict:
     return budget.apply_budget({"results": rows}, "results")
 
 
-@mcp.tool()
+@_tool
 def resolve_place(
     query: str,
     near_lat: float | None = None,
@@ -816,7 +828,7 @@ def resolve_place(
     return budget.apply_budget({"results": rows}, "results")
 
 
-@mcp.tool()
+@_tool
 def resolve_place_batch(gers_ids: list[str]) -> dict:
     """Resolve up to 25 GERS ids to compact place rows in one call.
 
@@ -862,7 +874,7 @@ def resolve_place_batch(gers_ids: list[str]) -> dict:
     return budget.apply_budget({"results": rows}, "results")
 
 
-@mcp.tool()
+@_tool
 def gers_lookup(id: str, near_lat: float | None = None, near_lon: float | None = None) -> dict:
     """Any GERS id -> what it is, across themes, plus its cheap cross-theme joins.
 
@@ -922,7 +934,7 @@ def gers_lookup(id: str, near_lat: float | None = None, near_lon: float | None =
     return result
 
 
-@mcp.tool()
+@_tool
 def reverse_geocode(lat: float, lon: float) -> dict:
     """Point -> nearest address (street/number/postcode) and its containing division chain.
 
@@ -941,7 +953,7 @@ def reverse_geocode(lat: float, lon: float) -> dict:
         return _upstream_error(e)
 
 
-@mcp.tool()
+@_tool
 def reverse_geocode_batch(points: list[dict]) -> dict:
     """Reverse-geocode many points in one call, to cut N round-trips down to one.
 
@@ -985,7 +997,7 @@ def reverse_geocode_batch(points: list[dict]) -> dict:
     return budget.apply_budget({"results": rows}, "results")
 
 
-@mcp.tool()
+@_tool
 def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
     """Simplify a GeoJSON geometry to fit a token budget, reporting what was lost.
 
@@ -1001,13 +1013,13 @@ def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
     except simplify.InvalidGeometry as e:
         return {"error": "invalid_geometry", "detail": e.detail}
 
-@mcp.tool()
+@_tool
 def render_map(result: dict | list, title: str | None = None, inline: bool = False) -> dict:
-    """Render find_places/summarize_area JSON (or caller-supplied GeoJSON) as a map.
+    """Render place-search or area-summary JSON (or caller-supplied GeoJSON) as a map.
 
     Writes ONE self-contained HTML file — inline CSS/JS, vector markers with
-    labels and click popups, polygon/line shapes (including
-    routing.isochrone()'s {"polygon": ..., "stats": {...}} output), a scale
+    labels and click popups, polygon/line shapes (including reachability
+    output shaped {"polygon": ..., "stats": {...}}), a scale
     bar, attribution, no CDN, no tile server, no API key, zero network
     requests when opened — to PLACEROOT_ARTIFACT_DIR (default: alongside the
     tile cache directory). The file itself is the artifact; this tool's
@@ -1021,7 +1033,7 @@ def render_map(result: dict | list, title: str | None = None, inline: bool = Fal
     """
     return mapview.write_artifact(result, title=title, inline=inline)
 
-@mcp.tool()
+@_tool
 def isochrone(
     lat: float,
     lon: float,
@@ -1079,7 +1091,7 @@ def isochrone(
         return {"error": "bad_request", "detail": str(e)}
 
 
-@mcp.tool()
+@_tool
 def route(
     from_lat: float,
     from_lon: float,
@@ -1093,16 +1105,16 @@ def route(
     Overture's transportation theme around the two points and returns
     {"distance_m", "duration_s", "mode", "from", "to"} for the fastest path
     — no polyline/geometry (that's a separate tool). mode is "walk",
-    "cycle", or "drive" (default), same cost model as isochrone (walk 1.4
-    m/s, cycle 4.2 m/s, drive per-edge from Overture's speed_limits or a
-    class-based default table). drive's duration is a posted-speed model
+    "cycle", or "drive" (default), on the same cost model every routing tool
+    uses (walk 1.4 m/s, cycle 4.2 m/s, drive per-edge from Overture's
+    speed_limits or a class-based default table). drive's duration is a posted-speed model
     with no live traffic; all modes snap each endpoint to the nearest
     usable street-graph node (real routes rarely start/end exactly on a
     segment).
 
     Each mode has a straight-line-distance cap on the two points, rejected
     before any graph is built (see routing.ROUTE_MAX_STRAIGHT_LINE_M, derived
-    per-mode from the same extraction-radius cap isochrone uses — roughly
+    per-mode from the shared graph-extraction radius cap — roughly
     walk 7.5km, cycle 23.5km, drive 95.5km) — real road distance only ever
     exceeds straight-line, so anything past the cap can't produce a route
     worth extracting for anyway; returns {"error": "route_too_long"} with
@@ -1140,7 +1152,7 @@ def route(
         return {"error": "bad_request", "detail": str(e)}
 
 
-@mcp.tool()
+@_tool
 def places_along_route(
     from_lat: float,
     from_lon: float,
@@ -1217,7 +1229,7 @@ def places_along_route(
     return _with_category_hint(payload, category, widen_hint="widen max_detour_m")
 
 
-@mcp.tool()
+@_tool
 def data_version() -> dict:
     """Which Overture Maps release backs the answers from every other tool.
 
@@ -1239,6 +1251,47 @@ def data_version() -> dict:
             "cached for the process."
         ),
     }
+
+
+_UNSET = object()
+
+
+def build_server(spec=_UNSET) -> MCPServer:
+    """An MCPServer with the PLACEROOT_TOOLS-selected subset registered.
+
+    `spec` defaults to reading the env var, and is a parameter only so
+    tests can build a server for a given selection without touching the
+    process environment. See tool_profiles.py for the grammar; None means
+    "unset", i.e. the full surface.
+    """
+    if spec is _UNSET:
+        spec = os.environ.get("PLACEROOT_TOOLS")
+    selected = tool_profiles.resolve(spec, set(_TOOL_FUNCS))
+    server = MCPServer("placeroot", instructions=BASE_INSTRUCTIONS)
+    for name, fn in _TOOL_FUNCS.items():
+        if name in selected:
+            server.tool()(fn)
+    # One line at startup naming what got registered. An empty or
+    # whitespace-only PLACEROOT_TOOLS is legal and means "everything", which
+    # is indistinguishable from a subset that silently didn't apply unless
+    # the server says which it did.
+    requested = (spec or "").strip() or tool_profiles.ALL
+    logger.info(
+        "registered %d of %d tools (PLACEROOT_TOOLS=%s)",
+        len(selected),
+        len(_TOOL_FUNCS),
+        requested,
+    )
+    return server
+
+
+try:
+    mcp = build_server()
+except tool_profiles.InvalidToolSelection as e:
+    # Fail fast, at import, with the message and nothing else — an operator
+    # who typo'd a profile name gets told which names are valid rather than
+    # a traceback, and never a server that quietly loaded everything.
+    raise SystemExit(f"placeroot: {e}") from e
 
 
 def _warm_start() -> None:
