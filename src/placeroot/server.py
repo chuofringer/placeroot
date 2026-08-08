@@ -1521,6 +1521,103 @@ def places_along_route(
     return _with_category_hint(payload, category, widen_hint="widen max_detour_m")
 
 
+@_tool("Best visiting order for stops")
+def optimize_route(
+    stops: list[dict],
+    mode: str = "drive",
+    roundtrip: bool = True,
+    start_index: int = 0,
+) -> dict:
+    """Best order to visit several stops: multi-stop route ordering (a small TSP).
+
+    Answers "I have these five errands, what order costs least" — stops is a
+    list of 2-10 {"lat": ..., "lon": ..., "name": ... (optional)} points, and
+    the answer is the cheapest visiting order over the real street graph, not
+    a straight-line guess. Solved exactly (Held-Karp over the routed cost
+    matrix), so it is the optimum, not a nearest-neighbour approximation.
+
+    Returns {"order": [stop indices, in visiting order], "legs":
+    [{"from_idx", "to_idx", "distance_m", "duration_s"}, ...],
+    "total_distance_m", "total_duration_s", "mode", "roundtrip"} — indices
+    refer to the input `stops` list, and there is no polyline/geometry — for
+    a single pair's numbers on their own, call `route`.
+
+    start_index (default 0) is fixed as the first stop. roundtrip=true (the
+    default) returns to it; the closing leg is in "legs" but the start is not
+    repeated in "order". roundtrip=false is an open path that ends wherever
+    is cheapest. mode is "walk", "cycle" or "drive" (default), on the same
+    cost model every routing tool uses; one-ways make the drive/cycle cost
+    matrix asymmetric and that is solved for exactly. The objective minimized
+    is total duration.
+
+    If some pair of stops has no route between them (disconnected road data),
+    the call still succeeds: that leg's numbers are a straight-line estimate,
+    the leg carries "estimated": true, and the response carries
+    "estimated": true plus a note naming the estimated legs — so a flagged
+    approximation, never a crash.
+
+    Errors are structured, not raised: fewer than 2 or more than 10 stops, a
+    stop missing numeric lat/lon, or an out-of-range start_index return
+    {"error": "bad_request"} naming the offending stop index; an unknown mode
+    returns {"error": "unsupported_mode"}; a stop set whose two furthest-apart
+    stops are further apart than the mode's straight-line cap (see `route`)
+    returns {"error": "route_too_long"}; a stop with no usable street node near it returns
+    {"error": "no_graph_nearby"} naming that stop's index.
+    """
+    if not isinstance(stops, list):
+        return {"error": "bad_request", "detail": "stops must be a list of {lat, lon} points"}
+    if not (routing.OPTIMIZE_MIN_STOPS <= len(stops) <= routing.OPTIMIZE_MAX_STOPS):
+        return {
+            "error": "bad_request",
+            "detail": (
+                f"stops must hold between {routing.OPTIMIZE_MIN_STOPS} and "
+                f"{routing.OPTIMIZE_MAX_STOPS} points, got {len(stops)}"
+            ),
+        }
+    points = []
+    for idx, stop in enumerate(stops):
+        try:
+            lat, lon = float(stop["lat"]), float(stop["lon"])
+        except (KeyError, TypeError, ValueError) as e:
+            return {
+                "error": "bad_request",
+                "detail": f"stops[{idx}]: each stop needs numeric lat and lon: {e}",
+            }
+        coord_error = _invalid_coord(lat, lon)
+        if coord_error is not None:
+            coord_error["detail"] = f"stops[{idx}]: {coord_error['detail']}"
+            return coord_error
+        points.append((lat, lon))
+    if not isinstance(start_index, int) or isinstance(start_index, bool):
+        return {"error": "bad_request", "detail": "start_index must be an integer"}
+    if not 0 <= start_index < len(points):
+        return {
+            "error": "bad_request",
+            "detail": f"start_index={start_index} is out of range for {len(points)} stops",
+        }
+
+    try:
+        return routing.optimize_route(
+            points, mode=mode, roundtrip=bool(roundtrip), start_index=start_index
+        )
+    except routing.UnsupportedMode:
+        return {"error": "unsupported_mode", "supported": sorted(routing.MODE_CONFIG)}
+    except routing.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except routing.SchemaDegraded as e:
+        return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
+    except routing.NoGraphNearby as e:
+        return {"error": "no_graph_nearby", "detail": e.detail}
+    except routing.RouteTooLong as e:
+        return {
+            "error": "route_too_long",
+            "detail": e.detail,
+            "max_distance_m": e.max_distance_m,
+        }
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
+
+
 @_tool("Data version")
 def data_version() -> dict:
     """Which Overture Maps release backs the answers from every other tool.
