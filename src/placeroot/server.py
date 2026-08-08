@@ -40,6 +40,7 @@ from placeroot import (
     routing,
     simplify,
     tool_profiles,
+    water,
 )
 from placeroot import geocode as geocoding
 
@@ -768,6 +769,124 @@ def infrastructure_at(
     result = budget.apply_budget(result, "results")
     result = _with_infrastructure_truncation(result, total_in_range, subtype, infra_class)
     degraded = infrastructure.degraded_fields()
+    if degraded:
+        result["degraded_fields"] = degraded
+    return result
+
+
+def _water_notes(
+    payload: dict, in_range_count: int, containing: dict | None, radius_m: float
+) -> dict:
+    """Attach water_near's on_water/truncation/empty notes to the payload.
+
+    Three things a caller can get wrong here, so all three are said out
+    loud. (1) The point is inside a generalized ocean/sea polygon: those
+    are cut into 1-degree tiles and their landward edge swallows coastal
+    land, so "inside" means at-or-near the water, and no shoreline
+    distance is derivable from them at all (their boundaries carry phantom
+    grid cuts). (2) The rows shown are a slice — a canal district puts
+    hundreds of rows in a 500 m circle. (3) Nothing came back, which is a
+    real finding about an arid or unmapped place rather than a failure.
+    """
+    shown = len(payload.get("results", []))
+    notes = []
+    if containing is not None:
+        payload["on_water"] = True
+        if containing["water_body"]:
+            payload["water_body"] = containing["water_body"]
+        body = containing["water_body"] or "a water polygon"
+        if containing["generalized"]:
+            notes.append(
+                f"this point falls inside Overture's generalized {body} polygon. "
+                "Those bodies are cut into 1-degree tiles and their landward edge "
+                "is coarse enough to cover dry coastal land, so read this as "
+                "'on or close to the water', not as a precise shoreline test — "
+                "and no distance to the coast is reported, because the tile "
+                "boundaries include phantom grid cuts through open water."
+            )
+        else:
+            notes.append(f"this point is inside {body}.")
+    if in_range_count > shown:
+        payload["truncated"] = True
+        notes.append(
+            f"showing the {shown} nearest of {in_range_count} water features in range; "
+            "narrow with a smaller radius or a filter, e.g. subtype='canal', "
+            "subtype='river', water_class='lake'."
+        )
+    elif shown == 0 and containing is None:
+        notes.append(
+            f"no water features within {radius_m:g} m. base/water coverage is "
+            "OSM-derived, so an arid, remote or unmapped area legitimately has "
+            "nothing here — this is an answer, not a failure."
+        )
+    payload["in_range_count"] = in_range_count
+    if notes:
+        payload["note"] = " ".join(notes)
+    return payload
+
+
+@_tool("Water near a point")
+def water_near(
+    lat: float,
+    lon: float,
+    radius_m: float = water.DEFAULT_RADIUS_M,
+    limit: int = water.DEFAULT_LIMIT,
+    subtype: str | None = None,
+    water_class: str | None = None,
+) -> dict:
+    """Water near a point, nearest first: waterfront check, distance to river/canal/lake.
+
+    From Overture's base theme (issue #200), type=water — oceans, bays,
+    lakes, ponds, reservoirs, rivers, streams, canals, springs, pools.
+    Returns {"center", "radius_m", "in_range_count", "results": [{"name"
+    (when named), "subtype", "class", "distance_m", "is_salt"/
+    "is_intermittent" (only when true)}, ...]}, plus "truncated": true and
+    a "note" when more matched than were returned. No raw geometry.
+
+    distance_m is to the closest point on the feature, not its centroid —
+    a canal bank you are standing on reads ~0 m. Water gets dense (an
+    Amsterdam canal district puts hundreds of rows in a 500 m circle),
+    which is what in_range_count and the filters are for:
+    subtype/water_class match Overture's `subtype`/`class` columns
+    (case-insensitive substring; water_class is `class` under a
+    non-reserved name) — e.g. subtype="canal", subtype="river",
+    water_class="lake".
+
+    "on_water": true plus "water_body" means the point is *inside* a water
+    polygon. For oceans, seas and big bays that is a coarse signal:
+    Overture cuts them into 1-degree tiles whose landward edge covers dry
+    coastal land, so a waterfront building reads as inside the ocean. Such
+    bodies are reported this way rather than as a bogus 0 m "nearest
+    water" row, and no distance-to-coast is derived from them (their tile
+    boundaries include phantom cuts through open water). The "note" says
+    which case applies.
+
+    An empty results list is a valid answer: coverage is OSM-derived, and
+    "no water within 500 m" is a real finding about an arid or unmapped
+    place. radius_m echoes the effective radius (large values are
+    clamped). Returns a structured {"error": ...} if upstream is
+    unavailable or the dataset is missing geometry/bbox, and {"error":
+    "bad_request"} for a bad coordinate.
+    """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
+    try:
+        rows, effective_radius_m, in_range_count, containing = water.water_near(
+            lat, lon, radius_m, limit, subtype=subtype, water_class=water_class
+        )
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    result = {
+        "center": {"lat": lat, "lon": lon},
+        "radius_m": effective_radius_m,
+        "results": rows,
+    }
+    result = budget.apply_budget(result, "results")
+    result = _water_notes(result, in_range_count, containing, effective_radius_m)
+    degraded = water.degraded_fields()
     if degraded:
         result["degraded_fields"] = degraded
     return result

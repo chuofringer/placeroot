@@ -77,6 +77,11 @@ PROFILES: dict[str, frozenset[str]] = {
         "buildings_at",
         "land_use_at",
         "infrastructure_at",
+        # Hydrology is a characterize-the-surroundings question of the same
+        # shape as infrastructure_at ("is this parcel waterfront / how far
+        # to the nearest canal"), not a find-a-named-thing one, so it lands
+        # in analysis rather than search.
+        "water_near",
         "admin_lookup",
     }),
     # Working on geometry the caller already has, and turning results into

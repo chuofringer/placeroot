@@ -64,6 +64,7 @@ uvx placeroot --http      # HTTP endpoint at http://127.0.0.1:8321/mcp
 | `buildings_at` | Nearest building footprints to a point |
 | `land_use_at` | What kind of land is this: land use and land cover classification at a point |
 | `infrastructure_at` | Infrastructure near a point, nearest first — filter by `subtype`/`infra_class` (e.g. `bridge`, `tower`) to see past the street furniture |
+| `water_near` | Water near a point, nearest first — is this waterfront, how far to the nearest river/canal/lake; filter by `subtype`/`water_class` |
 | `geocode` | Free-text place name → ranked candidates with coordinates and admin context (`geocode_batch` for many at once) |
 | `resolve_place` | Free-text place reference → stable ids an agent can hold onto across turns (`resolve_place_batch`) |
 | `reverse_geocode` | Point → nearest address plus its containing admin areas (`reverse_geocode_batch`) |
@@ -145,7 +146,7 @@ The value is a comma-separated list of profile names, tool names, or both — th
 - **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `places_along_route`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
 - **`search`** — the find/name/identify family: `find_places`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, `address_at`, `search_categories`, and `gers_lookup`.
 - **`routing`** — `route`, `isochrone`, `distance_matrix`, `within_distance`.
-- **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `admin_lookup`.
+- **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`.
 - **`geometry`** — `simplify_geometry`, `render_map`.
 
 `data_version` is registered under every profile: it is ~230 tokens and the only way an agent can tell which Overture release backs its answers.
