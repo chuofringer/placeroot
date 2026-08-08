@@ -13,6 +13,8 @@ PlaceRoot is an MCP server that answers spatial questions from [Overture Maps](h
 
 It is the only keyless MCP server that does real graph routing over global open map data. `isochrone` and `route` walk an actual street graph built from Overture's transportation segments — not a straight-line approximation — anywhere on Earth, with no key, no signup, and no per-call quota. All 25 tools work that way.
 
+Every one of those 25 tools declares MCP annotations — `readOnlyHint: true`, closed-world, plus a human-readable title — so a client can tell before it prompts you that nothing here writes anything. Keyless *and* annotated is a combination the field mostly hasn't shipped. Honest caveat: Claude Code does not gate its permission prompts on `readOnlyHint` (it uses its own classifier), so the practical win is with clients that do, such as Codex CLI and Copilot-class agents — plus spec hygiene everywhere else.
+
 What it deliberately does not do, because Overture's open data does not carry it:
 
 - **No live traffic.** Routing is free-flow; durations do not reflect current conditions.
