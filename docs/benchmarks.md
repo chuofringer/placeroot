@@ -63,15 +63,15 @@ ceiling.
 
 <!-- BEGIN GENERATED: benchmarks/token_efficiency.py -->
 
-Generated 2026-08-07 by `uv run python benchmarks/token_efficiency.py --write`.
+Generated 2026-08-08 by `uv run python benchmarks/token_efficiency.py --write`.
 
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-07-22.0`
-- Tools registered: **25**
-- Total schema surface: **10031 tokens** (40158 chars, 40266 bytes)
-- Schema cost per tool: min 158, median 317, max 1316 tokens
+- Tools registered: **26**
+- Total schema surface: **10572 tokens** (42324 chars, 42434 bytes)
+- Schema cost per tool: min 158, median 339, max 1316 tokens
 - Median scenario response: **131 tokens** (range 41-702)
-- Break-even: the schema surface costs about as much as **77 median answers**
+- Break-even: the schema surface costs about as much as **81 median answers**
 
 ### Schema surface (paid once per conversation)
 
@@ -82,10 +82,11 @@ Generated 2026-08-07 by `uv run python benchmarks/token_efficiency.py --write`.
 | `infrastructure_at` | 494 | 118 | **682** | 2729 |
 | `route` | 461 | 88 | **613** | 2452 |
 | `isochrone` | 374 | 115 | **548** | 2193 |
+| `address_at` | 427 | 54 | **541** | 2164 |
 | `gers_lookup` | 385 | 74 | **519** | 2079 |
 | `place_details` | 259 | 158 | **469** | 1879 |
 | `resolve_place` | 265 | 91 | **419** | 1676 |
-| `render_map` | 243 | 85 | **381** | 1524 |
+| `render_map` | 243 | 85 | **381** | 1526 |
 | `land_use_at` | 274 | 41 | **373** | 1493 |
 | `distance_matrix` | 224 | 78 | **358** | 1434 |
 | `resolve_place_batch` | 237 | 42 | **339** | 1357 |
@@ -102,7 +103,7 @@ Generated 2026-08-07 by `uv run python benchmarks/token_efficiency.py --write`.
 | `reverse_geocode` | 111 | 42 | **205** | 820 |
 | `data_version` | 112 | 16 | **176** | 704 |
 | `summarize_area` | 53 | 57 | **158** | 635 |
-| **all 25 tools** | 6532 | 2077 | **10031** | 40158 |
+| **all 26 tools** | 6959 | 2131 | **10572** | 42324 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 

@@ -208,24 +208,33 @@ def build_division_rows(con: duckdb.DuckDBPyConnection) -> list[tuple]:
     return all five, neighborhood first. A sixth, unrelated polygon (around
     the high-latitude places cluster) proves non-containing divisions are
     excluded rather than just always-included.
+
+    The `country` column (#188 follow-up) is what addresses.py's coverage
+    check reads: it resolves the containing country by point-in-polygon over
+    these rows rather than by nearest division point. The seventh polygon is
+    a GB country covering the addresses fixture's deliberately-uncovered
+    London coordinate, so that path has a polygon to be contained by.
     """
     levels = [
-        ("neighborhood", box_wkt(40.695, 40.705, -73.905, -73.895)),
-        ("locality", box_wkt(40.6, 40.8, -74.0, -73.8)),
-        ("county", box_wkt(40.0, 41.0, -75.0, -73.0)),
-        ("region", box_wkt(39.0, 42.0, -76.0, -72.0)),
-        ("country", box_wkt(30.0, 50.0, -90.0, -60.0)),
+        ("neighborhood", "US", box_wkt(40.695, 40.705, -73.905, -73.895)),
+        ("locality", "US", box_wkt(40.6, 40.8, -74.0, -73.8)),
+        ("county", "US", box_wkt(40.0, 41.0, -75.0, -73.0)),
+        ("region", "US", box_wkt(39.0, 42.0, -76.0, -72.0)),
+        ("country", "US", box_wkt(30.0, 50.0, -90.0, -60.0)),
         # Unrelated: near the high-latitude places cluster, doesn't contain CENTER.
-        ("country", box_wkt(70.0, 85.0, 0.0, 30.0)),
+        ("country", "NO", box_wkt(70.0, 85.0, 0.0, 30.0)),
+        # #188: a country the addresses theme does not carry, around
+        # build_geocode_fixture.py's UNCOVERED_LAT/UNCOVERED_LON.
+        ("country", "GB", box_wkt(50.0, 55.0, -6.0, 2.0)),
     ]
     names = [
         "Downtown", "Metropolis", "Franklin County", "Empire State", "United Testland",
-        "Arctica",
+        "Arctica", "United Kingdom",
     ]
     rows = []
-    for i, ((subtype, wkt), name) in enumerate(zip(levels, names)):
+    for i, ((subtype, country, wkt), name) in enumerate(zip(levels, names)):
         (wkb,) = con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()
-        rows.append((gers_id(10_000 + i), {"primary": name}, subtype, wkb))
+        rows.append((gers_id(10_000 + i), {"primary": name}, subtype, country, wkb))
     return rows
 
 
@@ -358,10 +367,11 @@ def build_division_areas(con: duckdb.DuckDBPyConnection) -> None:
             id VARCHAR,
             names STRUCT("primary" VARCHAR),
             subtype VARCHAR,
+            country VARCHAR,
             geometry BLOB
         )
     """)
-    con.executemany("INSERT INTO division_areas VALUES (?, ?, ?, ?)", rows)
+    con.executemany("INSERT INTO division_areas VALUES (?, ?, ?, ?, ?)", rows)
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
     con.execute(f"COPY division_areas TO '{DIVISION_AREAS_FIXTURE_PATH}' (FORMAT PARQUET)")
     print(f"wrote {len(rows)} rows to {DIVISION_AREAS_FIXTURE_PATH}")
