@@ -733,6 +733,44 @@ def test_emitted_path_follows_the_traversed_parallel_edge():
     assert all(lat > 37.800000 for _lon, lat in interior)
 
 
+def test_a_straight_edge_beats_a_heavier_shaped_parallel_edge():
+    """Regression (#161 sweep): straight edges used to skip shape
+    registration entirely, so the min-weight parallel-edge rule never saw
+    them — a heavier curvy edge kept the slot against a lighter straight
+    edge it could never have beaten, and the emitted line followed a road
+    dijkstra never used (traced length exceeding distance_m, and the wrong
+    edge's dropped_m reported as deviation).
+    """
+    graph = routing.Graph()
+    graph.add_node("A", 37.800000, -122.400000)
+    graph.add_node("B", 37.800000, -122.394000)
+    graph.has_shapes = True
+    south = [(-122.398000, 37.799000), (-122.396000, 37.799000)]
+    graph.add_edge("A", "B", 50.0, 50.0, directed=False)  # straight chord
+    graph.add_edge("A", "B", 100.0, 100.0, directed=False, shape=south, shape_dropped_m=3.0)
+
+    # The cheapest A->B edge really is the straight one, so its (empty)
+    # geometry and 0.0 dropped_m must answer — in both directions.
+    assert min(w for nb, w, _ in graph.adjacency["A"] if nb == "B") == 50.0
+    assert graph.shape_between("A", "B") == ([], 0.0)
+    assert graph.shape_between("B", "A") == ([], 0.0)
+
+    # End to end: the emitted LineString is the chord, not the south bulge.
+    geometry, deviation_m = routing._path_linestring(graph, [("A", 0.0), ("B", 50.0)], 500)
+    assert geometry["coordinates"] == [[-122.400000, 37.800000], [-122.394000, 37.800000]]
+    assert deviation_m == 0.0
+
+    # Registration order must not matter: heavier shaped edge first.
+    graph2 = routing.Graph()
+    graph2.add_node("A", 37.800000, -122.400000)
+    graph2.add_node("B", 37.800000, -122.394000)
+    graph2.has_shapes = True
+    graph2.add_edge("A", "B", 100.0, 100.0, directed=False, shape=south, shape_dropped_m=3.0)
+    graph2.add_edge("A", "B", 50.0, 50.0, directed=False)
+    assert graph2.shape_between("A", "B") == ([], 0.0)
+    assert graph2.shape_between("B", "A") == ([], 0.0)
+
+
 def test_a_one_way_edges_shape_is_not_offered_for_the_forbidden_direction():
     """Shapes are keyed by direction of travel, so a one-way edge's geometry
     never answers for the direction it cannot be driven."""

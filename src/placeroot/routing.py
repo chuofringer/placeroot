@@ -534,8 +534,9 @@ class Graph:
         # (from_node, to_node) -> (weight, [(lon, lat), ...], dropped_m,
         # reversed): the source segment's shape vertices strictly *between*
         # the two nodes, plus how far GRAPH_SHAPE_EPSILON_M pruning moved the
-        # retained shape off the source geometry. Only edges that actually
-        # bend carry an entry, so a grid of straight segments stores nothing.
+        # retained shape off the source geometry. On a has_shapes graph every
+        # edge carries an entry — a straight chord's is just (weight, [], 0.0)
+        # — so the parallel-edge weight comparison below sees every contender.
         # Read back through shape_between() so an emitted route line follows
         # the real road rather than cutting the chord across every curve
         # (#161 sweep).
@@ -576,11 +577,15 @@ class Graph:
         self._undirected_neighbors[b].add(a)
         if not directed:
             self.adjacency[b].append((a, weight, length_m))
-        # An edge whose every shape vertex was pruned away still gets an
-        # entry: its shape is empty but its dropped_m isn't, and losing that
-        # would put the emitted line right back on the chord while reporting
-        # a deviation of 0.0.
-        if shape or shape_dropped_m:
+        # On a shape-carrying graph EVERY edge registers, straight chords
+        # included (empty vertices, 0.0 dropped): _register_shape's min-weight
+        # rule for parallel edges only resolves the way dijkstra does if it
+        # sees every contender, and skipping straight edges let a heavier
+        # curvy edge keep the slot against a lighter straight one it could
+        # never have beaten. It also keeps an all-pruned edge's dropped_m —
+        # losing that would put the emitted line right back on the chord
+        # while reporting a deviation of 0.0.
+        if self.has_shapes or shape or shape_dropped_m:
             vertices = shape or []
             self._register_shape(a, b, weight, vertices, shape_dropped_m, False)
             if not directed:
