@@ -275,12 +275,25 @@ class Country(NamedTuple):
 # _TERRITORY_PARENT cares about, so both count.
 _COUNTRY_SUBTYPES = ("country", "dependency")
 
+# Cap on the containing-division rows the coverage lookup reads back. Division
+# areas nest — country > region > county > locality — and a point sits inside
+# one polygon per level, so a handful of rows is the real shape of this result;
+# the limit only stops a pathological dataset from streaming an unbounded
+# result set into memory for a note nobody reads more than one line of. It is
+# applied with ORDER BY area ASC, which keeps the *most specific* rows — the
+# ones _country_by_containment actually chooses between.
+_CONTAINMENT_ROW_LIMIT = 32
+
 
 def _country_by_containment(lat: float, lon: float) -> Country:
     """The country actually *containing* the point, via ST_Contains on division_area.
 
     The same point-in-polygon path divisions.admin_lookup runs, narrowed to
     the country columns: bbox prunes remote row groups, ST_Contains decides.
+
+    Division areas nest, so a point is inside several of them at once; the
+    answer is the most specific country-or-dependency-level one — code and
+    name together, off a single row. See the comment at the return.
     """
     try:
         db.ensure_spatial()
@@ -309,6 +322,7 @@ def _country_by_containment(lat: float, lon: float) -> Country:
         WHERE {bbox_prefilter}country IS NOT NULL
           AND ST_Contains({geom}, ST_Point($lon, $lat))
         ORDER BY area ASC
+        LIMIT {_CONTAINMENT_ROW_LIMIT}
     """
     try:
         with db.conn_lock:
@@ -318,13 +332,24 @@ def _country_by_containment(lat: float, lon: float) -> Country:
         return Country(LOOKUP_FAILED)
     if not rows:
         return Country(NOT_FOUND)
-    # Code off the smallest containing polygon (the most specific division
-    # that covers the point); name off the largest country/dependency-level
-    # one, which is the entity a reader would call the country.
-    code = rows[0][0]
+    # Code and name must come off the SAME row. Division areas nest, and a
+    # dependency sits inside its parent country's polygon: taking the code
+    # from the smallest containing row (AX) and the name from the largest
+    # country-level one (Finland) built the label "Finland (AX)" — two
+    # different places in one parenthesis, and the coverage sentence built
+    # from it then said Finland was covered while checking Aland's code.
+    #
+    # So: the *most specific* country-or-dependency-level row containing the
+    # point, which is the entity the code identifies. Rows are sorted by area
+    # ascending, so that is the first match, not the last.
     named = [r for r in rows if r[2] in _COUNTRY_SUBTYPES and r[1]]
-    name = named[-1][1] if named else None
-    return Country(RESOLVED, code, name)
+    if named:
+        return Country(RESOLVED, named[0][0], named[0][1])
+    # No named country-level row — a dataset without names/subtype, say.
+    # Keep the old code (smallest containing row) and no label rather than
+    # borrowing a sub-country row's name, which would put a county in the
+    # sentence that is supposed to name a country.
+    return Country(RESOLVED, rows[0][0], None)
 
 
 def _country_by_nearest(lat: float, lon: float) -> Country:

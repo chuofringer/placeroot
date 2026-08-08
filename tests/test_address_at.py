@@ -454,3 +454,113 @@ def test_reverse_geocode_still_works_against_the_widened_fixture():
     result = server.reverse_geocode(CENTER_LAT, CENTER_LON)
     assert result["source"] == "address"
     assert result["address"]["street"] == "Main St"
+
+
+# --- nested divisions: code and name must describe the same place ----------
+#
+# Overture files dependent territories as their own division_area, nested
+# inside the parent country's polygon. A point in Aland is contained by both
+# the AX dependency and the FI country, so a lookup that takes the code from
+# one row and the name from another produces a label naming two places.
+
+ALAND_LAT, ALAND_LON = 60.10, 19.95
+
+
+def _write_nested_dependency_divisions(tmp_path):
+    """(division_area path, division path): AX nested inside FI.
+
+    Plus a sub-country region row inside AX, so "smallest containing polygon"
+    and "smallest country-level polygon" are genuinely different rows.
+    """
+    con = duckdb.connect()
+    con.execute("INSTALL spatial; LOAD spatial;")
+    areas = tmp_path / "nested_division_areas.parquet"
+    divisions = tmp_path / "nested_divisions.parquet"
+    con.execute(f"""
+        COPY (
+            SELECT id, names, subtype, country, bbox,
+                   ST_AsWKB(ST_GeomFromText(wkt)) AS geometry
+            FROM (VALUES
+                ('gers-fi', {{'primary': 'Finland'}}, 'country', 'FI',
+                 {{'xmin': 19.0, 'ymin': 59.0, 'xmax': 32.0, 'ymax': 71.0}},
+                 'POLYGON((19.0 59.0, 32.0 59.0, 32.0 71.0, 19.0 71.0, 19.0 59.0))'),
+                ('gers-ax', {{'primary': 'Aland Islands'}}, 'dependency', 'AX',
+                 {{'xmin': 19.5, 'ymin': 59.8, 'xmax': 20.5, 'ymax': 60.5}},
+                 'POLYGON((19.5 59.8, 20.5 59.8, 20.5 60.5, 19.5 60.5, 19.5 59.8))'),
+                ('gers-ax-region', {{'primary': 'Mariehamn'}}, 'region', 'AX',
+                 {{'xmin': 19.8, 'ymin': 60.0, 'xmax': 20.1, 'ymax': 60.2}},
+                 'POLYGON((19.8 60.0, 20.1 60.0, 20.1 60.2, 19.8 60.2, 19.8 60.0))')
+            ) AS t(id, names, subtype, country, bbox, wkt)
+        ) TO '{areas}' (FORMAT PARQUET)
+    """)
+    con.execute(f"""
+        COPY (
+            SELECT 'gers-div-fi' AS id,
+                   {{'xmin': 25.0, 'ymin': 60.17, 'xmax': 25.0, 'ymax': 60.17}} AS bbox,
+                   'FI' AS country,
+                   [[{{'name': 'Finland'}}]] AS hierarchies
+        ) TO '{divisions}' (FORMAT PARQUET)
+    """)
+    return areas, divisions
+
+
+def test_nested_dependency_takes_code_and_name_from_the_same_row(tmp_path):
+    """Regression: code came off the smallest containing polygon and name off
+    the largest country-level one, so a coordinate in Aland was labelled
+    "Finland (AX)" — a name and a code for two different places."""
+    _point_divisions_at(*_write_nested_dependency_divisions(tmp_path))
+    country = addresses._country_by_containment(ALAND_LAT, ALAND_LON)
+    assert country.status == addresses.RESOLVED
+    assert country.code == "AX"
+    assert country.name == "Aland Islands"
+    assert country.label == "Aland Islands (AX)"
+
+
+def test_nested_dependency_note_names_the_dependency_and_its_parent_feed(tmp_path):
+    """End to end: the coverage sentence says Aland, and explains that its
+    address points ride under FI — which is only coherent because the code
+    and the name now agree."""
+    _point_divisions_at(*_write_nested_dependency_divisions(tmp_path))
+    result = addresses.address_at(ALAND_LAT, ALAND_LON)
+    assert result["results"] == []
+    note = result["note"]
+    assert "Aland Islands (AX) is covered by" in note
+    assert "Finland (AX)" not in note
+    assert "carried under FI" in note
+
+
+def test_a_point_in_the_parent_country_still_resolves_the_parent(tmp_path):
+    """The specificity rule must not overshoot: outside the dependency, the
+    country-level row is itself the most specific one."""
+    _point_divisions_at(*_write_nested_dependency_divisions(tmp_path))
+    country = addresses._country_by_containment(62.0, 25.0)
+    assert country.code == "FI"
+    assert country.name == "Finland"
+
+
+def test_containment_query_is_bounded(tmp_path, monkeypatch):
+    """The containment scan reads a bounded number of rows, not whatever a
+    pathological dataset happens to contain."""
+    _point_divisions_at(*_write_nested_dependency_divisions(tmp_path))
+    seen = []
+    real_shared_conn = addresses.db.shared_conn
+
+    class Recording:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *args, **kwargs):
+            seen.append(sql)
+            return self._conn.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    monkeypatch.setattr(addresses.db, "shared_conn", lambda: Recording(real_shared_conn()))
+    country = addresses._country_by_containment(ALAND_LAT, ALAND_LON)
+    assert country.code == "AX"
+    containment_sql = [q for q in seen if "ST_Contains" in q]
+    assert containment_sql
+    assert all(
+        f"LIMIT {addresses._CONTAINMENT_ROW_LIMIT}" in q for q in containment_sql
+    )
