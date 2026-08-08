@@ -362,6 +362,23 @@ def build_divisions() -> list[tuple]:
         52.3728, 4.8936, _chain("Netherlands", "North Holland", "Amsterdam"),
         population=921_402,
     )
+    # #225: the two anchors geocode_address resolves a street search inside.
+    # San Francisco is already above (the #215 fuzzy target); these add the
+    # Mountain View that "1600 Amphitheatre Parkway, Mountain View" anchors on
+    # and the Berlin that carries the German trailing-house-number case. Both
+    # have a matching division_area row in division_areas.parquet keyed on
+    # their id -- without it there is no extent and geocode_address declines
+    # to scan, which is its own test.
+    add(
+        "gers-div-mountain-view", "Mountain View", "locality", "US", "US-CA",
+        37.3861, -122.0839, _chain("United States", "California", "Mountain View"),
+        population=82_376,
+    )
+    add(
+        "gers-div-berlin", "Berlin", "locality", "DE", "DE-BE",
+        52.52, 13.405, _chain("Germany", "Berlin"),
+        population=3_677_472,
+    )
     # #188: a division in a country the addresses theme does NOT cover (GB is
     # not one of addresses.COVERED_COUNTRIES), so address_at has somewhere to
     # resolve "this coordinate is in an uncovered country" from. Deliberately
@@ -421,6 +438,64 @@ def build_addresses() -> list[tuple]:
             ))
             n += 1
     rows += build_postcode_addresses()
+    rows += build_street_addresses()
+    return rows
+
+
+# #225: the street-level rows geocode_address searches, spelled the way
+# Overture actually spells them on release 2026-07-22.0 -- UPPERCASE and
+# USPS-abbreviated ("MARKET ST", "AMPHITHEATRE PKWY", both verified live). A
+# query for "Market Street" therefore only finds them through the suffix
+# variant map, which is the point: a fixture written as "Market Street" would
+# pass without the feature under test.
+#
+# (street, country, postcode, postal_city, level, lat, lon, numbers, copies)
+#
+# `copies` is the dedup probe. Overture files one address point per source
+# contribution, so the live MARKET ST in San Francisco is 2,980 rows over 900
+# distinct number|street pairs; three copies of every Market St number here
+# reproduce that shape at fixture scale, and an undeduplicated top-5 would
+# return one doorway five times.
+STREET_CLUSTERS = (
+    ("MARKET ST", "US", "94103", "San Francisco", "CA", 37.7749, -122.4194,
+     tuple(str(n) for n in range(1, 13)), 3),
+    ("AMPHITHEATRE PKWY", "US", "94043", "Mountain View", "CA", 37.4220, -122.0841,
+     ("1600", "1601", "1900"), 1),
+    # No transformation needed for DE (R27-verified): "Hauptstraße" is one
+    # token in the query and one in the data, so this cluster only exercises
+    # the trailing-house-number parse ("Hauptstraße 5").
+    ("Hauptstraße", "DE", "10827", "Berlin", None, 52.5200, 13.4050,
+     ("5", "7", "9"), 1),
+)
+
+# Spacing between consecutive house numbers along a street, and between the
+# duplicate copies of one number. The duplicate offset is deliberately tiny
+# (sub-metre): duplicates are the same doorway contributed twice, not
+# neighbours, so a dedup that kept them would show five rows metres apart.
+STREET_NUMBER_STEP_DEG = 0.0006
+STREET_DUPLICATE_OFFSET_DEG = 0.000004
+
+
+def build_street_addresses() -> list[tuple]:
+    """Address points along the named streets of STREET_CLUSTERS."""
+    rows = []
+    for street, country, postcode, city, level, lat, lon, numbers, copies in STREET_CLUSTERS:
+        for i, number in enumerate(numbers):
+            for copy in range(copies):
+                rows.append((
+                    f"gers-addr-st-{street.lower().replace(' ', '-')}-{number}-{copy}",
+                    _point_bbox(
+                        lat + i * STREET_NUMBER_STEP_DEG + copy * STREET_DUPLICATE_OFFSET_DEG,
+                        lon + i * STREET_NUMBER_STEP_DEG,
+                    ),
+                    country,
+                    number,
+                    street,
+                    None,
+                    postcode,
+                    city,
+                    [{"value": level}] if level else None,
+                ))
     return rows
 
 

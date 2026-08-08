@@ -1293,6 +1293,48 @@ def address_at(lat: float, lon: float, limit: int = addresses.DEFAULT_LIMIT) -> 
     return budget.apply_budget(result, "results")
 
 
+@_tool("Find a street address")
+def geocode_address(
+    query: str = "",
+    limit: int = geocoding.ADDRESS_DEFAULT_LIMIT,
+    number: str | None = None,
+    street: str | None = None,
+    city: str | None = None,
+) -> dict:
+    """Street address -> coordinates: "1600 Amphitheatre Parkway, Mountain View".
+
+    The forward counterpart to address_at, and finer than geocode, which
+    answers at city/neighborhood granularity and never at a doorway. The
+    first comma splits the street from the city; a bare integer at either end
+    of the street part is the house number ("1600 Amphitheatre Parkway",
+    "Hauptstraße 5"). Pass `number`/`street`/`city` instead if you already
+    have the parts. Unit/apartment numbers are not parsed.
+
+    The city is resolved first and its boundary bounds the search, so a city
+    that resolves to no boundary returns an empty list plus a note rather
+    than a scan — never a wrong-neighborhood guess. Street names match in
+    either spelling (Parkway/Pkwy, West/W).
+
+    Returns {"results": [{number, street, unit, postcode, country,
+    distance_m, lat, lon}, ...], "anchor": {name, id}}, deduplicated to
+    distinct number+street and nearest the city's own point first. More matches
+    than `limit` adds "truncated", "distinct_in_range" and a note.
+
+    Coverage is alpha: 39 countries, no UK, Ireland, India or China. An empty
+    list is a valid answer and always carries a note saying whether the
+    country is uncovered or the street simply wasn't found.
+    """
+    try:
+        result = geocoding.geocode_address(
+            query, limit, number=number, street=street, city=city
+        )
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    return budget.apply_budget(result, "results")
+
+
 @_tool("Reverse geocode points in batch")
 def reverse_geocode_batch(points: list[dict]) -> dict:
     """Reverse-geocode many points in one call, to cut N round-trips down to one.

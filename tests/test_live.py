@@ -66,3 +66,33 @@ def test_resolve_place_against_real_overture_data():
     )
     assert results
     assert any(r["kind"] == "place" and r["id"] for r in results)
+
+
+@pytest.mark.live
+def test_geocode_address_finds_an_exact_doorway():
+    """#225: number + street + city -> the one point, live.
+
+    "1600 Amphitheatre Parkway" is spelled "AMPHITHEATRE PKWY" in Overture's
+    US address rows, so this only passes through the USPS suffix map.
+    """
+    result = geocode.geocode_address("1600 Amphitheatre Parkway, Mountain View")
+    assert result["anchor"]["name"] == "Mountain View"
+    assert len(result["results"]) == 1
+    row = result["results"][0]
+    assert row["number"] == "1600"
+    assert row["street"].upper().startswith("AMPHITHEATRE")
+    assert abs(row["lat"] - 37.4224) < 0.01
+    assert abs(row["lon"] + 122.0842) < 0.01
+
+
+@pytest.mark.live
+def test_geocode_address_dedupes_a_whole_street():
+    """#225: MARKET ST is ~3,000 raw address points over ~900 distinct
+    number|street pairs; the answer must be the distinct ones, capped."""
+    result = geocode.geocode_address("Market Street, San Francisco", limit=5)
+    assert result["anchor"]["name"] == "San Francisco"
+    assert len(result["results"]) == 5
+    pairs = [(r["number"], r["street"]) for r in result["results"]]
+    assert len(set(pairs)) == 5
+    assert result["truncated"] is True
+    assert result["distinct_in_range"] > 500
