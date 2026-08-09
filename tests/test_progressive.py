@@ -16,7 +16,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from placeroot import budget, server, tool_profiles
+from placeroot import budget, prompts, server, tool_profiles
 from tests._routing_fixture import build_routing_fixture as fx
 
 from .conftest import CENTER_LAT, CENTER_LON
@@ -35,9 +35,28 @@ STANDING_COST_CEILING = 1500
 # ceiling.
 CATALOG_CEILING = 1000
 
+# The subset note's opening words, rendered by the renderer itself rather than
+# retyped here. A phrase typed from memory can drift from what prompts.py
+# actually writes, and an absence assertion that matches text no prompt ever
+# renders passes for the wrong reason — so the marker is generated, and
+# test_the_subset_note_is_detectable_when_it_is_there proves it still matches.
+_NOTE_SENTINEL = "sentinel_tool_name"
+SUBSET_NOTE_MARKER = prompts._profile_note([_NOTE_SENTINEL], set()).split(_NOTE_SENTINEL)[0].strip()
+
 
 def _tools(spec):
     return asyncio.run(server.build_server(spec).list_tools())
+
+
+def _rendered_prompts(spec) -> dict[str, str]:
+    """Every prompt of a `spec` server, rendered, keyed by name."""
+    built = server.build_server(spec)
+    rendered = {}
+    for prompt in asyncio.run(built.list_prompts()):
+        args = {a.name: "x" for a in (prompt.arguments or [])}
+        result = asyncio.run(built.get_prompt(prompt.name, args))
+        rendered[prompt.name] = " ".join(str(m.content) for m in result.messages)
+    return rendered
 
 
 def _names(spec) -> set[str]:
@@ -96,13 +115,28 @@ def test_prompts_and_resources_are_still_registered():
 def test_prompts_do_not_disown_tools_progressive_can_still_reach():
     """Every tool is reachable via placeroot_call, so no prompt may carry the
     subset note naming tools this selection "left out" (#194 vs #210).
+
+    This is what build_server's `reachable` line buys: hand prompts.register
+    the three meta names instead of the full surface and all three prompts
+    render the note, disowning the tools their own steps depend on.
     """
-    built = server.build_server("progressive")
-    for prompt in asyncio.run(built.list_prompts()):
-        args = {a.name: "x" for a in (prompt.arguments or [])}
-        rendered = asyncio.run(built.get_prompt(prompt.name, args))
-        text = " ".join(str(m.content) for m in rendered.messages)
-        assert "not available" not in text.lower(), prompt.name
+    rendered = _rendered_prompts("progressive")
+    assert rendered
+    for name, text in rendered.items():
+        assert SUBSET_NOTE_MARKER not in text, name
+
+
+def test_the_subset_note_is_detectable_when_it_is_there():
+    """Positive control for the assertion above.
+
+    Under a genuine subset every one of these prompts names a tool the
+    selection dropped, so the marker must appear — otherwise the absence
+    assertion is matching text no prompt ever renders and cannot fail.
+    """
+    rendered = _rendered_prompts("geometry")
+    assert rendered
+    for name, text in rendered.items():
+        assert SUBSET_NOTE_MARKER in text, name
 
 
 def test_build_server_logs_the_progressive_selection(caplog):
@@ -338,13 +372,22 @@ def test_a_tools_own_error_is_passed_through_unchanged():
 
 
 def test_dispatch_works_through_the_registered_mcp_tool():
-    """End to end over the server, not just the plain function."""
+    """End to end over the server, not just the plain function.
+
+    Asserted on the payload rather than on the result existing: call_tool
+    returns a CallToolResult for a failed dispatch too, so `is not None` held
+    even when the answer was an unknown_tool error.
+    """
     result = asyncio.run(
         server.build_server("progressive").call_tool(
             "placeroot_call", {"tool": "data_version", "args": {}}
         )
     )
-    assert result is not None
+    assert not result.is_error
+    payload = json.loads(result.content[0].text)
+    assert "error" not in payload, payload
+    assert payload["release"] == server.data_version()["release"]
+    assert payload == server.data_version()
 
 
 # --- Composition ------------------------------------------------------------
