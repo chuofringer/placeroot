@@ -1,0 +1,33 @@
+name: New tool proposal
+description: Propose a new MCP tool (please read the token-budget rule in CONTRIBUTING.md first)
+labels: ["tool-request"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: What question does the tool answer?
+      description: One sentence, from the agent's point of view.
+    validations:
+      required: true
+  - type: textarea
+    id: why-new
+    attributes:
+      label: Why can't existing tools answer it?
+      description: Including as a new argument on an existing tool, or a `*_batch` sibling — a new top-level tool is the most expensive option, since every install pays its schema tokens in every conversation.
+    validations:
+      required: true
+  - type: textarea
+    id: data
+    attributes:
+      label: Which Overture theme(s) does it read?
+      placeholder: places / divisions / transportation / addresses / buildings / base
+    validations:
+      required: true
+  - type: textarea
+    id: shape
+    attributes:
+      label: Sketch of the response shape
+      description: Fields and a rough token estimate for a typical answer (design rule — every answer fits in ~2K tokens).
+      render: json
+    validations:
+      required: true

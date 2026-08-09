@@ -38,7 +38,10 @@ from pathlib import Path
 
 from placeroot import cache
 
-ATTRIBUTION = "© Overture Maps Foundation contributors"
+# Overture's divisions/transportation/base themes are substantially
+# OSM-derived (ODbL), so a rendered map is a "produced work" and needs the
+# OSM credit alongside Overture's — see docs/DATA-LICENSE.md.
+ATTRIBUTION = "© Overture Maps Foundation · © OpenStreetMap contributors (ODbL)"
 
 # Returning the HTML inline (inline=True) is only offered under this size —
 # above it the point of keeping the tool response small is defeated.

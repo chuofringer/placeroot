@@ -22,5 +22,13 @@
   ],
   "license": "MIT",
   "author": "Vibe Mapper <chuo.fringer@gmail.com>",
-  "homepage": "https://placeroot.dev"
+  "homepage": "https://placeroot.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chuofringer/placeroot.git",
+    "directory": "npm"
+  },
+  "bugs": {
+    "url": "https://github.com/chuofringer/placeroot/issues"
+  }
 }
