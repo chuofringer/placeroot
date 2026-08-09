@@ -98,22 +98,52 @@ DEFAULT_STALE_DAYS = 60
 # _refreshing lets exactly one thread pay for an expired re-check while
 # every other caller keeps getting the previous answer — a 5s discovery
 # timeout must never stall the query path TTL-wide.
+#
+# _generation is bumped by reset_cache(). A refresher captures it before its
+# (unlocked, slow) discovery and re-checks it before writing back, so a
+# refresh that started before a reset can never overwrite — and re-stamp the
+# TTL of — whatever resolved after that reset.
 _lock = threading.Lock()
 _cached: dict | None = None
 _cached_at: float = 0.0
 _refreshing = False
+_generation = 0
+_ttl_warned = False
+_override_warned: str | None = None
 
 
 def _ttl_s() -> float:
+    """Cache TTL in seconds, from PLACEROOT_RELEASE_TTL_HOURS.
+
+    A value <= 0 means "re-check on every resolve" — deliberate, and what the
+    tests use to force a rollover without sleeping. It is a poor production
+    setting, though: _upstream_glob() resolves the release for every query, so
+    a non-positive TTL puts a discovery round-trip on the hot path. Warn the
+    operator once rather than silently clamping, since the tests depend on the
+    literal meaning.
+    """
+    global _ttl_warned
     try:
-        return float(os.environ.get("PLACEROOT_RELEASE_TTL_HOURS", DEFAULT_TTL_HOURS)) * 3600.0
+        ttl_s = float(os.environ.get("PLACEROOT_RELEASE_TTL_HOURS", DEFAULT_TTL_HOURS)) * 3600.0
     except ValueError:
         return DEFAULT_TTL_HOURS * 3600.0
+    if ttl_s <= 0 and not _ttl_warned:
+        _ttl_warned = True
+        logger.warning(
+            "PLACEROOT_RELEASE_TTL_HOURS is <= 0: the Overture release will be "
+            "re-discovered on every resolve, which puts a network round-trip on "
+            "the query path. Set it to a positive number of hours (default %g) "
+            "unless you are testing rollover.",
+            DEFAULT_TTL_HOURS,
+        )
+    return ttl_s
 
 
 def _stale_days_threshold() -> int:
+    """Staleness threshold in days, floored at 1 — a 0 or negative threshold
+    would mark every release, including one published today, as stale."""
     try:
-        return int(os.environ.get("PLACEROOT_STALE_RELEASE_DAYS", DEFAULT_STALE_DAYS))
+        return max(1, int(os.environ.get("PLACEROOT_STALE_RELEASE_DAYS", DEFAULT_STALE_DAYS)))
     except ValueError:
         return DEFAULT_STALE_DAYS
 
@@ -153,6 +183,27 @@ def _warn_if_stale(info: dict) -> None:
         )
 
 
+def _warn_if_stale_once(info: dict) -> None:
+    """_warn_if_stale for the env-override path, which has no TTL to pace it.
+
+    resolve_release_info() runs several times per query and the override path
+    returns before touching the cache, so warn once per distinct override
+    value instead of once per call.
+    """
+    global _override_warned
+    if _override_warned == info["release"]:
+        return
+    _override_warned = info["release"]
+    _warn_if_stale(info)
+
+
+def _resolved(discovered: str | None) -> dict:
+    """A resolution dict for a discovery result: the release, or the pin."""
+    if discovered:
+        return {"release": discovered, "source": "discovered"}
+    return {"release": PINNED_RELEASE, "source": "pinned-fallback"}
+
+
 def resolve_release_info() -> dict:
     """Active release + how it was resolved: {"release": str, "source": ...}.
 
@@ -172,7 +223,12 @@ def resolve_release_info() -> dict:
         # would otherwise flow straight into an S3 glob. Not agent-reachable
         # today (no tool takes a release arg), but cheap defense in depth.
         if _RELEASE_RE.match(env_release):
-            return {"release": env_release, "source": "env-override"}
+            info = {"release": env_release, "source": "env-override"}
+            # An operator can pin an ancient vintage too, and it is the case
+            # least likely to be noticed (nothing is failing) — so this path
+            # warns as well. Still zero-network: no discovery, no cache write.
+            _warn_if_stale_once(info)
+            return info
         logger.warning(
             "PLACEROOT_OVERTURE_RELEASE=%r doesn't look like a release "
             "(YYYY-MM-DD.N); ignoring it and falling back to discovery/pin.",
@@ -182,43 +238,54 @@ def resolve_release_info() -> dict:
         now = time.monotonic()
         if _cached is not None and (now - _cached_at < _ttl_s() or _refreshing):
             return _cached
-        if _cached is not None:
-            # Expired and nobody else is refreshing: this thread refreshes
-            # outside the lock; everyone else keeps the previous answer.
-            _refreshing = True
-        else:
+        if _cached is None:
             # First resolution of the process: there is no previous answer to
             # serve, so block (concurrent first calls wait ≤ the 5s discovery
             # timeout, once).
-            discovered = _discover()
-            _cached = (
-                {"release": discovered, "source": "discovered"}
-                if discovered
-                else {"release": PINNED_RELEASE, "source": "pinned-fallback"}
-            )
+            _cached = _resolved(_discover())
             _cached_at = time.monotonic()
             _warn_if_stale(_cached)
             return _cached
-    discovered = _discover()
+        # Expired and nobody else is refreshing: this thread refreshes outside
+        # the lock; everyone else keeps the previous answer.
+        _refreshing = True
+        generation = _generation
+        previous = _cached
+    try:
+        discovered = _discover()
+    except BaseException:
+        # _discover() swallows Exception, but not a KeyboardInterrupt landing
+        # in its 5s urlopen. Releasing the claim here is what keeps that from
+        # pinning _refreshing True — and with it the cache — for the rest of
+        # the process's life.
+        with _lock:
+            if generation == _generation:
+                _refreshing = False
+        raise
     with _lock:
+        if generation != _generation:
+            # reset_cache() ran while we were discovering, and already cleared
+            # _refreshing. Our answer predates the reset, so it must not
+            # overwrite whatever resolved after it: that would regress the
+            # cache to an older release and re-stamp its TTL. Hand our result
+            # to this caller without installing it.
+            return _cached if _cached is not None else _resolved(discovered)
         _refreshing = False
         if discovered:
-            if _cached is not None and discovered != _cached["release"]:
+            if discovered != previous["release"]:
                 logger.info(
                     "Overture release rollover: %s -> %s (tile/table caches are "
                     "release-keyed; old-release files age out under the size cap)",
-                    _cached["release"], discovered,
+                    previous["release"], discovered,
                 )
             _cached = {"release": discovered, "source": "discovered"}
         else:
             logger.warning(
                 "Overture release re-check failed; keeping previously resolved "
                 "release %s until the next check",
-                _cached["release"] if _cached else PINNED_RELEASE,
+                previous["release"],
             )
-            if _cached is None:
-                # reset_cache() raced the refresh: nothing to keep, use the pin.
-                _cached = {"release": PINNED_RELEASE, "source": "pinned-fallback"}
+            _cached = previous
         # Stamp even on failure: retry next TTL window, not on every query.
         _cached_at = time.monotonic()
         _warn_if_stale(_cached)
@@ -235,9 +302,16 @@ def resolve_release() -> str:
 
 
 def reset_cache() -> None:
-    """Clear the TTL cache. Used by tests and rare hot-reload."""
-    global _cached, _cached_at, _refreshing
+    """Clear the TTL cache. Used by tests and rare hot-reload.
+
+    Bumping _generation disowns any refresh already in flight, so its result
+    is discarded rather than written over the next resolution.
+    """
+    global _cached, _cached_at, _refreshing, _generation, _ttl_warned, _override_warned
     with _lock:
         _cached = None
         _cached_at = 0.0
         _refreshing = False
+        _generation += 1
+        _ttl_warned = False
+        _override_warned = None

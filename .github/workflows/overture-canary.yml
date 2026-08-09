@@ -3,6 +3,12 @@ name: Overture Canary
 # Fails (and opens/refreshes an issue) when the pinned fallback release is
 # no longer upstream's newest, or when the newest release drops a column we
 # require. See scripts/overture_canary.py for what exactly is probed.
+#
+# The issue is opened, refreshed AND closed from here: a watch nobody has to
+# tidy up by hand is one that keeps being trusted. An infrastructure failure
+# (checkout, uv, an unhandled error in the script) files the same issue with
+# a different body — a canary that dies quietly is the exact failure mode
+# this workflow exists to prevent.
 on:
   schedule:
     - cron: '17 6 * * 1'   # Mondays 06:17 UTC — offset to dodge cron rushes
@@ -16,6 +22,13 @@ jobs:
   canary:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      CANARY_TITLE: 'Overture canary: stale pin or schema drift'
+      GH_TOKEN: ${{ github.token }}
+      # gh infers the repo from the checkout; naming it here keeps the issue
+      # steps working when the failure being reported IS the checkout.
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -30,19 +43,44 @@ jobs:
           set -o pipefail
           uv run python scripts/overture_canary.py | tee canary-report.md
 
-      - name: Open or refresh the canary issue
-        if: failure() && steps.canary.conclusion == 'failure'
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # Exact title match, not whatever GitHub's fuzzy search ranks first: the
+      # search only narrows the candidates, jq decides. Ranking alone would
+      # happily hand back an unrelated open issue sharing a few words, and the
+      # report would land as a comment on it.
+      - name: Find the open canary issue
+        id: existing
+        if: ${{ !cancelled() }}
         run: |
-          TITLE="Overture canary: stale pin or schema drift"
-          BODY="$(cat canary-report.md 2>/dev/null || echo 'canary failed before producing a report — see the workflow run')"
-          BODY="$BODY
+          NUMBER=$(gh issue list --state open --limit 100 \
+            --search "in:title \"$CANARY_TITLE\"" --json number,title \
+            | jq -r --arg t "$CANARY_TITLE" '[.[] | select(.title == $t)] | .[0].number // empty')
+          echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
 
-Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          EXISTING=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number // empty')
+      - name: Open or refresh the canary issue
+        if: ${{ !cancelled() && (steps.canary.conclusion == 'failure' || steps.canary.conclusion == '') }}
+        env:
+          EXISTING: ${{ steps.existing.outputs.number }}
+        run: |
+          if [ -s canary-report.md ]; then
+            BODY="$(cat canary-report.md)"
+          else
+            BODY="The canary produced no report: it failed before probing anything (checkout, uv setup, or an unhandled error in scripts/overture_canary.py). This is an infrastructure failure, not a finding about the Overture bucket — the staleness and schema watch did NOT run this week."
+          fi
+          # printf, not a literal newline in the source: an un-indented
+          # continuation line would terminate this block scalar mid-script.
+          BODY="$(printf '%s\n\nWorkflow run: %s\n' "$BODY" "$RUN_URL")"
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" --body "$BODY"
           else
-            gh issue create --title "$TITLE" --label bug --body "$BODY"
+            gh issue create --title "$CANARY_TITLE" --label bug --body "$BODY"
           fi
+
+      - name: Close the canary issue once the run is clean
+        if: ${{ !cancelled() && steps.canary.conclusion == 'success' && steps.existing.outputs.number != '' }}
+        env:
+          EXISTING: ${{ steps.existing.outputs.number }}
+        run: |
+          COMMENT="$(printf '%s\n\nWorkflow run: %s\n' \
+            "Canary is clean again: the pin is upstream's newest release and every watched theme still carries its required columns." \
+            "$RUN_URL")"
+          gh issue close "$EXISTING" --comment "$COMMENT"

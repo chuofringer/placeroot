@@ -62,8 +62,9 @@ CATEGORIES_TOKEN_BUDGET = 1500
 def data_version_payload() -> dict:
     """The resolved-release answer. The `data_version` tool returns this too.
 
-    Reads the process-lifetime cache in release.py — no upstream call, no
-    DB dependency, safe to read from either surface at any time.
+    Reads the TTL cache in release.py — no DB dependency, safe to read from
+    either surface at any time. It can trigger the one discovery call that
+    an expired TTL owes, the same as any query path would.
     """
     info = release.resolve_release_info()
     release_str = info["release"]

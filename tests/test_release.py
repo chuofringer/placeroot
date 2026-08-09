@@ -1,3 +1,7 @@
+import datetime
+import logging
+import threading
+
 import pytest
 
 from placeroot import release
@@ -206,20 +210,120 @@ def test_garbage_ttl_env_uses_the_default(monkeypatch):
     assert release._ttl_s() == release.DEFAULT_TTL_HOURS * 3600.0
 
 
+def test_non_positive_ttl_re_checks_every_call_and_warns_once(monkeypatch, caplog):
+    """TTL <= 0 keeps its literal meaning (the rollover tests rely on it), but
+    it belongs nowhere near production, so the operator hears about it once."""
+    monkeypatch.setenv("PLACEROOT_RELEASE_TTL_HOURS", "0")
+    with caplog.at_level(logging.WARNING, logger="placeroot.release"):
+        assert release._ttl_s() == 0.0
+        assert release._ttl_s() == 0.0
+    warned = "PLACEROOT_RELEASE_TTL_HOURS is <= 0"
+    assert len([r for r in caplog.records if warned in r.getMessage()]) == 1
+
+
+# --- #219: concurrent re-discovery ------------------------------------------
+
+
+def _seed(monkeypatch, release_name):
+    """Put a resolved release in the TTL cache, with the TTL already expired."""
+    monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
+    monkeypatch.setenv("PLACEROOT_RELEASE_TTL_HOURS", "0")
+    monkeypatch.setattr(release, "_discover", lambda: release_name)
+    assert release.resolve_release() == release_name
+
+
+def _parked_discover():
+    """A _discover that blocks until released, so a refresh can be held mid-flight.
+
+    Returns (discover, started, finish): `started` is set once the refresher
+    is inside the call, `finish` releases it.
+    """
+    started, finish = threading.Event(), threading.Event()
+
+    def discover():
+        started.set()
+        assert finish.wait(10), "test deadlock: parked _discover never released"
+        return "2026-08-20.0"
+
+    return discover, started, finish
+
+
+def test_one_thread_refreshes_while_others_keep_the_previous_answer(monkeypatch):
+    """The whole point of _refreshing: a slow re-check must not queue every
+    other caller behind a network round-trip for the length of the timeout."""
+    _seed(monkeypatch, "2026-07-22.0")
+    discover, started, finish = _parked_discover()
+    monkeypatch.setattr(release, "_discover", discover)
+
+    refresher = threading.Thread(target=release.resolve_release)
+    refresher.start()
+    assert started.wait(10), "refresher never entered discovery"
+
+    # The refresher is parked in _discover. A second caller must be served the
+    # previous answer promptly; without the _refreshing guard it would start
+    # its own discovery and block here instead.
+    answers = []
+    other = threading.Thread(target=lambda: answers.append(release.resolve_release()))
+    other.start()
+    other.join(3)
+    assert not other.is_alive(), "a second caller blocked behind the in-flight refresh"
+    assert answers == ["2026-07-22.0"]
+
+    finish.set()
+    refresher.join(10)
+    assert release._cached == {"release": "2026-08-20.0", "source": "discovered"}
+
+
+def test_a_refresh_that_outlives_reset_cache_does_not_clobber_the_newer_answer(monkeypatch):
+    """reset_cache() disowns an in-flight refresh: the pre-reset answer is
+    older than whatever resolved after the reset, and must neither replace it
+    nor re-stamp its TTL."""
+    _seed(monkeypatch, "2026-01-01.0")
+    discover, started, finish = _parked_discover()  # would resolve 2026-08-20.0
+    monkeypatch.setattr(release, "_discover", discover)
+
+    refresher = threading.Thread(target=release.resolve_release)
+    refresher.start()
+    assert started.wait(10), "refresher never entered discovery"
+
+    release.reset_cache()
+    monkeypatch.setattr(release, "_discover", lambda: "2026-09-09.0")
+    assert release.resolve_release() == "2026-09-09.0"
+
+    finish.set()
+    refresher.join(10)
+    assert release._cached == {"release": "2026-09-09.0", "source": "discovered"}
+    assert release._refreshing is False
+
+
+def test_an_exception_escaping_discovery_does_not_freeze_the_cache(monkeypatch):
+    """_discover swallows Exception but not KeyboardInterrupt; without the
+    try/except the escaping one would leave _refreshing set, and the cache
+    would silently never re-check again for the life of the process."""
+    _seed(monkeypatch, "2026-01-01.0")
+
+    def interrupted():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(release, "_discover", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        release.resolve_release()
+    assert release._refreshing is False
+
+    monkeypatch.setattr(release, "_discover", lambda: "2026-09-09.0")
+    assert release.resolve_release() == "2026-09-09.0"
+
+
 # --- #219: staleness --------------------------------------------------------
 
 
 def test_age_days_reads_the_date_in_the_release_name():
-    import datetime
-
     old = (datetime.date.today() - datetime.timedelta(days=90)).isoformat()
     assert release.age_days(f"{old}.0") == 90
     assert release.age_days("garbage") is None
 
 
 def test_is_stale_past_the_threshold(monkeypatch):
-    import datetime
-
     monkeypatch.delenv("PLACEROOT_STALE_RELEASE_DAYS", raising=False)
     fresh = (datetime.date.today() - datetime.timedelta(days=10)).isoformat()
     old = (datetime.date.today() - datetime.timedelta(days=90)).isoformat()
@@ -229,9 +333,37 @@ def test_is_stale_past_the_threshold(monkeypatch):
     assert release.is_stale(f"{old}.0") is False
 
 
-def test_data_version_payload_carries_age_and_stale_flag(monkeypatch):
-    import datetime
+def test_stale_days_env_is_floored_at_one_day(monkeypatch):
+    """0 or negative would mark a release published today as stale."""
+    monkeypatch.setenv("PLACEROOT_STALE_RELEASE_DAYS", "not-a-number")
+    assert release._stale_days_threshold() == release.DEFAULT_STALE_DAYS
+    monkeypatch.setenv("PLACEROOT_STALE_RELEASE_DAYS", "0")
+    assert release._stale_days_threshold() == 1
+    monkeypatch.setenv("PLACEROOT_STALE_RELEASE_DAYS", "-5")
+    assert release._stale_days_threshold() == 1
+    assert release.is_stale(datetime.date.today().isoformat() + ".0") is False
 
+
+def test_env_override_warns_about_a_stale_vintage_once_and_never_dials_out(monkeypatch, caplog):
+    """An operator-pinned ancient release is the least visible way to serve old
+    data — nothing fails — so the override path warns too. It stays
+    zero-network, and warns once per value rather than once per query."""
+    old = (datetime.date.today() - datetime.timedelta(days=400)).isoformat()
+    monkeypatch.setenv("PLACEROOT_OVERTURE_RELEASE", f"{old}.0")
+
+    def no_network():
+        raise AssertionError("the env override must not trigger discovery")
+
+    monkeypatch.setattr(release, "_discover", no_network)
+    with caplog.at_level(logging.WARNING, logger="placeroot.release"):
+        assert release.resolve_release() == f"{old}.0"
+        assert release.resolve_release() == f"{old}.0"
+    stale_warnings = [r for r in caplog.records if "days old" in r.getMessage()]
+    assert len(stale_warnings) == 1
+    assert "400 days old" in stale_warnings[0].getMessage()
+
+
+def test_data_version_payload_carries_age_and_stale_flag(monkeypatch):
     from placeroot import resources
 
     old = (datetime.date.today() - datetime.timedelta(days=90)).isoformat()

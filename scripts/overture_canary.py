@@ -30,6 +30,7 @@ import duckdb  # noqa: E402
 from placeroot import (  # noqa: E402
     addresses,
     buildings,
+    db,
     divisions,
     infrastructure,
     land_use,
@@ -40,14 +41,20 @@ from placeroot import (  # noqa: E402
 )
 
 # (theme, type, required columns) — the same lists the runtime degrades
-# against, gathered here so the canary can't drift from the code.
+# against, referenced rather than restated so the canary can't drift from the
+# code. Every dataset the server reads appears exactly once:
+# divisions.REQUIRED_COLUMNS is a superset of overture's division_area list,
+# and land_cover gets its own list because it carries neither class nor names
+# upstream (probing it with land_use's list would report by-design absences as
+# drift every week).
 THEME_REQUIREMENTS: list[tuple[str, str, list[str]]] = [
     ("places", "place", overture.REQUIRED_COLUMNS),
-    ("divisions", "division_area", overture._DIVISION_AREA_REQUIRED_COLUMNS),
     ("divisions", "division_area", divisions.REQUIRED_COLUMNS),
+    ("divisions", "division", addresses.DIVISION_REQUIRED_COLUMNS),
     ("addresses", "address", addresses.REQUIRED_COLUMNS),
     ("buildings", "building", buildings.REQUIRED_COLUMNS),
     ("base", "land_use", land_use.REQUIRED_COLUMNS),
+    ("base", "land_cover", land_use.LAND_COVER_REQUIRED_COLUMNS),
     ("base", "infrastructure", infrastructure.REQUIRED_COLUMNS),
     ("base", "water", water.REQUIRED_COLUMNS),
     ("transportation", "segment", routing.REQUIRED_COLUMNS),
@@ -85,28 +92,32 @@ def main() -> int:
         )
 
     target = newest or release.PINNED_RELEASE
-    con = duckdb.connect()
-    con.execute("INSTALL httpfs; LOAD httpfs;")
-    con.execute("SET s3_region='us-west-2';")
-    for theme, type_, required in THEME_REQUIREMENTS:
-        glob = f"{overture.DEFAULT_UPSTREAM_BASE}/{target}/theme={theme}/type={type_}/*"
-        cols = probe_columns(con, glob)
-        if cols is None:
-            findings.append(
-                f"- **Could not probe** `theme={theme}/type={type_}` at "
-                f"`{target}` — dataset missing or unreadable."
-            )
-            continue
-        # Required lists name top-level columns; struct-field access like
-        # bbox.xmin still resolves as long as the top-level column exists.
-        missing = [c for c in required if c.split(".")[0] not in cols]
-        if missing:
-            findings.append(
-                f"- **Schema drift** in `theme={theme}/type={type_}` at "
-                f"`{target}`: required column(s) {missing} are gone. Runtime "
-                f"degrades these to None fields — fix before the TTL rollover "
-                f"adopts this release."
-            )
+    # The runtime's own connection setup (db._configure): anonymous credentials
+    # for the public bucket, the S3 region, and the httpfs timeout/retry
+    # settings. Hand-rolling those here is how a canary starts failing for
+    # reasons the server never would — a signed request 403ing on a runner
+    # that happens to carry AWS_* in its environment, say.
+    con = db.new_connection()
+    try:
+        for theme, type_, required in THEME_REQUIREMENTS:
+            glob = f"{overture.DEFAULT_UPSTREAM_BASE}/{target}/theme={theme}/type={type_}/*"
+            cols = probe_columns(con, glob)
+            if cols is None:
+                findings.append(
+                    f"- **Could not probe** `theme={theme}/type={type_}` at "
+                    f"`{target}` — dataset missing or unreadable."
+                )
+                continue
+            missing = [c for c in required if c not in cols]
+            if missing:
+                findings.append(
+                    f"- **Schema drift** in `theme={theme}/type={type_}` at "
+                    f"`{target}`: required column(s) {missing} are gone. Runtime "
+                    f"degrades these to None fields — fix before the TTL rollover "
+                    f"adopts this release."
+                )
+    finally:
+        con.close()
 
     if findings:
         print(f"## Overture canary findings ({target})\n")
