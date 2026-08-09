@@ -68,6 +68,10 @@ jobs:
           # placeroot's own version is pinned in uv.lock; refresh it so the PR
           # doesn't land a lock file pointing at the previous version.
           uv lock
+          # The site serves the Desktop Extension bundle (#233); rebuild it so
+          # the bundle's manifest version matches the bump —
+          # tests/test_mcpb_bundle.py fails the verify step below otherwise.
+          uv run python scripts/build_mcpb.py site/placeroot.mcpb
 
       - name: Verify the bumped tree
         run: |
