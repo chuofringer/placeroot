@@ -5,22 +5,46 @@ s3://overturemaps-us-west-2/release/<release>/. We list that prefix via the
 bucket's public HTTPS listing endpoint (anonymous, no SDK, no new deps) and
 take the lexicographically greatest release name — Overture's release
 naming (YYYY-MM-DD.N) sorts correctly as a plain string. Discovery is
-best-effort and cached for the process lifetime: any failure (network,
-parsing, empty listing) falls back to a pinned known-good release rather
-than failing the request.
+best-effort: any failure (network, parsing, empty listing) falls back to a
+pinned known-good release rather than failing the request.
+
+Freshness (#219): the resolved release is cached with a TTL (default 6h,
+PLACEROOT_RELEASE_TTL_HOURS) instead of for the process lifetime, so a
+long-running server rolls over to a new Overture release without a restart.
+The re-check is lazy — it happens on the first resolve after expiry, and
+only one thread pays for it while others keep the previous answer — and a
+FAILED re-check keeps the previously-resolved release rather than dropping
+to the pin (a release that worked a moment ago beats a months-old pin).
+Rollover mid-flight is safe for the caches (tile paths and support-table
+paths embed the release, so a query can never read release A's files
+through release B's path); a single query that resolves the release more
+than once around a rollover boundary can do part of its work against each
+release, which is two self-consistent reads, not corruption.
+
+Staleness (#219): release names carry their date, so `age_days()` and
+`is_stale()` (threshold PLACEROOT_STALE_RELEASE_DAYS, default 60) let
+data_version and the logs say "this vintage is older than Overture's
+cadence" instead of leaving the reader to know the cadence themselves.
 """
 
+import datetime
 import logging
 import os
 import re
+import threading
+import time
 import urllib.request
-from functools import lru_cache
 from xml.etree import ElementTree
 
 logger = logging.getLogger(__name__)
 
-# Known-good release, updated occasionally by hand. Discovery failures (and
-# tests) fall back to this rather than ever failing closed.
+# Known-good release, the fallback when discovery has never succeeded this
+# process. Bumping it is a one-line change here, but the fixtures and docs
+# pin the same string — grep for the old value and regenerate fixtures when
+# moving it. The weekly overture-canary workflow (#219) compares this pin
+# against upstream's newest release and probes the schema, so a stale pin
+# or a breaking upstream change opens an issue instead of waiting for a
+# bug report.
 PINNED_RELEASE = "2026-07-22.0"
 
 LISTING_URL = (
@@ -66,14 +90,80 @@ def _discover(timeout_s: float = 5.0) -> str | None:
     return max(releases, key=lambda r: (r[: r.rindex(".")], int(r[r.rindex(".") + 1 :])))
 
 
-@lru_cache(maxsize=1)
+DEFAULT_TTL_HOURS = 6.0
+DEFAULT_STALE_DAYS = 60
+
+# TTL cache state. _cached is the last successful resolution; _cached_at is
+# monotonic so wall-clock jumps can't expire (or eternally refresh) it.
+# _refreshing lets exactly one thread pay for an expired re-check while
+# every other caller keeps getting the previous answer — a 5s discovery
+# timeout must never stall the query path TTL-wide.
+_lock = threading.Lock()
+_cached: dict | None = None
+_cached_at: float = 0.0
+_refreshing = False
+
+
+def _ttl_s() -> float:
+    try:
+        return float(os.environ.get("PLACEROOT_RELEASE_TTL_HOURS", DEFAULT_TTL_HOURS)) * 3600.0
+    except ValueError:
+        return DEFAULT_TTL_HOURS * 3600.0
+
+
+def _stale_days_threshold() -> int:
+    try:
+        return int(os.environ.get("PLACEROOT_STALE_RELEASE_DAYS", DEFAULT_STALE_DAYS))
+    except ValueError:
+        return DEFAULT_STALE_DAYS
+
+
+def age_days(release_name: str) -> int | None:
+    """Whole days since the date carried in the release name, or None if the
+    name doesn't parse (an env override is validated, but stay defensive)."""
+    try:
+        released = datetime.date.fromisoformat(release_name.rsplit(".", 1)[0])
+    except ValueError:
+        return None
+    return max(0, (datetime.date.today() - released).days)
+
+
+def is_stale(release_name: str) -> bool:
+    """Older than the staleness threshold (default 60 days — Overture ships
+    ~monthly, so two missed releases)."""
+    days = age_days(release_name)
+    return days is not None and days > _stale_days_threshold()
+
+
+def _warn_if_stale(info: dict) -> None:
+    """One log line per (re-)resolution when the vintage is suspect. Piggybacks
+    on the TTL cadence, so a long-running stale server re-warns every TTL
+    window rather than only once at startup (#219)."""
+    days = age_days(info["release"])
+    if days is None:
+        return
+    if is_stale(info["release"]):
+        logger.warning(
+            "active Overture release %s is %d days old (threshold %d) — "
+            "%s; data served from an old vintage",
+            info["release"], days, _stale_days_threshold(),
+            "discovery keeps failing and the pinned fallback has gone stale"
+            if info["source"] == "pinned-fallback"
+            else "check upstream discovery and the deployment's egress",
+        )
+
+
 def resolve_release_info() -> dict:
     """Active release + how it was resolved: {"release": str, "source": ...}.
 
     source is one of: "env-override", "discovered", "pinned-fallback".
-    Cached for the process lifetime (discovery is a network call we don't
-    want repeated on every query) — call reset_cache() to force a re-check.
+    Cached with a TTL (default 6h, PLACEROOT_RELEASE_TTL_HOURS) so a
+    long-running server rolls over to a new Overture release without a
+    restart. A failed re-check keeps the previously-resolved release —
+    only a process that has never resolved anything falls to the pin.
+    Call reset_cache() to force a re-check.
     """
+    global _cached, _cached_at, _refreshing
     env_release = os.environ.get("PLACEROOT_OVERTURE_RELEASE")
     if env_release:
         # The release becomes a path/glob segment (…/release/<release>/…), so
@@ -88,23 +178,66 @@ def resolve_release_info() -> dict:
             "(YYYY-MM-DD.N); ignoring it and falling back to discovery/pin.",
             env_release,
         )
+    with _lock:
+        now = time.monotonic()
+        if _cached is not None and (now - _cached_at < _ttl_s() or _refreshing):
+            return _cached
+        if _cached is not None:
+            # Expired and nobody else is refreshing: this thread refreshes
+            # outside the lock; everyone else keeps the previous answer.
+            _refreshing = True
+        else:
+            # First resolution of the process: there is no previous answer to
+            # serve, so block (concurrent first calls wait ≤ the 5s discovery
+            # timeout, once).
+            discovered = _discover()
+            _cached = (
+                {"release": discovered, "source": "discovered"}
+                if discovered
+                else {"release": PINNED_RELEASE, "source": "pinned-fallback"}
+            )
+            _cached_at = time.monotonic()
+            _warn_if_stale(_cached)
+            return _cached
     discovered = _discover()
-    if discovered:
-        return {"release": discovered, "source": "discovered"}
-    return {"release": PINNED_RELEASE, "source": "pinned-fallback"}
+    with _lock:
+        _refreshing = False
+        if discovered:
+            if _cached is not None and discovered != _cached["release"]:
+                logger.info(
+                    "Overture release rollover: %s -> %s (tile/table caches are "
+                    "release-keyed; old-release files age out under the size cap)",
+                    _cached["release"], discovered,
+                )
+            _cached = {"release": discovered, "source": "discovered"}
+        else:
+            logger.warning(
+                "Overture release re-check failed; keeping previously resolved "
+                "release %s until the next check",
+                _cached["release"] if _cached else PINNED_RELEASE,
+            )
+            if _cached is None:
+                # reset_cache() raced the refresh: nothing to keep, use the pin.
+                _cached = {"release": PINNED_RELEASE, "source": "pinned-fallback"}
+        # Stamp even on failure: retry next TTL window, not on every query.
+        _cached_at = time.monotonic()
+        _warn_if_stale(_cached)
+        return _cached
 
 
-@lru_cache(maxsize=1)
 def resolve_release() -> str:
     """Active Overture release: env override, then discovery, then the pin.
 
-    Cached for the process lifetime (discovery is a network call we don't
-    want repeated on every query) — call reset_cache() to force a re-check.
+    TTL-cached (see resolve_release_info) — call reset_cache() to force a
+    re-check.
     """
     return resolve_release_info()["release"]
 
 
 def reset_cache() -> None:
-    """Clear the process-lifetime cache. Used by tests and rare hot-reload."""
-    resolve_release.cache_clear()
-    resolve_release_info.cache_clear()
+    """Clear the TTL cache. Used by tests and rare hot-reload."""
+    global _cached, _cached_at, _refreshing
+    with _lock:
+        _cached = None
+        _cached_at = 0.0
+        _refreshing = False
