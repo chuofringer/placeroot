@@ -24,7 +24,7 @@ import json
 
 import pytest
 from mcp.server.caching import apply_cache_hint
-from mcp.types import LATEST_PROTOCOL_VERSION, ListToolsResult
+from mcp.types import LATEST_PROTOCOL_VERSION, DiscoverResult, ListToolsResult
 from mcp_types.methods import serialize_server_result
 
 from placeroot import server
@@ -52,16 +52,39 @@ def test_tools_list_declares_a_one_day_public_ttl():
     assert hint.scope == "public"
 
 
-def test_every_listing_method_is_hinted():
-    """The spec requires hints on all cacheable listing methods, not just
-    tools/list — a partially hinted server is a spec-incomplete server."""
+def test_every_build_time_frozen_listing_is_hinted():
+    """Every listing that is frozen at build time is hinted, and only those.
+
+    A listing whose content cannot move at runtime is one a client may safely
+    reuse; hinting a subset of them would leave free cache hits on the table,
+    and hinting one that *can* move (see below) would serve stale data.
+    """
     assert set(server.CACHE_HINTS) == {
-        "server/discover",
         "tools/list",
         "prompts/list",
         "resources/list",
         "resources/templates/list",
     }
+
+
+def test_runtime_resolved_results_are_not_hinted():
+    """`server/discover` and `resources/read` stay at the SDK default.
+
+    Both carry the Overture release resolved from S3 at process start, not a
+    build-time constant: `resources/read` reports it in the
+    placeroot://data-version body, and `DiscoverResult` carries `instructions`
+    — which main() appends "Backed by Overture Maps release {release}." to at
+    startup, read live by the SDK's default discover handler. A 24h `public`
+    entry would keep serving the pre-restart release string, to other callers
+    too, after an operator restarts onto a new release, and that string is
+    model-visible grounding.
+    """
+    assert "server/discover" not in server.CACHE_HINTS
+    assert "resources/read" not in server.CACHE_HINTS
+    # Pins the premise: if a future revision dropped `instructions` from the
+    # discover result, discover would become build-time frozen and the
+    # exclusion above would be worth revisiting.
+    assert "instructions" in DiscoverResult.model_fields
 
 
 def _tools_list_result(mcp, *, hinted: bool) -> ListToolsResult:

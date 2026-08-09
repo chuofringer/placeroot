@@ -1659,13 +1659,22 @@ _UNSET = object()
 # Why "public": these listings carry no caller-specific data. PlaceRoot is
 # keyless, does no per-caller filtering, and returns the same bytes to every
 # request on a given process, so a shared gateway may serve one caller's copy
-# to another. `resources/read` is deliberately left at the SDK default
-# (ttlMs=0/private) — its body reports the resolved Overture release, which is
-# discovered at process start rather than baked into the build.
+# to another.
+#
+# Two of the six cacheable methods are deliberately left at the SDK default
+# (ttlMs=0/private), for the same reason: their bodies carry the resolved
+# Overture release, which is discovered from S3 at process start rather than
+# baked into the build, so a day-long shared cache could outlive the value.
+#   `resources/read` — placeroot://data-version reports the release directly.
+#   `server/discover` — its DiscoverResult carries `instructions`, and main()
+#       appends "Backed by Overture Maps release {release}." to those at
+#       startup (the SDK's default handler reads them at call time). A 24h
+#       public entry would keep serving the pre-restart release string — to
+#       other callers too, under "public" — after an operator restarts onto a
+#       new Overture release, and that string is model-visible grounding.
 _LISTING_TTL_MS = 24 * 60 * 60 * 1000
 _LISTING_CACHE_HINT = CacheHint(ttl_ms=_LISTING_TTL_MS, scope="public")
 CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
-    "server/discover": _LISTING_CACHE_HINT,
     "tools/list": _LISTING_CACHE_HINT,
     "prompts/list": _LISTING_CACHE_HINT,
     "resources/list": _LISTING_CACHE_HINT,
