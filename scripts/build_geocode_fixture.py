@@ -211,6 +211,26 @@ def build_divisions() -> list[tuple]:
         -23.55, -46.63, _chain("Brazil", "São Paulo"),
         population=12_300_000,
     )
+    # #215: the three live-verified typo probes ("Berekley", "Cinncinati",
+    # "Sna Francisco") need their correctly-spelled targets in the fixture
+    # for the fuzzy fallback tier to have anything to correct *to*. All
+    # three carry a population, like the well-known places they are, so the
+    # fuzzy pass's population ordering is exercised on real-shaped rows.
+    add(
+        "gers-div-berkeley", "Berkeley", "locality", "US", "US-CA",
+        37.87, -122.27, _chain("United States", "California", "Berkeley"),
+        population=124_321,
+    )
+    add(
+        "gers-div-cincinnati", "Cincinnati", "locality", "US", "US-OH",
+        39.10, -84.51, _chain("United States", "Ohio", "Cincinnati"),
+        population=309_317,
+    )
+    add(
+        "gers-div-san-francisco", "San Francisco", "locality", "US", "US-CA",
+        37.77, -122.42, _chain("United States", "California", "San Francisco"),
+        population=808_437,
+    )
     # #188: a division in a country the addresses theme does NOT cover (GB is
     # not one of addresses.COVERED_COUNTRIES), so address_at has somewhere to
     # resolve "this coordinate is in an uncovered country" from. Deliberately
