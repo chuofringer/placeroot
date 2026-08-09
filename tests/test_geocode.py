@@ -724,6 +724,162 @@ def test_resolve_area_accepts_a_corrected_spelling(geocode_cache):
     # An area that isn't a typo of anything still resolves to nothing.
     assert geocode.resolve_area("Nonexistentplacexyz123") is None
 
+# --- #224: internal bbox columns on the divisions table -------------------
+
+
+def _divisions_table_path(cache_dir):
+    (table,) = cache_dir.rglob(geocode._DIVISIONS_TABLE_FILENAME)
+    return table
+
+
+def _strip_bbox_columns(table):
+    """Rewrite the materialized table as a pre-#224 one: same rows, no bbox
+    columns. The realistic shape of a cache directory written before #224."""
+    kept = ", ".join(
+        c for c in _column_names(table) if c not in geocode._DIVISIONS_BBOX_COLUMNS
+    )
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE t AS SELECT {kept} FROM read_parquet('{table}')")
+    con.execute(f"COPY t TO '{table}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+
+
+def _column_names(table):
+    return [
+        c[0]
+        for c in duckdb.connect()
+        .execute(f"SELECT * FROM read_parquet('{table}') LIMIT 0")
+        .description
+    ]
+
+
+def test_divisions_table_carries_bbox_columns(geocode_cache):
+    geocode.geocode("Brooklyn", limit=1)
+    table = _divisions_table_path(geocode_cache)
+    assert all(c in _column_names(table) for c in geocode._DIVISIONS_BBOX_COLUMNS)
+    row = duckdb.connect().execute(
+        f"""SELECT bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, lon, lat
+            FROM read_parquet('{table}') WHERE id = 'gers-div-brooklyn'"""
+    ).fetchone()
+    # lat/lon are still bbox.ymin/bbox.xmin, unchanged since #43 — the new
+    # columns sit beside them rather than redefining them.
+    assert row[0] == row[4]
+    assert row[1] == row[5]
+
+
+def test_division_bbox_is_none_for_the_point_bboxes_real_divisions_carry(geocode_cache):
+    # The honest finding behind #224 (see geocode.py's #224 docstring section):
+    # type=division rows are points, and their bbox is that point's rounding
+    # envelope, not a city extent. The helper reports that as "no extent"
+    # rather than handing #225 a metre-wide "city".
+    geocode.geocode("Brooklyn", limit=1)
+    table = str(_divisions_table_path(geocode_cache))
+    assert geocode._division_bbox(table, "gers-div-brooklyn") is None
+
+
+def test_division_bbox_returns_a_real_extent_when_the_row_has_one(tmp_path):
+    # Nothing in Overture populates this today, so the non-degenerate branch is
+    # pinned against a synthetic table: if a future release starts carrying
+    # real extents on division rows, the helper already passes them through.
+    table = tmp_path / "divisions.parquet"
+    duckdb.connect().execute(f"""
+        COPY (SELECT 'gers-div-mv' AS id,
+                     -122.1176 AS bbox_xmin, 37.3542 AS bbox_ymin,
+                     -122.0449 AS bbox_xmax, 37.4711 AS bbox_ymax)
+        TO '{table}' (FORMAT PARQUET)
+    """)
+    assert geocode._division_bbox(str(table), "gers-div-mv") == (
+        -122.1176, 37.3542, -122.0449, 37.4711,
+    )
+    assert geocode._division_bbox(str(table), "gers-div-nope") is None
+
+
+def test_division_bbox_is_none_when_only_one_axis_is_degenerate(tmp_path):
+    # A box can be half a degree wide and still bound nothing: the degeneracy
+    # floor is per-axis, so a flat box is rejected exactly like a point. Passing
+    # this one through would hand #225 a centimetre-tall scan window, which
+    # matches no addresses and reads as "no such address" rather than "fall
+    # back" — the failure the floor exists to prevent.
+    table = tmp_path / "divisions.parquet"
+    duckdb.connect().execute(f"""
+        COPY (SELECT 'gers-div-flat' AS id,
+                     -122.5 AS bbox_xmin, 37.4 AS bbox_ymin,
+                     -122.0 AS bbox_xmax, 37.4000001 AS bbox_ymax
+              UNION ALL
+              SELECT 'gers-div-thin', -122.5000001, 37.0, -122.5, 37.5)
+        TO '{table}' (FORMAT PARQUET)
+    """)
+    assert geocode._division_bbox(str(table), "gers-div-flat") is None
+    assert geocode._division_bbox(str(table), "gers-div-thin") is None
+
+
+def test_division_bbox_is_none_for_an_inverted_antimeridian_bbox(tmp_path):
+    # xmin > xmax: a row crossing the antimeridian stored unwrapped. Its x span
+    # is negative, which is below the floor, so it lands in the None branch on
+    # purpose — a caller's `lon BETWEEN xmin AND xmax` would otherwise be a
+    # silently empty range rather than the whole Pacific-spanning division.
+    table = tmp_path / "divisions.parquet"
+    duckdb.connect().execute(f"""
+        COPY (SELECT 'gers-div-fiji' AS id,
+                     179.9 AS bbox_xmin, -18.5 AS bbox_ymin,
+                     -179.9 AS bbox_xmax, -16.0 AS bbox_ymax)
+        TO '{table}' (FORMAT PARQUET)
+    """)
+    assert geocode._division_bbox(str(table), "gers-div-fiji") is None
+
+
+def test_division_bbox_without_a_local_table_is_none():
+    # PLACEROOT_CACHE=off: no table to read, and no upstream query to fall
+    # back to — the caller's job is to cope with None.
+    assert geocode._division_bbox(None, "gers-div-brooklyn") is None
+
+
+def test_division_bbox_on_a_pre_224_table_is_none(geocode_cache):
+    # The columns simply aren't there; the binder error must not escape.
+    geocode.geocode("Brooklyn", limit=1)
+    table = _divisions_table_path(geocode_cache)
+    _strip_bbox_columns(table)
+    assert geocode._division_bbox(str(table), "gers-div-brooklyn") is None
+
+
+def test_pre_224_divisions_table_degrades_and_rebuilds_once_per_process(
+    geocode_cache, monkeypatch
+):
+    # Mirrors the #214 alt-table story: a cache directory written before this
+    # feature keeps answering from its existing name table, gets exactly one
+    # rebuild attempt per process even when that attempt fails, and picks the
+    # columns up once it can succeed.
+    geocode.geocode("Brooklyn", limit=1)
+    table = _divisions_table_path(geocode_cache)
+    _strip_bbox_columns(table)
+    monkeypatch.setattr(geocode, "_DIVISIONS_BBOX_CHECKED", set())
+    real = geocode._materialize_divisions_table
+    attempts = []
+
+    def counted(path, glob):
+        attempts.append(glob)
+        raise duckdb.Error("no upstream here")
+
+    monkeypatch.setattr(geocode, "_materialize_divisions_table", counted)
+    # Answers are unchanged by the missing columns and by the failed rebuild.
+    assert geocode.geocode("Brooklyn", limit=1)[0]["id"] == "gers-div-brooklyn"
+    assert geocode.geocode("Munich", limit=1)[0]["name"] == "München"
+    assert len(attempts) == 1
+    assert geocode._DIVISIONS_BBOX_COLUMNS[0] not in _column_names(table)
+
+    monkeypatch.setattr(geocode, "_DIVISIONS_BBOX_CHECKED", set())
+    monkeypatch.setattr(geocode, "_materialize_divisions_table", real)
+    geocode.geocode("Brooklyn", limit=1)
+    assert all(c in _column_names(table) for c in geocode._DIVISIONS_BBOX_COLUMNS)
+
+
+def test_bbox_columns_are_never_exposed_in_a_tool_response(geocode_cache):
+    # #224's whole point is that these are internal: the answer shape is
+    # byte-identical to what it was before the columns existed.
+    for result in geocode.geocode("Brooklyn", limit=5):
+        assert not any(k.startswith("bbox") for k in result)
+    assert "bbox" not in str(geocode.resolve_place("Brooklyn"))
+
+
 # --- #221: prominence can rescue a prefix match; the fold stops being gated
 # The broad "did any of this move an answer that was already right" question
 # is tests/test_geocode_ranking.py's; these pin the rule itself.
