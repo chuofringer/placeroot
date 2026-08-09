@@ -707,9 +707,12 @@ def _fallback_anchor(
     ILIKE '%the%' matches a large fraction of every place on Earth: 50.2s
     measured live, answering "the Met" with "The Core IAS". The caller
     treats a None name_query as "skip the places half entirely and say so",
-    which is strictly better than that. The significance rule is
-    _significant_words' — >=3 chars and not a _STOPWORD — so this stays in
-    step with how resolve_place decides which words are worth searching on.
+    which is strictly better than that. The rule is _nothing_but_stopwords':
+    reject only when *every* word left is a _STOPWORD. That is deliberately
+    looser than _significant_tokens' >=3-chars-and-not-a-stopword rule --
+    rejecting here means returning nothing at all, and short is not the same
+    as empty ("H&M Brooklyn", or a two-character Chinese name, has to reach
+    the anchored scan). See _nothing_but_stopwords.
 
     Note this gate is about *emptiness*, not correctness: a misspelling
     like "Sna Francisco" (anchor "Francisco", residual "Sna") still clears
@@ -731,7 +734,7 @@ def _fallback_anchor(
             continue
         best = min(rows, key=lambda r: _rank_key(r, candidate, {}))
         base = " ".join(tokens[:-n]).strip()
-        name_query = base if _significant_words(base) else None
+        name_query = None if _nothing_but_stopwords(base) else base
         return best["lat"], best["lon"], name_query
     return None
 
@@ -1036,16 +1039,19 @@ def _match_label(name: str, query: str) -> str:
 _MAX_RESOLVE_TOKENS = 12
 
 
-def _significant_words(text: str) -> list[str]:
-    """text -> the words in it worth searching a name index on: >=3 chars and
-    not a _STOPWORD, in order of appearance.
+def _nothing_but_stopwords(text: str) -> bool:
+    """Whether `text` holds no word a place could be named after — every word
+    in it is a _STOPWORD, or there are no words at all.
 
-    The shared rule behind _significant_tokens (which layers resolve_place's
-    fan-out cap and its own never-search-nothing fallback on top) and
-    _fallback_anchor's residual gate (#216, which needs the raw answer —
-    "nothing here is worth searching for" is exactly the case it acts on).
+    _fallback_anchor's residual gate (#216). Deliberately *not*
+    _significant_tokens' rule: that one also drops words under 3 characters,
+    which is safe there only because it layers a never-search-nothing
+    fallback on top. Here the answer is load-bearing — "reject" means
+    returning no results at all — and plenty of real names are nothing but
+    short words ("H&M", and most two-character Chinese/Japanese/Korean place
+    names). Those are distinctive enough to search on; "the" is not.
     """
-    return [t for t in re.findall(r"[\w'-]+", text) if len(t) >= 3 and t.lower() not in _STOPWORDS]
+    return not any(w.lower() not in _STOPWORDS for w in re.findall(r"[\w'-]+", text))
 
 
 def _significant_tokens(query: str) -> list[str]:
@@ -1055,7 +1061,8 @@ def _significant_tokens(query: str) -> list[str]:
     rather than searching nothing.
     """
     tokens = [t for t in re.findall(r"[\w'-]+", query) if len(t) >= 3]
-    return (_significant_words(query) or tokens or [query])[:_MAX_RESOLVE_TOKENS]
+    significant = [t for t in tokens if t.lower() not in _STOPWORDS]
+    return (significant or tokens or [query])[:_MAX_RESOLVE_TOKENS]
 
 
 def _place_match_label(name: str, query: str) -> str | None:

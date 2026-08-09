@@ -171,6 +171,11 @@ def test_stopword_residual_note_reaches_the_geocode_tool(monkeypatch):
     _count_places_fallback(monkeypatch)
     result = server.geocode("the Met", limit=5)
     assert result["results"] == []
+    # Text unique to this note, not the #105 one -- both mention find_places
+    # and both say "skipped", so only the distinctive half proves which of
+    # the two skip paths the caller was actually told about.
+    assert "nothing distinctive is left" in result["note"]
+    assert "the Metropolitan Museum of Art" in result["note"]
     assert "find_places" in result["note"]
 
 
@@ -187,31 +192,56 @@ def test_anchored_query_with_a_real_residual_still_scans_places(monkeypatch):
     assert "Blue Bottle Roastery" in [r["name"] for r in results]
 
 
-def test_short_residual_tokens_are_as_insignificant_as_stopwords(monkeypatch):
-    # Two-char residuals carry no more signal than "the" does and cost the
-    # same full-theme scan.
+def test_multi_word_stopword_residual_is_rejected_too(monkeypatch):
+    # Every word being a stopword is the rejection condition, not just the
+    # single-word case.
     calls = _count_places_fallback(monkeypatch)
     result = geocode.geocode_detailed("of a Met", limit=5)
     assert calls == []
     assert result["results"] == []
 
 
-def test_significant_words_shares_the_resolve_place_rule():
-    # The residuals #216 has to reject: stopwords and sub-3-char words only.
-    assert geocode._significant_words("the") == []
-    assert geocode._significant_words("of a") == []
-    assert geocode._significant_words("Blue Bottle in Brooklyn") == ["Blue", "Bottle", "Brooklyn"]
-    # _significant_tokens keeps its never-search-nothing fallback on top of
-    # the same rule.
+@pytest.mark.parametrize("query, residual", [
+    # Names made entirely of words too short for _significant_tokens' >=3
+    # rule, which the gate must NOT borrow: rejecting here returns nothing
+    # at all, and these are real, distinctive things to search names for.
+    ("H&M Brooklyn", "H&M"),
+    ("Q&A Brooklyn", "Q&A"),
+    # Two characters is a whole word in Chinese/Japanese/Korean -- the
+    # common case for those names, not an edge case. ("Forbidden City")
+    ("故宫 Brooklyn", "故宫"),
+])
+def test_short_but_meaningful_residual_still_scans_places(monkeypatch, query, residual):
+    calls = _count_places_fallback(monkeypatch)
+
+    result = geocode.geocode_detailed(query, limit=5)
+
+    assert [q for q, _ in calls] == [residual], "a short name is not an empty one"
+    assert calls[0][1] is not None, "and is still bounded by the Brooklyn anchor"
+    assert "note" not in result, "nothing was skipped, so there is nothing to explain"
+
+
+def test_short_residual_gate_matches_the_note_it_would_have_shown():
+    # The unit-level rule behind the two tests above: stopwords only, never
+    # length. Keeps _nothing_but_stopwords honest about what the note claims
+    # ("only common words like the or of").
+    assert geocode._nothing_but_stopwords("the")
+    assert geocode._nothing_but_stopwords("of a")
+    assert geocode._nothing_but_stopwords("   ")
+    assert not geocode._nothing_but_stopwords("H&M")
+    assert not geocode._nothing_but_stopwords("故宫")
+    assert not geocode._nothing_but_stopwords("the Blue Bottle")
+    # _significant_tokens keeps resolve_place's own (stricter) rule, plus its
+    # never-search-nothing fallback -- unchanged by #216.
     assert geocode._significant_tokens("the") == ["the"]
     assert geocode._significant_tokens("the Blue Bottle") == ["Blue", "Bottle"]
 
 
 def test_misspelled_prefix_still_reaches_the_fallback_pending_215(monkeypatch):
     # Documents the deliberate limit of this gate (#216 acceptance): a typo
-    # residual is "significant" by the >=3-chars/not-a-stopword rule and so
-    # still reaches the places scan. Fixing that needs the fuzzy tier of
-    # #215; when it lands, this expectation should change with it.
+    # residual isn't a stopword and so still reaches the places scan. Fixing
+    # that needs the fuzzy tier of #215; when it lands, this expectation
+    # should change with it.
     calls = _count_places_fallback(monkeypatch)
     geocode.geocode_detailed("Sna Brooklyn", limit=5)
     assert [q for q, _ in calls] == ["Sna"]
