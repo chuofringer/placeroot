@@ -15,6 +15,8 @@ It is the only keyless MCP server that does real graph routing over global open 
 
 Every one of those 28 tools declares MCP annotations — closed-world, plus a human-readable title, and `readOnlyHint: true` on the 27 that are pure lookups — so a client can tell before it prompts you which calls touch nothing. The one exception is honest about itself: `render_map` writes an HTML file, so it declares `readOnlyHint: false`. Keyless *and* annotated is a combination the field mostly hasn't shipped. Honest caveat: Claude Code does not gate its permission prompts on `readOnlyHint` (it uses its own classifier), so the practical win is with clients that do, such as Codex CLI and Copilot-class agents — plus spec hygiene everywhere else.
 
+PlaceRoot also speaks the MCP 2026-07-28 revision's listing cache hints: `tools/list` (and the prompt and resource listings) come back with `ttlMs: 86400000` and `cacheScope: "public"`. Our listings are frozen at build time — nothing at runtime can change them — so a client is free to reuse them for a day instead of re-reading a ~12k-token schema surface every session. Clients that speak an older revision are unaffected: those fields did not exist before 2026-07-28, and the response they get is byte-identical to what it was.
+
 What it deliberately does not do, because Overture's open data does not carry it:
 
 - **No live traffic.** Routing is free-flow; durations do not reflect current conditions.
@@ -143,12 +145,14 @@ The value is a comma-separated list of profile names, tool names, or both — th
 | `routing` | 6 | ~2,890 | 76% |
 | `analysis` | 9 | ~3,240 | 73% |
 | `geometry` | 3 | ~850 | 93% |
+| `progressive` | 3 (all 28 reachable) | ~550 | 95% |
 
 - **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `places_along_route`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
 - **`search`** — the find/name/identify family: `find_places`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, `address_at`, `search_categories`, and `gers_lookup`.
 - **`routing`** — `route`, `isochrone`, `distance_matrix`, `within_distance`, `optimize_route`.
 - **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`.
 - **`geometry`** — `simplify_geometry`, `render_map`.
+- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~950-token catalog of all 28 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 12.2k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 
 `data_version` is registered under every profile: it is ~230 tokens and the only way an agent can tell which Overture release backs its answers.
 
@@ -177,6 +181,7 @@ uv run ruff check .
 
 - [ROADMAP.md](ROADMAP.md) — where this is going · [PLAN.md](PLAN.md) — product plan and positioning
 - [docs/benchmarks.md](docs/benchmarks.md) — token efficiency: per-answer cost, and the schema surface it's paid against
+- [docs/benchmarks-vs.md](docs/benchmarks-vs.md) — head-to-head against Mapbox MCP and the Google Maps MCP reference server
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) — how releases reach PyPI + npm
 - [docs/WEBSITE.md](docs/WEBSITE.md) — the marketing site: serve locally and deploy
 - [docs/MIRROR.md](docs/MIRROR.md) · [docs/METRICS.md](docs/METRICS.md) · [docs/launch/](docs/launch/)

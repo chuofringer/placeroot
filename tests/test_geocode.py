@@ -171,6 +171,11 @@ def test_stopword_residual_note_reaches_the_geocode_tool(monkeypatch):
     _count_places_fallback(monkeypatch)
     result = server.geocode("the Met", limit=5)
     assert result["results"] == []
+    # Text unique to this note, not the #105 one -- both mention find_places
+    # and both say "skipped", so only the distinctive half proves which of
+    # the two skip paths the caller was actually told about.
+    assert "nothing distinctive is left" in result["note"]
+    assert "the Metropolitan Museum of Art" in result["note"]
     assert "find_places" in result["note"]
 
 
@@ -187,30 +192,56 @@ def test_anchored_query_with_a_real_residual_still_scans_places(monkeypatch):
     assert "Blue Bottle Roastery" in [r["name"] for r in results]
 
 
-def test_short_residual_tokens_are_as_insignificant_as_stopwords(monkeypatch):
-    # Two-char residuals carry no more signal than "the" does and cost the
-    # same full-theme scan.
+def test_multi_word_stopword_residual_is_rejected_too(monkeypatch):
+    # Every word being a stopword is the rejection condition, not just the
+    # single-word case.
     calls = _count_places_fallback(monkeypatch)
     result = geocode.geocode_detailed("of a Met", limit=5)
     assert calls == []
     assert result["results"] == []
 
 
-def test_significant_words_shares_the_resolve_place_rule():
-    # The residuals #216 has to reject: stopwords and sub-3-char words only.
-    assert geocode._significant_words("the") == []
-    assert geocode._significant_words("of a") == []
-    assert geocode._significant_words("Blue Bottle in Brooklyn") == ["Blue", "Bottle", "Brooklyn"]
-    # _significant_tokens keeps its never-search-nothing fallback on top of
-    # the same rule.
+@pytest.mark.parametrize("query, residual", [
+    # Names made entirely of words too short for _significant_tokens' >=3
+    # rule, which the gate must NOT borrow: rejecting here returns nothing
+    # at all, and these are real, distinctive things to search names for.
+    ("H&M Brooklyn", "H&M"),
+    ("Q&A Brooklyn", "Q&A"),
+    # Two characters is a whole word in Chinese/Japanese/Korean -- the
+    # common case for those names, not an edge case. ("Forbidden City")
+    ("故宫 Brooklyn", "故宫"),
+])
+def test_short_but_meaningful_residual_still_scans_places(monkeypatch, query, residual):
+    calls = _count_places_fallback(monkeypatch)
+
+    result = geocode.geocode_detailed(query, limit=5)
+
+    assert [q for q, _ in calls] == [residual], "a short name is not an empty one"
+    assert calls[0][1] is not None, "and is still bounded by the Brooklyn anchor"
+    assert "note" not in result, "nothing was skipped, so there is nothing to explain"
+
+
+def test_short_residual_gate_matches_the_note_it_would_have_shown():
+    # The unit-level rule behind the two tests above: stopwords only, never
+    # length. Keeps _nothing_but_stopwords honest about what the note claims
+    # ("only common words like the or of").
+    assert geocode._nothing_but_stopwords("the")
+    assert geocode._nothing_but_stopwords("of a")
+    assert geocode._nothing_but_stopwords("   ")
+    assert not geocode._nothing_but_stopwords("H&M")
+    assert not geocode._nothing_but_stopwords("故宫")
+    assert not geocode._nothing_but_stopwords("the Blue Bottle")
+    # _significant_tokens keeps resolve_place's own (stricter) rule, plus its
+    # never-search-nothing fallback -- unchanged by #216.
     assert geocode._significant_tokens("the") == ["the"]
     assert geocode._significant_tokens("the Blue Bottle") == ["Blue", "Bottle"]
 
 
 def test_misspelled_prefix_reaches_the_fallback_without_the_fuzzy_tier(monkeypatch):
     # This was #216's test_misspelled_prefix_still_reaches_the_fallback_pending_215.
-    # #215 landed, so the expectation moves: the typo residual only reaches
-    # the places scan where the fuzzy tier can't run at all — no local
+    # A typo residual isn't a stopword, so this gate never rejects it -- and
+    # #215 has landed, so the expectation moves: the typo reaches the places
+    # scan only where the fuzzy tier can't run at all, i.e. no local
     # divisions table (cache off, as the default fixtures run), which is
     # what this test still pins. With the table available it doesn't; see
     # test_typo_query_runs_no_places_scan_at_all below.
@@ -271,11 +302,20 @@ def test_fuzzy_pass_never_scans_upstream(geocode_cache, monkeypatch):
     # The tier is local-table-only by construction; assert it, since a
     # similarity predicate against S3 has nothing to prune by and would
     # read the whole divisions theme over the network.
+    #
+    # Build the local table first, then cut upstream off entirely for the
+    # query itself: patching the two upstream entry points alone wouldn't
+    # prove much, since with a local table in hand the literal search
+    # wouldn't call them either. Blocking upstream_glob covers any path
+    # that would reach for the remote dataset at all.
+    geocode._local_divisions_table()
+
     def fail(*args, **kwargs):
         raise AssertionError("the fuzzy tier must never scan upstream")
 
     monkeypatch.setattr(geocode, "_query_divisions_from_upstream", fail)
     monkeypatch.setattr(geocode, "_query_places_fallback", fail)
+    monkeypatch.setattr(overture, "upstream_glob", fail)
 
     assert geocode.geocode("Berekley", limit=5)[0]["name"] == "Berkeley"
 
@@ -618,6 +658,80 @@ def test_alt_names_do_not_feed_the_fuzzy_tier(geocode_cache):
     assert [r["name"] for r in geocode.geocode("Pressbrug", limit=5)] == []
 
 
+def test_typo_with_a_region_suffix_still_reaches_the_fuzzy_tier(geocode_cache, monkeypatch):
+    # "City, ST" is the most common shape a caller writes, and a region
+    # suffix must not cost the correction. The literal search drops the
+    # region on a miss and retries the *whole* original string, so the
+    # fuzzy pass has to match on the name half (base_query) instead --
+    # nothing is within edit distance of "Berekley, CA".
+    calls = _count_places_fallback(monkeypatch)
+
+    result = geocode.geocode_detailed("Berekley, CA", limit=5)
+
+    assert [r["name"] for r in result["results"]] == ["Berkeley"]
+    assert calls == [], "a corrected typo must not fall through to the places theme"
+    # The note names the string actually corrected, not the raw query with
+    # its suffix still attached.
+    assert '"Berekley"' in result["note"]
+    assert '"Berkeley"' in result["note"]
+
+
+def test_region_suffixed_typo_is_filtered_by_that_region_first(geocode_cache):
+    # The suffix's region code narrows the pass, like it does for the
+    # literal queries...
+    table = geocode._local_divisions_table()
+    assert [r["name"] for r in geocode._query_divisions_fuzzy(table, "Berekley", "US-CA")] == [
+        "Berkeley",
+    ]
+    assert geocode._query_divisions_fuzzy(table, "Berekley", "US-NY") == []
+    # ...and, like the literal search one step up, a region-constrained
+    # miss degrades to an unconstrained retry rather than answering
+    # nothing: a suffix that parsed as a region may simply have been read
+    # wrong.
+    assert [r["name"] for r in geocode.geocode("Berekley, NY", limit=5)] == ["Berkeley"]
+
+
+def test_fuzzy_rows_are_labeled_fuzzy_not_substring(geocode_cache):
+    # A corrected row does not contain the query at all, so resolve_place
+    # must not report it as a "substring" match -- that field is exactly
+    # what a caller reads to decide whether the answer is the string it
+    # asked for. _match_tier grades any name it is handed as at least
+    # "substring", so the label has to come from the row's provenance.
+    assert geocode.geocode("Berekley", limit=5)[0]["matched_by"] == "fuzzy"
+    assert "matched_by" not in geocode.geocode("Brooklyn", limit=5)[0]
+
+    top = geocode.resolve_place("Berekley")[0]
+    assert top["name"] == "Berkeley"
+    assert top["match"] == "fuzzy"
+
+    assert geocode.resolve_place("Sna Francisco")[0]["match"] == "fuzzy"
+    assert server.resolve_place("Berekley")["results"][0]["match"] == "fuzzy"
+
+
+def test_fuzzy_label_ranks_below_every_literal_label(geocode_cache):
+    # Same ordering _rank_key enforces on the rows themselves, restated
+    # for resolve_place's label vocabulary.
+    ranks = geocode._MATCH_LABEL_RANK
+    assert ranks["fuzzy"] < min(ranks[label] for label in ("exact", "prefix", "substring"))
+
+
+def test_resolve_area_accepts_a_corrected_spelling(geocode_cache):
+    # Pins the knock-on effect of #215 on the area-constrained tools
+    # (find_places/summarize_area go through here): a typo'd area now
+    # resolves to the corrected division. resolve_area returns no note
+    # channel, so this is deliberately the whole contract -- the
+    # correction is silent by design, and this test is what makes that a
+    # decision rather than an accident.
+    assert geocode.resolve_area("Berekley") == {
+        "division_id": "gers-div-berkeley",
+        "name": "Berkeley",
+        "admin_context": ["United States", "California"],
+    }
+    assert geocode.resolve_area("Sna Francisco")["name"] == "San Francisco"
+    # An area that isn't a typo of anything still resolves to nothing.
+    assert geocode.resolve_area("Nonexistentplacexyz123") is None
+
+
 # --- reverse_geocode ---
 
 
@@ -763,6 +877,18 @@ def test_results_are_correct_via_local_table(geocode_cache):
     results = geocode.geocode("Springfield", limit=10)
     assert len(results) == 2
     assert all(r["name"] == "Springfield" for r in results)
+
+
+def test_vanished_local_table_mid_query_falls_back_to_upstream(geocode_cache):
+    """#230: the local table being deleted between _local_divisions_table()'s
+    exists() check and the read (external cleanup, or a cache sweep) must
+    degrade to a direct upstream scan, not surface a false
+    upstream_unavailable."""
+    geocode.geocode("Brooklyn", limit=5)  # materialize the table
+    path = geocode._local_divisions_table_path(release.PINNED_RELEASE)
+    path.unlink()  # simulate the sweep winning the race
+    results = geocode._query_divisions("Brooklyn", None, str(path))
+    assert any(r["name"] == "Brooklyn" for r in results)
 
 
 def test_cache_off_skips_materialization_and_still_answers(monkeypatch, tmp_path):

@@ -11,14 +11,19 @@ stays safe under that concurrency.
 """
 
 import argparse
+import functools
+import inspect
 import logging
 import math
 import os
 import threading
 from collections.abc import Callable
 
+from mcp.server.caching import CacheableMethod, CacheHint
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.utilities.func_metadata import func_metadata
 from mcp.types import ToolAnnotations
+from pydantic import ValidationError
 
 from placeroot import (
     addresses,
@@ -62,6 +67,15 @@ DEFAULT_HTTP_PORT = 8321
 # registered — a tool outside the selection never reaches the MCP server,
 # and so never reaches tools/list (issue #182).
 _TOOL_FUNCS: dict[str, Callable] = {}
+
+# The PLACEROOT_TOOLS=progressive meta-tools (issue #210), kept out of
+# _TOOL_FUNCS deliberately: they are a way to reach the surface, not part of
+# it. Everything that reasons about "the tools PlaceRoot has" — the profile
+# definitions, the coverage guard, placeroot_capabilities' own catalog, what
+# placeroot_call will dispatch to — reads _TOOL_FUNCS, and none of those
+# should grow an entry because a meta-tool exists. Titles and annotations
+# still live in the shared dicts below, so registration is one code path.
+_META_TOOL_FUNCS: dict[str, Callable] = {}
 
 # Human-readable display title per tool, keyed by function name (issue #193).
 _TOOL_TITLES: dict[str, str] = {}
@@ -113,8 +127,24 @@ _WRITES_A_FILE_ANNOTATIONS = ToolAnnotations(
 # here gets _READ_ONLY_ANNOTATIONS.
 _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {}
 
+# placeroot_call reaches every tool, render_map included, so it inherits the
+# weakest claim any of them makes rather than its own: a dispatcher that
+# advertised readOnlyHint would hand a filesystem write the approval-free
+# path, and the client cannot see which tool a given call will land on.
+# destructive_hint stays False because nothing behind it deletes or
+# overwrites; idempotent_hint False because render_map's timestamped output
+# means a repeat call is not a no-op.
+_DISPATCH_ANNOTATIONS = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
 
-def _tool(title: str, annotations: ToolAnnotations | None = None) -> Callable[[Callable], Callable]:
+
+def _tool(
+    title: str, annotations: ToolAnnotations | None = None, meta: bool = False
+) -> Callable[[Callable], Callable]:
     """Mark a function as an MCP tool with a display title.
 
     Replaces a direct @mcp.tool(). `title` is required rather than
@@ -125,6 +155,10 @@ def _tool(title: str, annotations: ToolAnnotations | None = None) -> Callable[[C
     behavior is not a pure read — pass it at the definition site, next to
     the code that does the writing, so the claim and the behavior are read
     together. Everything else is annotated centrally in build_server().
+
+    `meta` routes the function into _META_TOOL_FUNCS instead: a
+    PLACEROOT_TOOLS=progressive meta-tool is registered exactly like any
+    other tool but is not one of the tools PlaceRoot offers (issue #210).
     """
     if not isinstance(title, str) or not title.strip():
         # Catches the bare `@_tool` (no call) mistake, which would otherwise
@@ -132,7 +166,7 @@ def _tool(title: str, annotations: ToolAnnotations | None = None) -> Callable[[C
         raise TypeError("@_tool requires a non-empty display title, e.g. @_tool(\"Find places\")")
 
     def register(fn: Callable) -> Callable:
-        _TOOL_FUNCS[fn.__name__] = fn
+        (_META_TOOL_FUNCS if meta else _TOOL_FUNCS)[fn.__name__] = fn
         _TOOL_TITLES[fn.__name__] = title
         if annotations is not None:
             _TOOL_ANNOTATIONS[fn.__name__] = annotations
@@ -952,10 +986,11 @@ def geocode(query: str, limit: int = 5) -> dict:
     scanning the global places dataset — minutes, not seconds (#105). That
     case comes back empty with a "note" saying so and what to do instead.
 
-    A misspelled name that matches no division literally ("Berekley") gets
-    one close-spelling retry over the local divisions table (#215); those
-    results rank below any literal match and come with a "note" naming the
-    spelling they were corrected to.
+    A misspelled name that matches no division literally ("Berekley", or
+    "Berekley, CA" — the region suffix is set aside first) gets one
+    close-spelling retry over the local divisions table (#215); those
+    results rank below any literal match, carry "matched_by": "fuzzy", and
+    come with a "note" naming the spelling they were corrected to.
 
     Exonyms work too (#214): names are matched against Overture's ~100
     localized alternates as well as its canonical one, so "Munich" answers
@@ -1056,9 +1091,12 @@ def resolve_place(
     speeds up the places half of the search.
 
     Returns {"results": [{"id" (GERS), "kind": "division" | "place",
-    "name", "lat", "lon", "match": "exact" | "prefix" | "substring", plus
-    "admin_context" for a division or "category" for a place}, ...]},
-    ranked by match tier then prominence, budgeted like every other tool.
+    "name", "lat", "lon", "match": "exact" | "prefix" | "substring" |
+    "fuzzy", plus "admin_context" for a division or "category" for a
+    place}, ...]}, ranked by match tier then prominence ("fuzzy" — a
+    division reached by close spelling rather than by containing the query
+    at all, #215 — ranking below every literal match), budgeted like every
+    other tool.
     An unresolvable query returns {"results": []} — not an error. Returns a
     structured {"error": ...} instead of raising if the remote scan fails
     or the places dataset is missing columns this tool depends on.
@@ -1647,7 +1685,178 @@ def data_version() -> dict:
     return resources.data_version_payload()
 
 
+# ---------------------------------------------------------------------------
+# PLACEROOT_TOOLS=progressive: the meta surface (issue #210).
+# ---------------------------------------------------------------------------
+
+
+def _arg_summary(fn: Callable) -> str:
+    """A tool's parameters as `required,optional?` — the catalog's arg column.
+
+    Names only, no types: the catalog's budget is the whole point (28 tools
+    have to fit in well under 1k tokens), and the names here are already
+    self-describing (lat, radius_m, limit, category). A caller that guesses
+    a type wrong gets placeroot_call's bad_request naming what the tool
+    accepts, which is cheaper than paying for the types on every catalog
+    read.
+    """
+    return ",".join(
+        name if param.default is inspect.Parameter.empty else f"{name}?"
+        for name, param in inspect.signature(fn).parameters.items()
+    )
+
+
+@functools.cache
+def _arg_metadata(fn: Callable):
+    """The tool's own argument model — the one the SDK validates calls against.
+
+    `server.tool()(fn)` builds exactly this via func_metadata when the tool is
+    registered, so validating dispatch through it is not a second, parallel
+    notion of what the tool accepts: a value that reaches the function through
+    placeroot_call has been through the same coercions (str "5" -> int 5,
+    a JSON-string list -> list) as one that arrives over tools/call. Built
+    once per function and cached, because the model construction is the
+    expensive part and the tools are a fixed set.
+    """
+    return func_metadata(fn)
+
+
+def _validation_detail(e: ValidationError) -> str:
+    """A pydantic ValidationError as one line of advice per bad argument.
+
+    The raw repr carries a URL, an input echo and a type tag per error —
+    tokens a caller retrying the call cannot use. Field name plus message is
+    what tells it which argument to fix and to what.
+    """
+    return "; ".join(
+        f"{'.'.join(str(p) for p in err['loc']) or 'args'}: {err['msg']}" for err in e.errors()
+    )
+
+
+def _catalog_entry(name: str, fn: Callable) -> str:
+    """`name(args) one-line summary` for one tool.
+
+    The summary is the first paragraph of the tool's own docstring — the
+    same text whose full version is the tool's MCP description on the full
+    surface — so the catalog cannot describe a tool differently from how
+    the tool describes itself, and a reworded tool updates here for free.
+    """
+    doc = inspect.getdoc(fn) or ""
+    summary = " ".join(doc.split("\n\n")[0].split())
+    return f"{name}({_arg_summary(fn)}) {summary}"
+
+
+@_tool("PlaceRoot capabilities", meta=True)
+def placeroot_capabilities() -> dict:
+    """List every PlaceRoot tool: what it answers and what arguments it takes.
+
+    Read this once, then call anything it lists through placeroot_call.
+    The catalog is generated from the tools themselves, so it is always the
+    complete set for this build.
+    """
+    return {
+        "tools": [_catalog_entry(name, fn) for name, fn in _TOOL_FUNCS.items()],
+        "count": len(_TOOL_FUNCS),
+        "usage": (
+            "Call any of these with placeroot_call(tool=<name>, args={...}). "
+            "A trailing ? marks an optional argument; everything else is required. "
+            "Answers come back exactly as the tool would return them directly."
+        ),
+    }
+
+
+@_tool("Call a PlaceRoot tool", annotations=_DISPATCH_ANNOTATIONS, meta=True)
+def placeroot_call(tool: str, args: dict | None = None) -> dict:
+    """Run one PlaceRoot tool by name, with its arguments.
+
+    `tool` is a name from placeroot_capabilities; `args` is an object of that
+    tool's arguments (omit it for the ones that take none). The answer is the
+    tool's own, unchanged. An unknown name comes back as an error listing the
+    valid ones.
+    """
+    fn = _TOOL_FUNCS.get(tool)
+    if fn is None:
+        return {
+            "error": "unknown_tool",
+            "detail": (
+                f"{tool!r} is not a PlaceRoot tool. Call placeroot_capabilities "
+                "for what each one does and what it takes."
+            ),
+            "valid_tools": sorted(_TOOL_FUNCS),
+        }
+    call_args = {} if args is None else args
+    if not isinstance(call_args, dict):
+        return {
+            "error": "bad_request",
+            "detail": (
+                f"args must be an object of {tool}'s arguments, got "
+                f"{type(call_args).__name__}; it accepts: {_arg_summary(fn)}"
+            ),
+        }
+    # Bind before calling so a wrong/missing/misspelled argument is reported
+    # as this dispatcher's bad_request. Calling fn(**args) blind would let
+    # the same TypeError arrive from inside the tool's own body, where it
+    # would surface as a crash rather than as advice about the arguments.
+    # Binding is names-only, so the types go through the tool's own pydantic
+    # model below — the same one the SDK validates a direct call against.
+    try:
+        inspect.signature(fn).bind(**call_args)
+    except TypeError as e:
+        return {"error": "bad_request", "detail": f"{tool}: {e}", "accepts": _arg_summary(fn)}
+    try:
+        validated = _arg_metadata(fn).validate_arguments(call_args)
+    except ValidationError as e:
+        return {
+            "error": "bad_request",
+            "detail": f"{tool}: {_validation_detail(e)}",
+            "accepts": _arg_summary(fn),
+        }
+    return fn(**validated)
+
+
 _UNSET = object()
+
+# MCP 2026-07-28 caching hints (SEP-2549). The spec requires a `ttlMs` and a
+# `cacheScope` on every `resultType: "complete"` listing result; the SDK's
+# default is ttlMs=0 ("immediately stale"), which is valid but throws away the
+# whole point for a server whose listings are frozen at build time.
+#
+# Why 24 hours: our listings are a pure function of the installed placeroot
+# version and PLACEROOT_TOOLS. Nothing at runtime can change them — no tool is
+# registered after startup, and we never send notifications/tools/list_changed
+# — so the only event that invalidates a cached listing is the operator
+# upgrading the package. TTL is therefore a bound on how long a client could
+# keep showing a pre-upgrade tool list, and one day is the honest trade: it
+# spares a re-fetch of a ~12.2k-token schema surface on every session within a
+# day, while an upgrade is visible by the next one. A week would buy almost
+# nothing extra (sessions cluster well inside a day) for seven times the
+# staleness window; 0 is what we'd declare if the surface could move at
+# runtime, and it can't.
+#
+# Why "public": these listings carry no caller-specific data. PlaceRoot is
+# keyless, does no per-caller filtering, and returns the same bytes to every
+# request on a given process, so a shared gateway may serve one caller's copy
+# to another.
+#
+# Two of the six cacheable methods are deliberately left at the SDK default
+# (ttlMs=0/private), for the same reason: their bodies carry the resolved
+# Overture release, which is discovered from S3 at process start rather than
+# baked into the build, so a day-long shared cache could outlive the value.
+#   `resources/read` — placeroot://data-version reports the release directly.
+#   `server/discover` — its DiscoverResult carries `instructions`, and main()
+#       appends "Backed by Overture Maps release {release}." to those at
+#       startup (the SDK's default handler reads them at call time). A 24h
+#       public entry would keep serving the pre-restart release string — to
+#       other callers too, under "public" — after an operator restarts onto a
+#       new Overture release, and that string is model-visible grounding.
+_LISTING_TTL_MS = 24 * 60 * 60 * 1000
+_LISTING_CACHE_HINT = CacheHint(ttl_ms=_LISTING_TTL_MS, scope="public")
+CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
+    "tools/list": _LISTING_CACHE_HINT,
+    "prompts/list": _LISTING_CACHE_HINT,
+    "resources/list": _LISTING_CACHE_HINT,
+    "resources/templates/list": _LISTING_CACHE_HINT,
+}
 
 
 def build_server(spec=_UNSET) -> MCPServer:
@@ -1661,8 +1870,15 @@ def build_server(spec=_UNSET) -> MCPServer:
     if spec is _UNSET:
         spec = os.environ.get("PLACEROOT_TOOLS")
     selected = tool_profiles.resolve(spec, set(_TOOL_FUNCS))
-    server = MCPServer("placeroot", instructions=BASE_INSTRUCTIONS)
-    for name, fn in _TOOL_FUNCS.items():
+    # cache_hints are filled in by the SDK's response serializer and sieved
+    # out again for pre-2026-07-28 clients, so an older client's tools/list is
+    # byte-identical to what it got before this existed (asserted in
+    # tests/test_caching.py).
+    server = MCPServer("placeroot", instructions=BASE_INSTRUCTIONS, cache_hints=CACHE_HINTS)
+    # One registry for the loop: `progressive` selects meta-tool names, every
+    # other selection selects only real ones, so the two never mix in a
+    # single server even though they are registered by the same code.
+    for name, fn in {**_TOOL_FUNCS, **_META_TOOL_FUNCS}.items():
         if name in selected:
             # Title + hints are applied here, once, for every selected tool —
             # so a subset profile (PLACEROOT_TOOLS=core) is annotated exactly
@@ -1684,7 +1900,13 @@ def build_server(spec=_UNSET) -> MCPServer:
     # tools/list, so they cost a subset install nothing, and a workflow is
     # still worth reading when one of its steps is unavailable. Each one
     # renders a note naming the tools this selection left out (#194).
-    prompts.register(server, selected)
+    #
+    # Under `progressive` nothing is left out — every tool is reachable
+    # through placeroot_call — so the prompts are told the full surface is
+    # available. Passing the three meta-tool names instead would put a note
+    # on every prompt disowning the tools its own steps depend on.
+    reachable = set(_TOOL_FUNCS) if selected & tool_profiles.PROGRESSIVE_TOOLS else selected
+    prompts.register(server, reachable)
     requested = (spec or "").strip() or tool_profiles.ALL
     logger.info(
         "registered %d of %d tools (PLACEROOT_TOOLS=%s)",
