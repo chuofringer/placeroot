@@ -122,7 +122,7 @@ Like prompts, resources are registered under **every** `PLACEROOT_TOOLS` selecti
 
 ## Loading fewer tools (`PLACEROOT_TOOLS`)
 
-All 29 tool schemas cost roughly **13.0k tokens** of every conversation's context, paid before the agent asks anything — about the cost of 99 median answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS` selects which tools get registered. Unselected tools are never registered and never appear in `tools/list`.
+All 29 tool schemas cost roughly **13.1k tokens** of every conversation's context, paid before the agent asks anything — about the cost of 100 median answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS` selects which tools get registered. Unselected tools are never registered and never appear in `tools/list`.
 
 ```json
 {
@@ -140,8 +140,8 @@ The value is a comma-separated list of profile names, tool names, or both — th
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 29 | ~13,010 | — |
-| `search` | 13 | ~6,010 | 54% |
+| unset / `all` (default) | 29 | ~13,100 | — |
+| `search` | 13 | ~6,100 | 53% |
 | `core` | 10 | ~5,220 | 60% |
 | `routing` | 6 | ~2,890 | 78% |
 | `analysis` | 9 | ~3,240 | 75% |

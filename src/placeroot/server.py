@@ -1311,12 +1311,13 @@ def geocode_address(
     have the parts. Unit/apartment numbers are not parsed.
 
     The city is resolved first and its boundary bounds the search, so a city
-    that resolves to no boundary returns an empty list plus a note rather
-    than a scan. If a same-named runner-up in the same country supplies the
-    boundary instead, the note names it — the answer is never silently about
-    a different city, and never about one in another country. Check `anchor`
-    (name, country, admin_context) to see which one it was. Street names
-    match in either spelling (Parkway/Pkwy, West/W, NW/Northwest).
+    that resolves to no boundary — or to something far larger than a city,
+    like a state — returns an empty list plus a note rather than a scan. If a
+    same-named runner-up in the same country supplies the boundary instead,
+    the note names it — the answer is never silently about a different city,
+    and never about one in another country. Check `anchor` (name, country,
+    admin_context) to see which one it was. Street names match in either
+    spelling (Parkway/Pkwy, West/W, NW/Northwest).
 
     Returns {"results": [{number, street, unit, postcode, country,
     distance_m, lat, lon}, ...], "anchor": {name, id, country,

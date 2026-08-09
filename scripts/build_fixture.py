@@ -306,6 +306,14 @@ GEOCODE_ANCHOR_AREAS = (
     # for the scan step to be reached at all.
     ("gers-div-washington-dc", "Washington", "US", (-77.12, 38.79, -76.90, 39.00)),
     ("gers-div-miami", "Miami", "US", (-80.32, 25.70, -80.14, 25.86)),
+    # R29: the English numbered-route parse case ("Route 66, Flagstaff").
+    ("gers-div-flagstaff", "Flagstaff", "US", (-111.72, 35.14, -111.56, 35.26)),
+    # R29: the extent that must be refused rather than scanned. Texas's real
+    # bounding box, 13.1 x 10.7 degrees — well past
+    # geocode._MAX_ANCHOR_SPAN_DEG, and the size at which an address scan
+    # stops being an answer. Every other anchor here is a city, so without
+    # this row nothing in the fixture can reach the too-broad branch.
+    ("gers-div-tx", "Texas", "US", (-106.65, 25.84, -93.51, 36.50)),
 )
 
 
