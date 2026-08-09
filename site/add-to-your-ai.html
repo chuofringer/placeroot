@@ -116,7 +116,7 @@
     var PROMPT = 'Install the PlaceRoot MCP server for me. It is a local stdio server run with "uvx placeroot", which requires uv (docs.astral.sh/uv). If uv is not installed, tell me so and ask before installing anything. Add the server to this tool\'s MCP configuration — tell me which config file you are changing before you edit it. Restart whatever needs restarting, then verify the install by listing the MCP tools and confirming that "find_places" from placeroot is available.';
     var apps = [
       { name: "Claude Desktop", surfaces: [
-        { label: "Claude chat", prompt: false, warn: true, note: "Installing in the Code tab does NOT make it appear here — the two read separate configs.", deeplink: "placeroot.mcpb", oneclickLabel: "⬇ one-click extension for Claude chat", oneclickCaption: "Downloads the PlaceRoot Desktop Extension (.mcpb) — open the file and Claude Desktop installs it in one dialog. No config file, no JSON. Requires uv on your machine.", step1: "In the Claude Desktop app, open Settings → Developer → Edit Config. This opens claude_desktop_config.json.", step2: "Add the server config:", file: "claude_desktop_config.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Quit and reopen Claude Desktop, then ask: \"What's around downtown Palo Alto?\"" },
+        { label: "Claude chat", prompt: false, warn: true, note: "Installing in the Code tab does NOT make it appear here — the two read separate configs.", deeplink: "placeroot.mcpb", downloadName: "placeroot.mcpb", oneclickLabel: "⬇ one-click extension for Claude chat", oneclickCaption: "Downloads the PlaceRoot Desktop Extension (.mcpb) — open the file and Claude Desktop installs it in one dialog. No config file, no JSON. Requires uv on your machine.", step1: "In the Claude Desktop app, open Settings → Developer → Edit Config. This opens claude_desktop_config.json.", step2: "Add the server config:", file: "claude_desktop_config.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Quit and reopen Claude Desktop, then ask: \"What's around downtown Palo Alto?\"" },
         { label: "the Code tab", prompt: true, warn: true, note: "This installs for the Code tab (Claude Code) only — Claude chat reads a separate config; pick \"Claude chat\" above for that.", step1: "Open the integrated terminal in the Code tab and run one command:", step2: "Command:", file: "terminal", snippet: "claude mcp add placeroot -- uvx placeroot", copy: "claude mcp add placeroot -- uvx placeroot", step3: "Check with /mcp inside the session, and verify in the SAME tab you installed for — then just ask." }
       ] },
       { name: "Claude Code", prompt: true, step1: "In a terminal, from any project directory:", step2: "Run one command:", file: "terminal", snippet: "claude mcp add placeroot -- uvx placeroot", copy: "claude mcp add placeroot -- uvx placeroot", step3: "Check with /mcp inside a session — then just ask. (Add --scope user to enable it in every project.)" },
@@ -222,6 +222,8 @@
         oneclick.style.display = "block";
         var link = document.getElementById("oneclickLink");
         link.href = a.deeplink;
+        if (a.downloadName) link.setAttribute("download", a.downloadName);
+        else link.removeAttribute("download");
         link.textContent = a.oneclickLabel || ("⚡ one-click install in " + app.name);
         document.getElementById("oneclickCaption").textContent =
           a.oneclickCaption || "Opens the app and pre-fills the config — you just confirm a dialog.";

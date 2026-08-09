@@ -28,6 +28,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Pinned so the release-time artifact is reproducible — an unpinned packer
+# would build each release with whatever CLI shipped that day, and a
+# breaking change would redden the release run after PyPI already
+# published (the mcpb job runs parallel to the publish jobs, not ahead).
+MCPB_CLI = "@anthropic-ai/mcpb@2.1.2"
+
 # Everything `uv run --directory <bundle>` needs to resolve and run the
 # server, and nothing else — no tests, no site, no fixtures.
 STAGED = ["pyproject.toml", "uv.lock", "README.md", "LICENSE"]
@@ -48,8 +54,15 @@ def main() -> int:
                 REPO_ROOT / tree, stage / tree,
                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
             )
+        if shutil.which("npx") is None:
+            print(
+                "npx not found — the packer is a Node CLI. Install Node 18+ "
+                "(or run where node is available) and retry.",
+                file=sys.stderr,
+            )
+            return 1
         result = subprocess.run(
-            ["npx", "--yes", "@anthropic-ai/mcpb", "pack", str(stage), str(out)],
+            ["npx", "--yes", MCPB_CLI, "pack", str(stage), str(out)],
             check=False,
         )
         if result.returncode != 0:
