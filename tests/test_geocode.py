@@ -171,6 +171,11 @@ def test_stopword_residual_note_reaches_the_geocode_tool(monkeypatch):
     _count_places_fallback(monkeypatch)
     result = server.geocode("the Met", limit=5)
     assert result["results"] == []
+    # Text unique to this note, not the #105 one -- both mention find_places
+    # and both say "skipped", so only the distinctive half proves which of
+    # the two skip paths the caller was actually told about.
+    assert "nothing distinctive is left" in result["note"]
+    assert "the Metropolitan Museum of Art" in result["note"]
     assert "find_places" in result["note"]
 
 
@@ -187,30 +192,56 @@ def test_anchored_query_with_a_real_residual_still_scans_places(monkeypatch):
     assert "Blue Bottle Roastery" in [r["name"] for r in results]
 
 
-def test_short_residual_tokens_are_as_insignificant_as_stopwords(monkeypatch):
-    # Two-char residuals carry no more signal than "the" does and cost the
-    # same full-theme scan.
+def test_multi_word_stopword_residual_is_rejected_too(monkeypatch):
+    # Every word being a stopword is the rejection condition, not just the
+    # single-word case.
     calls = _count_places_fallback(monkeypatch)
     result = geocode.geocode_detailed("of a Met", limit=5)
     assert calls == []
     assert result["results"] == []
 
 
-def test_significant_words_shares_the_resolve_place_rule():
-    # The residuals #216 has to reject: stopwords and sub-3-char words only.
-    assert geocode._significant_words("the") == []
-    assert geocode._significant_words("of a") == []
-    assert geocode._significant_words("Blue Bottle in Brooklyn") == ["Blue", "Bottle", "Brooklyn"]
-    # _significant_tokens keeps its never-search-nothing fallback on top of
-    # the same rule.
+@pytest.mark.parametrize("query, residual", [
+    # Names made entirely of words too short for _significant_tokens' >=3
+    # rule, which the gate must NOT borrow: rejecting here returns nothing
+    # at all, and these are real, distinctive things to search names for.
+    ("H&M Brooklyn", "H&M"),
+    ("Q&A Brooklyn", "Q&A"),
+    # Two characters is a whole word in Chinese/Japanese/Korean -- the
+    # common case for those names, not an edge case. ("Forbidden City")
+    ("故宫 Brooklyn", "故宫"),
+])
+def test_short_but_meaningful_residual_still_scans_places(monkeypatch, query, residual):
+    calls = _count_places_fallback(monkeypatch)
+
+    result = geocode.geocode_detailed(query, limit=5)
+
+    assert [q for q, _ in calls] == [residual], "a short name is not an empty one"
+    assert calls[0][1] is not None, "and is still bounded by the Brooklyn anchor"
+    assert "note" not in result, "nothing was skipped, so there is nothing to explain"
+
+
+def test_short_residual_gate_matches_the_note_it_would_have_shown():
+    # The unit-level rule behind the two tests above: stopwords only, never
+    # length. Keeps _nothing_but_stopwords honest about what the note claims
+    # ("only common words like the or of").
+    assert geocode._nothing_but_stopwords("the")
+    assert geocode._nothing_but_stopwords("of a")
+    assert geocode._nothing_but_stopwords("   ")
+    assert not geocode._nothing_but_stopwords("H&M")
+    assert not geocode._nothing_but_stopwords("故宫")
+    assert not geocode._nothing_but_stopwords("the Blue Bottle")
+    # _significant_tokens keeps resolve_place's own (stricter) rule, plus its
+    # never-search-nothing fallback -- unchanged by #216.
     assert geocode._significant_tokens("the") == ["the"]
     assert geocode._significant_tokens("the Blue Bottle") == ["Blue", "Bottle"]
 
 
 def test_misspelled_prefix_reaches_the_fallback_without_the_fuzzy_tier(monkeypatch):
     # This was #216's test_misspelled_prefix_still_reaches_the_fallback_pending_215.
-    # #215 landed, so the expectation moves: the typo residual only reaches
-    # the places scan where the fuzzy tier can't run at all — no local
+    # A typo residual isn't a stopword, so this gate never rejects it -- and
+    # #215 has landed, so the expectation moves: the typo reaches the places
+    # scan only where the fuzzy tier can't run at all, i.e. no local
     # divisions table (cache off, as the default fixtures run), which is
     # what this test still pins. With the table available it doesn't; see
     # test_typo_query_runs_no_places_scan_at_all below.
@@ -590,6 +621,18 @@ def test_results_are_correct_via_local_table(geocode_cache):
     results = geocode.geocode("Springfield", limit=10)
     assert len(results) == 2
     assert all(r["name"] == "Springfield" for r in results)
+
+
+def test_vanished_local_table_mid_query_falls_back_to_upstream(geocode_cache):
+    """#230: the local table being deleted between _local_divisions_table()'s
+    exists() check and the read (external cleanup, or a cache sweep) must
+    degrade to a direct upstream scan, not surface a false
+    upstream_unavailable."""
+    geocode.geocode("Brooklyn", limit=5)  # materialize the table
+    path = geocode._local_divisions_table_path(release.PINNED_RELEASE)
+    path.unlink()  # simulate the sweep winning the race
+    results = geocode._query_divisions("Brooklyn", None, str(path))
+    assert any(r["name"] == "Brooklyn" for r in results)
 
 
 def test_cache_off_skips_materialization_and_still_answers(monkeypatch, tmp_path):

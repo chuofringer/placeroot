@@ -10,7 +10,8 @@ never registered and never reach `tools/list`.
 Grammar: a comma-separated list whose entries are profile names, tool
 names, or the special name `all` — the union of everything named. Unset,
 empty, or `all` means the full surface (the default; identical to the
-behavior before this existed).
+behavior before this existed). The one name that is not part of that union
+is `progressive` (issue #210), which must stand alone: see PROGRESSIVE.
 """
 
 # Profile -> the tools it registers. Profiles may overlap, and the union of
@@ -103,6 +104,21 @@ ALWAYS_INCLUDED: frozenset[str] = frozenset({"data_version"})
 # Selects the full surface; also what unset/empty means.
 ALL = "all"
 
+# Progressive disclosure (issue #210): instead of a slice of the surface,
+# a *meta* surface — a catalog tool plus a dispatcher — that keeps all 28
+# tools reachable at the standing cost of three schemas. For the install
+# that wants everything available but can't pay 12.2k tokens for it in
+# every conversation; profiles need you to know up front which tools you
+# want, this doesn't.
+PROGRESSIVE = "progressive"
+
+# The meta-tools `progressive` registers. They live in server.py's separate
+# meta registry rather than in _TOOL_FUNCS, so they never widen the real
+# surface, never belong to a profile, and can't be named individually in
+# PLACEROOT_TOOLS — `progressive` is the only way to get them, because a
+# dispatcher without its catalog (or vice versa) is not a usable surface.
+PROGRESSIVE_TOOLS: frozenset[str] = frozenset({"placeroot_capabilities", "placeroot_call"})
+
 
 class InvalidToolSelection(ValueError):
     """PLACEROOT_TOOLS named something that is neither a profile nor a tool."""
@@ -156,6 +172,23 @@ def resolve(spec: str | None, known_tools: set[str]) -> set[str]:
     if not entries:
         return set(known_tools)
 
+    # `progressive` replaces the surface rather than adding to it. Honoring
+    # a mix would register the meta-tools *on top of* whatever else was
+    # named — paying both costs, when the whole point is paying neither the
+    # full 12.2k nor a guess at which tools this install needs. So it fails
+    # like a typo does, rather than quietly producing a surface nobody asked
+    # for.
+    if PROGRESSIVE in entries:
+        if set(entries) != {PROGRESSIVE}:
+            raise InvalidToolSelection(
+                f"PLACEROOT_TOOLS={spec.strip()!r} mixes '{PROGRESSIVE}' with other "
+                f"name(s): {', '.join(sorted(set(entries) - {PROGRESSIVE}))}. "
+                f"'{PROGRESSIVE}' replaces the whole tool surface with the meta-tools "
+                f"({', '.join(sorted(PROGRESSIVE_TOOLS))}) and cannot be combined; "
+                f"use it on its own, or drop it and name profiles/tools."
+            )
+        return set(PROGRESSIVE_TOOLS) | (ALWAYS_INCLUDED & known_tools)
+
     # Validate every entry before honoring `all`: "all,typo" must fail the
     # same way "typo" does, not silently load the full surface — the loud
     # failure on typos is this module's whole contract.
@@ -171,7 +204,7 @@ def resolve(spec: str | None, known_tools: set[str]) -> set[str]:
     if unknown:
         raise InvalidToolSelection(
             f"PLACEROOT_TOOLS contains unknown name(s): {', '.join(sorted(unknown))}. "
-            f"Valid profiles: {', '.join(sorted(PROFILES) + [ALL])}. "
+            f"Valid profiles: {', '.join(sorted(PROFILES) + [ALL, PROGRESSIVE])}. "
             f"Valid tool names: {', '.join(sorted(known_tools))}."
         )
     if ALL in selected:
