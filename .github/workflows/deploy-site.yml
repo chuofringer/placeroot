@@ -58,6 +58,11 @@ permissions:
 
 jobs:
   deploy:
+    # Dependabot-triggered runs get Dependabot secrets, not Actions secrets,
+    # so CLOUDFLARE_API_TOKEN is empty and wrangler hard-fails (seen on the
+    # first grouped actions bump, PR #247). Its branches never touch site/
+    # content anyway — skip instead of failing every weekly bump.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
