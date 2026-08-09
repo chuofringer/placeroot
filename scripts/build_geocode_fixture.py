@@ -463,6 +463,24 @@ def build_divisions() -> list[tuple]:
         25.7617, -80.1918, _chain("United States", "Florida", "Miami"),
         population=442_241,
     )
+    # R29: the English numbered-route parse case, the twin of Miami's
+    # "Calle 8" above -- Flagstaff is where Route 66 is a street name.
+    add(
+        "gers-div-flagstaff", "Flagstaff", "locality", "US", "US-AZ",
+        35.1983, -111.6513, _chain("United States", "Arizona", "Flagstaff"),
+        population=76_831,
+    )
+    # R29: a division whose boundary is a *state*, so geocode_address has a
+    # case where the anchor step succeeds and the extent is still far too big
+    # to scan addresses inside (see geocode._MAX_ANCHOR_SPAN_DEG). Texas
+    # rather than an invented name because its real extent, 13.1 x 10.7
+    # degrees, is what the guard exists to refuse — every other region row in
+    # this fixture carries no division_area at all, so none of them can reach
+    # the check.
+    add(
+        "gers-div-tx", "Texas", "region", "US", "US-TX", 31.0, -100.0,
+        _chain("United States", "Texas"), population=30_503_301,
+    )
     # #188: a division in a country the addresses theme does NOT cover (GB is
     # not one of addresses.COVERED_COUNTRIES), so address_at has somewhere to
     # resolve "this coordinate is in an uncovered country" from. Deliberately
@@ -562,6 +580,13 @@ STREET_CLUSTERS = (
     # R28/#229: Calle Ocho. The street name ends in the digit.
     ("CALLE 8", "US", "33135", "Miami", "FL", 25.7650, -80.2200,
      ("1", "3", "5"), 1),
+    # R29: the English twin of Calle 8. "ROUTE 66" is the street's whole
+    # name, and the Romance-only leading-type list split the 66 off it and
+    # searched for a street called "Route". Numbers are even so the
+    # doorway-on-a-numbered-route case ("4 Route 66") has something to land
+    # on -- that query must still split, because the number leads.
+    ("ROUTE 66", "US", "86001", "Flagstaff", "AZ", 35.1980, -111.6510,
+     ("2", "4", "6"), 1),
 )
 
 # Spacing between consecutive house numbers along a street, and between the

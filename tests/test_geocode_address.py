@@ -14,9 +14,10 @@ exists purely so the anchor step can *succeed* in a country the addresses
 theme does not carry — the coverage-note case.
 """
 
+import duckdb
 import pytest
 
-from placeroot import addresses, geocode, server
+from placeroot import addresses, geocode, overture, server
 
 
 def _streets(payload):
@@ -95,10 +96,50 @@ def test_trailing_house_number_is_the_german_convention():
         # The German convention is the mirror image of Calle 8 -- the street
         # type is glued to the name, so the trailing number still splits.
         ("Hauptstraße 5", ("5", "Hauptstraße")),
+        # R29: the English numbered routes, which are the same grammar as
+        # Calle 8 and are ordinary US address data -- the original rule was
+        # Romance-only and split every one of these.
+        ("Route 66", (None, "Route 66")),
+        ("Highway 101", (None, "Highway 101")),
+        ("Hwy 41", (None, "Hwy 41")),
+        ("US 1", (None, "US 1")),
+        ("Interstate 5", (None, "Interstate 5")),
+        # ...including the ones whose type word is two tokens, where the
+        # first token alone is far too ordinary to blocklist.
+        ("County Road 12", (None, "County Road 12")),
+        ("State Route 89", (None, "State Route 89")),
+        ("Historic Route 66", (None, "Historic Route 66")),
+        # ...and "State"/"County" on their own must keep splitting, which is
+        # the whole reason the pairs are a separate list.
+        ("State Street 12", ("12", "State Street")),
+        ("County Line Road 40", ("40", "County Line Road")),
+        # A real doorway on a numbered route is untouched: the leading-number
+        # rule is checked first, so the house number still comes off the front.
+        ("1234 Highway 101", ("1234", "Highway 101")),
+        ("500 Route 66", ("500", "Route 66")),
     ],
 )
 def test_house_number_is_leading_or_trailing_only(text, expected):
     assert geocode._split_house_number(text) == expected
+
+
+def test_route_66_searches_for_the_street_not_house_number_66():
+    """The English half of the Calle 8 bug (R29): "ROUTE 66" is the street's
+    own name, and stripping the 66 searched Flagstaff for a street called
+    "Route" -- an empty that looks like an honest one."""
+    result = geocode.geocode_address("Route 66, Flagstaff", limit=10)
+
+    assert result["anchor"]["name"] == "Flagstaff"
+    assert {r["number"] for r in result["results"]} == {"2", "4", "6"}
+    assert all(r["street"] == "ROUTE 66" for r in result["results"])
+
+
+def test_a_real_doorway_on_a_numbered_route_still_resolves():
+    """The rule above must not cost the addresses that genuinely sit on one:
+    "500 Route 66" is house 500, not a street called "500 Route"."""
+    result = geocode.geocode_address("4 Route 66, Flagstaff")
+
+    assert _streets(result) == [("4", "ROUTE 66")]
 
 
 def test_calle_8_searches_for_the_street_not_house_number_8():
@@ -383,3 +424,186 @@ def test_tool_is_in_the_search_profile():
     from placeroot import tool_profiles
 
     assert "geocode_address" in tool_profiles.PROFILES["search"]
+
+
+# --- the extent lookup memoizes facts, not failures (R29) ------------------
+
+
+def _failing_conn(state, real):
+    """overture.conn() whose *extent lookup* raises until state["fail"] is
+    cleared. Scoped to that one query by its `division_id = $id` filter,
+    because a connection that fails outright never reaches the anchor step --
+    geocode() itself would raise first, which is a different bug.
+    """
+    class _Blip:
+        def execute(self, sql, *a, **kw):
+            if state["fail"] and "division_id = $id" in sql:
+                raise duckdb.Error("transient upstream blip")
+            return real().execute(sql, *a, **kw)
+
+    return lambda: _Blip()
+
+
+def test_a_transient_extent_lookup_failure_is_not_memoized(monkeypatch):
+    """The 10.7s division_area lookup is memoized per process, and used to
+    memoize its *errors* too. One blip therefore answered every later call
+    for that city out of the cache -- no query, so no recovery -- and
+    geocode_address rendered it as "Overture carries no boundary extent for
+    San Francisco" until the process restarted."""
+    monkeypatch.setattr(geocode, "_AREA_BBOX_CACHE", {})
+    state = {"fail": True}
+    monkeypatch.setattr(overture, "conn", _failing_conn(state, overture.conn))
+
+    assert geocode._division_area_bbox("gers-div-san-francisco") is None
+
+    state["fail"] = False
+    assert geocode._division_area_bbox("gers-div-san-francisco") is not None
+
+
+def test_a_transient_failure_does_not_strand_the_whole_tool(monkeypatch):
+    """The same thing one level up: the blip must cost one empty answer, not
+    every answer about that city for the life of the process."""
+    monkeypatch.setattr(geocode, "_AREA_BBOX_CACHE", {})
+    state = {"fail": True}
+    monkeypatch.setattr(overture, "conn", _failing_conn(state, overture.conn))
+
+    blipped = geocode.geocode_address("Market Street, San Francisco")
+    assert blipped["results"] == []
+
+    state["fail"] = False
+    recovered = geocode.geocode_address("Market Street, San Francisco")
+    assert recovered["results"], "the anchor stayed poisoned after upstream recovered"
+
+
+def test_a_resolved_extent_is_still_memoized(monkeypatch):
+    """...and the memoization it exists for still happens: the second call
+    for a city whose extent resolved must not re-run the scan."""
+    monkeypatch.setattr(geocode, "_AREA_BBOX_CACHE", {})
+    calls = []
+    real = geocode.overture.conn
+
+    class _Counting:
+        def execute(self, sql, *a, **kw):
+            calls.append(sql)
+            return real().execute(sql, *a, **kw)
+
+    monkeypatch.setattr(overture, "conn", lambda: _Counting())
+    assert geocode._division_area_bbox("gers-div-san-francisco") is not None
+    assert len(calls) == 1
+    assert geocode._division_area_bbox("gers-div-san-francisco") is not None
+    assert len(calls) == 1, "the resolved extent was looked up twice"
+
+
+def test_a_confirmed_absent_extent_is_still_memoized(monkeypatch):
+    """A division with no area row is a fact about the dataset, not a
+    failure, so it stays cached -- otherwise every "Brooklyn" query pays the
+    full scan again to learn the same thing."""
+    monkeypatch.setattr(geocode, "_AREA_BBOX_CACHE", {})
+    calls = []
+    real = geocode.overture.conn
+
+    class _Counting:
+        def execute(self, sql, *a, **kw):
+            calls.append(sql)
+            return real().execute(sql, *a, **kw)
+
+    monkeypatch.setattr(overture, "conn", lambda: _Counting())
+    assert geocode._division_area_bbox("gers-div-brooklyn") is None
+    assert geocode._division_area_bbox("gers-div-brooklyn") is None
+    assert len(calls) == 1
+
+
+# --- an anchor too big to scan inside (R29) --------------------------------
+
+
+def test_a_state_sized_anchor_is_refused_rather_than_scanned():
+    """Texas's boundary is 13.1 x 10.7 degrees. That box blows past
+    cache.MAX_TILES_PER_QUERY, so the tile cache declines it and the scan
+    degrades to a direct read of the whole 474M-row addresses theme -- minutes
+    of upstream work behind one tool call, answering with the Main Street of
+    every town in the state."""
+    result = geocode.geocode_address("Main Street, Texas")
+
+    assert result["results"] == []
+    assert "far larger than a city" in result["note"]
+    # The note says how big, and does not claim Texas has no boundary.
+    assert "13.1° x 10.7°" in result["note"]
+    assert "no boundary extent" not in result["note"]
+    assert "anchor" not in result
+
+
+def test_the_size_guard_never_runs_the_scan(monkeypatch):
+    """Pinned separately from the note: the whole point is the query that
+    does not happen."""
+    scans = []
+    real = geocode._scan_addresses_in_bbox
+
+    def counted(*a, **kw):
+        scans.append(a)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(geocode, "_scan_addresses_in_bbox", counted)
+    geocode.geocode_address("Main Street, Texas")
+    assert scans == []
+    geocode.geocode_address("Market Street, San Francisco")
+    assert len(scans) == 1, "a city-sized anchor must still be scanned"
+
+
+def test_the_cap_admits_a_real_city_extent():
+    """The guard has to sit above every genuine city. San Francisco's live
+    boundary reaches the Farallon Islands 45 km offshore, which is the widest
+    shape a real city takes."""
+    assert not geocode._anchor_too_broad((-123.17, 37.70, -122.28, 37.83))
+    assert geocode._anchor_too_broad((-106.65, 25.84, -93.51, 36.50))
+
+
+# --- the runner-up loop rejects on country before paying for an extent -----
+
+
+def test_a_cross_border_runner_up_is_rejected_before_its_extent_is_looked_up(monkeypatch):
+    """The country test is a dict comparison; the extent lookup behind it is
+    the 10.7s division_area scan. A cross-border candidate can never be the
+    anchor whatever that scan returns, so looking it up first spent ~10s to
+    reach a foregone conclusion."""
+    looked_up = []
+    real = geocode._anchor_bbox
+
+    def spy(anchor_id, local_table):
+        looked_up.append(anchor_id)
+        return real(anchor_id, local_table)
+
+    monkeypatch.setattr(geocode, "_anchor_bbox", spy)
+    result = geocode.geocode_address("Trumpington Street, Cambridge")
+
+    # Still the honest empty, with the Massachusetts candidate named...
+    assert result["results"] == []
+    assert "different country" in result["note"]
+    assert "Cambridge (United States, US)" in result["note"]
+    # ...but its extent was never fetched to find that out.
+    assert "gers-div-cambridge-ma" not in looked_up
+
+
+# --- a dataset with no number column says so (R29) -------------------------
+
+
+def test_a_dataset_without_a_number_column_says_the_house_number_was_ignored(monkeypatch):
+    """Dropping the filter silently answers a different question than the one
+    asked: "1600 Amphitheatre Parkway" comes back as every doorway on the
+    street. degraded_fields alone does not say that in words."""
+    real = geocode._scan_addresses_in_bbox
+
+    def without_number(*a, **kw):
+        rows, distinct, matched, _ = real(*a, **kw)
+        return rows, distinct, matched, False
+
+    monkeypatch.setattr(geocode, "_scan_addresses_in_bbox", without_number)
+    result = geocode.geocode_address("1600 Amphitheatre Parkway, Mountain View")
+
+    assert result["results"]
+    assert "no `number` column" in result["note"]
+    assert "1600" in result["note"]
+
+
+def test_the_dropped_number_note_stays_off_a_normal_answer():
+    result = geocode.geocode_address("1600 Amphitheatre Parkway, Mountain View")
+    assert "no `number` column" not in result.get("note", "")
