@@ -952,10 +952,11 @@ def geocode(query: str, limit: int = 5) -> dict:
     scanning the global places dataset — minutes, not seconds (#105). That
     case comes back empty with a "note" saying so and what to do instead.
 
-    A misspelled name that matches no division literally ("Berekley") gets
-    one close-spelling retry over the local divisions table (#215); those
-    results rank below any literal match and come with a "note" naming the
-    spelling they were corrected to.
+    A misspelled name that matches no division literally ("Berekley", or
+    "Berekley, CA" — the region suffix is set aside first) gets one
+    close-spelling retry over the local divisions table (#215); those
+    results rank below any literal match, carry "matched_by": "fuzzy", and
+    come with a "note" naming the spelling they were corrected to.
     """
     try:
         result = geocoding.geocode_detailed(query, limit)
@@ -1050,9 +1051,12 @@ def resolve_place(
     speeds up the places half of the search.
 
     Returns {"results": [{"id" (GERS), "kind": "division" | "place",
-    "name", "lat", "lon", "match": "exact" | "prefix" | "substring", plus
-    "admin_context" for a division or "category" for a place}, ...]},
-    ranked by match tier then prominence, budgeted like every other tool.
+    "name", "lat", "lon", "match": "exact" | "prefix" | "substring" |
+    "fuzzy", plus "admin_context" for a division or "category" for a
+    place}, ...]}, ranked by match tier then prominence ("fuzzy" — a
+    division reached by close spelling rather than by containing the query
+    at all, #215 — ranking below every literal match), budgeted like every
+    other tool.
     An unresolvable query returns {"results": []} — not an error. Returns a
     structured {"error": ...} instead of raising if the remote scan fails
     or the places dataset is missing columns this tool depends on.

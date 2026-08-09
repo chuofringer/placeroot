@@ -150,6 +150,14 @@ trigger is deliberately emptiness alone: a literal substring hit is a real
 answer to the string the caller actually typed, and there is no honest
 tier-based reading of "weak" that doesn't demote some of those.
 
+What gets matched is the query's *name* half — "Berekley" out of
+"Berekley, CA" — with the region the suffix named passed as a filter, and
+dropped on a miss like the literal search drops it. The literal path
+answers a region-constrained miss by retrying the whole original string,
+suffix included, and nothing is within edit distance of that, so fuzzing
+what the literal search happened to end up holding would lose the
+correction on the most common shape a place gets written in.
+
 Two properties this tier is built around:
 
 - It never scans upstream. jaro_winkler over the whole local table is
@@ -160,9 +168,10 @@ Two properties this tier is built around:
   something expensive.
 - A fuzzy hit answers a *different* string than the one typed, so it sorts
   below every literal tier (_rank_key's leading term, ahead of even tier
-  3), scores below the substring tier, and carries a note naming the
-  spelling it corrected to, so an agent can see the correction happened
-  rather than silently trusting it. A fuzzy hit also stands down the
+  3), scores below the substring tier, and says so twice over: a note
+  naming the spelling it corrected to, and "matched_by": "fuzzy" on the
+  row itself, so neither an agent reading prose nor resolve_place (which
+  has no note to read) can mistake a correction for a match. A fuzzy hit also stands down the
   places fallback: the query text is a known misspelling at that point,
   and substring-matching a typo against the places theme is how
   "Snags N Burgs Cafe" happened.
@@ -755,15 +764,18 @@ def _has_like_metacharacter(query: str) -> bool:
     return "%" in query or "_" in query
 
 
-def _query_divisions_fuzzy(table_path: str, query: str) -> list[dict]:
+def _query_divisions_fuzzy(
+    table_path: str, query: str, region_code: str | None = None
+) -> list[dict]:
     """Divisions whose folded name is within _FUZZY_SIMILARITY_THRESHOLD
     jaro-winkler of the folded query — the #215 typo tier.
 
-    No region filter, unlike the literal queries: this only runs when the
-    literal search came back empty, and a region-constrained literal miss
-    has already dropped its region code and retried unconstrained by then
-    (see geocode_detailed) — so there is never a live region constraint
-    left to honor here.
+    `region_code` narrows the pass to one region, the same filter the
+    literal queries take. The caller passes the code parsed off the
+    query's own "City, ST" suffix and retries without it if that comes
+    back empty, mirroring what the literal search one step up already does
+    — a region-constrained miss can mean the suffix was misread as a
+    region, and answering nothing would be the worse failure.
 
     Local table only, by construction: the caller passes a materialized
     table path or doesn't call this at all. A similarity predicate has
@@ -780,12 +792,17 @@ def _query_divisions_fuzzy(table_path: str, query: str) -> list[dict]:
     place.
     """
     params: dict = {"folded": _normalize_for_match(query)}
+    region_filter = ""
+    if region_code:
+        region_filter = "AND region = $region_code"
+        params["region_code"] = region_code
     sql = f"""
         SELECT id, name, subtype, country, region, lat, lon, admin_chain, population,
                jaro_winkler_similarity({_FOLDED_NAME_SQL}, $folded) AS similarity
         FROM read_parquet('{table_path}')
         WHERE jaro_winkler_similarity({_FOLDED_NAME_SQL}, $folded)
               >= {_FUZZY_SIMILARITY_THRESHOLD}
+        {region_filter}
         ORDER BY similarity DESC, population DESC NULLS LAST
         LIMIT {DIVISION_OVERFETCH}
     """
@@ -961,12 +978,15 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
     A "note" also comes back *with* results when nothing matched literally
     and the answer came from the #215 fuzzy tier instead: it names the
     spelling the results were corrected to ("Berekley" -> "Berkeley"), so
-    a caller can tell a correction from a match.
+    a caller can tell a correction from a match. Those rows also carry
+    "matched_by": "fuzzy" individually, which is what resolve_place reads
+    to label them (it returns no note of its own).
 
     Never more than `limit` results. Each result: {name, type, lat, lon, id
-    (GERS), admin_context, rank_score}. Raises overture.UpstreamUnavailable
-    if the remote scan fails after retries; the caller (server.py) turns
-    that into a structured error like the other tools.
+    (GERS), admin_context, rank_score, plus "matched_by" on a #215 fuzzy
+    row}. Raises overture.UpstreamUnavailable if the remote scan fails
+    after retries; the caller (server.py) turns that into a structured
+    error like the other tools.
 
     Handles "City, ST" / "City, Region" suffixes (#46) and ranks same-tier
     ties by population/prominence (#47) — see the module docstring.
@@ -980,6 +1000,10 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
     local_table = _local_divisions_table()
     base_query, region_code, _region_name = _parse_region_suffix(query, local_table)
     search_query = base_query if region_code else query
+    # `region_code` is cleared below if its constrained search comes up
+    # empty; the #215 fuzzy pass still wants the code the query itself
+    # carried, so keep it.
+    suffix_region_code = region_code
 
     divisions = _query_divisions(search_query, region_code, local_table)
     if region_code and not divisions:
@@ -1041,9 +1065,23 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
     # at all — the shape a typo makes. Retry by edit distance against the
     # local table only; see the module docstring for why emptiness is the
     # whole trigger and why this never runs upstream.
+    #
+    # Matched against `base_query`, not `search_query`: when a region
+    # suffix was recognized and its constrained search came up empty,
+    # search_query has been reset to the *whole* original string, suffix
+    # included, and no division name is within edit distance of
+    # "Berekley, CA" — the correction would be lost on the single most
+    # common way a caller writes a place. base_query is the name half
+    # either way (_parse_region_suffix returns the query unchanged when it
+    # recognizes no suffix), and the region it was parsed off of is passed
+    # as a filter, dropped on a miss the same way the literal search drops
+    # it.
     fuzzy_rows: list[dict] = []
-    if not divisions and local_table is not None and not _has_like_metacharacter(search_query):
-        fuzzy_rows = _query_divisions_fuzzy(local_table, search_query)
+    fuzzy_query = base_query
+    if not divisions and local_table is not None and not _has_like_metacharacter(fuzzy_query):
+        fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query, suffix_region_code)
+        if not fuzzy_rows and suffix_region_code:
+            fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query)
         divisions = fuzzy_rows
 
     region_population = _region_population_lookup(local_table)
@@ -1106,7 +1144,7 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
 
     out = []
     for row in candidates[:limit]:
-        out.append({
+        entry = {
             "name": row["name"],
             "type": row["subtype"],
             "lat": row["lat"],
@@ -1116,13 +1154,25 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
             "rank_score": _rank_score(row, search_query) if "_confidence" not in row else round(
                 0.4 + row["_confidence"] * 0.3, 3
             ),
-        })
+        }
+        if row.get("_fuzzy"):
+            # #215: the note says "these answer a corrected spelling" in
+            # prose, which is what a human reader needs; this says it per
+            # row, in a field, which is what code needs. resolve_place
+            # returns no note at all and has to label each candidate's
+            # match on its own — without this it can only re-derive a tier
+            # from a name that doesn't contain the query, and call a
+            # correction a "substring" match.
+            entry["matched_by"] = "fuzzy"
+        out.append(entry)
     result = {"results": out}
     fuzzy_out = [row for row in candidates[:limit] if row.get("_fuzzy")]
     if fuzzy_out:
         # #215: unlike the skip notes below, this one accompanies real
-        # results — it says which spelling they actually answer.
-        result["note"] = _fuzzy_correction_note(fuzzy_out, search_query)
+        # results — it says which spelling they actually answer. Named
+        # against the string actually fuzzed, which is the query minus any
+        # region suffix.
+        result["note"] = _fuzzy_correction_note(fuzzy_out, fuzzy_query)
     if note and not out:
         # Only worth saying when the answer is empty: if divisions already
         # produced candidates, the skipped places half isn't what the caller
@@ -1201,6 +1251,13 @@ _RESOLVE_PLACE_RADIUS_M = 20_000
 
 _MATCH_TIER_LABELS = {3: "exact", 2: "prefix", 1: "substring"}
 
+# resolve_place's `match` labels, best first. "fuzzy" (#215) is not a tier
+# the literal search can produce — it means the name doesn't contain the
+# query at all and was reached by edit distance instead — so it ranks
+# below every literal label, matching how _rank_key already orders the
+# rows themselves.
+_MATCH_LABEL_RANK = {"exact": 3, "prefix": 2, "substring": 1, "fuzzy": 0}
+
 # Small enough to filter, generic enough that requiring them in a name
 # match would be actively wrong ("the Whole Foods on Lamar" — "the"/"on"
 # aren't part of any real place name). Dropped before a query is split into
@@ -1208,8 +1265,19 @@ _MATCH_TIER_LABELS = {3: "exact", 2: "prefix", 1: "substring"}
 _STOPWORDS = {"the", "a", "an", "on", "in", "at", "near", "of", "and", "by"}
 
 
-def _match_label(name: str, query: str) -> str:
-    return _MATCH_TIER_LABELS[_match_tier(name, query)]
+def _match_label(row: dict, query: str) -> str:
+    """A geocode() result row -> how it matched `query`.
+
+    A #215 fuzzy row is labeled from its own provenance, not re-derived
+    from its name: `_match_tier` reports "substring" for any name it is
+    handed, including one that doesn't contain the query at all, so
+    deriving a label from "Berkeley" against "Berekley" would claim a
+    containment that isn't there — the one thing a caller reads this field
+    to rule out.
+    """
+    if row.get("matched_by") == "fuzzy":
+        return "fuzzy"
+    return _MATCH_TIER_LABELS[_match_tier(row["name"], query)]
 
 
 # resolve_place runs one find_places per significant token, each taking the
@@ -1293,12 +1361,15 @@ def resolve_place(
     just down-ranked — see _place_match_label.
 
     Each candidate: {"id" (GERS), "kind": "division" | "place", "name",
-    "lat", "lon", "match": "exact" | "prefix" | "substring", plus
-    "admin_context" (division) or "category" (place)}. Ranked by match tier
-    first — kind-agnostic, an exact place beats a prefix-matched division —
-    then by prominence (division rank_score / place confidence, both
-    roughly 0-1 scales), then id for determinism. Never more than `limit`
-    results.
+    "lat", "lon", "match": "exact" | "prefix" | "substring" | "fuzzy", plus
+    "admin_context" (division) or "category" (place)}. "fuzzy" (#215,
+    divisions only) means the name doesn't contain the query at all and was
+    reached by close spelling instead — the caller asked for one string and
+    is being handed the answer to another, so it ranks below every literal
+    label. Ranked by match tier first — kind-agnostic, an exact place beats
+    a prefix-matched division — then by prominence (division rank_score /
+    place confidence, both roughly 0-1 scales), then id for determinism.
+    Never more than `limit` results.
 
     No match is a valid answer, not an error: an unresolvable query returns
     an empty list. Raises overture.UpstreamUnavailable if a remote scan
@@ -1344,7 +1415,7 @@ def resolve_place(
             "id": r["id"], "kind": "division", "name": r["name"],
             "lat": r["lat"], "lon": r["lon"],
             "admin_context": r["admin_context"],
-            "match": _match_label(r["name"], query),
+            "match": _match_label(r, query),
             "_prominence": r["rank_score"],
         })
     for r in place_rows:
@@ -1363,7 +1434,7 @@ def resolve_place(
         })
 
     candidates.sort(key=lambda c: (
-        -{"exact": 3, "prefix": 2, "substring": 1}[c["match"]],
+        -_MATCH_LABEL_RANK[c["match"]],
         -c["_prominence"],
         c["id"],
     ))

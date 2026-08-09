@@ -271,11 +271,20 @@ def test_fuzzy_pass_never_scans_upstream(geocode_cache, monkeypatch):
     # The tier is local-table-only by construction; assert it, since a
     # similarity predicate against S3 has nothing to prune by and would
     # read the whole divisions theme over the network.
+    #
+    # Build the local table first, then cut upstream off entirely for the
+    # query itself: patching the two upstream entry points alone wouldn't
+    # prove much, since with a local table in hand the literal search
+    # wouldn't call them either. Blocking upstream_glob covers any path
+    # that would reach for the remote dataset at all.
+    geocode._local_divisions_table()
+
     def fail(*args, **kwargs):
         raise AssertionError("the fuzzy tier must never scan upstream")
 
     monkeypatch.setattr(geocode, "_query_divisions_from_upstream", fail)
     monkeypatch.setattr(geocode, "_query_places_fallback", fail)
+    monkeypatch.setattr(overture, "upstream_glob", fail)
 
     assert geocode.geocode("Berekley", limit=5)[0]["name"] == "Berkeley"
 
@@ -360,6 +369,80 @@ def test_fuzzy_matching_folds_case_and_diacritics(geocode_cache):
     # reachable from a plain-ASCII typo of it.
     results = geocode.geocode("Sao Paluo", limit=5)
     assert results[0]["name"] == "São Paulo"
+
+
+def test_typo_with_a_region_suffix_still_reaches_the_fuzzy_tier(geocode_cache, monkeypatch):
+    # "City, ST" is the most common shape a caller writes, and a region
+    # suffix must not cost the correction. The literal search drops the
+    # region on a miss and retries the *whole* original string, so the
+    # fuzzy pass has to match on the name half (base_query) instead --
+    # nothing is within edit distance of "Berekley, CA".
+    calls = _count_places_fallback(monkeypatch)
+
+    result = geocode.geocode_detailed("Berekley, CA", limit=5)
+
+    assert [r["name"] for r in result["results"]] == ["Berkeley"]
+    assert calls == [], "a corrected typo must not fall through to the places theme"
+    # The note names the string actually corrected, not the raw query with
+    # its suffix still attached.
+    assert '"Berekley"' in result["note"]
+    assert '"Berkeley"' in result["note"]
+
+
+def test_region_suffixed_typo_is_filtered_by_that_region_first(geocode_cache):
+    # The suffix's region code narrows the pass, like it does for the
+    # literal queries...
+    table = geocode._local_divisions_table()
+    assert [r["name"] for r in geocode._query_divisions_fuzzy(table, "Berekley", "US-CA")] == [
+        "Berkeley",
+    ]
+    assert geocode._query_divisions_fuzzy(table, "Berekley", "US-NY") == []
+    # ...and, like the literal search one step up, a region-constrained
+    # miss degrades to an unconstrained retry rather than answering
+    # nothing: a suffix that parsed as a region may simply have been read
+    # wrong.
+    assert [r["name"] for r in geocode.geocode("Berekley, NY", limit=5)] == ["Berkeley"]
+
+
+def test_fuzzy_rows_are_labeled_fuzzy_not_substring(geocode_cache):
+    # A corrected row does not contain the query at all, so resolve_place
+    # must not report it as a "substring" match -- that field is exactly
+    # what a caller reads to decide whether the answer is the string it
+    # asked for. _match_tier grades any name it is handed as at least
+    # "substring", so the label has to come from the row's provenance.
+    assert geocode.geocode("Berekley", limit=5)[0]["matched_by"] == "fuzzy"
+    assert "matched_by" not in geocode.geocode("Brooklyn", limit=5)[0]
+
+    top = geocode.resolve_place("Berekley")[0]
+    assert top["name"] == "Berkeley"
+    assert top["match"] == "fuzzy"
+
+    assert geocode.resolve_place("Sna Francisco")[0]["match"] == "fuzzy"
+    assert server.resolve_place("Berekley")["results"][0]["match"] == "fuzzy"
+
+
+def test_fuzzy_label_ranks_below_every_literal_label(geocode_cache):
+    # Same ordering _rank_key enforces on the rows themselves, restated
+    # for resolve_place's label vocabulary.
+    ranks = geocode._MATCH_LABEL_RANK
+    assert ranks["fuzzy"] < min(ranks[label] for label in ("exact", "prefix", "substring"))
+
+
+def test_resolve_area_accepts_a_corrected_spelling(geocode_cache):
+    # Pins the knock-on effect of #215 on the area-constrained tools
+    # (find_places/summarize_area go through here): a typo'd area now
+    # resolves to the corrected division. resolve_area returns no note
+    # channel, so this is deliberately the whole contract -- the
+    # correction is silent by design, and this test is what makes that a
+    # decision rather than an accident.
+    assert geocode.resolve_area("Berekley") == {
+        "division_id": "gers-div-berkeley",
+        "name": "Berkeley",
+        "admin_context": ["United States", "California"],
+    }
+    assert geocode.resolve_area("Sna Francisco")["name"] == "San Francisco"
+    # An area that isn't a typo of anything still resolves to nothing.
+    assert geocode.resolve_area("Nonexistentplacexyz123") is None
 
 
 # --- reverse_geocode ---
