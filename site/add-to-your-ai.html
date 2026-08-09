@@ -62,6 +62,7 @@
         <div style="font:600 11px 'Fira Code',monospace;color:#e8b04b;margin-bottom:16px">INSTALL · <span id="activeName1"></span></div>
         <div style="display:flex;flex-direction:column;gap:14px;font-size:14px;line-height:1.6;color:#c9d4c4">
           <div style="display:flex;gap:12px"><span style="font:600 12px 'Fira Code',monospace;color:#8fbf96;flex:none;padding-top:2px">1</span><span id="step1"></span></div>
+          <div id="oneclick" style="display:none"><a id="oneclickLink" href="#" style="display:inline-block;font:600 13px 'Fira Code',monospace;color:#171c17;background:#8fbf96;padding:10px 20px;border-radius:99px;text-decoration:none">⚡ one-click install</a><div style="margin-top:8px;font-size:12px;color:#8a9482">Opens the app and pre-fills the config — you just confirm a dialog.</div></div>
           <div style="display:flex;gap:12px"><span style="font:600 12px 'Fira Code',monospace;color:#8fbf96;flex:none;padding-top:2px">2</span><span id="step2"></span></div>
         </div>
         <div style="margin:14px 0 0;background:#0f140f;border-radius:10px;overflow:hidden;border:1px solid rgba(251,250,245,.08)">
@@ -103,7 +104,8 @@
       { name: "Claude Code", step1: "In a terminal, from any project directory:", step2: "Run one command:", file: "terminal", snippet: "claude mcp add placeroot -- uvx placeroot", copy: "claude mcp add placeroot -- uvx placeroot", step3: "Check with /mcp inside a session — then just ask. (Add --scope user to enable it in every project.)" },
       { name: "ChatGPT Desktop", step1: "In the ChatGPT desktop app, add an MCP server in settings: enter a name, choose STDIO, and give it the command \"uvx placeroot\". (ChatGPT on the web takes remote servers only — or use Codex: codex mcp add placeroot -- uvx placeroot.)", step2: "Command to paste:", file: "server command · STDIO", snippet: "uvx placeroot", copy: "uvx placeroot", step3: "Save, restart, then type /mcp in the composer to confirm placeroot is connected." },
       { name: "Gemini CLI", step1: "MCP servers work in Gemini CLI (the consumer Gemini app doesn't take custom servers). Open ~/.gemini/settings.json — create it if it doesn't exist.", step2: "Add the server config:", file: "~/.gemini/settings.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Restart gemini and type /mcp — placeroot should be listed. Then just ask." },
-      { name: "Cursor", step1: "Open Cursor Settings → MCP → Add new server, or create .cursor/mcp.json in your project.", step2: "Add the server config:", file: ".cursor/mcp.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Ask the agent about places around any address in your code or docs." },
+      { name: "Cursor", step1: "Fastest: use the one-click install below — it opens Cursor with the config pre-filled; just confirm.", step2: "Or add the config by hand (Settings → MCP → Add new server, or .cursor/mcp.json):", file: ".cursor/mcp.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Ask the agent about places around any address in your code or docs.", deeplink: "cursor://anysphere.cursor-deeplink/mcp/install?name=placeroot&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJwbGFjZXJvb3QiXX0=" },
+      { name: "VS Code", step1: "Fastest: use the one-click install below — it opens VS Code with the config pre-filled; just confirm.", step2: "Or add the config by hand (.vscode/mcp.json, or: code --add-mcp '{\"name\":\"placeroot\",\"command\":\"uvx\",\"args\":[\"placeroot\"]}'):", file: ".vscode/mcp.json", snippet: '"servers": {\n  "placeroot": { "type": "stdio", "command": "uvx", "args": ["placeroot"] }\n}', copy: '{\n  "servers": {\n    "placeroot": {\n      "type": "stdio",\n      "command": "uvx",\n      "args": ["placeroot"]\n    }\n  }\n}', step3: "Open Chat in Agent mode and check the tools icon — placeroot's tools should be listed.", deeplink: "https://vscode.dev/redirect/mcp/install?name=placeroot&config=%7B%22name%22%3A%22placeroot%22%2C%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22placeroot%22%5D%7D" },
       { name: "any MCP agent", step1: "Register a stdio MCP server pointing at the command below.", step2: "Server config (stdio transport):", file: "mcp config", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Call find_places or summarize_area from your agent loop." }
     ];
 
@@ -142,6 +144,15 @@
       document.getElementById("step3").textContent = a.step3;
       document.getElementById("configFile").textContent = a.file;
       document.getElementById("configText").textContent = a.snippet;
+      var oneclick = document.getElementById("oneclick");
+      if (a.deeplink) {
+        oneclick.style.display = "block";
+        var link = document.getElementById("oneclickLink");
+        link.href = a.deeplink;
+        link.textContent = "⚡ one-click install in " + a.name;
+      } else {
+        oneclick.style.display = "none";
+      }
       document.getElementById("copyBtn").textContent = state.copied ? "copied ✓" : "copy";
     }
 
