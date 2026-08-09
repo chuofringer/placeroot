@@ -40,6 +40,7 @@
     .pr-h1hero{white-space:normal!important;font-size:33px!important}
     .pr-devhead,.pr-footrow{flex-direction:column!important;align-items:flex-start!important;gap:14px!important}
     .pr-toolgrid{grid-template-columns:1fr!important}
+    .pr-contactrow{flex-direction:column!important;border-radius:20px!important;padding:20px!important;gap:14px!important}
   }
 </style>
 </head>
@@ -52,6 +53,7 @@
       <a href="https://pypi.org/project/placeroot/" style="color:#55604f">PyPI ↗</a>
       <a href="https://www.npmjs.com/package/placeroot" style="color:#55604f">npm ↗</a>
       <a href="add-to-your-ai.html" style="color:#fbfaf5;background:#5c8a63;padding:10px 20px;border-radius:99px;white-space:nowrap">Add to your AI — free</a>
+      <a href="#contact" style="color:#55604f">Contact</a>
     </div>
   </div>
   <div style="max-width:900px;margin:0 auto;padding:48px 48px 0;text-align:center">
@@ -107,7 +109,32 @@
   <div style="text-align:center;padding:48px 48px 24px">
     <a href="add-to-your-ai.html" style="display:inline-block;background:#5c8a63;color:#fbfaf5;border-radius:99px;padding:15px 30px;font-weight:700;font-size:15.5px;box-shadow:0 10px 24px rgba(92,138,99,.28)">Add to your AI — free</a>
   </div>
-  <div style="text-align:center;padding:0 48px 72px;font-size:12.5px;color:#8a9482">Developed by <a href="https://vibemapper.dev" rel="noopener" style="font-weight:700">vibemapper</a></div>
+  <div id="contact" style="background:#eef3ea;margin-top:36px">
+    <div class="pr-wrap" style="max-width:1240px;margin:0 auto;padding:60px 48px;box-sizing:border-box;text-align:center">
+      <h2 style="margin:0;font-size:30px;font-weight:800;letter-spacing:-.025em;color:#2a332b">Contact</h2>
+      <div class="pr-contactrow" style="margin-top:22px;display:inline-flex;align-items:center;gap:16px;max-width:100%;box-sizing:border-box;background:#fff;border:1px solid rgba(42,51,43,.1);border-radius:99px;padding:12px 12px 12px 28px;box-shadow:0 12px 28px rgba(42,51,43,.1)">
+        <a href="mailto:hello@placeroot.dev" style="font:600 clamp(17px,4.4vw,26px) 'Fira Code',monospace;color:#2a332b;letter-spacing:-.01em;word-break:break-all">hello@placeroot.dev</a>
+        <button id="contactCopyBtn" type="button" style="cursor:pointer;flex:none;font:600 13px 'Fira Code',monospace;color:#fbfaf5;background:#5c8a63;padding:11px 20px;border-radius:99px;border:none">copy</button>
+      </div>
+    </div>
+  </div>
+  <div style="text-align:center;padding:32px 48px 72px;font-size:12.5px;color:#8a9482">Developed by <a href="https://vibemapper.dev" rel="noopener" style="font-weight:700">vibemapper</a></div>
 </div>
+<script>
+  (function () {
+    var btn = document.getElementById("contactCopyBtn");
+    var t;
+    // "copied ✓" only once the write resolves — a denied clipboard permission
+    // must not report success over an address the user never got.
+    btn.addEventListener("click", function () {
+      if (!navigator.clipboard) return;
+      navigator.clipboard.writeText("hello@placeroot.dev").then(function () {
+        btn.textContent = "copied ✓";
+        clearTimeout(t);
+        t = setTimeout(function () { btn.textContent = "copy"; }, 1500);
+      }).catch(function () {});
+    });
+  })();
+</script>
 </body>
 </html>
