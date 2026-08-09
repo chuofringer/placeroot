@@ -92,6 +92,23 @@ def offline_data(request, monkeypatch):
         routing.clear_graph_cache()
 
 
+@pytest.fixture
+def geocode_cache(tmp_path, monkeypatch):
+    """Enables the #43 local divisions table (default fixtures otherwise run
+    with PLACEROOT_CACHE=off, see offline_data above) at an isolated,
+    per-test cache dir.
+
+    Lives here rather than in test_geocode.py because the #221 ranking
+    regression corpus (test_geocode_ranking.py) needs the same local table:
+    the alternate-name search (#214) and the fuzzy tier (#215) both only run
+    against it, so half the corpus is meaningless without it.
+    """
+    d = tmp_path / "placeroot-cache"
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(d))
+    monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
+    return d
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
