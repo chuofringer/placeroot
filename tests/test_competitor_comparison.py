@@ -26,7 +26,6 @@ file path, the same way tests/test_benchmark_script.py loads its sibling.
 
 import importlib.util
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -72,6 +71,50 @@ def test_competitor_tool_lists_load_and_carry_schemas():
             assert tool["inputSchema"]["type"] == "object"
 
 
+def test_schema_ratio_does_not_charge_mapbox_for_a_field_we_never_publish():
+    """The published ratio must be like-for-like (review of #213).
+
+    Mapbox declares an `outputSchema` on almost every tool and PlaceRoot
+    declares none, so counting it verbatim would make the headline mostly a
+    report of that one choice — roughly half of Mapbox's surface. The common-
+    field count is what the page leads with.
+    """
+    surfaces = competitor_comparison.measure_all_surfaces()
+    ours, theirs = surfaces[PLACEROOT], surfaces[MAPBOX]
+
+    assert "outputSchema" in theirs.extra_fields
+    assert ours.extra_fields == [], f"PlaceRoot now publishes {ours.extra_fields} — recount"
+    # Not a cosmetic difference: it is a large share of their verbatim surface.
+    assert theirs.extra_tokens > theirs.common_tokens * 0.5
+
+    # Common-field counting must actually exclude it, on both sides.
+    for surface in surfaces.values():
+        assert surface.common_tokens <= surface.tokens
+        assert surface.subset_common_tokens <= surface.subset_tokens
+
+    text = competitor_comparison.DOC_PATH.read_text()
+    assert "outputSchema" in text, "the page must name the field it declines to count"
+    headline = theirs.subset_common_tokens / ours.subset_common_tokens
+    verbatim = theirs.subset_tokens / ours.subset_tokens
+    assert headline < verbatim, "the fair ratio should be the smaller, published one"
+    assert f"{headline:.1f}x ours" in text
+    assert f"{verbatim:.1f}x on the six-tool subset" in text
+
+
+def test_common_fields_only_keeps_the_shared_field_set():
+    trimmed = competitor_comparison.common_fields_only(
+        {
+            "name": "x",
+            "description": "d",
+            "inputSchema": {"type": "object"},
+            "outputSchema": {"type": "object"},
+            "execution": {"mode": "sync"},
+            "_meta": {},
+        }
+    )
+    assert set(trimmed) == {"name", "description", "inputSchema"}
+
+
 def test_scenario_tool_subsets_exist_in_every_snapshot():
     """A rename upstream must fail loudly, not silently shrink their subset."""
     surfaces = competitor_comparison.measure_all_surfaces()
@@ -110,8 +153,31 @@ def test_placeroot_answers_every_scenario_from_fixtures_without_network():
     assert len(answers) == len(competitor_comparison.SCENARIOS)
     for answer in answers:
         assert answer.tokens > 0
-        # PlaceRoot serializes compact, so there is no whitespace to strip.
-        assert answer.minified_tokens == answer.tokens
+        # The page claims PlaceRoot serializes compact. That has to be measured
+        # rather than assumed, so `minified_tokens` runs our text through the
+        # same whitespace-stripping the competitors' text gets — an equality
+        # that could fail if a response were ever pretty-printed.
+        assert answer.minified_tokens == answer.tokens, (
+            f"{answer.scenario}: response carries strippable whitespace"
+        )
+
+
+def test_minified_tokens_actually_strips_whitespace():
+    """Guards the assertion above from going vacuous again.
+
+    If `minified_tokens` ever returned its input's count unchanged, the compact-
+    serialization check would pass for a pretty-printed payload too.
+    """
+    pretty = json.dumps({"a": [1, 2, 3], "b": {"c": "d"}}, indent=2)
+    compact = json.dumps({"a": [1, 2, 3], "b": {"c": "d"}}, separators=(",", ":"))
+    assert competitor_comparison.minified_tokens(pretty) < competitor_comparison.count_tokens(
+        pretty
+    )
+    assert competitor_comparison.minified_tokens(pretty) == competitor_comparison.count_tokens(
+        compact
+    )
+    # Not JSON at all — Mapbox's text answers take this path.
+    assert competitor_comparison.minified_tokens("1. Some Cafe\n   Address: ...") is None
 
 
 def test_our_answers_are_vendored_with_the_platform_they_were_captured_on():
@@ -177,10 +243,31 @@ def test_write_replaces_only_the_generated_region(tmp_path):
     assert doc.read_text() == "before\nFRESH\nafter\n"
 
 
-@pytest.mark.skipif(
-    os.environ.get("PLACEROOT_TOOLS", "all") != "all",
-    reason="PLACEROOT_TOOLS narrows the registry, so the committed schema surface won't match",
-)
+def test_a_narrowed_registry_is_refused_rather_than_published(monkeypatch):
+    """PLACEROOT_TOOLS must not quietly shrink the published surface.
+
+    tests/conftest.py clears PLACEROOT_TOOLS for every test, which is why the
+    skip marker this replaces could never fire. The risk it was gesturing at is
+    real, though: a narrowed registry would either blow up deep inside
+    `measure_surface` or publish a smaller surface than a default install pays.
+    """
+    monkeypatch.setattr(
+        competitor_comparison.token_efficiency,
+        "tool_definitions",
+        lambda: [{"name": "geocode", "description": "d", "inputSchema": {"type": "object"}}],
+    )
+    with pytest.raises(RuntimeError, match="narrowed"):
+        competitor_comparison.placeroot_tool_definitions()
+
+
+def test_duplicate_captured_answers_are_refused(monkeypatch):
+    """A stale re-capture must not silently win the published cell."""
+    rows = competitor_comparison.snapshot_answers()
+    monkeypatch.setattr(competitor_comparison, "snapshot_answers", lambda: rows + rows[:1])
+    with pytest.raises(KeyError, match="duplicate"):
+        competitor_comparison.answer_index()
+
+
 def test_committed_doc_matches_a_fresh_run():
     """The drift guard, byte for byte.
 

@@ -31,7 +31,7 @@
     },
     {
       "scenario": "matrix_3x3",
-      "question": "3x3 distance matrix between six points.",
+      "question": "3x3 distance matrix over three points.",
       "response_text": "{\"elements\":[{\"origin_idx\":0,\"dest_idx\":0,\"distance_m\":0},{\"origin_idx\":0,\"dest_idx\":1,\"distance_m\":300},{\"origin_idx\":0,\"dest_idx\":2,\"distance_m\":300},{\"origin_idx\":1,\"dest_idx\":0,\"distance_m\":300},{\"origin_idx\":1,\"dest_idx\":1,\"distance_m\":0},{\"origin_idx\":1,\"dest_idx\":2,\"distance_m\":424},{\"origin_idx\":2,\"dest_idx\":0,\"distance_m\":300},{\"origin_idx\":2,\"dest_idx\":1,\"distance_m\":424},{\"origin_idx\":2,\"dest_idx\":2,\"distance_m\":0}]}"
     }
   ]

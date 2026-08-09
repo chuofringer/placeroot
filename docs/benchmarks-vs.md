@@ -40,13 +40,33 @@ never are.
   evaluated straight out of the literal `MAPS_TOOLS` region of its `index.ts`.
   Both capture scripts are committed in
   [`benchmarks/competitors/capture/`](../benchmarks/competitors/capture/).
-- **Their answers are their real output.** Each competitor server was run over
-  stdio with its upstream HTTP calls redirected to a local stub that replies with
-  the vendor's *own documented example response* for that endpoint. So the text
-  measured is their code's formatting, their field selection and their added
-  hints — on a payload they publish themselves. No live traffic, no hand-typed
-  JSON, no estimates. Where a vendor no longer publishes an example response for
-  an endpoint, the cell says **not measured** rather than carrying a guess.
+- **Their answers are their real output, on their own example payload.** Each
+  competitor server was run over stdio with its upstream HTTP calls redirected to
+  a local stub that replies with the vendor's *own documented example response*
+  for that endpoint. So the text measured is their code's formatting, their field
+  selection and their added hints. No live traffic, no hand-typed JSON, no
+  estimates. Where a vendor no longer publishes an example response for an
+  endpoint, the cell says **not measured** rather than carrying a guess.
+
+  What this method does **not** give is six identical questions. The stub answers
+  with the vendor's example whatever the request arguments say, so a competitor
+  cell is the cost of rendering a payload they publish, not of answering the
+  question we asked — and the content behind the two cells in a row is often not
+  the same content. The isochrone row is the clearest case: both servers were
+  asked for one 15-minute contour, and Mapbox's example carries three. Every case
+  we know of is listed in *What these numbers are not*, below the table.
+
+- **Schema surfaces are counted twice, and the ratio uses the fair one.** A
+  `tools/list` entry can carry fields one server publishes and another simply
+  does not. Mapbox declares an `outputSchema` on 28 of its 29 tools; PlaceRoot
+  declares none, so on our side that field is absent rather than smaller, and it
+  is roughly half of Mapbox's verbatim surface. A ratio built on the verbatim
+  numbers would therefore mostly be reporting that one design choice. So the
+  generated table shows both: the **verbatim** cost an agent really pays, and the
+  cost over the **common fields** every server here publishes (`name`, `title`,
+  `description`, `inputSchema`, `annotations`). The headline ratios are the
+  common-field ones, and the note under the table names what each server sends
+  beyond them and what it costs.
 - **Our answers come from the committed fixtures**, through the same
   `placeroot.server` functions the MCP server exposes, reusing
   `benchmarks/token_efficiency.py`'s scenario machinery so the two benchmarks
@@ -85,6 +105,16 @@ token cost should reach for theirs. The claim here is narrower and falsifiable:
 for the spatial questions PlaceRoot *does* answer, it answers them in fewer
 tokens.
 
+**Some of those answers are smaller because they contain less, and the `route`
+row is the plainest example.** PlaceRoot's `route` returns distance, duration,
+mode and the two endpoints — no polyline, no turn-by-turn steps — so its answer
+is a handful of tokens whether the route is 300 m or 30 km. Mapbox's cell in
+that row is a two-leg 4.5 km route carrying waypoints, leg summaries and a
+congestion breakdown. The ratio between those two cells is not a compression
+result and should not be quoted as one; an agent that needs directions to
+*follow* needs what they return. Read the `route` row as "this is what a
+distance-and-duration answer costs", not as ten-to-one efficiency.
+
 The two costs also behave differently, and conflating them would be a cheat.
 **Schema tokens are paid once per conversation**, whether or not a spatial
 question is ever asked — that is the number that punishes a large tool surface.
@@ -107,9 +137,10 @@ Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Eve
 - Token counting method: **chars/4 heuristic — `placeroot.budget.estimate_tokens`, applied identically to all three servers**
 - Snapshots captured: **2026-08-08**
 - PlaceRoot's own answers were captured on **macOS-26.3.1-arm64-arm-64bit** (Python 3.11.15, Overture `2026-07-22.0`) and are snapshotted rather than recomputed here: floating-point differences in routing and geometry change digit counts between platforms, so a live rerun costs a few tokens more or less on Linux than on macOS. A tolerance test reruns them for real and fails if this snapshot drifts from what the code now answers.
-- Schema surface, whole install: PlaceRoot **12198** tokens (28 tools) · Mapbox **29295** (29 tools) · Google Maps **655** (7 tools)
-- Schema surface, the six tools each server needs for the scenarios below: PlaceRoot **3513** · Mapbox **13129** (3.7x ours) · Google Maps **500** (5 tools — no isochrone tool exists)
-- Whole-install surface: Mapbox is **2.4x** PlaceRoot's, on 29 tools against 28
+- Schema figures are counted twice: over the **common fields** every server here publishes, and **verbatim** over everything it sends. The ratios below are the common-field ones, because Mapbox declares an `outputSchema` that PlaceRoot does not declare at all — see the note under the table.
+- Schema surface, whole install (common fields): PlaceRoot **12198** tokens (28 tools) · Mapbox **15190** (29 tools) · Google Maps **655** (7 tools)
+- Schema surface, the six tools each server needs for the scenarios below (common fields): PlaceRoot **3513** · Mapbox **4654** (1.3x ours) · Google Maps **500** (5 tools — no isochrone tool exists)
+- Whole-install surface: Mapbox is **1.2x** PlaceRoot's on common fields, on 29 tools against 28. Verbatim — counting the output schemas Mapbox publishes and we don't — it is 2.4x (29295 against 12198), and 3.7x on the six-tool subset.
 - Answers, over the 6 scenarios both PlaceRoot and Mapbox answer: PlaceRoot **1190** tokens total, Mapbox **1337** (1219 with pretty-print whitespace removed)
 
 ### Where the competitor numbers come from
@@ -121,11 +152,19 @@ Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Eve
 
 ### Schema surface (paid once per conversation, whether or not a tool is called)
 
-| server | tools registered | schema surface (tokens) | schema surface (chars) | the 6-scenario subset | subset tokens |
-|---|---:|---:|---:|---:|---:|
-| PlaceRoot | 28 | **12198** | 48836 | 6 | **3513** |
-| Mapbox MCP | 29 | **29295** | 117220 | 6 | **13129** |
-| Google Maps MCP (archived) | 7 | **655** | 2632 | 5 | **500** |
+| server | tools registered | whole install, verbatim | whole install, common fields | the 6-scenario subset | subset verbatim | subset common fields |
+|---|---:|---:|---:|---:|---:|---:|
+| PlaceRoot | 28 | 12198 | **12198** | 6 | 3513 | **3513** |
+| Mapbox MCP | 29 | 29295 | **15190** | 6 | 13129 | **4654** |
+| Google Maps MCP (archived) | 7 | 655 | **655** | 5 | 500 | **500** |
+
+**Common fields** are `name`, `title`, `description`, `inputSchema`, `annotations` — the ones every server here puts in a `tools/list` entry. The verbatim column additionally counts whatever else a server sends, and that is not the same kind of difference:
+
+- **PlaceRoot** sends the common fields and nothing else.
+- **Mapbox MCP** also sends `_meta`, `execution`, `outputSchema` — **14105** tokens across the install, **8475** across the six-tool subset.
+- **Google Maps MCP (archived)** sends the common fields and nothing else.
+
+Mapbox declares an `outputSchema` on almost every tool; PlaceRoot declares none, so on our side the field is *absent*, not smaller. An agent really does pay the verbatim number, so it is in the table — but a ratio built on it would mostly be reporting that one choice, which is why the headline ratios above use the common fields. If PlaceRoot adds output schemas the two columns will converge, and this page will say so on its own.
 
 ### Answer size (paid per tool call)
 
@@ -136,14 +175,17 @@ Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Eve
 | `nearest_coffee` — Coffee shops near this point. | **702** | **117** (text) | not measured |
 | `route_a_to_b` — Route from A to B. | **41** | **422** (text) | not measured |
 | `isochrone_15min` — How far can I get in 15 minutes? | **208** | **396** (text) | not measured |
-| `matrix_3x3` — 3x3 distance matrix between six points. | **107** | **245** (127 minified) | not measured |
+| `matrix_3x3` — 3x3 distance matrix over three points. | **107** | **245** (127 minified) | not measured |
 
-Competitor answers are their real servers' output: each server was run over stdio with its upstream HTTP calls pointed at a local stub replying with the vendor's own documented example response for that endpoint (`benchmarks/competitors/upstream_examples/`). Both pretty-print their JSON with two-space indentation, so the whitespace-free count is shown alongside. PlaceRoot serializes compact, which is why its two numbers are equal.
+Competitor answers are their real servers' output: each server was run over stdio with its upstream HTTP calls pointed at a local stub replying with the vendor's own documented example response for that endpoint (`benchmarks/competitors/upstream_examples/`). The stub answers with that example whatever the request says, so a competitor cell is the size of their code's rendering of a payload they publish — not of an answer to our exact question, and not of the same content ours answered. Read the caveats below before comparing any row. Both pretty-print their JSON with two-space indentation, so the whitespace-free count is shown alongside; PlaceRoot serializes compact, and its two counts come out equal.
 
 PlaceRoot's answers were captured the same way, on macOS-26.3.1-arm64-arm-64bit: the six scenarios run through the same `placeroot.server` functions the MCP server exposes, answered from the committed fixtures with the Overture release pinned and the tile cache off.
 
 ### What these numbers are not
 
+- The route_a_to_b row is partly a capability difference, not an efficiency one, and should not be quoted as a ratio. PlaceRoot's route answer carries distance, duration, mode and the two endpoints and nothing else — no polyline, no turn-by-turn steps — so its size barely moves with the length of the route. Mapbox's cell is a two-leg 4,575 m EV route with waypoints, leg summaries and a congestion breakdown. Ours is smaller in large part because it contains less.
+- The isochrone_15min row does not compare equal content. Both servers were asked for a single 15-minute contour, but the stub replies with Mapbox's published example whatever the request says, and that example carries three contours (15, 10 and 5 minutes) against PlaceRoot's one polygon. Their cell is therefore roughly three contours' worth of envelope; unlike the abridging caveats below, this one inflates their number rather than deflating it.
+- Both reverse-geocode cells are their servers' rendering of a forward-geocoding example payload — mb_forward_geocode.json for Mapbox, g_geocode.json for Google — because neither vendor publishes a separate reverse-geocode example response. Both APIs return the same response shape either way and each server's own reverse-geocode handler did the formatting, but the input was not a reverse-geocode payload.
 - Vendor documentation abridges long payloads. The Mapbox isochrone example replaces every polygon ring with the literal string "arrays of longitude, latitude coordinates", and its search examples carry a single feature and a "{mapbox_id}" placeholder. Competitor answer sizes below are therefore floors, not typical values — a real isochrone or a ten-result search is much larger.
 - The only Mapbox Directions example response their reference publishes is an EV route with charging stops, and it carries no step-by-step geometry. A real turn-by-turn response with geometry is far larger.
 - The nearest_coffee row is the least comparable in the table and should not be read as a win or a loss: PlaceRoot returns ten ranked places, while Mapbox's published category-search example contains one POI. Their cell is roughly a per-result cost; ours is a ten-result answer.

@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import platform
 import sys
 from dataclasses import dataclass
@@ -147,15 +148,41 @@ SCENARIO_TOOLS: dict[str, list[str]] = {
 }
 
 
+# A `tools/list` entry may carry fields one server publishes and another does
+# not, and the difference is not a verbosity difference. Mapbox declares an
+# `outputSchema` on 28 of its 29 tools; PlaceRoot declares none, so the field is
+# structurally absent from our side rather than smaller. Counting it would make
+# the ratio mostly a report of that one choice.
+#
+# So every surface is measured twice: `tokens` is the verbatim wire cost an
+# agent really pays, and `common_tokens` restricts both sides to the fields all
+# three servers actually publish. The published ratios are the common-field
+# ones; the verbatim numbers sit next to them, with the gap named.
+COMMON_FIELDS = ("name", "title", "description", "inputSchema", "annotations")
+
+
+def common_fields_only(definition: dict) -> dict:
+    return {k: v for k, v in definition.items() if k in COMMON_FIELDS}
+
+
 @dataclass
 class SchemaSurface:
     server: str
     tool_count: int
     tokens: int
     chars: int
+    common_tokens: int
     subset_names: list[str]
     subset_tool_count: int
     subset_tokens: int
+    subset_common_tokens: int
+    # Fields this server publishes that are outside COMMON_FIELDS, and what
+    # they cost across the whole install — the gap between the two counts.
+    extra_fields: list[str]
+
+    @property
+    def extra_tokens(self) -> int:
+        return self.tokens - self.common_tokens
 
 
 def measure_surface(name: str, definitions: list[dict]) -> SchemaSurface:
@@ -166,27 +193,61 @@ def measure_surface(name: str, definitions: list[dict]) -> SchemaSurface:
         raise KeyError(f"{name}: scenario tools missing from the tool list: {missing}")
     texts = [wire_json(d) for d in definitions]
     subset = [wire_json(by_name[t]) for t in wanted]
+    common = [wire_json(common_fields_only(d)) for d in definitions]
+    subset_common = [wire_json(common_fields_only(by_name[t])) for t in wanted]
+    extra = sorted({k for d in definitions for k in d if k not in COMMON_FIELDS})
     return SchemaSurface(
         server=name,
         tool_count=len(definitions),
         tokens=sum(count_tokens(t) for t in texts),
         chars=sum(len(t) for t in texts),
+        common_tokens=sum(count_tokens(t) for t in common),
         subset_names=wanted,
         subset_tool_count=len(wanted),
         subset_tokens=sum(count_tokens(t) for t in subset),
+        subset_common_tokens=sum(count_tokens(t) for t in subset_common),
+        extra_fields=extra,
     )
+
+
+def placeroot_tool_definitions() -> list[dict]:
+    """Our live registry, refusing to measure a narrowed one.
+
+    `PLACEROOT_TOOLS` can register a subset, and a subset that drops a scenario
+    tool would otherwise produce a KeyError deep inside `measure_surface` or,
+    worse, a smaller published surface than an unconfigured install pays. The
+    page documents the default install, so say so.
+    """
+    definitions = token_efficiency.tool_definitions()
+    missing = [t for t in SCENARIO_TOOLS[PLACEROOT] if t not in {d["name"] for d in definitions}]
+    if missing:
+        raise RuntimeError(
+            "the tool registry is narrowed (PLACEROOT_TOOLS="
+            f"{os.environ.get('PLACEROOT_TOOLS', '<unset>')}), so it is missing scenario "
+            f"tools {missing}. This benchmark reports the default install; rerun with "
+            "PLACEROOT_TOOLS unset."
+        )
+    return definitions
 
 
 def measure_all_surfaces() -> dict[str, SchemaSurface]:
     return {
-        PLACEROOT: measure_surface(PLACEROOT, token_efficiency.tool_definitions()),
+        PLACEROOT: measure_surface(PLACEROOT, placeroot_tool_definitions()),
         MAPBOX: measure_surface(MAPBOX, competitor_tools(MAPBOX)),
         GOOGLE: measure_surface(GOOGLE, competitor_tools(GOOGLE)),
     }
 
 
 # ----------------------------------------------------------------------
-# (b) Answer size, on six identical questions.
+# (b) Answer size, on six matched questions.
+#
+# "Matched", not "identical": each competitor server really is asked the
+# scenario's question, but the stub behind it replies with the vendor's
+# published example for that endpoint whatever the arguments say. So their cell
+# is the size of their code's rendering of a payload they publish, not of an
+# answer to our exact question. Where that changes what is being compared —
+# the isochrone example carries three contours to our one — the difference is
+# recorded in provenance.json and printed next to the table.
 # ----------------------------------------------------------------------
 
 ROUTE_FROM_LAT, ROUTE_FROM_LON = fx.node_latlon(2, 2)
@@ -232,7 +293,7 @@ SCENARIOS: list[tuple[str, str, object]] = [
     ),
     (
         "matrix_3x3",
-        "3x3 distance matrix between six points.",
+        "3x3 distance matrix over three points.",
         lambda: server.distance_matrix(_MATRIX_POINTS, _MATRIX_POINTS),
     ),
 ]
@@ -290,7 +351,11 @@ def live_placeroot_answers() -> list[Answer]:
                     scenario=key,
                     tokens=count_tokens(text),
                     chars=len(text),
-                    minified_tokens=count_tokens(text),
+                    # Measured, not assumed: the claim on the page is that we
+                    # serialize compact, so run our text through the same
+                    # whitespace-stripping the competitors' text gets and let
+                    # the two numbers agree on their own.
+                    minified_tokens=minified_tokens(text),
                 )
             )
     return answers
@@ -316,7 +381,7 @@ def vendored_placeroot_answers() -> list[Answer]:
                 scenario=row["scenario"],
                 tokens=count_tokens(text),
                 chars=len(text),
-                minified_tokens=count_tokens(text),
+                minified_tokens=minified_tokens(text),
             )
         )
     return answers
@@ -378,10 +443,18 @@ def snapshot_answers() -> list[Answer]:
 
 
 def answer_index() -> dict[tuple[str, str], Answer]:
-    return {
-        (a.server, a.scenario): a
-        for a in vendored_placeroot_answers() + snapshot_answers()
-    }
+    """One answer per (server, scenario) — a duplicate is a capture bug.
+
+    Silently letting the last row win would let a stale re-capture sit in the
+    file and quietly set a published number.
+    """
+    index: dict[tuple[str, str], Answer] = {}
+    for answer in vendored_placeroot_answers() + snapshot_answers():
+        key = (answer.server, answer.scenario)
+        if key in index:
+            raise KeyError(f"duplicate captured answer for {key[0]}/{key[1]}")
+        index[key] = answer
+    return index
 
 
 # ----------------------------------------------------------------------
@@ -397,16 +470,53 @@ LABELS = {
 
 def render_schema_table(surfaces: dict[str, SchemaSurface]) -> str:
     lines = [
-        "| server | tools registered | schema surface (tokens) | schema surface (chars) "
-        "| the 6-scenario subset | subset tokens |",
-        "|---|---:|---:|---:|---:|---:|",
+        "| server | tools registered | whole install, verbatim | whole install, common fields "
+        "| the 6-scenario subset | subset verbatim | subset common fields |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
     for name in SERVER_ORDER:
         s = surfaces[name]
         lines.append(
-            f"| {LABELS[name]} | {s.tool_count} | **{s.tokens}** | {s.chars} "
-            f"| {s.subset_tool_count} | **{s.subset_tokens}** |"
+            f"| {LABELS[name]} | {s.tool_count} | {s.tokens} | **{s.common_tokens}** "
+            f"| {s.subset_tool_count} | {s.subset_tokens} | **{s.subset_common_tokens}** |"
         )
+    return "\n".join(lines)
+
+
+def render_field_note(surfaces: dict[str, SchemaSurface]) -> str:
+    """Name the fields each server publishes, and what the extras cost.
+
+    Without this the two columns above look like a rounding choice rather than
+    the difference between "they are more verbose" and "they publish a field we
+    don't publish at all".
+    """
+    common = ", ".join(f"`{f}`" for f in COMMON_FIELDS)
+    lines = [
+        f"**Common fields** are {common} — the ones every server here puts in a "
+        "`tools/list` entry. The verbatim column additionally counts whatever else "
+        "a server sends, and that is not the same kind of difference:",
+        "",
+    ]
+    for name in SERVER_ORDER:
+        s = surfaces[name]
+        if s.extra_fields:
+            extra = ", ".join(f"`{f}`" for f in s.extra_fields)
+            lines.append(
+                f"- **{LABELS[name]}** also sends {extra} — **{s.extra_tokens}** tokens "
+                f"across the install, **{s.subset_tokens - s.subset_common_tokens}** across "
+                "the six-tool subset."
+            )
+        else:
+            lines.append(f"- **{LABELS[name]}** sends the common fields and nothing else.")
+    lines += [
+        "",
+        "Mapbox declares an `outputSchema` on almost every tool; PlaceRoot declares none, "
+        "so on our side the field is *absent*, not smaller. An agent really does pay the "
+        "verbatim number, so it is in the table — but a ratio built on it would mostly be "
+        "reporting that one choice, which is why the headline ratios above use the common "
+        "fields. If PlaceRoot adds output schemas the two columns will converge, and this "
+        "page will say so on its own.",
+    ]
     return "\n".join(lines)
 
 
@@ -455,8 +565,11 @@ def render_generated_section() -> str:
     ours = surfaces[PLACEROOT]
     mapbox = surfaces[MAPBOX]
     google = surfaces[GOOGLE]
-    subset_vs_mapbox = mapbox.subset_tokens / ours.subset_tokens
-    whole_vs_mapbox = mapbox.tokens / ours.tokens
+    # Headline ratios are the common-field ones; see render_field_note().
+    subset_vs_mapbox = mapbox.subset_common_tokens / ours.subset_common_tokens
+    whole_vs_mapbox = mapbox.common_tokens / ours.common_tokens
+    subset_vs_mapbox_verbatim = mapbox.subset_tokens / ours.subset_tokens
+    whole_vs_mapbox_verbatim = mapbox.tokens / ours.tokens
 
     measured = [key for key, _q, _c in SCENARIOS if (MAPBOX, key) in index]
     ours_total = sum(index[(PLACEROOT, k)].tokens for k in measured)
@@ -492,15 +605,24 @@ def render_generated_section() -> str:
             "digit counts between platforms, so a live rerun costs a few tokens more or "
             "less on Linux than on macOS. A tolerance test reruns them for real and fails "
             "if this snapshot drifts from what the code now answers.",
-            f"- Schema surface, whole install: PlaceRoot **{ours.tokens}** tokens "
-            f"({ours.tool_count} tools) · Mapbox **{mapbox.tokens}** ({mapbox.tool_count} tools) "
-            f"· Google Maps **{google.tokens}** ({google.tool_count} tools)",
-            f"- Schema surface, the six tools each server needs for the scenarios below: "
-            f"PlaceRoot **{ours.subset_tokens}** · Mapbox **{mapbox.subset_tokens}** "
-            f"({subset_vs_mapbox:.1f}x ours) · Google Maps **{google.subset_tokens}** "
+            "- Schema figures are counted twice: over the **common fields** every server "
+            "here publishes, and **verbatim** over everything it sends. The ratios below "
+            "are the common-field ones, because Mapbox declares an `outputSchema` that "
+            "PlaceRoot does not declare at all — see the note under the table.",
+            f"- Schema surface, whole install (common fields): PlaceRoot "
+            f"**{ours.common_tokens}** tokens ({ours.tool_count} tools) · Mapbox "
+            f"**{mapbox.common_tokens}** ({mapbox.tool_count} tools) · Google Maps "
+            f"**{google.common_tokens}** ({google.tool_count} tools)",
+            f"- Schema surface, the six tools each server needs for the scenarios below "
+            f"(common fields): PlaceRoot **{ours.subset_common_tokens}** · Mapbox "
+            f"**{mapbox.subset_common_tokens}** ({subset_vs_mapbox:.1f}x ours) · Google Maps "
+            f"**{google.subset_common_tokens}** "
             f"({google.subset_tool_count} tools — no isochrone tool exists)",
-            f"- Whole-install surface: Mapbox is **{whole_vs_mapbox:.1f}x** PlaceRoot's, "
-            f"on {mapbox.tool_count} tools against {ours.tool_count}",
+            f"- Whole-install surface: Mapbox is **{whole_vs_mapbox:.1f}x** PlaceRoot's on "
+            f"common fields, on {mapbox.tool_count} tools against {ours.tool_count}. "
+            f"Verbatim — counting the output schemas Mapbox publishes and we don't — it is "
+            f"{whole_vs_mapbox_verbatim:.1f}x ({mapbox.tokens} against {ours.tokens}), and "
+            f"{subset_vs_mapbox_verbatim:.1f}x on the six-tool subset.",
             f"- Answers, over the {len(measured)} scenarios both PlaceRoot and Mapbox answer: "
             f"PlaceRoot **{ours_total}** tokens total, Mapbox **{theirs_total}** "
             f"({theirs_min_total} with pretty-print whitespace removed)",
@@ -513,6 +635,8 @@ def render_generated_section() -> str:
             "",
             render_schema_table(surfaces),
             "",
+            render_field_note(surfaces),
+            "",
             "### Answer size (paid per tool call)",
             "",
             render_answer_table(index),
@@ -520,9 +644,13 @@ def render_generated_section() -> str:
             "Competitor answers are their real servers' output: each server was run over "
             "stdio with its upstream HTTP calls pointed at a local stub replying with the "
             "vendor's own documented example response for that endpoint "
-            "(`benchmarks/competitors/upstream_examples/`). Both pretty-print their JSON with "
-            "two-space indentation, so the whitespace-free count is shown alongside. "
-            "PlaceRoot serializes compact, which is why its two numbers are equal.",
+            "(`benchmarks/competitors/upstream_examples/`). The stub answers with that "
+            "example whatever the request says, so a competitor cell is the size of their "
+            "code's rendering of a payload they publish — not of an answer to our exact "
+            "question, and not of the same content ours answered. Read the caveats below "
+            "before comparing any row. Both pretty-print their JSON with two-space "
+            "indentation, so the whitespace-free count is shown alongside; PlaceRoot "
+            "serializes compact, and its two counts come out equal.",
             "",
             f"PlaceRoot's answers were captured the same way, on "
             f"{ours_snapshot['captured_on']}: the six scenarios run through the same "
