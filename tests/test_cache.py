@@ -276,6 +276,23 @@ def test_concurrent_cache_misses_on_same_tile_only_fetch_once(con, cache_dir, mo
     assert calls.count(tile) == 1
 
 
+def test_eviction_exempts_non_tile_support_tables(con, cache_dir, monkeypatch):
+    """#230: the geocode divisions table (built once per release, so always
+    the oldest file in the cache) must survive an over-cap sweep — only
+    tile_*.parquet files are evictable."""
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", str(5000 / 1024 / 1024))
+    table = cache.cache_dir() / RELEASE / "geocode-divisions" / "table.parquet"
+    table.parent.mkdir(parents=True)
+    table.write_bytes(b"x" * 20000)
+    os.utime(table, (1, 1))  # by far the oldest (and largest) file in the cache
+    tiles = [(-74, 40), (-75, 40), (-76, 40), (15, 78)]
+    for t in tiles:
+        cache.ensure_tile(con, RELEASE, THEME, t, str(FIXTURE_PATH))
+    assert table.exists()
+    remaining_tiles = list(cache.cache_dir().rglob("tile_*.parquet"))
+    assert len(remaining_tiles) < len(tiles)  # tiles, not the table, were evicted
+
+
 def test_lru_eviction_removes_oldest_tiles_when_over_cap(con, cache_dir, monkeypatch):
     # ~5000 bytes: room for a couple of small tiles but not the whole set,
     # forcing eviction of the least-recently-used ones. (Bumped from 2000
