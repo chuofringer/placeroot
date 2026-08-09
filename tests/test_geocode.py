@@ -135,6 +135,118 @@ def test_division_only_queries_unaffected_by_places_fallback_change():
     assert results[0]["type"] == "locality"
 
 
+# --- #216: the places fallback never anchors on a stopword-only residual ---
+# Live repro: "the Met" anchored on a division named "Met" and then searched
+# place names for the residual "the" -- 50.2s of S3 scanning, answering with
+# "The Core IAS". The scan itself is the bug, so these count scans.
+
+
+def _count_places_fallback(monkeypatch):
+    """Record every places-theme scan; returns the (growing) list of calls."""
+    calls = []
+    real = geocode._query_places_fallback
+
+    def counted(query, anchor=None):
+        calls.append((query, anchor))
+        return real(query, anchor=anchor)
+
+    monkeypatch.setattr(geocode, "_query_places_fallback", counted)
+    return calls
+
+
+def test_stopword_only_residual_runs_no_places_scan_at_all(monkeypatch):
+    # "Met" substring-matches the fixture division "Metropolis", so the
+    # trailing-token anchor resolves exactly as it did live -- leaving "the"
+    # as the thing we must refuse to search place names for.
+    calls = _count_places_fallback(monkeypatch)
+
+    result = geocode.geocode_detailed("the Met", limit=5)
+
+    assert calls == [], "a stopword-only residual must not touch the places theme"
+    assert result["results"] == []
+    assert "skipped" in result["note"]
+
+
+def test_stopword_residual_note_reaches_the_geocode_tool(monkeypatch):
+    _count_places_fallback(monkeypatch)
+    result = server.geocode("the Met", limit=5)
+    assert result["results"] == []
+    # Text unique to this note, not the #105 one -- both mention find_places
+    # and both say "skipped", so only the distinctive half proves which of
+    # the two skip paths the caller was actually told about.
+    assert "nothing distinctive is left" in result["note"]
+    assert "the Metropolitan Museum of Art" in result["note"]
+    assert "find_places" in result["note"]
+
+
+def test_anchored_query_with_a_real_residual_still_scans_places(monkeypatch):
+    # The gate is about emptiness, not about anchoring: "Blue Bottle" is a
+    # perfectly good thing to search place names for, so this must run the
+    # (bbox-bounded) scan exactly as #83 left it.
+    calls = _count_places_fallback(monkeypatch)
+
+    results = geocode.geocode("Blue Bottle Roastery Brooklyn", limit=5)
+
+    assert [q for q, _ in calls] == ["Blue Bottle Roastery"]
+    assert calls[0][1] is not None, "and still bounded by the Brooklyn anchor"
+    assert "Blue Bottle Roastery" in [r["name"] for r in results]
+
+
+def test_multi_word_stopword_residual_is_rejected_too(monkeypatch):
+    # Every word being a stopword is the rejection condition, not just the
+    # single-word case.
+    calls = _count_places_fallback(monkeypatch)
+    result = geocode.geocode_detailed("of a Met", limit=5)
+    assert calls == []
+    assert result["results"] == []
+
+
+@pytest.mark.parametrize("query, residual", [
+    # Names made entirely of words too short for _significant_tokens' >=3
+    # rule, which the gate must NOT borrow: rejecting here returns nothing
+    # at all, and these are real, distinctive things to search names for.
+    ("H&M Brooklyn", "H&M"),
+    ("Q&A Brooklyn", "Q&A"),
+    # Two characters is a whole word in Chinese/Japanese/Korean -- the
+    # common case for those names, not an edge case. ("Forbidden City")
+    ("故宫 Brooklyn", "故宫"),
+])
+def test_short_but_meaningful_residual_still_scans_places(monkeypatch, query, residual):
+    calls = _count_places_fallback(monkeypatch)
+
+    result = geocode.geocode_detailed(query, limit=5)
+
+    assert [q for q, _ in calls] == [residual], "a short name is not an empty one"
+    assert calls[0][1] is not None, "and is still bounded by the Brooklyn anchor"
+    assert "note" not in result, "nothing was skipped, so there is nothing to explain"
+
+
+def test_short_residual_gate_matches_the_note_it_would_have_shown():
+    # The unit-level rule behind the two tests above: stopwords only, never
+    # length. Keeps _nothing_but_stopwords honest about what the note claims
+    # ("only common words like the or of").
+    assert geocode._nothing_but_stopwords("the")
+    assert geocode._nothing_but_stopwords("of a")
+    assert geocode._nothing_but_stopwords("   ")
+    assert not geocode._nothing_but_stopwords("H&M")
+    assert not geocode._nothing_but_stopwords("故宫")
+    assert not geocode._nothing_but_stopwords("the Blue Bottle")
+    # _significant_tokens keeps resolve_place's own (stricter) rule, plus its
+    # never-search-nothing fallback -- unchanged by #216.
+    assert geocode._significant_tokens("the") == ["the"]
+    assert geocode._significant_tokens("the Blue Bottle") == ["Blue", "Bottle"]
+
+
+def test_misspelled_prefix_still_reaches_the_fallback_pending_215(monkeypatch):
+    # Documents the deliberate limit of this gate (#216 acceptance): a typo
+    # residual isn't a stopword and so still reaches the places scan. Fixing
+    # that needs the fuzzy tier of #215; when it lands, this expectation
+    # should change with it.
+    calls = _count_places_fallback(monkeypatch)
+    geocode.geocode_detailed("Sna Brooklyn", limit=5)
+    assert [q for q, _ in calls] == ["Sna"]
+
+
 # --- reverse_geocode ---
 
 

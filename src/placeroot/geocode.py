@@ -689,7 +689,7 @@ def _fallback_anchor(
     divisions: list[dict],
     region_code: str | None,
     local_table: str | None,
-) -> tuple[float, float, str] | None:
+) -> tuple[float, float, str | None] | None:
     """(lat, lon, name_query) to bound/aim the places fallback (#83), or None
     if no location context can be derived from the query at all — the
     caller (geocode()) then runs the fallback unbounded, same as before #83
@@ -712,6 +712,27 @@ def _fallback_anchor(
     matching the *whole* query (which appends the city name onto the place
     name) against a places row's own name would otherwise never match
     anything, defeating the point of finding an anchor at all.
+
+    #216: that trailing-token split is only worth acting on when what's
+    left over is something a place could plausibly be *named*. name_query
+    comes back None when it isn't — "the Met" splits into anchor "Met"
+    (which substring-matches a real division) and residual "the", and
+    ILIKE '%the%' matches a large fraction of every place on Earth: 50.2s
+    measured live, answering "the Met" with "The Core IAS". The caller
+    treats a None name_query as "skip the places half entirely and say so",
+    which is strictly better than that. The rule is _nothing_but_stopwords':
+    reject only when *every* word left is a _STOPWORD. That is deliberately
+    looser than _significant_tokens' >=3-chars-and-not-a-stopword rule --
+    rejecting here means returning nothing at all, and short is not the same
+    as empty ("H&M Brooklyn", or a two-character Chinese name, has to reach
+    the anchored scan). See _nothing_but_stopwords.
+
+    Note this gate is about *emptiness*, not correctness: a misspelling
+    like "Sna Francisco" (anchor "Francisco", residual "Sna") still clears
+    it and still reaches the fallback to find "Snags N Burgs Cafe". Getting
+    that one right needs the fuzzy/trigram tier tracked in #215 -- a
+    residual that matches nothing well should degrade to a fuzzy retry of
+    the whole query, not to a substring scan of its typo.
     """
     if divisions:
         top = divisions[0]
@@ -726,7 +747,8 @@ def _fallback_anchor(
             continue
         best = min(rows, key=lambda r: _rank_key(r, candidate, {}))
         base = " ".join(tokens[:-n]).strip()
-        return best["lat"], best["lon"], (base or search_query)
+        name_query = None if _nothing_but_stopwords(base) else base
+        return best["lat"], best["lon"], name_query
     return None
 
 
@@ -789,9 +811,10 @@ def geocode(query: str, limit: int = DEFAULT_LIMIT) -> list[dict]:
 def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
     """Free-text place name -> ranked candidates, from Overture divisions (and places fallback).
 
-    Returns {"results": [...]} and, when a query carries no derivable
-    location context, a "note" explaining that the places-name half of the
-    search was skipped and how to make the query answerable (#105).
+    Returns {"results": [...]} and, when the places-name half of the search
+    is skipped as not worth its cost — no derivable location context to
+    bound it by (#105), or nothing but stopwords left to search names for
+    (#216) — a "note" saying so and how to make the query answerable.
 
     Never more than `limit` results. Each result: {name, type, lat, lon, id
     (GERS), admin_context, rank_score}. Raises overture.UpstreamUnavailable
@@ -887,7 +910,15 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
         anchor, name_query = (
             ((anchor_hit[0], anchor_hit[1]), anchor_hit[2]) if anchor_hit else (None, search_query)
         )
-        if anchor is None and _skip_unanchored_places_scan():
+        if name_query is None:
+            # #216: an anchor was derivable, but the query has nothing left
+            # in it that a place could be named — see _fallback_anchor.
+            # Searching places for a bag of stopwords costs a full-theme
+            # substring scan (50.2s measured on "the Met") and returns
+            # whatever unrelated name happens to contain "the". Say what
+            # went wrong instead.
+            note = _STOPWORD_RESIDUAL_NOTE
+        elif anchor is None and _skip_unanchored_places_scan():
             # #105: with no anchor there is no bbox to prune by, so this is
             # a substring scan of every place on Earth. Measured live
             # against the 2026-07-22.0 release: 216s end-to-end for a query
@@ -955,6 +986,16 @@ _UNBOUNDED_NAME_SEARCH_ENV = "PLACEROOT_UNBOUNDED_NAME_SEARCH"
 # Schemes DuckDB reads over the network; anything else is a local path.
 _REMOTE_GLOB_SCHEMES = ("s3://", "http://", "https://", "gcs://", "gs://", "az://", "azure://")
 
+_STOPWORD_RESIDUAL_NOTE = (
+    "no division matched this query as a whole, and once its trailing location "
+    "word is set aside as an anchor nothing distinctive is left to search place "
+    "names for (only common words like \"the\" or \"of\"), so the places half of "
+    "the search was skipped -- matching those against every place name is minutes "
+    "of scanning for results that would be unrelated anyway. Spell the name out "
+    "(\"the Metropolitan Museum of Art\" rather than \"the Met\"), or use "
+    "find_places with lat/lon to search a known area."
+)
+
 _UNANCHORED_NAME_SEARCH_NOTE = (
     "no division matched, and this query carries no location context to bound a "
     "place-name search by, so the places half of the search was skipped (it would "
@@ -1009,6 +1050,21 @@ def _match_label(name: str, query: str) -> str:
 # slow response. A real place reference ("the Whole Foods on South Lamar,
 # Austin") is a handful of words; cap the fan-out well above that.
 _MAX_RESOLVE_TOKENS = 12
+
+
+def _nothing_but_stopwords(text: str) -> bool:
+    """Whether `text` holds no word a place could be named after — every word
+    in it is a _STOPWORD, or there are no words at all.
+
+    _fallback_anchor's residual gate (#216). Deliberately *not*
+    _significant_tokens' rule: that one also drops words under 3 characters,
+    which is safe there only because it layers a never-search-nothing
+    fallback on top. Here the answer is load-bearing — "reject" means
+    returning no results at all — and plenty of real names are nothing but
+    short words ("H&M", and most two-character Chinese/Japanese/Korean place
+    names). Those are distinctive enough to search on; "the" is not.
+    """
+    return not any(w.lower() not in _STOPWORDS for w in re.findall(r"[\w'-]+", text))
 
 
 def _significant_tokens(query: str) -> list[str]:
