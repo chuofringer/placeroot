@@ -282,6 +282,18 @@ def test_results_are_correct_via_local_table(geocode_cache):
     assert all(r["name"] == "Springfield" for r in results)
 
 
+def test_vanished_local_table_mid_query_falls_back_to_upstream(geocode_cache):
+    """#230: the local table being deleted between _local_divisions_table()'s
+    exists() check and the read (external cleanup, or a cache sweep) must
+    degrade to a direct upstream scan, not surface a false
+    upstream_unavailable."""
+    geocode.geocode("Brooklyn", limit=5)  # materialize the table
+    path = geocode._local_divisions_table_path(release.PINNED_RELEASE)
+    path.unlink()  # simulate the sweep winning the race
+    results = geocode._query_divisions("Brooklyn", None, str(path))
+    assert any(r["name"] == "Brooklyn" for r in results)
+
+
 def test_cache_off_skips_materialization_and_still_answers(monkeypatch, tmp_path):
     monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "placeroot-cache"))
     monkeypatch.setenv("PLACEROOT_CACHE", "off")

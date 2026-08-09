@@ -666,7 +666,20 @@ def _query_divisions(
     the diacritic-folded half of the second-pass variant retry."""
     if local_table is not None:
         name_expr = "strip_accents(name)" if fold_diacritics else "name"
-        return _query_divisions_from_local(local_table, query, region_code, name_expr)
+        try:
+            return _query_divisions_from_local(local_table, query, region_code, name_expr)
+        except overture.UpstreamUnavailable:
+            if Path(local_table).exists():
+                raise
+            # The table was deleted out from under us between the exists()
+            # check in _local_divisions_table() and the read (external
+            # cleanup, or a cache sweep — #230). Upstream is not known to be
+            # unavailable, so don't report it as such: degrade to the direct
+            # upstream scan, same as if the table had never materialized.
+            logger.warning(
+                "local divisions table vanished mid-query (%s); falling back "
+                "to a direct upstream scan", local_table,
+            )
     name_expr = "strip_accents(names.primary)" if fold_diacritics else "names.primary"
     return _query_divisions_from_upstream(query, region_code, name_expr)
 
