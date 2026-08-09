@@ -4,6 +4,12 @@
 
 # PlaceRoot
 
+[![CI](https://github.com/chuofringer/placeroot/actions/workflows/ci.yml/badge.svg)](https://github.com/chuofringer/placeroot/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/placeroot)](https://pypi.org/project/placeroot/)
+[![npm](https://img.shields.io/npm/v/placeroot)](https://www.npmjs.com/package/placeroot)
+[![Python](https://img.shields.io/pypi/pyversions/placeroot)](https://pypi.org/project/placeroot/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/chuofringer/placeroot/blob/main/LICENSE)
+
 **Ground AI agents in open map data.**
 
 PlaceRoot is an MCP server that answers spatial questions from [Overture Maps](https://overturemaps.org) — no API key, no signup, no vendor platform.

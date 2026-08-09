@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/chuofringer/placeroot/discussions
+    about: Not sure it's a bug? Ask here first.
+  - name: Security report
+    url: https://github.com/chuofringer/placeroot/security/advisories/new
+    about: Please report vulnerabilities privately, not as public issues.
+  - name: Website
+    url: https://placeroot.dev
+    about: What PlaceRoot is and how to install it.

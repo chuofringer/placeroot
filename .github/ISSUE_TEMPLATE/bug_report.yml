@@ -1,0 +1,50 @@
+name: Bug report
+description: Something returned a wrong answer, errored, or misbehaved
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The tool call you made (tool name + arguments) and what came back vs. what you expected.
+      placeholder: |
+        Called find_places(lat=…, lon=…, category="…") and got …
+        Expected …
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: MCP client
+      placeholder: Claude Desktop / Claude Code / Cursor / custom
+    validations:
+      required: true
+  - type: input
+    id: tools-env
+    attributes:
+      label: PLACEROOT_TOOLS value
+      description: The env var if set, or "unset" (full 29-tool surface).
+      placeholder: unset
+    validations:
+      required: true
+  - type: input
+    id: release
+    attributes:
+      label: Overture release
+      description: What the `data_version` tool reports (release + source).
+      placeholder: 2026-07-22.0 (discovered)
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: PlaceRoot + Python version
+      placeholder: placeroot 0.8.0, Python 3.12, installed via uvx
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / stderr
+      description: Server startup line and any traceback, if you have them.
+      render: text
