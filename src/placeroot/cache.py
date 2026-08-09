@@ -446,7 +446,19 @@ def evict_if_needed() -> None:
     root = cache_dir()
     if not root.exists():
         return
-    files = list(root.rglob("*.parquet"))
+    # Only tile files (tile_Y_X.parquet, old- or new-layout) are evictable.
+    # The cache root also holds support tables that are NOT tiles: the
+    # geocode divisions name table (geocode-divisions/table.parquet, #43)
+    # and any sibling per-release tables built once and reused for the whole
+    # session. They are large, built exactly once, and never re-touched, so
+    # under an oldest-mtime-first sweep they are always the first casualty —
+    # evicting one turns a healthy local query into a false
+    # UpstreamUnavailable mid-query, and the subsequent rebuild immediately
+    # re-triggers eviction (thrash, #230). They are excluded from the size
+    # accounting too: they're a fixed per-release overhead, and counting
+    # them against the cap would let a large table squeeze the effective
+    # tile budget to zero and evict every tile on every pass.
+    files = [f for f in root.rglob("*.parquet") if f.name.startswith("tile_")]
     files.sort(key=lambda p: p.stat().st_mtime)
     total = sum(f.stat().st_size for f in files)
     cap = max_bytes()
