@@ -39,6 +39,7 @@
     .pr-h1hero{white-space:normal!important;font-size:33px!important}
     .pr-devhead,.pr-footrow{flex-direction:column!important;align-items:flex-start!important;gap:14px!important}
     .pr-toolgrid{grid-template-columns:1fr!important}
+    .pr-contactrow{flex-direction:column!important;border-radius:20px!important;padding:20px!important;gap:14px!important}
   }
 </style>
 <script type="application/ld+json">
@@ -61,7 +62,7 @@
 <div style="background:#fbfaf5">
   <div class="pr-nav pr-wrap" style="max-width:1240px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:20px 48px;box-sizing:border-box">
     <a href="index.html" style="display:flex;align-items:center;gap:7px;text-decoration:none"><svg width="32" height="30" viewBox="0 0 96 92"><rect x="8" y="8" width="80" height="58" rx="18" fill="#5c8a63"></rect><path d="M28 66 L28 86 L48 66 Z" fill="#5c8a63"></path><circle cx="48" cy="33" r="10" fill="#fbfaf5"></circle><circle cx="48" cy="33" r="4" fill="#e8b04b"></circle><path d="M48 43 L48 52" stroke="#fbfaf5" stroke-width="4" stroke-linecap="round"></path></svg><span style="font-weight:800;font-size:18px;letter-spacing:-.02em;color:#2a332b">placeroot</span></a>
-    <div class="pr-navlinks" style="display:flex;gap:26px;align-items:center;font-size:14px;font-weight:600"><a href="how-it-works.html" style="color:#55604f;text-decoration:none">How it works</a><a href="add-to-your-ai.html" style="color:#fbfaf5;background:#5c8a63;padding:10px 20px;border-radius:99px;white-space:nowrap;text-decoration:none">Add to your AI — free</a></div>
+    <div class="pr-navlinks" style="display:flex;gap:26px;align-items:center;font-size:14px;font-weight:600"><a href="how-it-works.html" style="color:#55604f;text-decoration:none">How it works</a><a href="add-to-your-ai.html" style="color:#fbfaf5;background:#5c8a63;padding:10px 20px;border-radius:99px;white-space:nowrap;text-decoration:none">Add to your AI — free</a><a href="#contact" style="color:#55604f;text-decoration:none">Contact</a></div>
   </div>
 </div>
 <div style="background:linear-gradient(160deg,#fbfaf5 40%,#eef3ea)">
@@ -245,6 +246,15 @@
     </div>
   </div>
 </div>
+<div id="contact" style="background:#eef3ea">
+  <div class="pr-wrap" style="max-width:1240px;margin:0 auto;padding:60px 48px;box-sizing:border-box;text-align:center">
+    <h2 style="margin:0;font-size:30px;font-weight:800;letter-spacing:-.025em;color:#2a332b">Contact</h2>
+    <div class="pr-contactrow" style="margin-top:22px;display:inline-flex;align-items:center;gap:16px;max-width:100%;box-sizing:border-box;background:#fff;border:1px solid rgba(42,51,43,.1);border-radius:99px;padding:12px 12px 12px 28px;box-shadow:0 12px 28px rgba(42,51,43,.1)">
+      <a href="mailto:hello@placeroot.dev" style="font:600 clamp(17px,4.4vw,26px) 'Fira Code',monospace;color:#2a332b;text-decoration:none;letter-spacing:-.01em;word-break:break-all">hello@placeroot.dev</a>
+      <button id="contactCopyBtn" type="button" style="cursor:pointer;flex:none;font:600 13px 'Fira Code',monospace;color:#fbfaf5;background:#5c8a63;padding:11px 20px;border-radius:99px;border:none">copy</button>
+    </div>
+  </div>
+</div>
 <script>
   (function () {
     var config = '{\n  "mcpServers": {\n    "placeroot": {\n      "command": "uvx",\n      "args": ["placeroot"]\n    }\n  }\n}';
@@ -255,6 +265,20 @@
       btn.textContent = "copied ✓";
       clearTimeout(t);
       t = setTimeout(function () { btn.textContent = "copy"; }, 1500);
+    });
+  })();
+  (function () {
+    var btn = document.getElementById("contactCopyBtn");
+    var t;
+    // "copied ✓" only once the write resolves — a denied clipboard permission
+    // must not report success over an address the user never got.
+    btn.addEventListener("click", function () {
+      if (!navigator.clipboard) return;
+      navigator.clipboard.writeText("hello@placeroot.dev").then(function () {
+        btn.textContent = "copied ✓";
+        clearTimeout(t);
+        t = setTimeout(function () { btn.textContent = "copy"; }, 1500);
+      }).catch(function () {});
     });
   })();
 </script>
