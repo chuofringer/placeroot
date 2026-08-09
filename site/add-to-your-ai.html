@@ -46,8 +46,6 @@
     <a href="index.html" style="display:flex;align-items:center;gap:7px"><svg width="32" height="30" viewBox="0 0 96 92"><rect x="8" y="8" width="80" height="58" rx="18" fill="#5c8a63"></rect><path d="M28 66 L28 86 L48 66 Z" fill="#5c8a63"></path><circle cx="48" cy="33" r="10" fill="#fbfaf5"></circle><circle cx="48" cy="33" r="4" fill="#e8b04b"></circle><path d="M48 43 L48 52" stroke="#fbfaf5" stroke-width="4" stroke-linecap="round"></path></svg><span style="font-weight:800;font-size:18px;letter-spacing:-.02em;color:#2a332b">placeroot</span></a>
     <div class="pr-navlinks" style="display:flex;gap:26px;align-items:center;font-size:14px;font-weight:600">
       <a href="how-it-works.html" style="color:#55604f">How it works</a>
-      <a href="https://pypi.org/project/placeroot/" style="color:#55604f">PyPI ↗</a>
-      <a href="https://www.npmjs.com/package/placeroot" style="color:#55604f">npm ↗</a>
       <span style="color:#fbfaf5;background:#5c8a63;padding:10px 20px;border-radius:99px;white-space:nowrap">Add to your AI — free</span>
     </div>
   </div>
@@ -60,16 +58,32 @@
     <div class="pr-installgrid" style="background:#171c17;border-radius:18px;padding:36px 40px;display:grid;grid-template-columns:1.05fr 1fr;gap:40px;align-items:start">
       <div>
         <div style="font:600 11px 'Fira Code',monospace;color:#e8b04b;margin-bottom:16px">INSTALL · <span id="activeName1"></span></div>
-        <div style="display:flex;flex-direction:column;gap:14px;font-size:14px;line-height:1.6;color:#c9d4c4">
-          <div style="display:flex;gap:12px"><span style="font:600 12px 'Fira Code',monospace;color:#8fbf96;flex:none;padding-top:2px">1</span><span id="step1"></span></div>
-          <div id="oneclick" style="display:none"><a id="oneclickLink" href="#" style="display:inline-block;font:600 13px 'Fira Code',monospace;color:#171c17;background:#8fbf96;padding:10px 20px;border-radius:99px;text-decoration:none">⚡ one-click install</a><div style="margin-top:8px;font-size:12px;color:#8a9482">Opens the app and pre-fills the config — you just confirm a dialog.</div></div>
-          <div style="display:flex;gap:12px"><span style="font:600 12px 'Fira Code',monospace;color:#8fbf96;flex:none;padding-top:2px">2</span><span id="step2"></span></div>
+        <div id="surfacePick" style="display:none;margin-bottom:16px">
+          <div style="font-size:13px;color:#c9d4c4;margin-bottom:8px">Where do you want it? The surfaces read separate configs — an install in one doesn't show up in the other.</div>
+          <div id="surfaceChips" style="display:flex;gap:8px;flex-wrap:wrap"></div>
         </div>
-        <div style="margin:14px 0 0;background:#0f140f;border-radius:10px;overflow:hidden;border:1px solid rgba(251,250,245,.08)">
-          <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px;border-bottom:1px solid rgba(251,250,245,.07)"><span id="configFile" style="font:500 10.5px 'Fira Code',monospace;color:#8a9482"></span><button id="copyBtn" type="button" style="cursor:pointer;font:600 10.5px 'Fira Code',monospace;color:#171c17;background:#e8b04b;padding:4px 11px;border-radius:5px;border:none">copy</button></div>
-          <pre id="configText" style="margin:0;padding:14px 18px;font:400 12.5px/1.7 'Fira Code',monospace;color:#e8ead9;white-space:pre-wrap"></pre>
+        <div id="oneclick" style="display:none;margin-bottom:16px"><a id="oneclickLink" href="#" style="display:inline-block;font:600 13px 'Fira Code',monospace;color:#171c17;background:#8fbf96;padding:10px 20px;border-radius:99px;text-decoration:none">⚡ one-click install</a><div style="margin-top:8px;font-size:12px;color:#8a9482">Opens the app and pre-fills the config — you just confirm a dialog.</div></div>
+        <div id="promptBlock" style="display:none">
+          <div style="font-size:14px;line-height:1.6;color:#c9d4c4;margin-bottom:10px">Paste this into <span id="promptTarget" style="color:#8fbf96"></span> and let it do the install:</div>
+          <div style="background:#0f140f;border-radius:10px;overflow:hidden;border:1px solid rgba(251,250,245,.08)">
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px;border-bottom:1px solid rgba(251,250,245,.07)"><span style="font:500 10.5px 'Fira Code',monospace;color:#8a9482">prompt</span><button id="promptCopyBtn" type="button" style="cursor:pointer;font:600 10.5px 'Fira Code',monospace;color:#171c17;background:#e8b04b;padding:4px 11px;border-radius:5px;border:none">copy</button></div>
+            <pre id="promptText" style="margin:0;padding:14px 18px;font:400 12.5px/1.7 'Fira Code',monospace;color:#e8ead9;white-space:pre-wrap;word-break:break-word"></pre>
+          </div>
+          <div style="margin-top:8px;font-size:12px;color:#8a9482">The prompt asks the agent to name the config file before editing it, and to finish by confirming the <span style="color:#8fbf96">find_places</span> tool shows up — so nothing happens off-screen.</div>
         </div>
-        <div style="display:flex;gap:12px;margin-top:14px;font-size:14px;line-height:1.6;color:#c9d4c4"><span style="font:600 12px 'Fira Code',monospace;color:#8fbf96;flex:none;padding-top:2px">3</span><span id="step3"></span></div>
+        <div id="surfaceNote" style="display:none;margin-top:14px;font-size:12.5px;line-height:1.6;color:#e8b04b"></div>
+        <details id="manualDetails" style="margin-top:16px">
+          <summary id="manualSummary" style="cursor:pointer;font:600 12px 'Fira Code',monospace;color:#8fbf96">do it by hand instead</summary>
+          <div style="display:flex;flex-direction:column;gap:14px;font-size:14px;line-height:1.6;color:#c9d4c4;margin-top:14px">
+            <div style="display:flex;gap:12px"><span style="font:600 12px 'Fira Code',monospace;color:#8fbf96;flex:none;padding-top:2px">1</span><span id="step1"></span></div>
+            <div style="display:flex;gap:12px"><span style="font:600 12px 'Fira Code',monospace;color:#8fbf96;flex:none;padding-top:2px">2</span><span id="step2"></span></div>
+          </div>
+          <div style="margin:14px 0 0;background:#0f140f;border-radius:10px;overflow:hidden;border:1px solid rgba(251,250,245,.08)">
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 14px;border-bottom:1px solid rgba(251,250,245,.07)"><span id="configFile" style="font:500 10.5px 'Fira Code',monospace;color:#8a9482"></span><button id="copyBtn" type="button" style="cursor:pointer;font:600 10.5px 'Fira Code',monospace;color:#171c17;background:#e8b04b;padding:4px 11px;border-radius:5px;border:none">copy</button></div>
+            <pre id="configText" style="margin:0;padding:14px 18px;font:400 12.5px/1.7 'Fira Code',monospace;color:#e8ead9;white-space:pre-wrap"></pre>
+          </div>
+          <div style="display:flex;gap:12px;margin-top:14px;font-size:14px;line-height:1.6;color:#c9d4c4"><span style="font:600 12px 'Fira Code',monospace;color:#8fbf96;flex:none;padding-top:2px">3</span><span id="step3"></span></div>
+        </details>
         <div style="margin-top:18px;font:500 11.5px 'Fira Code',monospace;color:#8a9482">requires <a href="https://docs.astral.sh/uv/" style="color:#8fbf96">uv</a> · stdio transport · latest release <span style="color:#e8b04b">v0.7.0</span> · <a href="https://pypi.org/project/placeroot/" style="color:#8fbf96">full options on PyPI →</a></div>
         <div style="margin-top:10px;font-size:13px;line-height:1.6;color:#8a9482">Prefer npm? <code style="font:500 12px 'Fira Code',monospace;color:#8fbf96">npx placeroot</code> also works — set <code style="font:500 12px 'Fira Code',monospace;color:#8fbf96">"command": "npx"</code> in any config above. The <a href="https://www.npmjs.com/package/placeroot" style="color:#8fbf96">npm launcher</a> (Node 18+) runs the same Python server via uv under the hood.</div>
       </div>
@@ -99,18 +113,25 @@
   (function () {
     var JSON_SNIPPET = '"mcpServers": {\n  "placeroot": { "command": "uvx", "args": ["placeroot"] }\n}';
     var JSON_FULL = '{\n  "mcpServers": {\n    "placeroot": {\n      "command": "uvx",\n      "args": ["placeroot"]\n    }\n  }\n}';
+    var PROMPT = 'Install the PlaceRoot MCP server for me. It is a local stdio server run with "uvx placeroot", which requires uv (docs.astral.sh/uv). If uv is not installed, tell me so and ask before installing anything. Add the server to this tool\'s MCP configuration — tell me which config file you are changing before you edit it. Restart whatever needs restarting, then verify the install by listing the MCP tools and confirming that "find_places" from placeroot is available.';
     var apps = [
-      { name: "Claude Desktop", step1: "In the Claude Desktop app, open Settings → Developer → Edit Config. This opens claude_desktop_config.json.", step2: "Add the server config:", file: "claude_desktop_config.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Quit and reopen Claude Desktop, then ask: \"What's around downtown Palo Alto?\"" },
-      { name: "Claude Code", step1: "In a terminal, from any project directory:", step2: "Run one command:", file: "terminal", snippet: "claude mcp add placeroot -- uvx placeroot", copy: "claude mcp add placeroot -- uvx placeroot", step3: "Check with /mcp inside a session — then just ask. (Add --scope user to enable it in every project.)" },
-      { name: "ChatGPT Desktop", step1: "In the ChatGPT desktop app, add an MCP server in settings: enter a name, choose STDIO, and give it the command \"uvx placeroot\". (ChatGPT on the web takes remote servers only — or use Codex: codex mcp add placeroot -- uvx placeroot.)", step2: "Command to paste:", file: "server command · STDIO", snippet: "uvx placeroot", copy: "uvx placeroot", step3: "Save, restart, then type /mcp in the composer to confirm placeroot is connected." },
-      { name: "Gemini CLI", step1: "MCP servers work in Gemini CLI (the consumer Gemini app doesn't take custom servers). Open ~/.gemini/settings.json — create it if it doesn't exist.", step2: "Add the server config:", file: "~/.gemini/settings.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Restart gemini and type /mcp — placeroot should be listed. Then just ask." },
-      { name: "Cursor", step1: "Fastest: use the one-click install below — it opens Cursor with the config pre-filled; just confirm.", step2: "Or add the config by hand (Settings → MCP → Add new server, or .cursor/mcp.json):", file: ".cursor/mcp.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Ask the agent about places around any address in your code or docs.", deeplink: "cursor://anysphere.cursor-deeplink/mcp/install?name=placeroot&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJwbGFjZXJvb3QiXX0=" },
-      { name: "VS Code", step1: "Fastest: use the one-click install below — it opens VS Code with the config pre-filled; just confirm.", step2: "Or add the config by hand (.vscode/mcp.json, or: code --add-mcp '{\"name\":\"placeroot\",\"command\":\"uvx\",\"args\":[\"placeroot\"]}'):", file: ".vscode/mcp.json", snippet: '"servers": {\n  "placeroot": { "type": "stdio", "command": "uvx", "args": ["placeroot"] }\n}', copy: '{\n  "servers": {\n    "placeroot": {\n      "type": "stdio",\n      "command": "uvx",\n      "args": ["placeroot"]\n    }\n  }\n}', step3: "Open Chat in Agent mode and check the tools icon — placeroot's tools should be listed.", deeplink: "https://vscode.dev/redirect/mcp/install?name=placeroot&config=%7B%22name%22%3A%22placeroot%22%2C%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22placeroot%22%5D%7D" },
-      { name: "any MCP agent", step1: "Register a stdio MCP server pointing at the command below.", step2: "Server config (stdio transport):", file: "mcp config", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Call find_places or summarize_area from your agent loop." }
+      { name: "Claude Desktop", surfaces: [
+        { label: "Claude chat", prompt: false, manualOpen: true, warn: true, note: "The Chat tab has no file or shell access, so an agent can't install this for itself — use the steps below. Installing in the Code tab does NOT make it appear here.", step1: "In the Claude Desktop app, open Settings → Developer → Edit Config. This opens claude_desktop_config.json.", step2: "Add the server config:", file: "claude_desktop_config.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Quit and reopen Claude Desktop, then ask: \"What's around downtown Palo Alto?\"" },
+        { label: "the Code tab", prompt: true, warn: true, note: "This installs for the Code tab (Claude Code) only — Claude chat reads a separate config; pick \"Claude chat\" above for that.", step1: "Open the integrated terminal in the Code tab and run one command:", step2: "Command:", file: "terminal", snippet: "claude mcp add placeroot -- uvx placeroot", copy: "claude mcp add placeroot -- uvx placeroot", step3: "Check with /mcp inside the session, and verify in the SAME tab you installed for — then just ask." }
+      ] },
+      { name: "Claude Code", prompt: true, step1: "In a terminal, from any project directory:", step2: "Run one command:", file: "terminal", snippet: "claude mcp add placeroot -- uvx placeroot", copy: "claude mcp add placeroot -- uvx placeroot", step3: "Check with /mcp inside a session — then just ask. (Add --scope user to enable it in every project.)" },
+      { name: "ChatGPT Desktop", surfaces: [
+        { label: "the ChatGPT app", prompt: false, manualOpen: true, note: "The chat app can't run the install for itself — use the steps below. (ChatGPT on the web takes remote servers only.)", step1: "In the ChatGPT desktop app, add an MCP server in settings: enter a name, choose STDIO, and give it the command \"uvx placeroot\".", step2: "Command to paste:", file: "server command · STDIO", snippet: "uvx placeroot", copy: "uvx placeroot", step3: "Save, restart, then type /mcp in the composer to confirm placeroot is connected." },
+        { label: "Codex CLI", prompt: true, note: "Codex CLI and the Codex IDE extension share one config (~/.codex/config.toml), so an install here covers both.", step1: "In a terminal:", step2: "Run one command:", file: "terminal", snippet: "codex mcp add placeroot -- uvx placeroot", copy: "codex mcp add placeroot -- uvx placeroot", step3: "Restart codex and check /mcp — placeroot should be listed." }
+      ] },
+      { name: "Gemini CLI", prompt: true, step1: "MCP servers work in Gemini CLI (the consumer Gemini app doesn't take custom servers). Open ~/.gemini/settings.json — create it if it doesn't exist.", step2: "Add the server config:", file: "~/.gemini/settings.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Restart gemini and type /mcp — placeroot should be listed. Then just ask." },
+      { name: "Cursor", prompt: true, step1: "Open Cursor Settings → MCP → Add new server, or create .cursor/mcp.json in your project.", step2: "Add the server config:", file: ".cursor/mcp.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Ask the agent about places around any address in your code or docs.", deeplink: "cursor://anysphere.cursor-deeplink/mcp/install?name=placeroot&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJwbGFjZXJvb3QiXX0=" },
+      { name: "VS Code", prompt: true, step1: "Create .vscode/mcp.json in your project (or run: code --add-mcp '{\"name\":\"placeroot\",\"command\":\"uvx\",\"args\":[\"placeroot\"]}').", step2: "Add the server config:", file: ".vscode/mcp.json", snippet: '"servers": {\n  "placeroot": { "type": "stdio", "command": "uvx", "args": ["placeroot"] }\n}', copy: '{\n  "servers": {\n    "placeroot": {\n      "type": "stdio",\n      "command": "uvx",\n      "args": ["placeroot"]\n    }\n  }\n}', step3: "Open Chat in Agent mode and check the tools icon — placeroot's tools should be listed.", deeplink: "https://vscode.dev/redirect/mcp/install?name=placeroot&config=%7B%22name%22%3A%22placeroot%22%2C%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22placeroot%22%5D%7D" },
+      { name: "any MCP agent", prompt: true, note: "The prompt works when your client hosts an agent with file access. If it's a plain chat UI, use the manual steps below.", step1: "Register a stdio MCP server pointing at the command below.", step2: "Server config (stdio transport):", file: "mcp config", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Call find_places or summarize_area from your agent loop." }
     ];
 
-    var state = { tab: 0, copied: false };
-    var copyTimer;
+    var state = { tab: 0, surface: 0, copied: false, promptCopied: false };
+    var copyTimer, promptCopyTimer;
     var tabsEl = document.getElementById("tabs");
 
     function renderTabs() {
@@ -125,20 +146,72 @@
           ";background:" + (active ? "#5c8a63" : "transparent") +
           ";color:" + (active ? "#fbfaf5" : "#55604f");
         el.addEventListener("click", function () {
+          if (state.tab === i) return;
           state.tab = i;
+          state.surface = 0;
           state.copied = false;
+          state.promptCopied = false;
           clearTimeout(copyTimer);
+          clearTimeout(promptCopyTimer);
+          resetManualFold();
           render();
         });
         tabsEl.appendChild(el);
       });
     }
 
-    function render() {
+    function activeEntry() {
       var a = apps[state.tab];
+      return a.surfaces ? a.surfaces[state.surface] : a;
+    }
+
+    function renderSurfaces() {
+      var a = apps[state.tab];
+      var pick = document.getElementById("surfacePick");
+      if (!a.surfaces) { pick.style.display = "none"; return; }
+      pick.style.display = "block";
+      var chips = document.getElementById("surfaceChips");
+      chips.innerHTML = "";
+      a.surfaces.forEach(function (s, i) {
+        var active = i === state.surface;
+        var el = document.createElement("span");
+        el.textContent = s.label;
+        el.style.cssText =
+          "cursor:pointer;font:600 12px 'Fira Code',monospace;padding:7px 14px;border-radius:99px;white-space:nowrap;border:1.5px solid " +
+          (active ? "#8fbf96" : "rgba(251,250,245,.25)") +
+          ";background:" + (active ? "#8fbf96" : "transparent") +
+          ";color:" + (active ? "#171c17" : "#c9d4c4");
+        el.addEventListener("click", function () {
+          state.surface = i;
+          state.copied = false;
+          state.promptCopied = false;
+          clearTimeout(copyTimer);
+          clearTimeout(promptCopyTimer);
+          resetManualFold();
+          render();
+        });
+        chips.appendChild(el);
+      });
+    }
+
+    // Collapse/expand only when the selection changes — a re-render from a
+    // copy-button click must not slam shut a section the user opened. With
+    // no prompt and no deeplink the manual steps ARE the path, so they show
+    // expanded rather than behind a fold.
+    function resetManualFold() {
+      var a = activeEntry();
+      document.getElementById("manualDetails").open =
+        !!a.manualOpen || (!a.prompt && !a.deeplink);
+    }
+
+    function render() {
+      var app = apps[state.tab];
+      var a = activeEntry();
+      var displayName = app.surfaces ? app.name + " · " + a.label : app.name;
       renderTabs();
-      document.getElementById("activeName1").textContent = a.name;
-      document.getElementById("activeName2").textContent = a.name;
+      renderSurfaces();
+      document.getElementById("activeName1").textContent = displayName;
+      document.getElementById("activeName2").textContent = app.name;
       document.getElementById("step1").textContent = a.step1;
       document.getElementById("step2").textContent = a.step2;
       document.getElementById("step3").textContent = a.step3;
@@ -149,22 +222,55 @@
         oneclick.style.display = "block";
         var link = document.getElementById("oneclickLink");
         link.href = a.deeplink;
-        link.textContent = "⚡ one-click install in " + a.name;
+        link.textContent = "⚡ one-click install in " + app.name;
       } else {
         oneclick.style.display = "none";
       }
+      var promptBlock = document.getElementById("promptBlock");
+      if (a.prompt) {
+        promptBlock.style.display = "block";
+        document.getElementById("promptTarget").textContent = displayName;
+        document.getElementById("promptText").textContent = PROMPT;
+      } else {
+        promptBlock.style.display = "none";
+      }
+      var note = document.getElementById("surfaceNote");
+      if (a.note) {
+        note.style.display = "block";
+        note.textContent = a.note;
+        // Amber only for the config-split warnings; plain gray for info.
+        note.style.color = a.warn ? "#e8b04b" : "#8a9482";
+      } else {
+        note.style.display = "none";
+      }
+      document.getElementById("manualSummary").textContent =
+        a.prompt || a.deeplink ? "do it by hand instead" : "install steps";
       document.getElementById("copyBtn").textContent = state.copied ? "copied ✓" : "copy";
+      document.getElementById("promptCopyBtn").textContent = state.promptCopied ? "copied ✓" : "copy";
+    }
+
+    // "copied ✓" only after the write actually resolves — a denied clipboard
+    // permission must not report success over text the user never got.
+    function copyThenFlag(text, flag) {
+      if (!navigator.clipboard) return;
+      navigator.clipboard.writeText(text).then(function () {
+        state[flag] = true;
+        render();
+        clearTimeout(flag === "copied" ? copyTimer : promptCopyTimer);
+        var t = setTimeout(function () { state[flag] = false; render(); }, 1500);
+        if (flag === "copied") copyTimer = t; else promptCopyTimer = t;
+      }).catch(function () {});
     }
 
     document.getElementById("copyBtn").addEventListener("click", function () {
-      var a = apps[state.tab];
-      if (navigator.clipboard) navigator.clipboard.writeText(a.copy);
-      state.copied = true;
-      render();
-      clearTimeout(copyTimer);
-      copyTimer = setTimeout(function () { state.copied = false; render(); }, 1500);
+      copyThenFlag(activeEntry().copy, "copied");
     });
 
+    document.getElementById("promptCopyBtn").addEventListener("click", function () {
+      copyThenFlag(PROMPT, "promptCopied");
+    });
+
+    resetManualFold();
     render();
   })();
 </script>
