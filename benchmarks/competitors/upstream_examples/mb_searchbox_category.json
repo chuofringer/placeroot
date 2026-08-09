@@ -1,0 +1,172 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "coordinates": [
+          -122.6180785,
+          38.9307594
+        ],
+        "type": "Point"
+      },
+      "properties": {
+        "name": "Starbucks",
+        "mapbox_id": "{mapbox_id}",
+        "feature_type": "poi",
+        "address": "15885 Dam Road",
+        "full_address": "15885 Dam Road, Clearlake, California 95422, United States",
+        "place_formatted": "Clearlake, California 95422, United States",
+        "context": {
+          "country": {
+            "name": "United States",
+            "country_code": "US",
+            "country_code_alpha_3": "USA"
+          },
+          "region": {
+            "name": "California",
+            "region_code": "CA",
+            "region_code_full": "US-CA"
+          },
+          "postcode": {
+            "id": "POSTCODE_ID",
+            "name": "95422"
+          },
+          "place": {
+            "id": "PLACE_ID",
+            "name": "Clearlake"
+          },
+          "address": {
+            "name": "15885 Dam Road",
+            "address_number": "15885",
+            "street_name": "Dam Road"
+          },
+          "street": {
+            "name": "Dam Road"
+          }
+        },
+        "coordinates": {
+          "latitude": 38.9307594,
+          "longitude": -122.6180785,
+          "routable_points": [
+            {
+              "name": "POI",
+              "latitude": 38.93073970095955,
+              "longitude": -122.61826791641334
+            }
+          ]
+        },
+        "language": "en",
+        "maki": "cafe",
+        "poi_category": [
+          "caf\u00e9",
+          "coffee",
+          "coffee shop",
+          "food",
+          "food and drink"
+        ],
+        "poi_category_ids": [
+          "cafe",
+          "coffee",
+          "coffee_shop",
+          "food",
+          "food_and_drink"
+        ],
+        "brand": [
+          "Starbucks",
+          "\u661f\u5df4\u514b",
+          "\u30b9\u30bf\u30fc\u30d0\u30c3\u30af\u30b9",
+          "\u0e2a\u0e15\u0e32\u0e23\u0e4c\u0e1a\u0e31\u0e04\u0e2a\u0e4c",
+          "\u0633\u062a\u0627\u0631\u0628\u0643\u0633"
+        ],
+        "brand_id": [
+          "starbucks"
+        ],
+        "external_ids": {
+          "provider": "PROVIDER_ID"
+        },
+        "metadata": {
+          "phone": "PHONE_NUMBER",
+          "website": "WEBSITE_URL",
+          "open_hours": {
+            "periods": [
+              {
+                "open": {
+                  "day": 0,
+                  "time": "0530"
+                },
+                "close": {
+                  "day": 0,
+                  "time": "2030"
+                }
+              },
+              {
+                "open": {
+                  "day": 1,
+                  "time": "0500"
+                },
+                "close": {
+                  "day": 1,
+                  "time": "2030"
+                }
+              },
+              {
+                "open": {
+                  "day": 2,
+                  "time": "0500"
+                },
+                "close": {
+                  "day": 2,
+                  "time": "2030"
+                }
+              },
+              {
+                "open": {
+                  "day": 3,
+                  "time": "0500"
+                },
+                "close": {
+                  "day": 3,
+                  "time": "2030"
+                }
+              },
+              {
+                "open": {
+                  "day": 4,
+                  "time": "0500"
+                },
+                "close": {
+                  "day": 4,
+                  "time": "2030"
+                }
+              },
+              {
+                "open": {
+                  "day": 5,
+                  "time": "0500"
+                },
+                "close": {
+                  "day": 5,
+                  "time": "2030"
+                }
+              },
+              {
+                "open": {
+                  "day": 6,
+                  "time": "0530"
+                },
+                "close": {
+                  "day": 6,
+                  "time": "2030"
+                }
+              }
+            ]
+          }
+        },
+        "distance": 19568
+      }
+    }
+  ],
+  "attribution": "\u00a9 2026 Mapbox and its suppliers. All rights reserved. Use of this data is subject to the Mapbox Terms of Service. (https://www.mapbox.com/about/maps/)",
+  "response_id": "RESPONSE_ID"
+}

@@ -1,0 +1,129 @@
+[
+  {
+    "server": "mapbox-mcp",
+    "scenario": "geocode_address",
+    "tool": "search_and_geocode_tool",
+    "arguments": {
+      "q": "2 Lincoln Memorial Circle NW, Washington, DC"
+    },
+    "upstream_example": "benchmarks/competitors/upstream_examples/mb_searchbox_forward.json",
+    "is_error": false,
+    "response_text": "1. 34170 Gannon Terrace\n   Address: 34170 Gannon Terrace, Fremont, California 94555, United States\n   Coordinates: 37.56153, -122.059627\n   Type: address\n   Mapbox ID: {mapbox_id}\n\n📍 To show this on a live Mapbox GL JS map, call:\n   render_map_tool({ \"payload_refs\": [\"mapbox://selffetch/search?data=eyJxIjoiMiBMaW5jb2xuIE1lbW9yaWFsIENpcmNsZSBOVywgV2FzaGluZ3RvbiwgREMifQ\"] })"
+  },
+  {
+    "server": "mapbox-mcp",
+    "scenario": "reverse_geocode",
+    "tool": "reverse_geocode_tool",
+    "arguments": {
+      "longitude": -77.05,
+      "latitude": 38.89
+    },
+    "upstream_example": "benchmarks/competitors/upstream_examples/mb_forward_geocode.json",
+    "is_error": false,
+    "response_text": "1. 974 2100 South\n   Address: Salt Lake City, Utah 84106, United States\n   Coordinates: 40.725163, -111.86313\n   Type: address\n\n2. 974 2100 South\n   Address: South Salt Lake, Utah 84119, United States\n   Coordinates: 40.725872, -111.919654\n   Type: address"
+  },
+  {
+    "server": "mapbox-mcp",
+    "scenario": "nearest_coffee",
+    "tool": "category_search_tool",
+    "arguments": {
+      "category": "coffee",
+      "proximity": {
+        "longitude": -77.05,
+        "latitude": 38.89
+      },
+      "limit": 10
+    },
+    "upstream_example": "benchmarks/competitors/upstream_examples/mb_searchbox_category.json",
+    "is_error": false,
+    "response_text": "1. Starbucks\n   Address: 15885 Dam Road, Clearlake, California 95422, United States\n   Coordinates: 38.9307594, -122.6180785\n   Type: poi\n   Category: café, coffee, coffee shop, food, food and drink\n   Mapbox ID: {mapbox_id}\n\n📍 To show this on a live Mapbox GL JS map, call:\n   render_map_tool({ \"payload_refs\": [\"mapbox://selffetch/category_search?data=eyJjYXRlZ29yeSI6ImNvZmZlZSIsImxpbWl0IjoxMCwicHJveGltaXR5Ijp7ImxvbmdpdHVkZSI6LTc3LjA1LCJsYXRpdHVkZSI6MzguODl9fQ\"] })"
+  },
+  {
+    "server": "mapbox-mcp",
+    "scenario": "route_a_to_b",
+    "tool": "directions_tool",
+    "arguments": {
+      "coordinates": [
+        {
+          "longitude": -77.05,
+          "latitude": 38.89
+        },
+        {
+          "longitude": -77.03,
+          "latitude": 38.9
+        }
+      ],
+      "routing_profile": "mapbox/driving"
+    },
+    "upstream_example": "benchmarks/competitors/upstream_examples/mb_directions.json",
+    "is_error": false,
+    "response_text": "{\n  \"routes\": [\n    {\n      \"duration\": 1372,\n      \"distance\": 4575,\n      \"leg_summaries\": [\n        \"Ifflandstraße, B 2R\",\n        \"Arabellastraße, Englschalkinger Straße\"\n      ],\n      \"intersecting_admins\": [\n        \"DEU\"\n      ],\n      \"notifications_summary\": [],\n      \"incidents_summary\": [],\n      \"num_legs\": 2,\n      \"congestion_information\": {\n        \"length_low\": 0,\n        \"length_moderate\": 0,\n        \"length_heavy\": 0,\n        \"length_severe\": 0\n      }\n    }\n  ],\n  \"waypoints\": [\n    {\n      \"name\": \"Ifflandstraße\",\n      \"snap_location\": [\n        11.59804,\n        48.149988\n      ],\n      \"snap_distance\": 30,\n      \"metadata\": null\n    },\n    {\n      \"name\": \"Arabellastraße\",\n      \"snap_location\": [\n        11.617788,\n        48.153125\n      ],\n      \"snap_distance\": 19,\n      \"metadata\": {\n        \"type\": \"charging-station\",\n        \"name\": \"BayWa Zentrale\",\n        \"charge_time\": 788,\n        \"charge_to\": 5369,\n        \"charge_at_arrival\": 250,\n        \"plug_type\": \"ccs_combo_type2\",\n        \"power_kw\": 150,\n        \"station_id\": \"ocm-128831\",\n        \"provider_names\": [\n          \"Tesla\",\n          \"Shell Recharge Solutions\"\n        ]\n      }\n    },\n    {\n      \"name\": \"Barlowstraße\",\n      \"snap_location\": [\n        11.646591,\n        48.156744\n      ],\n      \"snap_distance\": 1,\n      \"metadata\": null\n    }\n  ]\n}\n\n📍 To show this on a live Mapbox GL JS map, call:\n   render_map_tool({ \"payload_refs\": [\"mapbox://selffetch/directions?data=eyJjb29yZGluYXRlcyI6W3sibG9uZ2l0dWRlIjotNzcuMDUsImxhdGl0dWRlIjozOC44OX0seyJsb25naXR1ZGUiOi03Ny4wMywibGF0aXR1ZGUiOjM4Ljl9XSwicm91dGluZ19wcm9maWxlIjoibWFwYm94L2RyaXZpbmciLCJhbHRlcm5hdGl2ZXMiOmZhbHNlfQ\"] })"
+  },
+  {
+    "server": "mapbox-mcp",
+    "scenario": "isochrone_15min",
+    "tool": "isochrone_tool",
+    "arguments": {
+      "coordinates": {
+        "longitude": -77.05,
+        "latitude": 38.89
+      },
+      "profile": "mapbox/walking",
+      "contours_minutes": [
+        15
+      ],
+      "generalize": 1000
+    },
+    "upstream_example": "benchmarks/competitors/upstream_examples/mb_isochrone.json",
+    "is_error": false,
+    "response_text": "{\n  \"features\": [\n    {\n      \"properties\": {\n        \"contour\": 15,\n        \"color\": \"#4286f4\",\n        \"opacity\": 0.33,\n        \"fill\": \"#4286f4\",\n        \"fill-opacity\": 0.33,\n        \"fillColor\": \"#4286f4\",\n        \"fillOpacity\": 0.33\n      },\n      \"type\": \"Feature\",\n      \"geometry\": {\n        \"coordinates\": [\n          \"arrays of longitude, latitude coordinates\"\n        ],\n        \"type\": \"Polygon\"\n      }\n    },\n    {\n      \"properties\": {\n        \"contour\": 10,\n        \"color\": \"#04e813\",\n        \"opacity\": 0.33,\n        \"fill\": \"#04e813\",\n        \"fill-opacity\": 0.33,\n        \"fillColor\": \"#04e813\",\n        \"fillOpacity\": 0.33\n      },\n      \"type\": \"Feature\",\n      \"geometry\": {\n        \"coordinates\": [\n          \"arrays of longitude, latitude coordinates\"\n        ],\n        \"type\": \"Polygon\"\n      }\n    },\n    {\n      \"properties\": {\n        \"contour\": 5,\n        \"color\": \"#6706ce\",\n        \"opacity\": 0.33,\n        \"fill\": \"#6706ce\",\n        \"fill-opacity\": 0.33,\n        \"fillColor\": \"#6706ce\",\n        \"fillOpacity\": 0.33\n      },\n      \"type\": \"Feature\",\n      \"geometry\": {\n        \"coordinates\": [\n          \"arrays of longitude, latitude coordinates\"\n        ],\n        \"type\": \"Polygon\"\n      }\n    }\n  ],\n  \"type\": \"FeatureCollection\"\n}\n\n📍 To show this on a live Mapbox GL JS map, call:\n   render_map_tool({ \"payload_refs\": [\"mapbox://selffetch/isochrone?data=eyJwcm9maWxlIjoibWFwYm94L3dhbGtpbmciLCJjb29yZGluYXRlcyI6eyJsb25naXR1ZGUiOi03Ny4wNSwibGF0aXR1ZGUiOjM4Ljg5fSwiY29udG91cnNfbWludXRlcyI6WzE1XSwicG9seWdvbnMiOmZhbHNlLCJnZW5lcmFsaXplIjoxMDAwfQ\"] })"
+  },
+  {
+    "server": "mapbox-mcp",
+    "scenario": "matrix_3x3",
+    "tool": "matrix_tool",
+    "arguments": {
+      "coordinates": [
+        {
+          "longitude": -77.05,
+          "latitude": 38.89
+        },
+        {
+          "longitude": -77.03,
+          "latitude": 38.9
+        },
+        {
+          "longitude": -77.01,
+          "latitude": 38.91
+        }
+      ],
+      "profile": "mapbox/driving"
+    },
+    "upstream_example": "benchmarks/competitors/upstream_examples/mb_matrix.json",
+    "is_error": false,
+    "response_text": "{\n  \"code\": \"Ok\",\n  \"durations\": [\n    [\n      0,\n      573,\n      1169.5\n    ],\n    [\n      573,\n      0,\n      597\n    ],\n    [\n      1169.5,\n      597,\n      0\n    ]\n  ],\n  \"sources\": [\n    {\n      \"name\": \"Mission Street\",\n      \"location\": [\n        -122.418408,\n        37.751668\n      ],\n      \"distance\": 5\n    },\n    {\n      \"name\": \"22nd Street\",\n      \"location\": [\n        -122.422959,\n        37.755184\n      ],\n      \"distance\": 8\n    },\n    {\n      \"name\": \"\",\n      \"location\": [\n        -122.426911,\n        37.759695\n      ],\n      \"distance\": 10\n    }\n  ],\n  \"destinations\": [\n    {\n      \"name\": \"Mission Street\",\n      \"location\": [\n        -122.418408,\n        37.751668\n      ],\n      \"distance\": 5\n    },\n    {\n      \"name\": \"22nd Street\",\n      \"location\": [\n        -122.422959,\n        37.755184\n      ],\n      \"distance\": 8\n    },\n    {\n      \"name\": \"\",\n      \"location\": [\n        -122.426911,\n        37.759695\n      ],\n      \"distance\": 10\n    }\n  ]\n}"
+  },
+  {
+    "server": "google-maps-archived",
+    "scenario": "geocode_address",
+    "tool": "maps_geocode",
+    "arguments": {
+      "address": "1600 Amphitheatre Parkway, Mountain View, CA"
+    },
+    "upstream_example": "benchmarks/competitors/upstream_examples/g_geocode.json",
+    "is_error": false,
+    "response_text": "{\n  \"location\": {\n    \"lat\": 37.4267861,\n    \"lng\": -122.0806032\n  },\n  \"formatted_address\": \"1600 Amphitheatre Pkwy, Mountain View, CA 94043, USA\",\n  \"place_id\": \"ChIJtYuu0V25j4ARwu5e4wwRYgE\"\n}"
+  },
+  {
+    "server": "google-maps-archived",
+    "scenario": "reverse_geocode",
+    "tool": "maps_reverse_geocode",
+    "arguments": {
+      "latitude": 37.4224764,
+      "longitude": -122.0842499
+    },
+    "upstream_example": "benchmarks/competitors/upstream_examples/g_geocode.json",
+    "is_error": false,
+    "response_text": "{\n  \"formatted_address\": \"1600 Amphitheatre Pkwy, Mountain View, CA 94043, USA\",\n  \"place_id\": \"ChIJtYuu0V25j4ARwu5e4wwRYgE\",\n  \"address_components\": [\n    {\n      \"long_name\": \"1600\",\n      \"short_name\": \"1600\",\n      \"types\": [\n        \"street_number\"\n      ]\n    },\n    {\n      \"long_name\": \"Amphitheatre Parkway\",\n      \"short_name\": \"Amphitheatre Pkwy\",\n      \"types\": [\n        \"route\"\n      ]\n    },\n    {\n      \"long_name\": \"Mountain View\",\n      \"short_name\": \"Mountain View\",\n      \"types\": [\n        \"locality\",\n        \"political\"\n      ]\n    },\n    {\n      \"long_name\": \"Santa Clara County\",\n      \"short_name\": \"Santa Clara County\",\n      \"types\": [\n        \"administrative_area_level_2\",\n        \"political\"\n      ]\n    },\n    {\n      \"long_name\": \"California\",\n      \"short_name\": \"CA\",\n      \"types\": [\n        \"administrative_area_level_1\",\n        \"political\"\n      ]\n    },\n    {\n      \"long_name\": \"United States\",\n      \"short_name\": \"US\",\n      \"types\": [\n        \"country\",\n        \"political\"\n      ]\n    },\n    {\n      \"long_name\": \"94043\",\n      \"short_name\": \"94043\",\n      \"types\": [\n        \"postal_code\"\n      ]\n    }\n  ]\n}"
+  }
+]
