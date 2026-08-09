@@ -1,4 +1,5 @@
 import math
+import random
 
 import duckdb
 import pytest
@@ -1838,3 +1839,60 @@ def test_a_postcode_hit_short_circuits_the_name_search(tmp_path):
                                type_="division")
     assert all(r["type"] == "postcode" for r in result["results"])
     assert "gers-div-94110" not in [r["id"] for r in result["results"]]
+
+
+# --- #237: tied rows must not be decided by physical scan order ------------
+# Five runs of geocode("河南") against live data returned five different
+# orderings, while the same query against a parquet fixture was stable: the
+# tied rows all share a tier and carry no population, so which of them
+# survived LIMIT DIVISION_OVERFETCH came down to the order the scan happened
+# to produce — reproducible for a local file, not for a remote read.
+
+
+def _tied_divisions_table(path, ids):
+    """A local divisions table whose rows are identical in every ranking term
+    the SQL orders by (same name, so same tier; no population), written in
+    exactly the given row order — the physical order a scan sees."""
+    rows = ", ".join(
+        f"('{i}', 'Tiedville', 'locality', 'US', 'US-IL', 40.0, -89.0, "
+        f"['United States', 'Illinois'], CAST(NULL AS BIGINT))"
+        for i in ids
+    )
+    duckdb.connect().execute(f"""
+        COPY (
+            SELECT * FROM (VALUES {rows})
+                 t(id, name, subtype, country, region, lat, lon,
+                   admin_chain, population)
+        ) TO '{path}' (FORMAT PARQUET)
+    """)
+    return str(path)
+
+
+def test_match_tier_order_sql_breaks_ties_on_id():
+    """The tiebreak is the last term, so it decides only what tier and
+    population left open."""
+    order = geocode._match_tier_order_sql("name")
+    assert order.endswith(", id")
+    assert "population DESC NULLS LAST, id" in order
+    # The alternate-name search joins two tables that both carry an id, so
+    # its tiebreak has to be qualified or DuckDB rejects it as ambiguous.
+    assert geocode._match_tier_order_sql("a.alt_name", id_expr="d.id").endswith(", d.id")
+
+
+def test_tied_divisions_survive_the_overfetch_in_scan_order_independent_order(tmp_path):
+    """More tied rows than DIVISION_OVERFETCH admits: the surviving set, and
+    its order, must be the same whatever order the rows sit in on disk."""
+    ids = [f"gers-tie-{n:03d}" for n in range(geocode.DIVISION_OVERFETCH + 20)]
+    forward = _tied_divisions_table(tmp_path / "forward.parquet", ids)
+    reverse = _tied_divisions_table(tmp_path / "reverse.parquet", list(reversed(ids)))
+    shuffled_ids = list(ids)
+    random.Random(237).shuffle(shuffled_ids)
+    shuffled = _tied_divisions_table(tmp_path / "shuffled.parquet", shuffled_ids)
+
+    orders = [
+        [r["id"] for r in geocode._query_divisions_from_local(path, "Tiedville", None)]
+        for path in (forward, reverse, shuffled)
+    ]
+    assert orders[0] == orders[1] == orders[2]
+    # And it is the id order, so the rows that survive the LIMIT are pinned too.
+    assert orders[0] == ids[: geocode.DIVISION_OVERFETCH]

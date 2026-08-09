@@ -1229,7 +1229,7 @@ def _abbreviation_variant_queries(query: str) -> list[str]:
     return out
 
 
-def _match_tier_order_sql(name_expr: str) -> str:
+def _match_tier_order_sql(name_expr: str, id_expr: str = "id") -> str:
     """SQL ORDER BY expression pushing exact/prefix matches — the most
     populous ones first — ahead of plain substring matches, *before* LIMIT
     DIVISION_OVERFETCH applies.
@@ -1246,12 +1246,23 @@ def _match_tier_order_sql(name_expr: str) -> str:
     ranking is still done in Python by _rank_key, which also carries the
     #47 no-population proxy chain this SQL ORDER BY doesn't need to know
     about.
+
+    `id_expr` (#237) is the GERS id column, appended as a final tiebreak so
+    the order is total. Tier and population alone leave ties — 河南 matches
+    several equally-tiered divisions that all report no population — and
+    which of those tied rows survives LIMIT DIVISION_OVERFETCH is then
+    decided by physical scan order, which is stable for a local parquet
+    fixture but not across live remote reads. Five runs of the same query
+    against live data returned five different orderings before this. It is
+    the last term, so it only breaks ties the ranking terms left open.
+    Callers whose query joins two tables carrying an `id` must pass the
+    qualified name (`d.id`), since a bare `id` would be ambiguous.
     """
     tier_expr = (
         f"CASE WHEN {name_expr} ILIKE $exact ESCAPE '\\' THEN 0 "
         f"WHEN {name_expr} ILIKE $prefix ESCAPE '\\' THEN 1 ELSE 2 END"
     )
-    return f"{tier_expr}, population DESC NULLS LAST"
+    return f"{tier_expr}, population DESC NULLS LAST, {id_expr}"
 
 
 def _query_divisions_from_local(
@@ -1381,7 +1392,7 @@ def _query_alt_names(
     if region_code:
         region_filter = "AND d.region = $region_code"
         params["region_code"] = region_code
-    match_order = _match_tier_order_sql("a.alt_name")
+    match_order = _match_tier_order_sql("a.alt_name", id_expr="d.id")
     sql = f"""
         SELECT d.id, d.name, d.subtype, d.country, d.region, d.lat, d.lon,
                d.admin_chain, d.population, a.alt_name, a.alt_display
@@ -1582,7 +1593,7 @@ def _query_divisions_fuzzy(
         WHERE jaro_winkler_similarity({_FOLDED_NAME_SQL}, $folded)
               >= {_FUZZY_SIMILARITY_THRESHOLD}
         {region_filter}
-        ORDER BY similarity DESC, population DESC NULLS LAST
+        ORDER BY similarity DESC, population DESC NULLS LAST, id
         LIMIT {DIVISION_OVERFETCH}
     """
     try:
@@ -1725,7 +1736,7 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
                coalesce(confidence, 0) AS confidence
         FROM read_parquet('{glob}', hive_partitioning=1)
         WHERE {' AND '.join(filters)}
-        ORDER BY confidence DESC
+        ORDER BY confidence DESC, id
         LIMIT {DIVISION_OVERFETCH}
     """
     try:
