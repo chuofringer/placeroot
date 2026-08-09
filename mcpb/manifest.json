@@ -119,6 +119,10 @@
       "description": "Nearest street addresses to a point, nearest first: number, street, unit, postcode."
     },
     {
+      "name": "geocode_address",
+      "description": "Street address -> coordinates: \"1600 Amphitheatre Parkway, Mountain View\"."
+    },
+    {
       "name": "simplify_geometry",
       "description": "Simplify a GeoJSON geometry to fit a token budget, reporting what was lost."
     },

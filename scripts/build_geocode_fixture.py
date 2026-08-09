@@ -372,6 +372,66 @@ def build_divisions() -> list[tuple]:
         UNCOVERED_LAT, UNCOVERED_LON,
         _chain("United Kingdom", "England", "Kensington"),
     )
+    # Everything below is appended at the very end of build_divisions on
+    # purpose: several fixture queries tie on match tier, and which of the
+    # tied rows survives the DIVISION_OVERFETCH LIMIT is decided by physical
+    # row order. Inserting these mid-list shifted the pre-existing rows and
+    # silently changed the answer to unrelated queries (live: 河南 came back
+    # under a different province). Appending leaves every earlier row's
+    # position exactly as it was.
+    #
+    # #225: the two anchors geocode_address resolves a street search inside.
+    # San Francisco is already above (the #215 fuzzy target); these add the
+    # Mountain View that "1600 Amphitheatre Parkway, Mountain View" anchors on
+    # and the Berlin that carries the German trailing-house-number case. Both
+    # have a matching division_area row in division_areas.parquet keyed on
+    # their id -- without it there is no extent and geocode_address declines
+    # to scan, which is its own test.
+    add(
+        "gers-div-mountain-view", "Mountain View", "locality", "US", "US-CA",
+        37.3861, -122.0839, _chain("United States", "California", "Mountain View"),
+        population=82_376,
+    )
+    add(
+        "gers-div-berlin", "Berlin", "locality", "DE", "DE-BE",
+        52.52, 13.405, _chain("Germany", "Berlin"),
+        population=3_677_472,
+    )
+    # R28/#229: the quadrant case. Washington's streets carry NW/NE/SW/SE as
+    # part of the name, and Overture writes the abbreviation -- so
+    # "Pennsylvania Avenue NW" only matches through the quadrant variant map,
+    # and a bare "Pennsylvania Avenue" only through a prefix match.
+    add(
+        "gers-div-washington-dc", "Washington", "locality", "US", "US-DC",
+        38.9072, -77.0369, _chain("United States", "District of Columbia", "Washington"),
+        population=689_545,
+    )
+    # R28/#229: the house-number parse case. "Calle 8" is the *street*; a
+    # rule that strips a trailing integer searches for a street named
+    # "Calle" and finds nothing.
+    add(
+        "gers-div-miami", "Miami", "locality", "US", "US-FL",
+        25.7617, -80.1918, _chain("United States", "Florida", "Miami"),
+        population=442_241,
+    )
+    # R29: the English numbered-route parse case, the twin of Miami's
+    # "Calle 8" above -- Flagstaff is where Route 66 is a street name.
+    add(
+        "gers-div-flagstaff", "Flagstaff", "locality", "US", "US-AZ",
+        35.1983, -111.6513, _chain("United States", "Arizona", "Flagstaff"),
+        population=76_831,
+    )
+    # R29: a division whose boundary is a *state*, so geocode_address has a
+    # case where the anchor step succeeds and the extent is still far too big
+    # to scan addresses inside (see geocode._MAX_ANCHOR_SPAN_DEG). Texas
+    # rather than an invented name because its real extent, 13.1 x 10.7
+    # degrees, is what the guard exists to refuse — every other region row in
+    # this fixture carries no division_area at all, so none of them can reach
+    # the check.
+    add(
+        "gers-div-tx", "Texas", "region", "US", "US-TX", 31.0, -100.0,
+        _chain("United States", "Texas"), population=30_503_301,
+    )
     return rows
 
 
@@ -421,6 +481,125 @@ def build_addresses() -> list[tuple]:
             ))
             n += 1
     rows += build_postcode_addresses()
+    rows += build_street_addresses()
+    rows += build_shared_bbox_addresses()
+    return rows
+
+
+# #225: the street-level rows geocode_address searches, spelled the way
+# Overture actually spells them on release 2026-07-22.0 -- UPPERCASE and
+# USPS-abbreviated ("MARKET ST", "AMPHITHEATRE PKWY", both verified live). A
+# query for "Market Street" therefore only finds them through the suffix
+# variant map, which is the point: a fixture written as "Market Street" would
+# pass without the feature under test.
+#
+# (street, country, postcode, postal_city, level, lat, lon, numbers, copies)
+#
+# `copies` is the dedup probe. Overture files one address point per source
+# contribution, so the live MARKET ST in San Francisco is 2,980 rows over 900
+# distinct number|street pairs; three copies of every Market St number here
+# reproduce that shape at fixture scale, and an undeduplicated top-5 would
+# return one doorway five times.
+STREET_CLUSTERS = (
+    ("MARKET ST", "US", "94103", "San Francisco", "CA", 37.7749, -122.4194,
+     tuple(str(n) for n in range(1, 13)), 3),
+    ("AMPHITHEATRE PKWY", "US", "94043", "Mountain View", "CA", 37.4220, -122.0841,
+     ("1600", "1601", "1900"), 1),
+    # No transformation needed for DE (R27-verified): "Hauptstraße" is one
+    # token in the query and one in the data, so this cluster only exercises
+    # the trailing-house-number parse ("Hauptstraße 5").
+    ("Hauptstraße", "DE", "10827", "Berlin", None, 52.5200, 13.4050,
+     ("5", "7", "9"), 1),
+    # R28/#229: one street name, two quadrants -- different streets, and
+    # neither is reachable from "Pennsylvania Avenue NW" without the
+    # quadrant variant map or from "Pennsylvania Avenue" without a prefix
+    # match. They stay separate rows in the answer, which is the point.
+    ("PENNSYLVANIA AVE NW", "US", "20500", "Washington", "DC", 38.8977, -77.0365,
+     ("1600", "1700"), 1),
+    ("PENNSYLVANIA AVE SE", "US", "20003", "Washington", "DC", 38.8810, -76.9900,
+     ("1600",), 1),
+    # R28/#229: Calle Ocho. The street name ends in the digit.
+    ("CALLE 8", "US", "33135", "Miami", "FL", 25.7650, -80.2200,
+     ("1", "3", "5"), 1),
+    # R29: the English twin of Calle 8. "ROUTE 66" is the street's whole
+    # name, and the Romance-only leading-type list split the 66 off it and
+    # searched for a street called "Route". Numbers are even so the
+    # doorway-on-a-numbered-route case ("4 Route 66") has something to land
+    # on -- that query must still split, because the number leads.
+    ("ROUTE 66", "US", "86001", "Flagstaff", "AZ", 35.1980, -111.6510,
+     ("2", "4", "6"), 1),
+)
+
+# Spacing between consecutive house numbers along a street, and between the
+# duplicate copies of one number. The duplicate offset is deliberately tiny
+# (sub-metre): duplicates are the same doorway contributed twice, not
+# neighbours, so a dedup that kept them would show five rows metres apart.
+STREET_NUMBER_STEP_DEG = 0.0006
+STREET_DUPLICATE_OFFSET_DEG = 0.000004
+
+
+def build_street_addresses() -> list[tuple]:
+    """Address points along the named streets of STREET_CLUSTERS."""
+    rows = []
+    for street, country, postcode, city, level, lat, lon, numbers, copies in STREET_CLUSTERS:
+        for i, number in enumerate(numbers):
+            for copy in range(copies):
+                rows.append((
+                    f"gers-addr-st-{street.lower().replace(' ', '-')}-{number}-{copy}",
+                    _point_bbox(
+                        lat + i * STREET_NUMBER_STEP_DEG + copy * STREET_DUPLICATE_OFFSET_DEG,
+                        lon + i * STREET_NUMBER_STEP_DEG,
+                    ),
+                    country,
+                    number,
+                    street,
+                    None,
+                    postcode,
+                    city,
+                    [{"value": level}] if level else None,
+                ))
+    return rows
+
+
+# R28/#229: two municipalities inside one city's bounding box, and one
+# doorway with many units — the two shapes that made the address dedup lie.
+#
+# Live, Boston's bbox covers Hingham, Charlestown and Cambridge, each with
+# its own "1 MAIN ST"; grouping on (number, street) merged all three into one
+# arbitrarily-picked row. And 1 FRANKLIN ST carries 458 units, of which the
+# old arg_min(unit, d) named exactly one, nondeterministically.
+#
+# Both are reproduced inside the San Francisco anchor box (the fixture's one
+# large extent): a Daly City postcode that the box spills over, and a
+# multi-unit doorway. (number, street, postcode, postal_city, lat, lon, unit)
+SHARED_BBOX_ADDRESSES = (
+    ("1", "MAIN ST", "94112", "San Francisco", 37.7200, -122.4400, None),
+    ("1", "MAIN ST", "94014", "Daly City", 37.7100, -122.4450, None),
+    ("3", "MAIN ST", "94112", "San Francisco", 37.7205, -122.4405, None),
+    ("3", "MAIN ST", "94014", "Daly City", 37.7105, -122.4455, None),
+    # One doorway, three units: `unit` is unanswerable, `unit_count` is not.
+    ("1", "FRANKLIN ST", "94102", "San Francisco", 37.7780, -122.4210, "Apt 1"),
+    ("1", "FRANKLIN ST", "94102", "San Francisco", 37.7780, -122.4210, "Apt 2"),
+    ("1", "FRANKLIN ST", "94102", "San Francisco", 37.7780, -122.4210, "Apt 3"),
+    # ...and one with exactly one unit, which stays nameable.
+    ("3", "FRANKLIN ST", "94102", "San Francisco", 37.7785, -122.4215, "Suite 900"),
+)
+
+
+def build_shared_bbox_addresses() -> list[tuple]:
+    rows = []
+    for i, (number, street, postcode, city, lat, lon, unit) in enumerate(SHARED_BBOX_ADDRESSES):
+        rows.append((
+            f"gers-addr-shared-{i:02d}",
+            _point_bbox(lat, lon),
+            "US",
+            number,
+            street,
+            unit,
+            postcode,
+            city,
+            [{"value": "CA"}],
+        ))
     return rows
 
 
