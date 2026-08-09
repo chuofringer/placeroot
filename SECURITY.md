@@ -13,7 +13,7 @@ Please do **not** open a public issue for a security problem.
 
 Report privately via GitHub's private vulnerability reporting on this
 repository (Security → Report a vulnerability), or by email to
-<chuo.fringer@gmail.com> with `[placeroot security]` in the subject.
+<hello@placeroot.dev> with `[placeroot security]` in the subject.
 
 You can expect an acknowledgement within a week. Fixes ship as a normal
 release; credit is given unless you ask otherwise.
