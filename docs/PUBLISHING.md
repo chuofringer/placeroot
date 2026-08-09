@@ -90,3 +90,23 @@ for the right version, merge, then delete and re-create the tag.
 Registry listings and the launch post (`docs/launch/`) are safe to submit
 **only after** the package resolves on PyPI — entries pointing at a 404 get
 rejected.
+
+## Desktop Extension bundle (.mcpb, issue #233)
+
+`site/placeroot.mcpb` is the one-click install for Claude Desktop's **Chat**
+surface, served publicly from placeroot.dev (release assets aren't reachable
+by visitors while the repo is private). It is a committed build artifact:
+
+```bash
+uv run python scripts/build_mcpb.py site/placeroot.mcpb   # rebuild after a version bump
+```
+
+`tests/test_mcpb_bundle.py` fails when the bundle's manifest version doesn't
+match `pyproject.toml`, so a release can't ship a stale bundle; the Prepare
+Release workflow rebuilds it as part of the bump. The Release workflow also
+rebuilds from the tagged tree and attaches `placeroot.mcpb` to the GitHub
+release for repo users.
+
+Honest limitation, repeated wherever the bundle is offered: the server type
+is `uv`, and Claude Desktop does not bundle a Python/uv runtime — one-click
+removes the config-file step, not the uv prerequisite.
