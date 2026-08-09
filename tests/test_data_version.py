@@ -5,8 +5,8 @@ pinned fallback. Each case exercises release.resolve_release_info() through
 the server.data_version() tool body and cross-checks that resolve_release()
 (still used by every other consumer) delegates to the same cached value.
 
-release.resolve_release()/resolve_release_info() are process-lifetime
-lru_caches, so every case here resets them via release.reset_cache() after
+release.resolve_release()/resolve_release_info() share one TTL cache (#219),
+so every case here resets it via release.reset_cache() after
 mutating env/mocks (monkeypatch auto-undoes the mutation itself, but the
 cache would otherwise keep serving a stale value into whichever test runs
 next) and again on teardown via the autouse fixture below.

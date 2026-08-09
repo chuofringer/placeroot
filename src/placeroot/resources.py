@@ -62,19 +62,33 @@ CATEGORIES_TOKEN_BUDGET = 1500
 def data_version_payload() -> dict:
     """The resolved-release answer. The `data_version` tool returns this too.
 
-    Reads the process-lifetime cache in release.py — no upstream call, no
-    DB dependency, safe to read from either surface at any time.
+    Reads the TTL cache in release.py — no DB dependency, safe to read from
+    either surface at any time. It can trigger the one discovery call that
+    an expired TTL owes, the same as any query path would.
     """
     info = release.resolve_release_info()
     release_str = info["release"]
-    return {
+    payload = {
         "release": release_str,
         "release_date": release_str.rsplit(".", 1)[0],
         "source": info["source"],
+        # #219: the vintage's age, so an agent or operator can see the data
+        # is old without knowing Overture's release cadence. `stale` flips
+        # past PLACEROOT_STALE_RELEASE_DAYS (default 60 — two missed
+        # ~monthly releases).
+        "age_days": release.age_days(release_str),
         "note": (
-            "Overture ships ~monthly; resolved once at server start and cached for the process."
+            "Overture ships ~monthly; re-checked on a TTL "
+            "(PLACEROOT_RELEASE_TTL_HOURS, default 6h)."
         ),
     }
+    if release.is_stale(release_str):
+        payload["stale"] = True
+        payload["note"] += (
+            " This release is older than the staleness threshold — "
+            "discovery may be failing in this deployment."
+        )
+    return payload
 
 
 def categories_payload() -> dict:

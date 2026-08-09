@@ -29,9 +29,9 @@ from placeroot import budget, categories, release, resources, server, tool_profi
 def _offline_release(monkeypatch):
     """No network in these tests: pin discovery to the baked-in fallback.
 
-    resolve_release_info() is a process-lifetime lru_cache, so it is reset
-    on both sides — otherwise a value resolved here leaks into whichever
-    test runs next.
+    resolve_release_info() is TTL-cached (#219), and 6h outlasts any test
+    run, so it is reset on both sides — otherwise a value resolved here
+    leaks into whichever test runs next.
     """
     monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
     monkeypatch.setattr(release, "_discover", lambda: None)
