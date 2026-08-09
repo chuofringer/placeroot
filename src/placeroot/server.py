@@ -1293,6 +1293,53 @@ def address_at(lat: float, lon: float, limit: int = addresses.DEFAULT_LIMIT) -> 
     return budget.apply_budget(result, "results")
 
 
+@_tool("Find a street address")
+def geocode_address(
+    query: str = "",
+    limit: int = geocoding.ADDRESS_DEFAULT_LIMIT,
+    number: str | None = None,
+    street: str | None = None,
+    city: str | None = None,
+) -> dict:
+    """Street address -> coordinates: "1600 Amphitheatre Parkway, Mountain View".
+
+    The forward counterpart to address_at, and finer than geocode, which
+    answers at city/neighborhood granularity and never at a doorway. The
+    first comma splits the street from the city; a bare integer at either end
+    of the street part is the house number ("1600 Amphitheatre Parkway",
+    "Hauptstraße 5"). Pass `number`/`street`/`city` instead if you already
+    have the parts. Unit/apartment numbers are not parsed.
+
+    The city is resolved first and its boundary bounds the search, so a city
+    that resolves to no boundary — or to something far larger than a city,
+    like a state — returns an empty list plus a note rather than a scan. If a
+    same-named runner-up in the same country supplies the boundary instead,
+    the note names it — the answer is never silently about a different city,
+    and never about one in another country. Check `anchor` (name, country,
+    admin_context) to see which one it was. Street names match in either
+    spelling (Parkway/Pkwy, West/W, NW/Northwest).
+
+    Returns {"results": [{number, street, unit, postcode, country,
+    distance_m, lat, lon}, ...], "anchor": {name, id, country,
+    admin_context}}, deduplicated to distinct number+street+postcode and
+    nearest the city's own point first. More matches than `limit` adds
+    "truncated", "distinct_in_range" and a note.
+
+    Coverage is alpha: 39 countries, no UK, Ireland, India or China. An empty
+    list is a valid answer and always carries a note saying whether the
+    country is uncovered or the street simply wasn't found.
+    """
+    try:
+        result = geocoding.geocode_address(
+            query, limit, number=number, street=street, city=city
+        )
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    return budget.apply_budget(result, "results")
+
+
 @_tool("Reverse geocode points in batch")
 def reverse_geocode_batch(points: list[dict]) -> dict:
     """Reverse-geocode many points in one call, to cut N round-trips down to one.
@@ -1704,8 +1751,8 @@ def data_version() -> dict:
 def _arg_summary(fn: Callable) -> str:
     """A tool's parameters as `required,optional?` — the catalog's arg column.
 
-    Names only, no types: the catalog's budget is the whole point (28 tools
-    have to fit in well under 1k tokens), and the names here are already
+    Names only, no types: the catalog's budget is the whole point (29 tools
+    have to fit in about 1k tokens), and the names here are already
     self-describing (lat, radius_m, limit, category). A caller that guesses
     a type wrong gets placeroot_call's bad_request naming what the tool
     accepts, which is cheaper than paying for the types on every catalog
@@ -1838,7 +1885,7 @@ _UNSET = object()
 # — so the only event that invalidates a cached listing is the operator
 # upgrading the package. TTL is therefore a bound on how long a client could
 # keep showing a pre-upgrade tool list, and one day is the honest trade: it
-# spares a re-fetch of a ~12.2k-token schema surface on every session within a
+# spares a re-fetch of a ~13.2k-token schema surface on every session within a
 # day, while an upgrade is visible by the next one. A week would buy almost
 # nothing extra (sessions cluster well inside a day) for seven times the
 # staleness window; 0 is what we'd declare if the surface could move at

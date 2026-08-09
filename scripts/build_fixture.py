@@ -214,6 +214,19 @@ def build_division_rows(con: duckdb.DuckDBPyConnection) -> list[tuple]:
     these rows rather than by nearest division point. The seventh polygon is
     a GB country covering the addresses fixture's deliberately-uncovered
     London coordinate, so that path has a polygon to be contained by.
+
+    #225 adds two things every row now carries. `bbox` is the polygon's own
+    extent, which is where geocode_address gets a city-sized box to scan
+    addresses inside — the real theme carries it, and on `type=division_area`
+    (unlike `type=division`) it is a genuine extent rather than a point's
+    rounding envelope. `division_id` is the join back to the type=division
+    entity: this fixture reuses each row's own id for it, the same shorthand
+    that already lets DOWNTOWN_DIVISION_ID name a row in both fixtures.
+
+    The last three polygons (#225) are the anchors geocode_address resolves:
+    San Francisco and Mountain View around the Market St / Amphitheatre Pkwy
+    address rows, with Mountain View's box copied from the live 2026-07-22.0
+    extent, and Berlin for the German trailing-house-number case.
     """
     levels = [
         ("neighborhood", "US", box_wkt(40.695, 40.705, -73.905, -73.895)),
@@ -234,8 +247,74 @@ def build_division_rows(con: duckdb.DuckDBPyConnection) -> list[tuple]:
     rows = []
     for i, ((subtype, country, wkt), name) in enumerate(zip(levels, names)):
         (wkb,) = con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()
-        rows.append((gers_id(10_000 + i), {"primary": name}, subtype, country, wkb))
+        division_id = gers_id(10_000 + i)
+        bbox = _wkt_bbox(wkt)
+        rows.append((division_id, {"primary": name}, subtype, country, wkb, bbox, division_id))
+    for division_id, name, country, (xmin, ymin, xmax, ymax) in GEOCODE_ANCHOR_AREAS:
+        wkt = box_wkt(ymin, ymax, xmin, xmax)
+        (wkb,) = con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()
+        rows.append((
+            f"{division_id}-area", {"primary": name}, "locality", country, wkb,
+            {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}, division_id,
+        ))
     return rows
+
+
+def _wkt_bbox(wkt: str) -> dict:
+    """The bbox struct for one of box_wkt's rectangles, read back off its own
+    corner list so the two can never disagree."""
+    coords = wkt[len("POLYGON(("):-2].split(", ")
+    pairs = [tuple(float(v) for v in c.split()) for c in coords]
+    lons = [p[0] for p in pairs]
+    lats = [p[1] for p in pairs]
+    return {"xmin": min(lons), "ymin": min(lats), "xmax": max(lons), "ymax": max(lats)}
+
+
+# #225: the city extents geocode_address anchors on, keyed by the
+# build_geocode_fixture.py division id each one is the boundary of.
+# (division_id, name, country, (xmin, ymin, xmax, ymax))
+#
+# Mountain View's box is the live 2026-07-22.0 extent verbatim
+# (-122.1176,37.3542 .. -122.0449,37.4711), which is exactly the box R27's
+# hand-guessed one was 0.002 degrees short of — so the fixture's anchor step
+# is the same size as the real one, not a convenient rounding of it.
+GEOCODE_ANCHOR_AREAS = (
+    ("gers-div-san-francisco", "San Francisco", "US",
+     (-122.5150, 37.7080, -122.3570, 37.8120)),
+    ("gers-div-mountain-view", "Mountain View", "US",
+     (-122.11756896972656, 37.35421371459961, -122.0449447631836, 37.4710693359375)),
+    ("gers-div-berlin", "Berlin", "DE", (13.10, 52.35, 13.75, 52.65)),
+    # A resolvable extent in a country the addresses theme does not carry at
+    # all, so geocode_address has a case where the anchor step *succeeds* and
+    # the emptiness is purely coverage — the note addresses.COVERED_COUNTRIES
+    # backs. Without a boundary here the query would stop one step earlier
+    # and never reach that note.
+    ("gers-div-kensington-gb", "Kensington", "GB", (-0.22, 51.48, -0.16, 51.52)),
+    # R28/#229: the wrong-country anchor repro, at fixture scale. Cambridge
+    # resolves to the UK one (145,700 over Cambridge MA's 118,403), which has
+    # *no* boundary here -- exactly the shape live "London" has, where the UK
+    # London carries no division_area row at all. Only the Massachusetts one
+    # does, so an anchor fallback that doesn't check the country walks across
+    # the Atlantic and answers a UK query with US doorways.
+    ("gers-div-cambridge-ma", "Cambridge", "US", (-71.16, 42.35, -71.06, 42.40)),
+    # The same shape *within* one country, which is the case the fallback
+    # legitimately exists for: Springfield resolves to the MA one (155,929),
+    # which has no boundary, and the IL runner-up supplies one.
+    ("gers-div-springfield-il", "Springfield", "US", (-89.75, 39.72, -89.58, 39.84)),
+    # R28/#229: the quadrant repro (Washington's NW/SE streets) and the
+    # house-number-parse one ("Calle 8, Miami"), each needing a real extent
+    # for the scan step to be reached at all.
+    ("gers-div-washington-dc", "Washington", "US", (-77.12, 38.79, -76.90, 39.00)),
+    ("gers-div-miami", "Miami", "US", (-80.32, 25.70, -80.14, 25.86)),
+    # R29: the English numbered-route parse case ("Route 66, Flagstaff").
+    ("gers-div-flagstaff", "Flagstaff", "US", (-111.72, 35.14, -111.56, 35.26)),
+    # R29: the extent that must be refused rather than scanned. Texas's real
+    # bounding box, 13.1 x 10.7 degrees — well past
+    # geocode._MAX_ANCHOR_SPAN_DEG, and the size at which an address scan
+    # stops being an answer. Every other anchor here is a city, so without
+    # this row nothing in the fixture can reach the too-broad branch.
+    ("gers-div-tx", "Texas", "US", (-106.65, 25.84, -93.51, 36.50)),
+)
 
 
 # --- Buildings fixture (issue #23) -----------------------------------------
@@ -368,10 +447,12 @@ def build_division_areas(con: duckdb.DuckDBPyConnection) -> None:
             names STRUCT("primary" VARCHAR),
             subtype VARCHAR,
             country VARCHAR,
-            geometry BLOB
+            geometry BLOB,
+            bbox STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE),
+            division_id VARCHAR
         )
     """)
-    con.executemany("INSERT INTO division_areas VALUES (?, ?, ?, ?, ?)", rows)
+    con.executemany("INSERT INTO division_areas VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
     con.execute(f"COPY division_areas TO '{DIVISION_AREAS_FIXTURE_PATH}' (FORMAT PARQUET)")
     print(f"wrote {len(rows)} rows to {DIVISION_AREAS_FIXTURE_PATH}")
