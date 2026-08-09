@@ -592,6 +592,38 @@ def test_two_populationless_rows_still_order_by_tier():
     ) == ["z-exact", "a-prefix"]
 
 
+def test_a_population_of_zero_does_not_rescue_a_prefix_match():
+    # The rescue is prominence, not column-completeness: Overture ships
+    # divisions with an explicit population of 0 (abandoned/unincorporated
+    # places), and a bare "population is not None" check would let one of
+    # those leapfrog an exact match whose population is simply unrecorded —
+    # reading a filled-in field as prominence when the value says otherwise.
+    assert _ranked(
+        _row("z-exact-unknown", "Example", 3),
+        _row("a-prefix-zero", "Exampleton", 2, population=0),
+    ) == ["z-exact-unknown", "a-prefix-zero"]
+
+
+def test_the_smallest_nonzero_population_still_rescues():
+    # The boundary is exactly zero — one recorded resident is still a
+    # recorded population, and the rule stays a simple, explainable one
+    # rather than an invented cutoff.
+    assert _ranked(
+        _row("z-exact-unknown", "Example", 3),
+        _row("a-prefix-one", "Exampleton", 2, population=1),
+    ) == ["a-prefix-one", "z-exact-unknown"]
+
+
+def test_a_population_of_zero_still_outranks_an_unknown_one_at_the_same_tier():
+    # #221 moves zero out of the *rescue* term only. Below the tier term the
+    # #47 ordering is untouched: "we know it is 0" still sorts ahead of "we
+    # do not know", which is what the no-population proxy chain hangs off.
+    assert _ranked(
+        _row("z-exact-zero", "Example", 3, population=0),
+        _row("a-exact-unknown", "Example", 3),
+    ) == ["z-exact-zero", "a-exact-unknown"]
+
+
 def test_a_substring_match_cannot_leapfrog_a_strong_tier_however_populous():
     # Prominence only reorders *within* the exact/prefix group: "York" is a
     # substring of "New York", and a substring hit staying below every
@@ -635,11 +667,24 @@ def test_diacritic_fold_runs_even_when_the_literal_match_has_a_population(
     assert "Zurich" in [r["name"] for r in results]
 
 
-def test_the_fold_pass_also_runs_without_a_local_table():
-    # Nothing about the fold needs the #43 table — the upstream path folds
-    # names.primary the same way, so PLACEROOT_CACHE=off gets the fix too.
+def test_the_unconditional_fold_is_scoped_to_the_local_table():
+    # Without a #43 table the fold stays gated on prominence exactly as it
+    # was before #221, so this query keeps its old (worse) answer: upstream
+    # the extra pass is an unprunable full-theme ILIKE, not the 0.2s local
+    # predicate the change was measured on, and paying it on every query
+    # that already has a good literal answer is the cost class #105/#216
+    # exist to avoid. Warming the cache is what buys the fix.
     results = geocode.geocode("Zurich", limit=5)
-    assert results[0]["name"] == "Zürich"
+    assert [r["name"] for r in results] == ["Zurich"]
+
+
+def test_the_fold_still_runs_without_a_local_table_when_the_literal_search_is_weak():
+    # The gate, not the fold, is what's local-only: with no prominent
+    # literal match the folded pass runs upstream the same as it always
+    # did, which is what "Sao Paulo" -> "São Paulo" rides on. Pinned here
+    # so the #221 scoping above can't quietly turn into "no fold upstream".
+    results = geocode.geocode("Sao Paulo", limit=5)
+    assert results[0]["name"] == "São Paulo"
 
 
 def test_an_accented_query_still_finds_itself(geocode_cache):
