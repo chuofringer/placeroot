@@ -1,0 +1,173 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "dXJuOm1ieGFkcjo5ZDQzNzM1Mi0xZGZiLTRkNTItYWMxNC01MzllZjY5ODIwMmI",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -111.86313,
+          40.725163
+        ]
+      },
+      "properties": {
+        "mapbox_id": "dXJuOm1ieGFkcjo5ZDQzNzM1Mi0xZGZiLTRkNTItYWMxNC01MzllZjY5ODIwMmI",
+        "feature_type": "address",
+        "name": "974 2100 South",
+        "coordinates": {
+          "longitude": -111.86313,
+          "latitude": 40.725163,
+          "accuracy": "rooftop"
+        },
+        "place_formatted": "Salt Lake City, Utah 84106, United States",
+        "match_code": {
+          "address_number": "matched",
+          "street": "matched",
+          "postcode": "unmatched",
+          "place": "unmatched",
+          "region": "unmatched",
+          "locality": "not_applicable",
+          "country": "inferred",
+          "confidence": "low"
+        },
+        "context": {
+          "address": {
+            "mapbox_id": "dXJuOm1ieGFkcjo5ZDQzNzM1Mi0xZGZiLTRkNTItYWMxNC01MzllZjY5ODIwMmI",
+            "address_number": "974",
+            "street_name": "2100 South",
+            "name": "974 2100 South"
+          },
+          "street": {
+            "mapbox_id": "dXJuOm1ieGFkcjo5ZDQzNzM1Mi0xZGZiLTRkNTItYWMxNC01MzllZjY5ODIwMmI",
+            "name": "2100 South"
+          },
+          "neighborhood": {
+            "mapbox_id": "dXJuOm1ieHBsYzpERWdNN0E",
+            "name": "Fairmont",
+            "alternate": {
+              "mapbox_id": "dXJuOm1ieHBsYzpLMmRzN0E",
+              "name": "Winfield"
+            }
+          },
+          "postcode": {
+            "mapbox_id": "dXJuOm1ieHBsYzpFU011N0E",
+            "name": "84106"
+          },
+          "place": {
+            "mapbox_id": "dXJuOm1ieHBsYzpFVmhvN0E",
+            "name": "Salt Lake City",
+            "wikidata_id": "Q23337",
+            "alternate": {
+              "mapbox_id": "dXJuOm1ieHBsYzpETE5vN0E",
+              "name": "Millcreek"
+            }
+          },
+          "district": {
+            "mapbox_id": "dXJuOm1ieHBsYzpBVGdtN0E",
+            "name": "Salt Lake County",
+            "wikidata_id": "Q484556"
+          },
+          "region": {
+            "mapbox_id": "dXJuOm1ieHBsYzpCa1Rz",
+            "name": "Utah",
+            "wikidata_id": "Q829",
+            "region_code": "UT",
+            "region_code_full": "US-UT"
+          },
+          "country": {
+            "mapbox_id": "dXJuOm1ieHBsYzpJdXc",
+            "name": "United States",
+            "wikidata_id": "Q30",
+            "country_code": "US",
+            "country_code_alpha_3": "USA"
+          }
+        }
+      }
+    },
+    {
+      "type": "Feature",
+      "id": "dXJuOm1ieGFkcjpkNjZkM2M0Zi1hNTA0LTQ3NTQtYTZjMS1iNjYwMGU2NWY4NmI",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -111.919654,
+          40.725872
+        ]
+      },
+      "properties": {
+        "mapbox_id": "dXJuOm1ieGFkcjpkNjZkM2M0Zi1hNTA0LTQ3NTQtYTZjMS1iNjYwMGU2NWY4NmI",
+        "feature_type": "address",
+        "name": "974 2100 South",
+        "coordinates": {
+          "longitude": -111.919654,
+          "latitude": 40.725872,
+          "accuracy": "interpolated"
+        },
+        "place_formatted": "South Salt Lake, Utah 84119, United States",
+        "match_code": {
+          "address_number": "plausible",
+          "street": "matched",
+          "postcode": "unmatched",
+          "place": "unmatched",
+          "region": "unmatched",
+          "locality": "not_applicable",
+          "country": "inferred",
+          "confidence": "low"
+        },
+        "context": {
+          "address": {
+            "mapbox_id": "dXJuOm1ieGFkcjpkNjZkM2M0Zi1hNTA0LTQ3NTQtYTZjMS1iNjYwMGU2NWY4NmI",
+            "address_number": "974",
+            "street_name": "2100 South",
+            "name": "974 2100 South"
+          },
+          "street": {
+            "mapbox_id": "dXJuOm1ieGFkcjpkNjZkM2M0Zi1hNTA0LTQ3NTQtYTZjMS1iNjYwMGU2NWY4NmI",
+            "name": "2100 South"
+          },
+          "neighborhood": {
+            "mapbox_id": "dXJuOm1ieHBsYzpCVG5NN0E",
+            "name": "Cannon",
+            "alternate": {
+              "mapbox_id": "dXJuOm1ieHBsYzpGYU5zN0E",
+              "name": "Lincoln Park"
+            }
+          },
+          "postcode": {
+            "mapbox_id": "dXJuOm1ieHBsYzpFU1RPN0E",
+            "name": "84119"
+          },
+          "place": {
+            "mapbox_id": "dXJuOm1ieHBsYzpFbStJN0E",
+            "name": "South Salt Lake",
+            "alternate": {
+              "mapbox_id": "dXJuOm1ieHBsYzpFMHRJN0E",
+              "name": "Taylorsville"
+            }
+          },
+          "district": {
+            "mapbox_id": "dXJuOm1ieHBsYzpBVGdtN0E",
+            "name": "Salt Lake County",
+            "wikidata_id": "Q484556"
+          },
+          "region": {
+            "mapbox_id": "dXJuOm1ieHBsYzpCa1Rz",
+            "name": "Utah",
+            "wikidata_id": "Q829",
+            "region_code": "UT",
+            "region_code_full": "US-UT"
+          },
+          "country": {
+            "mapbox_id": "dXJuOm1ieHBsYzpJdXc",
+            "name": "United States",
+            "wikidata_id": "Q30",
+            "country_code": "US",
+            "country_code_alpha_3": "USA"
+          }
+        }
+      }
+    }
+  ],
+  "attribution": "NOTICE: \u00a9 2023 Mapbox and its suppliers. All rights reserved. Use of this data is subject to the Mapbox Terms of Service (https://www.mapbox.com/about/maps/). This response and the information it contains may not be retained."
+}

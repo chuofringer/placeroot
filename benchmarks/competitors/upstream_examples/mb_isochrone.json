@@ -1,0 +1,59 @@
+{
+  "features": [
+    {
+      "properties": {
+        "contour": 15,
+        "color": "#4286f4",
+        "opacity": 0.33,
+        "fill": "#4286f4",
+        "fill-opacity": 0.33,
+        "fillColor": "#4286f4",
+        "fillOpacity": 0.33
+      },
+      "type": "Feature",
+      "geometry": {
+        "coordinates": [
+          "arrays of longitude, latitude coordinates"
+        ],
+        "type": "Polygon"
+      }
+    },
+    {
+      "properties": {
+        "contour": 10,
+        "color": "#04e813",
+        "opacity": 0.33,
+        "fill": "#04e813",
+        "fill-opacity": 0.33,
+        "fillColor": "#04e813",
+        "fillOpacity": 0.33
+      },
+      "type": "Feature",
+      "geometry": {
+        "coordinates": [
+          "arrays of longitude, latitude coordinates"
+        ],
+        "type": "Polygon"
+      }
+    },
+    {
+      "properties": {
+        "contour": 5,
+        "color": "#6706ce",
+        "opacity": 0.33,
+        "fill": "#6706ce",
+        "fill-opacity": 0.33,
+        "fillColor": "#6706ce",
+        "fillOpacity": 0.33
+      },
+      "type": "Feature",
+      "geometry": {
+        "coordinates": [
+          "arrays of longitude, latitude coordinates"
+        ],
+        "type": "Polygon"
+      }
+    }
+  ],
+  "type": "FeatureCollection"
+}
