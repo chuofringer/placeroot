@@ -24,14 +24,12 @@ dependencies = [
     "mcp[cli]>=2.0.0",
 ]
 
-# The GitHub repo (chuofringer/placeroot) is currently PRIVATE, so any link
-# to it 404s for anyone landing on the public PyPI page. Point Issues/Docs at
-# the public site instead; restore Repository/Issues -> GitHub once the repo
-# goes public.
 [project.urls]
 Homepage = "https://placeroot.dev"
-Issues = "https://placeroot.dev"
+Repository = "https://github.com/chuofringer/placeroot"
+Issues = "https://github.com/chuofringer/placeroot/issues"
 Documentation = "https://placeroot.dev/how-it-works.html"
+Changelog = "https://github.com/chuofringer/placeroot/blob/main/CHANGELOG.md"
 
 [project.scripts]
 placeroot = "placeroot.server:main"

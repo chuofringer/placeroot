@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Python deps are locked in uv.lock at the repo root.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+
+  # The npm launcher package (no lockfile; manifest-only updates).
+  - package-ecosystem: npm
+    directory: /npm
+    schedule:
+      interval: weekly

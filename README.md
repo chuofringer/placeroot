@@ -1,5 +1,11 @@
 # PlaceRoot
 
+[![CI](https://github.com/chuofringer/placeroot/actions/workflows/ci.yml/badge.svg)](https://github.com/chuofringer/placeroot/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/placeroot)](https://pypi.org/project/placeroot/)
+[![npm](https://img.shields.io/npm/v/placeroot)](https://www.npmjs.com/package/placeroot)
+[![Python](https://img.shields.io/pypi/pyversions/placeroot)](https://pypi.org/project/placeroot/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/chuofringer/placeroot/blob/main/LICENSE)
+
 **Ground AI agents in open map data.**
 
 PlaceRoot is an MCP server that answers spatial questions from [Overture Maps](https://overturemaps.org) — no API key, no signup, no vendor platform.
@@ -180,6 +186,8 @@ uv run ruff check .
 
 ## Docs
 
+- [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, design rules, how to propose a tool · [CHANGELOG.md](CHANGELOG.md) · [SECURITY.md](SECURITY.md)
+- [docs/DATA-LICENSE.md](docs/DATA-LICENSE.md) — the data's licenses (the code is MIT; the data is per-theme) and what you owe downstream
 - [ROADMAP.md](ROADMAP.md) — where this is going · [PLAN.md](PLAN.md) — product plan and positioning
 - [docs/benchmarks.md](docs/benchmarks.md) — token efficiency: per-answer cost, and the schema surface it's paid against
 - [docs/benchmarks-vs.md](docs/benchmarks-vs.md) — head-to-head against Mapbox MCP and the Google Maps MCP reference server
@@ -191,7 +199,14 @@ uv run ruff check .
 
 `hello@placeroot.dev`
 
-## License
+## License and attribution
 
-MIT
+The code is [MIT](https://github.com/chuofringer/placeroot/blob/main/LICENSE). The data it queries is the Overture Maps public
+release, licensed per theme — places under CDLA-Permissive-2.0; the
+OSM-derived themes (divisions, transportation, base) under ODbL, which asks
+for attribution on anything user-facing you build from them:
+
+> © Overture Maps Foundation · © OpenStreetMap contributors ([ODbL](https://opendatacommons.org/licenses/odbl/))
+
+Details and per-theme obligations: [docs/DATA-LICENSE.md](docs/DATA-LICENSE.md).
 
