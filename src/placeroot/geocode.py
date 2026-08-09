@@ -820,8 +820,10 @@ def _division_bbox(
     tool response exposes this. None means "no usable extent", which covers
     four cases the caller must treat identically: no local table (cache off),
     a table predating #224, an unknown id, and — on release 2026-07-22.0, for
-    *every* division row measured — a bbox whose span is below
-    _DEGENERATE_BBOX_SPAN_DEG, i.e. a point rather than an extent.
+    *every* division row measured — a bbox whose span in *either* axis is
+    below _DEGENERATE_BBOX_SPAN_DEG, i.e. something that bounds nothing rather
+    than an extent. That last test is per-axis, so a wide-but-flat box and an
+    inverted (antimeridian-crossing) one are rejected alongside a point.
 
     That last case is the normal one today, not an edge case: division rows
     are points and their bbox is the point's float32 rounding envelope. A
@@ -844,7 +846,14 @@ def _division_bbox(
     if row is None or any(v is None for v in row):
         return None
     xmin, ymin, xmax, ymax = (float(v) for v in row)
-    if (xmax - xmin) < _DEGENERATE_BBOX_SPAN_DEG and (ymax - ymin) < _DEGENERATE_BBOX_SPAN_DEG:
+    # Either axis below the floor is enough: a box that is wide but flat bounds
+    # nothing, exactly like a point does. A negative span (xmin > xmax, i.e. an
+    # antimeridian-crossing row stored unwrapped) is below the floor too and
+    # lands in this branch deliberately — callers bound scans with a plain
+    # `BETWEEN xmin AND xmax`, which an inverted box turns into a silently
+    # empty range. Supporting wrapped extents means splitting the box at ±180,
+    # not passing it through.
+    if (xmax - xmin) < _DEGENERATE_BBOX_SPAN_DEG or (ymax - ymin) < _DEGENERATE_BBOX_SPAN_DEG:
         return None
     return xmin, ymin, xmax, ymax
 

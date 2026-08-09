@@ -616,6 +616,40 @@ def test_division_bbox_returns_a_real_extent_when_the_row_has_one(tmp_path):
     assert geocode._division_bbox(str(table), "gers-div-nope") is None
 
 
+def test_division_bbox_is_none_when_only_one_axis_is_degenerate(tmp_path):
+    # A box can be half a degree wide and still bound nothing: the degeneracy
+    # floor is per-axis, so a flat box is rejected exactly like a point. Passing
+    # this one through would hand #225 a centimetre-tall scan window, which
+    # matches no addresses and reads as "no such address" rather than "fall
+    # back" — the failure the floor exists to prevent.
+    table = tmp_path / "divisions.parquet"
+    duckdb.connect().execute(f"""
+        COPY (SELECT 'gers-div-flat' AS id,
+                     -122.5 AS bbox_xmin, 37.4 AS bbox_ymin,
+                     -122.0 AS bbox_xmax, 37.4000001 AS bbox_ymax
+              UNION ALL
+              SELECT 'gers-div-thin', -122.5000001, 37.0, -122.5, 37.5)
+        TO '{table}' (FORMAT PARQUET)
+    """)
+    assert geocode._division_bbox(str(table), "gers-div-flat") is None
+    assert geocode._division_bbox(str(table), "gers-div-thin") is None
+
+
+def test_division_bbox_is_none_for_an_inverted_antimeridian_bbox(tmp_path):
+    # xmin > xmax: a row crossing the antimeridian stored unwrapped. Its x span
+    # is negative, which is below the floor, so it lands in the None branch on
+    # purpose — a caller's `lon BETWEEN xmin AND xmax` would otherwise be a
+    # silently empty range rather than the whole Pacific-spanning division.
+    table = tmp_path / "divisions.parquet"
+    duckdb.connect().execute(f"""
+        COPY (SELECT 'gers-div-fiji' AS id,
+                     179.9 AS bbox_xmin, -18.5 AS bbox_ymin,
+                     -179.9 AS bbox_xmax, -16.0 AS bbox_ymax)
+        TO '{table}' (FORMAT PARQUET)
+    """)
+    assert geocode._division_bbox(str(table), "gers-div-fiji") is None
+
+
 def test_division_bbox_without_a_local_table_is_none():
     # PLACEROOT_CACHE=off: no table to read, and no upstream query to fall
     # back to — the caller's job is to cope with None.
