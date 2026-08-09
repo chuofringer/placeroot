@@ -432,11 +432,32 @@ def test_alt_match_folds_letters_strip_accents_leaves_alone(geocode_cache):
     assert results[0]["matched_name"] == "Preßburg"
 
 
+# Strings picked to stress every way the two folds could drift apart: each
+# _UNFOLDED_LETTERS entry in both cases, letters whose uppercase form has no
+# single-character lowercase (ẞ), the dotted/dotless Turkish I pair (where
+# Python's str.lower and DuckDB's lower() are documented to differ on İ),
+# titlecase digraphs, compatibility ligatures, fullwidth forms, and
+# non-Latin scripts that must pass through untouched.
+_FOLD_CORPUS = [
+    "Preßburg", "Łódź", "Malmø", "München", "Ísafjörður", "Straße", "STRAẞE", "ẞ",
+    "İstanbul", "İzmir", "ı", "I", "Kœnigsberg", "Ærøskøbing", "Þingvellir", "Đakovo",
+    "Ħamrun", "Ðurđevac", "ǅakovo", "ǇUBLJANA", "ﬁrenze", "Ｔｏｋｙｏ", "ØSTERBRO",
+    "ŁÓDŹ", "ÆRØ", "ÞÓRSHÖFN", "Nürnberg", "Reykjavík", "Kraków", "Aš", "Ḥalab",
+    "Αθήνα", "ΑΘΗΝΑ", "Москва", "東京都", "São Paulo",
+]
+
+
 def test_alt_fold_matches_between_python_and_sql():
-    for name in ["Preßburg", "Łódź", "Malmø", "München", "Ísafjörður"]:
-        assert geocode._fold_alt_name(name) == geocode._fold_alt_name(
-            geocode._fold_alt_name(name)
-        ), name
+    # The whole #214 design rests on this: alternates are folded once in SQL
+    # at materialization time and the query is folded in Python per call, and
+    # the two only ever meet as an ILIKE comparison — so a divergence on any
+    # letter silently makes those alternates unreachable rather than raising.
+    # Run the real SQL fold through DuckDB and compare, rather than asserting
+    # the Python side against itself.
+    con = duckdb.connect()
+    sql = f"SELECT {geocode._fold_alt_name_sql('?')}"
+    for name in _FOLD_CORPUS:
+        assert con.execute(sql, [name]).fetchone()[0] == geocode._fold_alt_name(name), name
     assert geocode._fold_alt_name("Preßburg") == "pressburg"
     assert geocode._fold_alt_name("Łódź") == "lodz"
     assert geocode._fold_alt_name("Malmø") == "malmo"
@@ -449,6 +470,47 @@ def test_endonym_queries_are_unaffected_by_the_alt_table(geocode_cache):
         top = geocode.geocode(query, limit=5)[0]
         assert top["name"] == expected
         assert "matched_name" not in top
+
+
+def test_one_result_per_division_however_many_alternates_match(geocode_cache):
+    # A division has one alt row per distinct folded spelling — Москва
+    # carries "moscow", "moskau", "moskva", "moskwa" — and a substring query
+    # matches several at once. Without the per-id de-duplication that came
+    # back as the same GERS id three times over, which at a small `limit`
+    # crowded every other division out of the answer entirely.
+    results = geocode.geocode("Mosk", limit=10)
+    ids = [r["id"] for r in results]
+    assert len(ids) == len(set(ids)), results
+    assert "gers-div-moskva-ru" in ids and "gers-div-moskva-tj" in ids
+    # The surviving alternate is the one that matched best, not an arbitrary
+    # one of the four: "Moskva" is an exact match for the query's fold.
+    top = geocode.geocode("Moskva", limit=5)[0]
+    assert top["name"] == "Москва"
+    assert top["matched_name"] == "Moskva"
+
+
+def test_alternate_crowding_does_not_consume_the_limit(geocode_cache):
+    # The user-visible half of the same bug: three of the caller's three
+    # slots went to one city.
+    names = [r["name"] for r in geocode.geocode("Mosk", limit=3)]
+    assert names.count("Москва") == 1
+    assert "Moskva" in names  # the Tajik namesake still gets a slot
+
+
+def test_query_that_folds_to_nothing_matches_no_alternates(geocode_cache):
+    # A query of only combining marks folds away to "" (that is what
+    # stripping diacritics does to it), which as an ILIKE pattern is a bare
+    # '%%' matching every alternate in the table — answering a nonsense
+    # query with whichever divisions happen to be most prominent. The
+    # literal search, which matches raw names, returns nothing for these.
+    #
+    # The #215 fuzzy tier had the same hole independently — DuckDB scores
+    # jaro_winkler_similarity(name, '') above the threshold — and the query
+    # reaches it precisely because the literal and alternate passes both
+    # come back empty, so both guards are needed for this to hold.
+    assert geocode._fold_alt_name("́") == ""
+    for query in ["́", "́̈"]:
+        assert geocode.geocode(query, limit=5) == [], query
 
 
 def test_alt_table_is_materialized_beside_the_divisions_table(geocode_cache):

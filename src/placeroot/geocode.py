@@ -591,11 +591,19 @@ _ALT_BUILD_ATTEMPTED: set[str] = set()
 
 def _try_materialize_alt_names_table(alt_path: Path, glob: str) -> None:
     """Build the alt table, logging and swallowing any failure — see
-    _materialize_divisions_table on why this half is best-effort."""
+    _materialize_divisions_table on why this half is best-effort.
+
+    OSError is caught alongside the query errors because the filesystem half
+    of the build (mkdir, and the tmp-file rename) fails on its own terms: a
+    read-only or full cache directory raises OSError, not duckdb.Error, and
+    every caller of this treats a failed alt build as "search primary names
+    only". Letting it escape would take down a geocode call whose primary
+    table had already been written successfully.
+    """
     t0 = time.time()
     try:
         _materialize_alt_names_table(alt_path, glob)
-    except (duckdb.Error, overture.UpstreamUnavailable) as e:
+    except (duckdb.Error, overture.UpstreamUnavailable, OSError) as e:
         logger.warning(
             "alternate-name table materialization failed, geocode will search "
             "primary names only: %s", e,
@@ -934,14 +942,34 @@ def _query_alt_names(
     canonical "München" at rank time would silently demote it to the
     substring tier). `_matched_name` carries one real spelling of the
     alternate for the caller-visible `matched_name`.
+
+    One row per division, not per matching alternate. A division has as many
+    alternate rows as it has distinct folded spellings — Москва carries
+    "moscow", "moskau", "moskva", "moskwa" — and a substring query ("Mosk")
+    matches several of them at once, which without the QUALIFY below returns
+    the same GERS id several times over and lets one division fill the
+    caller's whole `limit`. The de-duplication is done in SQL rather than in
+    Python so DIVISION_OVERFETCH bounds *divisions* and not near-duplicate
+    rows: the same ranking that orders the result picks which alternate
+    survives per id (best tier, then alt_name for determinism), so the row
+    kept is the one that matched `query` best.
+
+    Returns [] when the query folds away to nothing (a query of only
+    combining marks does: _fold_alt_name strips them). The pattern would
+    otherwise be a bare '%%' matching every alternate in the table, which
+    answers a nonsense query with arbitrary prominent divisions — the
+    literal search, matching raw names, returns nothing for those.
     """
     folded = _fold_alt_name(query)
+    if not folded:
+        return []
     q = overture._like_escape(folded)
     params: dict = {"pattern": f"%{q}%", "exact": q, "prefix": f"{q}%"}
     region_filter = ""
     if region_code:
         region_filter = "AND d.region = $region_code"
         params["region_code"] = region_code
+    match_order = _match_tier_order_sql("a.alt_name")
     sql = f"""
         SELECT d.id, d.name, d.subtype, d.country, d.region, d.lat, d.lon,
                d.admin_chain, d.population, a.alt_name, a.alt_display
@@ -949,7 +977,10 @@ def _query_alt_names(
         JOIN read_parquet('{table_path}') d ON d.id = a.id
         WHERE a.alt_name ILIKE $pattern ESCAPE '\\'
         {region_filter}
-        ORDER BY {_match_tier_order_sql("a.alt_name")}
+        QUALIFY row_number() OVER (
+            PARTITION BY d.id ORDER BY {match_order}, a.alt_name
+        ) = 1
+        ORDER BY {match_order}
         LIMIT {DIVISION_OVERFETCH}
     """
     try:
@@ -1074,8 +1105,18 @@ def _query_divisions_fuzzy(table_path: str, query: str) -> list[dict]:
     a threshold for it needs its own measurement, and a wrong fuzzy answer
     is the failure mode this tier is most careful about. Left for a
     follow-up with numbers behind it.
+
+    Returns [] when the query folds to the empty string — a query of only
+    combining marks does, since folding strips exactly those. DuckDB's
+    jaro_winkler_similarity(name, '') scores above the threshold rather
+    than at 0, so without this the tier answers a nonsense query with the
+    most populous divisions in the dataset, presented as spelling
+    corrections.
     """
-    params: dict = {"folded": _normalize_for_match(query)}
+    folded_query = _normalize_for_match(query)
+    if not folded_query:
+        return []
+    params: dict = {"folded": folded_query}
     sql = f"""
         SELECT id, name, subtype, country, region, lat, lon, admin_chain, population,
                jaro_winkler_similarity({_FOLDED_NAME_SQL}, $folded) AS similarity
@@ -1340,7 +1381,17 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
                     variant_rows.append(row)
                     seen_ids.add(row["id"])
         stripped_query = _strip_diacritics(search_query)
-        for row in _query_divisions(stripped_query, region_code, local_table, fold_diacritics=True):
+        # Not when stripping left nothing: a query of only combining marks
+        # folds to "", and searching for it is an ILIKE '%%' that matches
+        # every division in the dataset — a nonsense query answered with
+        # whichever places are most populous. The literal pass, matching raw
+        # names, correctly returns nothing for those.
+        rows = (
+            _query_divisions(stripped_query, region_code, local_table, fold_diacritics=True)
+            if stripped_query
+            else []
+        )
+        for row in rows:
             if row["id"] not in seen_ids:
                 row["_variant"] = True
                 row["_tier"] = _match_tier(row["name"], stripped_query)
