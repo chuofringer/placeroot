@@ -1,7 +1,7 @@
 # Traction metrics we own
 
 Stars measure other people's attention, not whether PlaceRoot is worth
-building. The Phase 2 traction bar (PLAN.md) is judged on the four signals
+building. The Phase 2 traction bar is judged on the four signals
 below — each measurable from data we control, each with a concrete
 collection method, reviewed on a fixed cadence.
 
@@ -46,7 +46,7 @@ anonymous "someone said" entries.
 
 - Record all four in a dated row of the appendix table every Monday
   during Phase 2 (weeks 8–13).
-- The Phase 3 gate (PLAN.md) is judged at ~week 14 on: positive download
+- The Phase 3 gate is judged at ~week 14 on: positive download
   slope over the last four weeks, ≥3 distinct client names, ≥5
   unsolicited inbound items, ≥2 named real uses. Miss the bar → Phase 3
   waits; the local server keeps shipping regardless.

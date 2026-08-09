@@ -117,7 +117,7 @@ of the `io.github.chuofringer` namespace) then `mcp-publisher publish`. The
 repo is currently private, which may affect the ownership check and the
 `repository.url` link in the manifest — make the repo public first, or
 expect that step to need revisiting. The official registry still returns
-zero results for "overture" (noted in PLAN.md): open namespace.
+zero results for "overture" (verified during market research): open namespace.
 
 ## awesome-agentic-AI-for-ST
 

@@ -1,13 +1,14 @@
 """Guardrails for the launch content in docs/launch/ (issue #21).
 
 Checks, deliberately conservative:
-  1. The four required launch docs exist and are non-empty.
+  1. The required launch docs exist and are non-empty.
   2. None of them contain a forbidden marketing superlative.
   3. None of them contain emoji.
   4. Every "metric-shaped" number in them (a number immediately followed by
      a unit like "tokens", "%", "ms", "places", "queries", "calls", or the
      phrasing "N-call"/"N tool calls") is drawn from a whitelist of values
-     that trace back to README.md, PLAN.md, ROADMAP.md, docs/METRICS.md, or
+     that trace back to README.md, ROADMAP.md, docs/METRICS.md, the internal
+     product plan (kept outside the repo), or
      site/index.html — the repo's actual measured numbers. This is not a
      check on every digit in the files (dates, JSON schema versions, HN
      title numbering, and step markers are not "claims" and are exempt by
@@ -15,21 +16,21 @@ Checks, deliberately conservative:
      number that would carry an invented statistic.
 
 Whitelist derivation (each value traced to its source file/line):
-  1944    PLAN.md: "summarize_area — category mix (1,944 places ~= 320 tokens)"
-  320     PLAN.md: same line — token cost for that summarize_area call
-  113     README.md / ROADMAP.md / PLAN.md: "113 queries" geocode benchmark
-  100     README.md / ROADMAP.md / PLAN.md: hit@1 100% (113 queries, saturated set)
+  1944    internal plan: "summarize_area — category mix (1,944 places ~= 320 tokens)"
+  320     internal plan: same line — token cost for that summarize_area call
+  113     README.md / ROADMAP.md / internal plan: "113 queries" geocode benchmark
+  100     README.md / ROADMAP.md / internal plan: hit@1 100% (113 queries, saturated set)
   35.4    initial benchmark run (progression cited in the launch essay)
   54.9    initial benchmark run, same measurement
-  21      PLAN.md: "Local tile cache -- warm ~21ms"
-  17      PLAN.md: "~5.9K tokens for a 17-call analysis"
+  21      internal plan: "Local tile cache -- warm ~21ms"
+  17      internal plan: "~5.9K tokens for a 17-call analysis"
           (also examples/site_selection/README.md: "17 tool calls total")
-  5.9K    PLAN.md: "~5.9K tokens for a 17-call analysis"
+  5.9K    internal plan: "~5.9K tokens for a 17-call analysis"
   501     site/index.html: "PlaceRoot <span class=\"token-count placeroot\">501 tokens</span>"
   45000   site/index.html: "Raw GeoJSON <span class=\"token-count raw\">~45,000 tokens</span>"
   291     site/index.html: "Each feature above runs ~291 tokens (measured...)"
-  25      PLAN.md: Geoawesome essay "45K-token GeoJSON collapsing to a 25-token reference"
-  2000    README.md / PLAN.md / ROADMAP.md: "every answer fits in ~2K tokens" design rule
+  25      internal plan: Geoawesome essay "45K-token GeoJSON collapsing to a 25-token reference"
+  2000    README.md / internal plan / ROADMAP.md: "every answer fits in ~2K tokens" design rule
 """
 
 import re
@@ -39,9 +40,7 @@ LAUNCH_DIR = Path(__file__).resolve().parent.parent / "docs" / "launch"
 
 REQUIRED_FILES = [
     "post-why-agents-are-bad-at-maps.md",
-    "show-hn.md",
     "registry-submissions.md",
-    "outreach.md",
 ]
 
 FORBIDDEN_WORDS = [

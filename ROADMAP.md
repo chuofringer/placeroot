@@ -65,7 +65,7 @@ tests, and a hardcoded upstream release.
 
 ## Competitive watch (verified 2026-08-06)
 
-A three-track market re-verification (details in [PLAN.md](PLAN.md)) confirmed the
+A three-track market re-verification confirmed the
 category position: no other project ships token-budgeted answers, GERS ids in every
 response, keyless Overture geocoding, keyless global own-graph isochrones, or
 self-contained offline map artifacts. The position is features, not a moat — two
@@ -82,7 +82,8 @@ watch items, none blocking:
 - **Google Maps Grounding Lite** — free while Experimental; a GA pricing decision
   ($2.80–7.00/1K published as potential) changes the cost-comparison story.
 - **Overture first-party tooling** — ORATOR is still an SF-Bay prototype; any move
-  toward an official Overture MCP server changes risk 7 in PLAN.md.
+  toward an official Overture MCP server changes the competitive picture more
+  than anything else on this list.
 
 The empty "overture" search in the official MCP registry is the clock: #16 ships
 before someone else fills it.
