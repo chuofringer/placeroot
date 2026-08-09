@@ -41,7 +41,7 @@ jobs:
       contents: write        # push the bump branch
       pull-requests: write   # open the PR
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           # Full history + tags: bump_version.py derives the new-tool list by
           # diffing the working tree's registered tools against the previous
@@ -49,7 +49,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf  # v3
         with:
           enable-cache: true
 
@@ -97,7 +97,7 @@ jobs:
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
       - name: Open the release PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         env:
           VERSION: ${{ inputs.version }}
           BRANCH: ${{ steps.push.outputs.branch }}

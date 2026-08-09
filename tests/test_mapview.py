@@ -164,6 +164,8 @@ def test_render_html_has_scale_bar_and_attribution():
     doc = mapview.render_html(points, title="Test Map")
     assert "scale" in doc.lower()
     assert "Overture Maps Foundation" in doc
+    # ODbL produced-work credit for the OSM-derived themes (docs/DATA-LICENSE.md)
+    assert "OpenStreetMap contributors" in doc
 
 
 def test_render_html_escapes_title():

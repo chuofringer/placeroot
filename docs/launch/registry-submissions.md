@@ -80,8 +80,12 @@ manifest is checked in at `mcpb/manifest.json` (MCPB manifest_version 0.4,
 `server.type: "uv"` — deps come from `pyproject.toml`, nothing vendored),
 validated against
 https://github.com/modelcontextprotocol/mcpb/blob/main/schemas/mcpb-manifest-v0.4.schema.json.
-Building the actual `.mcpb` (an `mcpb pack` run plus an `.mcpbignore`) is
-not done yet — that is the remaining work before a Smithery submission.
+The bundle itself is built (`scripts/build_mcpb.py` → `site/placeroot.mcpb`,
+rebuilt on every version bump by the Prepare Release workflow), so the
+submission is one `smithery mcp publish` away once the repo is public.
+Caveat for the listing text: the bundle's server type is `uv`, so the
+user's machine still needs uv installed — one-click removes the config
+step, not the runtime prerequisite.
 
 - **Qualified name:** `chuofringer/placeroot` (adjust once the namespace is claimed)
 - **Display name:** PlaceRoot
