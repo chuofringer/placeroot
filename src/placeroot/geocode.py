@@ -175,6 +175,52 @@ Two properties this tier is built around:
   places fallback: the query text is a known misspelling at that point,
   and substring-matching a typo against the places theme is how
   "Snags N Burgs Cafe" happened.
+
+--- #214: alternate names (Overture's names.common) ---
+
+Everything above matches `names.primary` — the *endonym*, the name in the
+local language. Overture also ships `names.common`, a ~100-language map of
+localized names (4.29M alternates across 1.53M divisions, release
+2026-07-22.0), which we used to discard at materialization time. Measured
+live before this: "Munich" answered Munich, North Dakota (München absent
+from the candidate pool entirely), "Tokyo" answered Tokyo, Papua New Guinea,
+"Moskva" answered Moskva, Tajikistan.
+
+So the #43 materialization writes a *second* local parquet next to the
+divisions table: one row per (division id, folded alternate name), from
+`unnest(map_values(names.common))`, grouped so each folded spelling appears
+once per division and dropping alternates that fold to the same string as
+the primary name. _query_divisions unions an ILIKE against that table
+(joined back to the divisions table for the row's real columns) into the
+literal search.
+
+Alt rows are tagged `_variant`, exactly like #53's abbreviation/diacritic
+retry hits, and for the same reason: they were found through a spelling the
+caller typed but Overture doesn't call canonical, so their own prominence
+(the #47 chain) decides against a same-tier literal match and the literal
+tiebreak only settles a full tie. That is what makes "Munich" resolve to
+München — both are exact-tier matches, and München carries a population
+while Munich, ND doesn't. The returned `name` is always Overture's
+canonical primary spelling; an optional `matched_name` says which alternate
+actually matched, so an agent can see that "Munich" found "München" rather
+than guessing whether the answer is a namesake.
+
+Alternates are stored pre-folded (lowercased, accents stripped) and the
+query is folded the same way in Python, so matching is case- and
+diacritic-insensitive without a per-row function call at query time. Both
+folds go through the explicit _UNFOLDED_LETTERS map on top of
+strip_accents, which leaves ß/ø/Ł alone (duckdb#15706) — see that constant.
+
+Cost, measured live on release 2026-07-22.0: 15.6s added to the one-time
+materialization, 95.3MB ZSTD on disk against the primary table's 197.1MB,
+0.17-0.42s per join lookup. Verified live on the same release: "Munich" ->
+München, "Tokyo" -> 東京都, "Moskva" -> Москва, "Vienna" -> Wien,
+"Pressburg" -> Bratislava. Graceful by construction: a cache directory
+written before this feature has no alt table, and the alt query is simply
+skipped — primary-only behavior, no error.
+
+The #215 fuzzy tier deliberately stays on primary names only; see
+_query_divisions_fuzzy.
 """
 
 import logging
@@ -209,6 +255,8 @@ _PLACES_FALLBACK_RADIUS_M = 30_000
 # share the same cache dir and eviction pool.
 _DIVISIONS_TABLE_SUBDIR = "geocode-divisions"
 _DIVISIONS_TABLE_FILENAME = "table.parquet"
+# #214: the alternate-name table, written alongside the primary one.
+_ALT_NAMES_TABLE_FILENAME = "alt_names.parquet"
 
 # Bigger number = ranked higher among same name-match tier. Chosen so a
 # free-text query like "Springfield" surfaces the city before a same-named
@@ -258,6 +306,56 @@ def _strip_diacritics(s: str) -> str:
 
 def _normalize_for_match(s: str) -> str:
     return _strip_diacritics(s).lower()
+
+
+# #214: Latin letters that carry no combining mark of their own, so neither
+# Python's NFD pass (_strip_diacritics) nor DuckDB's strip_accents() touches
+# them (duckdb#15706): "München" folds to "munchen", but "Preßburg" stays
+# "preßburg" and "Łódź" only loses the ź. Overture's names.common is full of
+# them — the German, Nordic, Polish and Icelandic exonyms are exactly the
+# alternates an English-speaking caller reaches for — and a plain-ASCII query
+# ("Pressburg", "Lodz", "Malmo") never reaches the row without this.
+#
+# Kept to letters with an unambiguous ASCII expansion, and applied *after*
+# lower(), so only the lowercase forms need listing. Deliberately scoped to
+# the #214 alternate-name fold rather than retrofitted onto
+# _normalize_for_match: the primary-name tiers (#53) and the #215 fuzzy
+# threshold were both measured against strip_accents alone, and widening
+# their folding is a separate change with its own regressions to justify.
+_UNFOLDED_LETTERS = {
+    "ß": "ss",
+    "ø": "o",
+    "ł": "l",
+    "đ": "d",
+    "ð": "d",
+    "þ": "th",
+    "æ": "ae",
+    "œ": "oe",
+    "ħ": "h",
+    "ı": "i",
+}
+
+
+def _fold_alt_name(s: str) -> str:
+    """Python side of the #214 alternate-name fold: lowercase, accents
+    stripped, then _UNFOLDED_LETTERS applied. Must stay byte-identical to
+    _fold_alt_name_sql, which folds the stored column at materialization
+    time — the two only ever meet as an equality/ILIKE comparison.
+    """
+    folded = _normalize_for_match(s)
+    for src, dst in _UNFOLDED_LETTERS.items():
+        folded = folded.replace(src, dst)
+    return folded
+
+
+def _fold_alt_name_sql(expr: str) -> str:
+    """SQL twin of _fold_alt_name over `expr`. Used once per alternate at
+    materialization time so the query-time comparison is a plain ILIKE on a
+    stored column rather than a per-row function chain."""
+    sql = f"lower(strip_accents({expr}))"
+    for src, dst in _UNFOLDED_LETTERS.items():
+        sql = f"replace({sql}, '{src}', '{dst}')"
+    return sql
 
 
 def _match_tier(name: str, query: str) -> int:
@@ -396,11 +494,72 @@ def _local_divisions_table_path(active_release: str) -> Path:
     return cache.cache_dir() / active_release / _DIVISIONS_TABLE_SUBDIR / _DIVISIONS_TABLE_FILENAME
 
 
+def _materialize_alt_names_table(path: Path, glob: str) -> None:
+    """COPY the #214 alternate-name table — one row per (division id, folded
+    `names.common` spelling) — into a local parquet at `path`.
+
+    Shape is deliberately narrow: `id`, the folded name the ILIKE runs
+    against, and one display spelling for `matched_name`. Everything else the
+    result row needs comes from joining `id` back to the primary divisions
+    table, so this stays the small side of the join.
+
+    Three reductions keep it that way, all done here rather than at query
+    time. GROUP BY (id, folded) collapses the many languages that agree on a
+    spelling — Overture stores "Munich" separately for en/fr/it/… — into one
+    row. Alternates that fold to the same string as the primary name are
+    dropped: the literal search already finds those, and a duplicate row
+    would only have to be de-duplicated again per query. And the fold itself
+    (lower + strip_accents + _UNFOLDED_LETTERS) is applied once per alternate
+    here instead of once per alternate per query.
+
+    Measured live on release 2026-07-22.0: 4.29M raw alternates fold down to
+    2.49M rows across 1.39M divisions; 15.6s added to the one-time build,
+    95.3MB ZSTD on disk against the primary table's 197.1MB, and 0.17-0.42s
+    per join lookup ("Vienna" .. "Tokyo"). Dropping alt_display would make it
+    71.6MB at the same build time — 24MB is what naming the matched spelling
+    in the answer costs, and it is worth it: without it `matched_name` can
+    only echo the folded lowercase form.
+
+    Raises duckdb.Error if names.common isn't there or isn't a map — the
+    caller treats that as "no alt table" and searches primary names only.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".parquet.tmp")
+    con = overture._new_connection()
+    sql = f"""
+        COPY (
+            SELECT id, alt_name, min(alt) AS alt_display
+            FROM (
+                SELECT id, alt, primary_folded, {_fold_alt_name_sql("alt")} AS alt_name
+                FROM (
+                    SELECT id,
+                           {_fold_alt_name_sql("names.primary")} AS primary_folded,
+                           unnest(map_values(names.common)) AS alt
+                    FROM read_parquet('{glob}', hive_partitioning=1)
+                    WHERE names.common IS NOT NULL
+                )
+            )
+            WHERE alt_name IS NOT NULL AND alt_name <> ''
+              AND alt_name IS DISTINCT FROM primary_folded
+            GROUP BY id, alt_name
+        ) TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)
+    """
+    con.execute(sql)
+    tmp_path.replace(path)
+
+
 def _materialize_divisions_table(path: Path, glob: str) -> None:
     """COPY just the columns geocode.py needs, for every type=division row, into
     a local parquet file at `path`. Raises UpstreamUnavailable/duckdb.Error on
     failure — callers treat that as "materialization failed" and fall back to
     direct upstream scans, same as a missing/incompatible schema.
+
+    Also writes the #214 alternate-name table beside it, from the same
+    upstream read. That half is best-effort: `names.common` is an optional
+    nested field this module can't probe for (probe_schema only sees
+    top-level columns), and losing alternate-name search is a much smaller
+    loss than losing the local table entirely — so a failure there is logged
+    and swallowed, leaving the install on primary names only.
     """
     cols = overture.probe_schema(glob)
     if cols is not None and "names" not in cols:
@@ -426,6 +585,68 @@ def _materialize_divisions_table(path: Path, glob: str) -> None:
     """
     con.execute(sql)
     tmp_path.replace(path)
+    _try_materialize_alt_names_table(path.with_name(_ALT_NAMES_TABLE_FILENAME), glob)
+
+
+# #214: releases whose alt table this process has already tried (and failed)
+# to build. A cache directory written before this feature has a divisions
+# table but no alt table; rather than leaving those installs on primary-only
+# search until the next Overture release rolls the cache directory over, the
+# alt half is built on its own the first time it is found missing. Bounded to
+# one attempt per release per process so a persistent failure (no network, a
+# release without names.common) costs one try, not one per geocode call.
+_ALT_BUILD_ATTEMPTED: set[str] = set()
+
+
+def _try_materialize_alt_names_table(alt_path: Path, glob: str) -> None:
+    """Build the alt table, logging and swallowing any failure — see
+    _materialize_divisions_table on why this half is best-effort.
+
+    OSError is caught alongside the query errors because the filesystem half
+    of the build (mkdir, and the tmp-file rename) fails on its own terms: a
+    read-only or full cache directory raises OSError, not duckdb.Error, and
+    every caller of this treats a failed alt build as "search primary names
+    only". Letting it escape would take down a geocode call whose primary
+    table had already been written successfully.
+    """
+    t0 = time.time()
+    try:
+        _materialize_alt_names_table(alt_path, glob)
+    except (duckdb.Error, overture.UpstreamUnavailable, OSError) as e:
+        logger.warning(
+            "alternate-name table materialization failed, geocode will search "
+            "primary names only: %s", e,
+        )
+        return
+    logger.info(
+        "alternate-name table materialized in %.1fs -> %s", time.time() - t0, alt_path
+    )
+
+
+def _local_alt_names_table(local_table: str | None) -> str | None:
+    """Path to the #214 alternate-name table sitting beside `local_table`, or
+    None if there isn't one.
+
+    None is not an error state: no local divisions table at all (cache off),
+    a cache directory written before this feature, a dataset without
+    names.common, or a failed best-effort build all land here, and every one
+    of them means the same thing to the caller — search primary names only.
+    """
+    if local_table is None:
+        return None
+    path = Path(local_table).with_name(_ALT_NAMES_TABLE_FILENAME)
+    if path.exists():
+        return str(path)
+    key = str(path)
+    if key not in _ALT_BUILD_ATTEMPTED:
+        _ALT_BUILD_ATTEMPTED.add(key)
+        logger.info("no alternate-name table at %s (cache predates #214); building it", path)
+        _try_materialize_alt_names_table(
+            path, overture.upstream_glob(theme="divisions", type_="division")
+        )
+        if path.exists():
+            return str(path)
+    return None
 
 
 def _local_divisions_table() -> str | None:
@@ -712,19 +933,133 @@ def _query_divisions_from_upstream(
     return result
 
 
+def _query_alt_names(
+    alt_table: str, table_path: str, query: str, region_code: str | None
+) -> list[dict]:
+    """#214: divisions whose *alternate* (names.common) spelling matches
+    `query`, joined back to the local divisions table for the real row.
+
+    The stored alt_name column is already folded (see
+    _materialize_alt_names_table), so the query is folded the same way in
+    Python and the predicate stays a plain ILIKE on a stored column —
+    0.19s measured over 4.29M alternates, against the 197MB primary table.
+
+    Rows come back tagged `_variant` like #53's retry hits — found through a
+    spelling Overture doesn't call canonical — with `_tier` recorded against
+    the alternate they actually matched (see _effective_tier: "Munich" is an
+    exact match for München's alternate, and re-deriving a tier from the
+    canonical "München" at rank time would silently demote it to the
+    substring tier). `_matched_name` carries one real spelling of the
+    alternate for the caller-visible `matched_name`.
+
+    One row per division, not per matching alternate. A division has as many
+    alternate rows as it has distinct folded spellings — Москва carries
+    "moscow", "moskau", "moskva", "moskwa" — and a substring query ("Mosk")
+    matches several of them at once, which without the QUALIFY below returns
+    the same GERS id several times over and lets one division fill the
+    caller's whole `limit`. The de-duplication is done in SQL rather than in
+    Python so DIVISION_OVERFETCH bounds *divisions* and not near-duplicate
+    rows: the same ranking that orders the result picks which alternate
+    survives per id (best tier, then alt_name for determinism), so the row
+    kept is the one that matched `query` best.
+
+    Returns [] when the query folds away to nothing (a query of only
+    combining marks does: _fold_alt_name strips them). The pattern would
+    otherwise be a bare '%%' matching every alternate in the table, which
+    answers a nonsense query with arbitrary prominent divisions — the
+    literal search, matching raw names, returns nothing for those.
+    """
+    folded = _fold_alt_name(query)
+    if not folded:
+        return []
+    q = overture._like_escape(folded)
+    params: dict = {"pattern": f"%{q}%", "exact": q, "prefix": f"{q}%"}
+    region_filter = ""
+    if region_code:
+        region_filter = "AND d.region = $region_code"
+        params["region_code"] = region_code
+    match_order = _match_tier_order_sql("a.alt_name")
+    sql = f"""
+        SELECT d.id, d.name, d.subtype, d.country, d.region, d.lat, d.lon,
+               d.admin_chain, d.population, a.alt_name, a.alt_display
+        FROM read_parquet('{alt_table}') a
+        JOIN read_parquet('{table_path}') d ON d.id = a.id
+        WHERE a.alt_name ILIKE $pattern ESCAPE '\\'
+        {region_filter}
+        QUALIFY row_number() OVER (
+            PARTITION BY d.id ORDER BY {match_order}, a.alt_name
+        ) = 1
+        ORDER BY {match_order}
+        LIMIT {DIVISION_OVERFETCH}
+    """
+    try:
+        with overture._conn_lock:
+            rows = overture.conn().execute(sql, params).fetchall()
+    except duckdb.Error as e:
+        raise overture.UpstreamUnavailable(str(e)) from e
+    result = []
+    for r in rows:
+        result.append({
+            "id": r[0], "name": r[1], "subtype": r[2], "country": r[3], "region": r[4],
+            "lat": round(r[5], 6), "lon": round(r[6], 6),
+            "admin_context": _admin_chain_context(r[7], self_name=r[1]),
+            "population": r[8],
+            "_variant": True,
+            "_tier": _match_tier(r[9], folded),
+            "_matched_name": r[10] or r[9],
+        })
+    return result
+
+
+def _alt_rows_not_already_found(
+    alt_table: str, table_path: str, query: str, region_code: str | None, found: list[dict]
+) -> list[dict]:
+    """#214 alternate-name matches for `query`, minus the divisions the
+    literal pass already returned — a division found under its canonical
+    name is not also reported as an alternate hit.
+
+    A vanished alt table degrades to primary-only rather than failing the
+    query, the same #230 shape _query_divisions handles for the primary
+    table one level up. It is milder here: no alt table at all is already
+    a supported state (a cache directory predating #214 is in it), so
+    there is nothing to fall back *to* and nothing lost but the alternate
+    spellings.
+    """
+    try:
+        rows = _query_alt_names(alt_table, table_path, query, region_code)
+    except overture.UpstreamUnavailable:
+        if Path(alt_table).exists():
+            raise
+        logger.warning(
+            "alternate-name table vanished mid-query (%s); answering from "
+            "primary names only", alt_table,
+        )
+        return []
+    seen = {r["id"] for r in found}
+    return [r for r in rows if r["id"] not in seen]
+
+
 def _query_divisions(
     query: str,
     region_code: str | None,
     local_table: str | None,
     fold_diacritics: bool = False,
+    alt_table: str | None = None,
 ) -> list[dict]:
     """fold_diacritics (#53): match strip_accents(name) against `query`
     (which the caller must already have run through _strip_diacritics) —
-    the diacritic-folded half of the second-pass variant retry."""
+    the diacritic-folded half of the second-pass variant retry.
+
+    alt_table (#214): when given, union in the alternate-name matches for
+    the same query. Passed only for the primary literal search — the #53
+    variant retries leave it None, because the alternate side already folds
+    case and diacritics itself, so re-running it on a diacritic-stripped
+    spelling of the same query can only return rows this pass already has.
+    """
     if local_table is not None:
         name_expr = "strip_accents(name)" if fold_diacritics else "name"
         try:
-            return _query_divisions_from_local(local_table, query, region_code, name_expr)
+            rows = _query_divisions_from_local(local_table, query, region_code, name_expr)
         except overture.UpstreamUnavailable:
             if Path(local_table).exists():
                 raise
@@ -737,6 +1072,12 @@ def _query_divisions(
                 "local divisions table vanished mid-query (%s); falling back "
                 "to a direct upstream scan", local_table,
             )
+        else:
+            if alt_table is not None:
+                rows = rows + _alt_rows_not_already_found(
+                    alt_table, local_table, query, region_code, rows
+                )
+            return rows
     name_expr = "strip_accents(names.primary)" if fold_diacritics else "names.primary"
     return _query_divisions_from_upstream(query, region_code, name_expr)
 
@@ -803,8 +1144,30 @@ def _query_divisions_fuzzy(
     similarity first, then population — between two names equally close to
     a typo, the one people are more likely to have meant is the bigger
     place.
+
+    Primary names only, deliberately, even though #214 put 4.29M alternate
+    spellings within reach of the same scan. Two reasons, neither of them
+    cost: this predicate can't use an index either way, so the extra table
+    roughly doubles a 0.26s pass, which is affordable. But
+    _FUZZY_SIMILARITY_THRESHOLD was calibrated against primary names — 4.65M
+    mostly-distinct strings — and Overture's alternates are a much denser,
+    much shorter population (every language's rendering of every division),
+    which is exactly the shape that produces spurious >=0.92 pairs. Choosing
+    a threshold for it needs its own measurement, and a wrong fuzzy answer
+    is the failure mode this tier is most careful about. Left for a
+    follow-up with numbers behind it.
+
+    Returns [] when the query folds to the empty string — a query of only
+    combining marks does, since folding strips exactly those. DuckDB's
+    jaro_winkler_similarity(name, '') scores above the threshold rather
+    than at 0, so without this the tier answers a nonsense query with the
+    most populous divisions in the dataset, presented as spelling
+    corrections.
     """
-    params: dict = {"folded": _normalize_for_match(query)}
+    folded_query = _normalize_for_match(query)
+    if not folded_query:
+        return []
+    params: dict = {"folded": folded_query}
     region_filter = ""
     if region_code:
         region_filter = "AND region = $region_code"
@@ -1000,9 +1363,12 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
 
     Never more than `limit` results. Each result: {name, type, lat, lon, id
     (GERS), admin_context, rank_score, plus "matched_by" on a #215 fuzzy
-    row}. Raises overture.UpstreamUnavailable if the remote scan fails
-    after retries; the caller (server.py) turns that into a structured
-    error like the other tools.
+    row, plus (#214) "matched_name" on a row found through one of
+    Overture's alternate names rather than the canonical one — "Munich"
+    answers München, with matched_name "Munich"}. Raises
+    overture.UpstreamUnavailable if the remote scan fails after retries;
+    the caller (server.py) turns that into a structured error like the
+    other tools.
 
     Handles "City, ST" / "City, Region" suffixes (#46) and ranks same-tier
     ties by population/prominence (#47) — see the module docstring.
@@ -1014,6 +1380,11 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
 
     note = None
     local_table = _local_divisions_table()
+    # #214: None whenever there is no alternate-name table to search — cache
+    # off, a cache directory predating the feature, a dataset without
+    # names.common — in which case every _query_divisions call below is
+    # exactly the primary-name-only search it was before.
+    alt_table = _local_alt_names_table(local_table)
     base_query, region_code, _region_name = _parse_region_suffix(query, local_table)
     search_query = base_query if region_code else query
     # `region_code` is cleared below if its constrained search comes up
@@ -1021,7 +1392,7 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
     # carried, so keep it.
     suffix_region_code = region_code
 
-    divisions = _query_divisions(search_query, region_code, local_table)
+    divisions = _query_divisions(search_query, region_code, local_table, alt_table=alt_table)
     if region_code and not divisions:
         # Recognized a region suffix, but nothing in this dataset matches
         # inside it — degrade to an unconstrained search of the original
@@ -1029,7 +1400,7 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
         # otherwise have matched something.
         region_code = None
         search_query = query
-        divisions = _query_divisions(search_query, None, local_table)
+        divisions = _query_divisions(search_query, None, local_table, alt_table=alt_table)
 
     # #53: literal query didn't reach an exact-or-prefix division match with
     # some real prominence behind it — retry with normalized variants
@@ -1049,9 +1420,16 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
     # for most well-known places (#47), so its presence is itself a signal
     # the literal search already found something real, not just a
     # same-spelling coincidence.
-    best_literal_tier = max((_match_tier(c["name"], search_query) for c in divisions), default=0)
+    #
+    # Read through _effective_tier, not _match_tier, so a #214 alternate-name
+    # hit counts for what it achieved: "Munich" is an exact match for
+    # München's alternate, and re-deriving a tier from the canonical
+    # "München" here would grade it 1 and send a query that has already found
+    # its answer through the variant retries for nothing. Before #214 no row
+    # in this pool carried a `_tier`, so this reads identically.
+    best_literal_tier = max((_effective_tier(c, search_query) for c in divisions), default=0)
     literal_match_has_prominence = any(
-        _match_tier(c["name"], search_query) == best_literal_tier
+        _effective_tier(c, search_query) == best_literal_tier
         and c.get("population") is not None
         for c in divisions
     )
@@ -1069,7 +1447,17 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
                     variant_rows.append(row)
                     seen_ids.add(row["id"])
         stripped_query = _strip_diacritics(search_query)
-        for row in _query_divisions(stripped_query, region_code, local_table, fold_diacritics=True):
+        # Not when stripping left nothing: a query of only combining marks
+        # folds to "", and searching for it is an ILIKE '%%' that matches
+        # every division in the dataset — a nonsense query answered with
+        # whichever places are most populous. The literal pass, matching raw
+        # names, correctly returns nothing for those.
+        rows = (
+            _query_divisions(stripped_query, region_code, local_table, fold_diacritics=True)
+            if stripped_query
+            else []
+        )
+        for row in rows:
             if row["id"] not in seen_ids:
                 row["_variant"] = True
                 row["_tier"] = _match_tier(row["name"], stripped_query)
@@ -1171,6 +1559,12 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
                 0.4 + row["_confidence"] * 0.3, 3
             ),
         }
+        if row.get("_matched_name"):
+            # #214: only present when the row was found through one of
+            # Overture's alternate (names.common) spellings rather than its
+            # canonical one. `name` stays canonical either way, so this is
+            # what tells a caller "Munich" found "München" on purpose.
+            entry["matched_name"] = row["_matched_name"]
         if row.get("_fuzzy"):
             # #215: the note says "these answer a corrected spelling" in
             # prose, which is what a human reader needs; this says it per
