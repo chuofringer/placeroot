@@ -1,3 +1,5 @@
+import math
+
 import duckdb
 import pytest
 
@@ -162,6 +164,11 @@ def test_stopword_residual_note_reaches_the_geocode_tool(monkeypatch):
     _count_places_fallback(monkeypatch)
     result = server.geocode("the Met", limit=5)
     assert result["results"] == []
+    # Text unique to this note, not the #105 one -- both mention find_places
+    # and both say "skipped", so only the distinctive half proves which of
+    # the two skip paths the caller was actually told about.
+    assert "nothing distinctive is left" in result["note"]
+    assert "the Metropolitan Museum of Art" in result["note"]
     assert "find_places" in result["note"]
 
 
@@ -178,30 +185,56 @@ def test_anchored_query_with_a_real_residual_still_scans_places(monkeypatch):
     assert "Blue Bottle Roastery" in [r["name"] for r in results]
 
 
-def test_short_residual_tokens_are_as_insignificant_as_stopwords(monkeypatch):
-    # Two-char residuals carry no more signal than "the" does and cost the
-    # same full-theme scan.
+def test_multi_word_stopword_residual_is_rejected_too(monkeypatch):
+    # Every word being a stopword is the rejection condition, not just the
+    # single-word case.
     calls = _count_places_fallback(monkeypatch)
     result = geocode.geocode_detailed("of a Met", limit=5)
     assert calls == []
     assert result["results"] == []
 
 
-def test_significant_words_shares_the_resolve_place_rule():
-    # The residuals #216 has to reject: stopwords and sub-3-char words only.
-    assert geocode._significant_words("the") == []
-    assert geocode._significant_words("of a") == []
-    assert geocode._significant_words("Blue Bottle in Brooklyn") == ["Blue", "Bottle", "Brooklyn"]
-    # _significant_tokens keeps its never-search-nothing fallback on top of
-    # the same rule.
+@pytest.mark.parametrize("query, residual", [
+    # Names made entirely of words too short for _significant_tokens' >=3
+    # rule, which the gate must NOT borrow: rejecting here returns nothing
+    # at all, and these are real, distinctive things to search names for.
+    ("H&M Brooklyn", "H&M"),
+    ("Q&A Brooklyn", "Q&A"),
+    # Two characters is a whole word in Chinese/Japanese/Korean -- the
+    # common case for those names, not an edge case. ("Forbidden City")
+    ("故宫 Brooklyn", "故宫"),
+])
+def test_short_but_meaningful_residual_still_scans_places(monkeypatch, query, residual):
+    calls = _count_places_fallback(monkeypatch)
+
+    result = geocode.geocode_detailed(query, limit=5)
+
+    assert [q for q, _ in calls] == [residual], "a short name is not an empty one"
+    assert calls[0][1] is not None, "and is still bounded by the Brooklyn anchor"
+    assert "note" not in result, "nothing was skipped, so there is nothing to explain"
+
+
+def test_short_residual_gate_matches_the_note_it_would_have_shown():
+    # The unit-level rule behind the two tests above: stopwords only, never
+    # length. Keeps _nothing_but_stopwords honest about what the note claims
+    # ("only common words like the or of").
+    assert geocode._nothing_but_stopwords("the")
+    assert geocode._nothing_but_stopwords("of a")
+    assert geocode._nothing_but_stopwords("   ")
+    assert not geocode._nothing_but_stopwords("H&M")
+    assert not geocode._nothing_but_stopwords("故宫")
+    assert not geocode._nothing_but_stopwords("the Blue Bottle")
+    # _significant_tokens keeps resolve_place's own (stricter) rule, plus its
+    # never-search-nothing fallback -- unchanged by #216.
     assert geocode._significant_tokens("the") == ["the"]
     assert geocode._significant_tokens("the Blue Bottle") == ["Blue", "Bottle"]
 
 
 def test_misspelled_prefix_reaches_the_fallback_without_the_fuzzy_tier(monkeypatch):
     # This was #216's test_misspelled_prefix_still_reaches_the_fallback_pending_215.
-    # #215 landed, so the expectation moves: the typo residual only reaches
-    # the places scan where the fuzzy tier can't run at all — no local
+    # A typo residual isn't a stopword, so this gate never rejects it -- and
+    # #215 has landed, so the expectation moves: the typo reaches the places
+    # scan only where the fuzzy tier can't run at all, i.e. no local
     # divisions table (cache off, as the default fixtures run), which is
     # what this test still pins. With the table available it doesn't; see
     # test_typo_query_runs_no_places_scan_at_all below.
@@ -262,11 +295,20 @@ def test_fuzzy_pass_never_scans_upstream(geocode_cache, monkeypatch):
     # The tier is local-table-only by construction; assert it, since a
     # similarity predicate against S3 has nothing to prune by and would
     # read the whole divisions theme over the network.
+    #
+    # Build the local table first, then cut upstream off entirely for the
+    # query itself: patching the two upstream entry points alone wouldn't
+    # prove much, since with a local table in hand the literal search
+    # wouldn't call them either. Blocking upstream_glob covers any path
+    # that would reach for the remote dataset at all.
+    geocode._local_divisions_table()
+
     def fail(*args, **kwargs):
         raise AssertionError("the fuzzy tier must never scan upstream")
 
     monkeypatch.setattr(geocode, "_query_divisions_from_upstream", fail)
     monkeypatch.setattr(geocode, "_query_places_fallback", fail)
+    monkeypatch.setattr(overture, "upstream_glob", fail)
 
     assert geocode.geocode("Berekley", limit=5)[0]["name"] == "Berkeley"
 
@@ -423,11 +465,32 @@ def test_alt_match_folds_letters_strip_accents_leaves_alone(geocode_cache):
     assert results[0]["matched_name"] == "Preßburg"
 
 
+# Strings picked to stress every way the two folds could drift apart: each
+# _UNFOLDED_LETTERS entry in both cases, letters whose uppercase form has no
+# single-character lowercase (ẞ), the dotted/dotless Turkish I pair (where
+# Python's str.lower and DuckDB's lower() are documented to differ on İ),
+# titlecase digraphs, compatibility ligatures, fullwidth forms, and
+# non-Latin scripts that must pass through untouched.
+_FOLD_CORPUS = [
+    "Preßburg", "Łódź", "Malmø", "München", "Ísafjörður", "Straße", "STRAẞE", "ẞ",
+    "İstanbul", "İzmir", "ı", "I", "Kœnigsberg", "Ærøskøbing", "Þingvellir", "Đakovo",
+    "Ħamrun", "Ðurđevac", "ǅakovo", "ǇUBLJANA", "ﬁrenze", "Ｔｏｋｙｏ", "ØSTERBRO",
+    "ŁÓDŹ", "ÆRØ", "ÞÓRSHÖFN", "Nürnberg", "Reykjavík", "Kraków", "Aš", "Ḥalab",
+    "Αθήνα", "ΑΘΗΝΑ", "Москва", "東京都", "São Paulo",
+]
+
+
 def test_alt_fold_matches_between_python_and_sql():
-    for name in ["Preßburg", "Łódź", "Malmø", "München", "Ísafjörður"]:
-        assert geocode._fold_alt_name(name) == geocode._fold_alt_name(
-            geocode._fold_alt_name(name)
-        ), name
+    # The whole #214 design rests on this: alternates are folded once in SQL
+    # at materialization time and the query is folded in Python per call, and
+    # the two only ever meet as an ILIKE comparison — so a divergence on any
+    # letter silently makes those alternates unreachable rather than raising.
+    # Run the real SQL fold through DuckDB and compare, rather than asserting
+    # the Python side against itself.
+    con = duckdb.connect()
+    sql = f"SELECT {geocode._fold_alt_name_sql('?')}"
+    for name in _FOLD_CORPUS:
+        assert con.execute(sql, [name]).fetchone()[0] == geocode._fold_alt_name(name), name
     assert geocode._fold_alt_name("Preßburg") == "pressburg"
     assert geocode._fold_alt_name("Łódź") == "lodz"
     assert geocode._fold_alt_name("Malmø") == "malmo"
@@ -440,6 +503,47 @@ def test_endonym_queries_are_unaffected_by_the_alt_table(geocode_cache):
         top = geocode.geocode(query, limit=5)[0]
         assert top["name"] == expected
         assert "matched_name" not in top
+
+
+def test_one_result_per_division_however_many_alternates_match(geocode_cache):
+    # A division has one alt row per distinct folded spelling — Москва
+    # carries "moscow", "moskau", "moskva", "moskwa" — and a substring query
+    # matches several at once. Without the per-id de-duplication that came
+    # back as the same GERS id three times over, which at a small `limit`
+    # crowded every other division out of the answer entirely.
+    results = geocode.geocode("Mosk", limit=10)
+    ids = [r["id"] for r in results]
+    assert len(ids) == len(set(ids)), results
+    assert "gers-div-moskva-ru" in ids and "gers-div-moskva-tj" in ids
+    # The surviving alternate is the one that matched best, not an arbitrary
+    # one of the four: "Moskva" is an exact match for the query's fold.
+    top = geocode.geocode("Moskva", limit=5)[0]
+    assert top["name"] == "Москва"
+    assert top["matched_name"] == "Moskva"
+
+
+def test_alternate_crowding_does_not_consume_the_limit(geocode_cache):
+    # The user-visible half of the same bug: three of the caller's three
+    # slots went to one city.
+    names = [r["name"] for r in geocode.geocode("Mosk", limit=3)]
+    assert names.count("Москва") == 1
+    assert "Moskva" in names  # the Tajik namesake still gets a slot
+
+
+def test_query_that_folds_to_nothing_matches_no_alternates(geocode_cache):
+    # A query of only combining marks folds away to "" (that is what
+    # stripping diacritics does to it), which as an ILIKE pattern is a bare
+    # '%%' matching every alternate in the table — answering a nonsense
+    # query with whichever divisions happen to be most prominent. The
+    # literal search, which matches raw names, returns nothing for these.
+    #
+    # The #215 fuzzy tier had the same hole independently — DuckDB scores
+    # jaro_winkler_similarity(name, '') above the threshold — and the query
+    # reaches it precisely because the literal and alternate passes both
+    # come back empty, so both guards are needed for this to hold.
+    assert geocode._fold_alt_name("́") == ""
+    for query in ["́", "́̈"]:
+        assert geocode.geocode(query, limit=5) == [], query
 
 
 def test_alt_table_is_materialized_beside_the_divisions_table(geocode_cache):
@@ -546,6 +650,79 @@ def test_alt_names_do_not_feed_the_fuzzy_tier(geocode_cache):
     assert geocode.geocode("Pressburg", limit=5)[0]["name"] == "Bratislava"
     assert [r["name"] for r in geocode.geocode("Pressbrug", limit=5)] == []
 
+
+def test_typo_with_a_region_suffix_still_reaches_the_fuzzy_tier(geocode_cache, monkeypatch):
+    # "City, ST" is the most common shape a caller writes, and a region
+    # suffix must not cost the correction. The literal search drops the
+    # region on a miss and retries the *whole* original string, so the
+    # fuzzy pass has to match on the name half (base_query) instead --
+    # nothing is within edit distance of "Berekley, CA".
+    calls = _count_places_fallback(monkeypatch)
+
+    result = geocode.geocode_detailed("Berekley, CA", limit=5)
+
+    assert [r["name"] for r in result["results"]] == ["Berkeley"]
+    assert calls == [], "a corrected typo must not fall through to the places theme"
+    # The note names the string actually corrected, not the raw query with
+    # its suffix still attached.
+    assert '"Berekley"' in result["note"]
+    assert '"Berkeley"' in result["note"]
+
+
+def test_region_suffixed_typo_is_filtered_by_that_region_first(geocode_cache):
+    # The suffix's region code narrows the pass, like it does for the
+    # literal queries...
+    table = geocode._local_divisions_table()
+    assert [r["name"] for r in geocode._query_divisions_fuzzy(table, "Berekley", "US-CA")] == [
+        "Berkeley",
+    ]
+    assert geocode._query_divisions_fuzzy(table, "Berekley", "US-NY") == []
+    # ...and, like the literal search one step up, a region-constrained
+    # miss degrades to an unconstrained retry rather than answering
+    # nothing: a suffix that parsed as a region may simply have been read
+    # wrong.
+    assert [r["name"] for r in geocode.geocode("Berekley, NY", limit=5)] == ["Berkeley"]
+
+
+def test_fuzzy_rows_are_labeled_fuzzy_not_substring(geocode_cache):
+    # A corrected row does not contain the query at all, so resolve_place
+    # must not report it as a "substring" match -- that field is exactly
+    # what a caller reads to decide whether the answer is the string it
+    # asked for. _match_tier grades any name it is handed as at least
+    # "substring", so the label has to come from the row's provenance.
+    assert geocode.geocode("Berekley", limit=5)[0]["matched_by"] == "fuzzy"
+    assert "matched_by" not in geocode.geocode("Brooklyn", limit=5)[0]
+
+    top = geocode.resolve_place("Berekley")[0]
+    assert top["name"] == "Berkeley"
+    assert top["match"] == "fuzzy"
+
+    assert geocode.resolve_place("Sna Francisco")[0]["match"] == "fuzzy"
+    assert server.resolve_place("Berekley")["results"][0]["match"] == "fuzzy"
+
+
+def test_fuzzy_label_ranks_below_every_literal_label(geocode_cache):
+    # Same ordering _rank_key enforces on the rows themselves, restated
+    # for resolve_place's label vocabulary.
+    ranks = geocode._MATCH_LABEL_RANK
+    assert ranks["fuzzy"] < min(ranks[label] for label in ("exact", "prefix", "substring"))
+
+
+def test_resolve_area_accepts_a_corrected_spelling(geocode_cache):
+    # Pins the knock-on effect of #215 on the area-constrained tools
+    # (find_places/summarize_area go through here): a typo'd area now
+    # resolves to the corrected division. resolve_area returns no note
+    # channel, so this is deliberately the whole contract -- the
+    # correction is silent by design, and this test is what makes that a
+    # decision rather than an accident.
+    assert geocode.resolve_area("Berekley") == {
+        "division_id": "gers-div-berkeley",
+        "name": "Berkeley",
+        "admin_context": ["United States", "California"],
+    }
+    assert geocode.resolve_area("Sna Francisco")["name"] == "San Francisco"
+    # An area that isn't a typo of anything still resolves to nothing.
+    assert geocode.resolve_area("Nonexistentplacexyz123") is None
 
 # --- #224: internal bbox columns on the divisions table -------------------
 
@@ -703,7 +880,7 @@ def test_bbox_columns_are_never_exposed_in_a_tool_response(geocode_cache):
     assert "bbox" not in str(geocode.resolve_place("Brooklyn"))
 
 
-# --- #221: prominence can rescue a prefix match; the fold always runs -----
+# --- #221: prominence can rescue a prefix match; the fold stops being gated
 # The broad "did any of this move an answer that was already right" question
 # is tests/test_geocode_ranking.py's; these pin the rule itself.
 
@@ -746,6 +923,38 @@ def test_two_populationless_rows_still_order_by_tier():
         _row("z-exact", "Example", 3),
         _row("a-prefix", "Exampleton", 2),
     ) == ["z-exact", "a-prefix"]
+
+
+def test_a_population_of_zero_does_not_rescue_a_prefix_match():
+    # The rescue is prominence, not column-completeness: Overture ships
+    # divisions with an explicit population of 0 (abandoned/unincorporated
+    # places), and a bare "population is not None" check would let one of
+    # those leapfrog an exact match whose population is simply unrecorded —
+    # reading a filled-in field as prominence when the value says otherwise.
+    assert _ranked(
+        _row("z-exact-unknown", "Example", 3),
+        _row("a-prefix-zero", "Exampleton", 2, population=0),
+    ) == ["z-exact-unknown", "a-prefix-zero"]
+
+
+def test_the_smallest_nonzero_population_still_rescues():
+    # The boundary is exactly zero — one recorded resident is still a
+    # recorded population, and the rule stays a simple, explainable one
+    # rather than an invented cutoff.
+    assert _ranked(
+        _row("z-exact-unknown", "Example", 3),
+        _row("a-prefix-one", "Exampleton", 2, population=1),
+    ) == ["a-prefix-one", "z-exact-unknown"]
+
+
+def test_a_population_of_zero_still_outranks_an_unknown_one_at_the_same_tier():
+    # #221 moves zero out of the *rescue* term only. Below the tier term the
+    # #47 ordering is untouched: "we know it is 0" still sorts ahead of "we
+    # do not know", which is what the no-population proxy chain hangs off.
+    assert _ranked(
+        _row("z-exact-zero", "Example", 3, population=0),
+        _row("a-exact-unknown", "Example", 3),
+    ) == ["z-exact-zero", "a-exact-unknown"]
 
 
 def test_a_substring_match_cannot_leapfrog_a_strong_tier_however_populous():
@@ -791,11 +1000,24 @@ def test_diacritic_fold_runs_even_when_the_literal_match_has_a_population(
     assert "Zurich" in [r["name"] for r in results]
 
 
-def test_the_fold_pass_also_runs_without_a_local_table():
-    # Nothing about the fold needs the #43 table — the upstream path folds
-    # names.primary the same way, so PLACEROOT_CACHE=off gets the fix too.
+def test_the_unconditional_fold_is_scoped_to_the_local_table():
+    # Without a #43 table the fold stays gated on prominence exactly as it
+    # was before #221, so this query keeps its old (worse) answer: upstream
+    # the extra pass is an unprunable full-theme ILIKE, not the 0.2s local
+    # predicate the change was measured on, and paying it on every query
+    # that already has a good literal answer is the cost class #105/#216
+    # exist to avoid. Warming the cache is what buys the fix.
     results = geocode.geocode("Zurich", limit=5)
-    assert results[0]["name"] == "Zürich"
+    assert [r["name"] for r in results] == ["Zurich"]
+
+
+def test_the_fold_still_runs_without_a_local_table_when_the_literal_search_is_weak():
+    # The gate, not the fold, is what's local-only: with no prominent
+    # literal match the folded pass runs upstream the same as it always
+    # did, which is what "Sao Paulo" -> "São Paulo" rides on. Pinned here
+    # so the #221 scoping above can't quietly turn into "no fold upstream".
+    results = geocode.geocode("Sao Paulo", limit=5)
+    assert results[0]["name"] == "São Paulo"
 
 
 def test_an_accented_query_still_finds_itself(geocode_cache):
@@ -948,6 +1170,18 @@ def test_results_are_correct_via_local_table(geocode_cache):
     results = geocode.geocode("Springfield", limit=10)
     assert len(results) == 2
     assert all(r["name"] == "Springfield" for r in results)
+
+
+def test_vanished_local_table_mid_query_falls_back_to_upstream(geocode_cache):
+    """#230: the local table being deleted between _local_divisions_table()'s
+    exists() check and the read (external cleanup, or a cache sweep) must
+    degrade to a direct upstream scan, not surface a false
+    upstream_unavailable."""
+    geocode.geocode("Brooklyn", limit=5)  # materialize the table
+    path = geocode._local_divisions_table_path(release.PINNED_RELEASE)
+    path.unlink()  # simulate the sweep winning the race
+    results = geocode._query_divisions("Brooklyn", None, str(path))
+    assert any(r["name"] == "Brooklyn" for r in results)
 
 
 def test_cache_off_skips_materialization_and_still_answers(monkeypatch, tmp_path):
@@ -1426,3 +1660,181 @@ def test_the_cold_scan_warning_only_appears_for_a_remote_read(monkeypatch):
     )
     monkeypatch.setattr(geocode, "_is_remote", lambda glob: True)
     assert "~12s" in geocode.geocode_detailed("94110", limit=5)["note"]
+
+
+# --- #223 follow-ups: consistency of the postcode answer -------------------
+
+
+def test_a_country_whose_rows_all_lack_a_bbox_is_reported_as_no_data(tmp_path):
+    """avg() skips NULLs and count(*) does not, so an all-NULL group used to
+    produce a NULL centroid that reached round() and raised TypeError."""
+    path = tmp_path / "addresses-without-bboxes.parquet"
+    duckdb.connect().execute(f"""
+        COPY (
+            SELECT id,
+                   CAST(NULL AS STRUCT(xmin DOUBLE, ymin DOUBLE,
+                                       xmax DOUBLE, ymax DOUBLE)) AS bbox,
+                   country, number, street, unit, postcode, address_levels
+            FROM read_parquet('{ADDRESSES_FIXTURE_PATH}')
+        ) TO '{path}' (FORMAT PARQUET)
+    """)
+    overture.set_data_path(str(path), theme="addresses", type_="address")
+    try:
+        result = geocode.geocode_detailed("94110", limit=5)
+    finally:
+        overture.set_data_path(str(ADDRESSES_FIXTURE_PATH), theme="addresses",
+                               type_="address")
+    assert result["results"] == []
+    assert "postcode-shaped" in result["note"]
+
+
+def test_address_count_and_centroid_are_measured_over_the_same_rows(tmp_path):
+    """A partly bbox-less country must not report a count taken over more
+    rows than the centroid was averaged from."""
+    path = tmp_path / "addresses-with-some-bboxes.parquet"
+    duckdb.connect().execute(f"""
+        COPY (
+            SELECT id,
+                   CASE WHEN id IN ('gers-addr-pc-us-94110-00',
+                                    'gers-addr-pc-us-94110-01')
+                        THEN NULL ELSE bbox END AS bbox,
+                   country, number, street, unit, postcode, address_levels
+            FROM read_parquet('{ADDRESSES_FIXTURE_PATH}')
+        ) TO '{path}' (FORMAT PARQUET)
+    """)
+    overture.set_data_path(str(path), theme="addresses", type_="address")
+    try:
+        rows = geocode.geocode("94110", limit=5)
+    finally:
+        overture.set_data_path(str(ADDRESSES_FIXTURE_PATH), theme="addresses",
+                               type_="address")
+    us = next(r for r in rows if r["country"] == "US")
+    assert us["address_count"] == 10, "the two bbox-less points are out of both"
+    assert us["lat"] is not None and us["lon"] is not None
+
+
+def test_the_covering_locality_is_looked_up_in_the_rows_own_country(tmp_path):
+    """A postcode centroid near a border is otherwise named by whatever is
+    nearest across it, contradicting the row's own `country`."""
+    # Mission District is nudged ~200m off the US cluster's centroid and a
+    # foreign locality dropped exactly on it, so the nearest division really
+    # is the foreign one and distance alone cannot produce the right answer.
+    path = tmp_path / "divisions-with-a-border-town.parquet"
+    duckdb.connect().execute(f"""
+        COPY (
+            SELECT id,
+                   CASE WHEN id = 'gers-div-mission-district'
+                        THEN {{'xmin': bbox.xmin + 0.002, 'ymin': bbox.ymin + 0.002,
+                               'xmax': bbox.xmax + 0.002, 'ymax': bbox.ymax + 0.002}}
+                        ELSE bbox END AS bbox,
+                   names, subtype, country, region, hierarchies, population
+            FROM read_parquet('{DIVISIONS_FIXTURE_PATH}')
+            UNION ALL
+            SELECT 'gers-div-border-town',
+                   {{'xmin': -122.4148, 'ymin': 37.7599,
+                     'xmax': -122.4148, 'ymax': 37.7599}},
+                   {{'primary': 'Border Town', 'common': MAP {{}}}},
+                   'locality', 'CA', NULL, NULL, NULL
+        ) TO '{path}' (FORMAT PARQUET)
+    """)
+    overture.set_data_path(str(path), theme="divisions", type_="division")
+    try:
+        rows = geocode.geocode("94110", limit=5)
+    finally:
+        overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions",
+                               type_="division")
+    us = next(r for r in rows if r["country"] == "US")
+    assert us["admin_context"][-1] == "Mission District"
+    assert "Border Town" not in us["admin_context"]
+
+
+def test_only_the_rows_actually_returned_pay_for_a_covering_lookup(monkeypatch):
+    """With the cache off each lookup is an upstream scan retried at three
+    radii, so rows trimmed by `limit` must never reach one."""
+    real = geocode._covering_division
+    looked_up = []
+
+    def counting(lat, lon, local_table, country=None):
+        looked_up.append(country)
+        return real(lat, lon, local_table, country)
+
+    monkeypatch.setattr(geocode, "_covering_division", counting)
+    rows = geocode.geocode("94110", limit=1)
+    assert len(rows) == 1
+    assert looked_up == ["US"], "the SK and FR rows were dropped before their lookups"
+
+
+def test_postcodes_match_regardless_of_case_and_padding(tmp_path):
+    """Overture stores what the source wrote; "1011 ab" with stray padding is
+    the same code, and missing it would be reported as a coverage gap."""
+    path = tmp_path / "addresses-with-untidy-postcodes.parquet"
+    duckdb.connect().execute(f"""
+        COPY (
+            SELECT id, bbox, country, number, street, unit,
+                   CASE WHEN postcode IS NULL THEN NULL
+                        ELSE '  ' || lower(postcode) || ' ' END AS postcode,
+                   address_levels
+            FROM read_parquet('{ADDRESSES_FIXTURE_PATH}')
+        ) TO '{path}' (FORMAT PARQUET)
+    """)
+    overture.set_data_path(str(path), theme="addresses", type_="address")
+    try:
+        rows = geocode.geocode("94110", limit=5)
+        dutch = geocode.geocode("1011 AB", limit=5)
+    finally:
+        overture.set_data_path(str(ADDRESSES_FIXTURE_PATH), theme="addresses",
+                               type_="address")
+    assert [r["country"] for r in rows] == ["US", "SK", "FR"]
+    assert dutch[0]["country"] == "NL"
+
+
+def test_the_locality_longitude_window_still_covers_the_distance_cap_up_north():
+    """A degree of longitude shrinks with cos(lat): the flat 0.5 degrees is
+    ~19km at 70N, narrower than the 25km the search is allowed to reach."""
+    for lat in (0.0, 45.0, 60.0, 70.0, 78.0, -70.0):
+        metres_per_degree_lon = 111_320 * math.cos(math.radians(lat))
+        reach = geocode._locality_lon_window(lat) * metres_per_degree_lon
+        assert reach >= geocode._POSTCODE_LOCALITY_MAX_M, f"window too narrow at {lat}"
+    assert geocode._locality_lon_window(0.0) == geocode._POSTCODE_LOCALITY_WINDOW_DEG
+    assert geocode._locality_lon_window(89.99) <= 180.0, "no runaway window at the pole"
+
+
+def test_the_postcode_aggregate_is_memoized_for_the_process(geocode_cache, monkeypatch):
+    """The scan behind one code is the most expensive read this module makes,
+    and its answer cannot change without the release (and so the glob)
+    changing — including for the year-shaped queries the detector can't
+    distinguish from four-digit postcodes."""
+    geocode._POSTCODE_AGGREGATE_CACHE.clear()
+    first = geocode.geocode("94110", limit=5)
+    assert (geocode.addresses._upstream_glob(), ("94110",)) \
+        in geocode._POSTCODE_AGGREGATE_CACHE
+
+    def boom(glob):
+        raise AssertionError("the addresses theme was re-scanned for a cached postcode")
+
+    monkeypatch.setattr(geocode.overture, "probe_schema", boom)
+    assert geocode.geocode("94110", limit=5) == first
+
+
+def test_a_postcode_hit_short_circuits_the_name_search(tmp_path):
+    """Intended, and the one thing the detector costs: where a code is live,
+    a division that happens to share its name is not reachable by geocode."""
+    path = tmp_path / "divisions-named-like-a-live-postcode.parquet"
+    duckdb.connect().execute(f"""
+        COPY (
+            SELECT * FROM read_parquet('{DIVISIONS_FIXTURE_PATH}')
+            UNION ALL
+            SELECT 'gers-div-94110',
+                   {{'xmin': 4.9, 'ymin': 52.4, 'xmax': 4.9, 'ymax': 52.4}},
+                   {{'primary': '94110', 'common': MAP {{}}}},
+                   'locality', 'NL', 'NL-NH', NULL, NULL
+        ) TO '{path}' (FORMAT PARQUET)
+    """)
+    overture.set_data_path(str(path), theme="divisions", type_="division")
+    try:
+        result = geocode.geocode_detailed("94110", limit=5)
+    finally:
+        overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions",
+                               type_="division")
+    assert all(r["type"] == "postcode" for r in result["results"])
+    assert "gers-div-94110" not in [r["id"] for r in result["results"]]

@@ -1,4 +1,6 @@
 import os
+import socket
+import threading
 from pathlib import Path
 
 # Before anything imports placeroot.server: its module-level `mcp` is built
@@ -105,6 +107,56 @@ def geocode_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(d))
     monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
     return d
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture
+def running_http_server():
+    """Start placeroot's streamable-HTTP transport on an ephemeral port.
+
+    Uses uvicorn.Server directly (rather than server.mcp.run(), which blocks
+    forever) so the test can request a graceful shutdown afterward; this is
+    the same Starlette app server.mcp.run(transport="streamable-http", ...)
+    builds internally (mcp.streamable_http_app()), so it exercises the exact
+    code path --http uses in production.
+
+    In-thread, not a subprocess, so the server shares this process's module
+    state — in particular the `offline_data` autouse fixture's
+    `overture.set_data_path(...)` overrides, which are plain module globals a
+    subprocess would not inherit.
+    """
+    try:
+        import uvicorn
+    except ImportError:
+        pytest.skip("uvicorn not installed; this SDK build lacks streamable-HTTP support")
+
+    from placeroot import server
+
+    host = "127.0.0.1"
+    port = _free_port()
+    app = server.mcp.streamable_http_app(host=host)
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+    usrv = uvicorn.Server(config)
+
+    thread = threading.Thread(target=usrv.run, daemon=True)
+    thread.start()
+    for _ in range(200):
+        if usrv.started:
+            break
+        threading.Event().wait(0.05)
+    else:
+        pytest.fail("streamable-HTTP server did not start within 10s")
+
+    try:
+        yield f"http://{host}:{port}/mcp"
+    finally:
+        usrv.should_exit = True
+        thread.join(timeout=5)
 
 
 def raw_rows() -> list[dict]:

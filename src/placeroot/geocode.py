@@ -126,6 +126,15 @@ abbreviation-variant retry. A tier-3/2 match with a real population value
 behind it is a much stronger signal the literal search already found the
 right thing, and skips the (otherwise pointless) extra query.
 
+That gate no longer covers both halves of the second pass: #221 took the
+diacritic-folded half out from under it whenever a local table (#43) is
+available, because how prominent the *unfolded* spelling turned out to be
+says nothing about whether the folded one is worth looking for ("Zurich"
+literally matches a 190-person Dutch village, which was enough to hide
+Zürich entirely). The abbreviation half stays gated on every path, and the
+folded half stays gated when there is no local table to run it against
+cheaply. See the #221 section at the end of this docstring.
+
 Variant-sourced rows are tagged (_rank_key's *last* tiebreak, after the #47
 population/proxy chain) so a variant match's own prominence still wins
 against a same-tier literal match the normal #47 way — literal only breaks
@@ -150,6 +159,14 @@ trigger is deliberately emptiness alone: a literal substring hit is a real
 answer to the string the caller actually typed, and there is no honest
 tier-based reading of "weak" that doesn't demote some of those.
 
+What gets matched is the query's *name* half — "Berekley" out of
+"Berekley, CA" — with the region the suffix named passed as a filter, and
+dropped on a miss like the literal search drops it. The literal path
+answers a region-constrained miss by retrying the whole original string,
+suffix included, and nothing is within edit distance of that, so fuzzing
+what the literal search happened to end up holding would lose the
+correction on the most common shape a place gets written in.
+
 Two properties this tier is built around:
 
 - It never scans upstream. jaro_winkler over the whole local table is
@@ -160,9 +177,10 @@ Two properties this tier is built around:
   something expensive.
 - A fuzzy hit answers a *different* string than the one typed, so it sorts
   below every literal tier (_rank_key's leading term, ahead of even tier
-  3), scores below the substring tier, and carries a note naming the
-  spelling it corrected to, so an agent can see the correction happened
-  rather than silently trusting it. A fuzzy hit also stands down the
+  3), scores below the substring tier, and says so twice over: a note
+  naming the spelling it corrected to, and "matched_by": "fuzzy" on the
+  row itself, so neither an agent reading prose nor resolve_place (which
+  has no note to read) can mistake a correction for a match. A fuzzy hit also stands down the
   places fallback: the query text is a known misspelling at that point,
   and substring-matching a typo against the places theme is how
   "Snags N Burgs Cafe" happened.
@@ -220,20 +238,26 @@ Two coupled leftovers from the above, both measured live on 2026-07-22.0.
 Tier used to dominate _rank_key outright, so an exact-tier match beat every
 prefix-tier one regardless of what stood behind them: "東京" answered a
 population-less neighborhood in 長野県, because 東京 is exactly its name and
-only a prefix of 東京都's (13.6M). _rank_key now lets a known population
+only a prefix of 東京都's (13.6M). _rank_key now lets a nonzero population
 outrank the tier *within* the exact/prefix group and only against a row
-carrying no population at all — the same prominence-over-namesake judgement
+carrying no prominence at all — the same prominence-over-namesake judgement
 #214 already made between literal and alternate-name hits, applied to the
-tier ladder. Two populated rows still order by tier first, and a substring
-hit still cannot leapfrog either. See _rank_key.
+tier ladder. Nonzero, not merely non-NULL: Overture ships divisions with an
+explicit population of 0, and those must not rescue anything past an exact
+match. Two populated rows still order by tier first, and a substring hit
+still cannot leapfrog either. See _rank_key.
 
 And the #53 second pass was gated on "no exact/prefix literal match carries
 a population", which the diacritic half of it cannot live with: "Zurich"
 literally matches a Dutch village of 190 people, so the gate declared the
 literal search good enough and the folded pass never ran — Zürich (443k)
 was absent from the candidate pool entirely, since ILIKE '%Zurich%' never
-matches "Zürich". The folded pass now always runs; the abbreviation half
-stays gated. Live after: "Zurich" -> Zürich, CH; "東京" -> 東京都.
+matches "Zürich". The folded pass now runs unconditionally whenever there
+is a local table (#43) to run it against; without one it stays gated, since
+upstream that extra pass is an unprunable full-theme ILIKE rather than the
+0.2s local predicate the change was measured on. The abbreviation half
+stays gated on every path. Live after (cache warm): "Zurich" -> Zürich, CH;
+"東京" -> 東京都.
 
 tests/test_geocode_ranking.py pins the answers all of the above already got
 right, as a corpus, precisely because a _rank_key change can move them.
@@ -256,7 +280,15 @@ behind them.
 The aggregate is the one addresses read in this codebase that does NOT go
 through cache.py's tile machinery: tiles are bboxes, and "which countries
 carry this code" has no bbox to be sliced by -- a tile-shaped answer here
-would be wrong, not merely partial. See _query_postcode_countries.
+would be wrong, not merely partial. See _query_postcode_countries. It is
+memoized per (dataset, code) for the life of the process instead
+(_POSTCODE_AGGREGATE_CACHE), which is what keeps the scan a one-off rather
+than a per-call cost -- including for the year-shaped queries the detector
+cannot tell from four-digit postcodes.
+
+Each row's locality is looked up in the row's own country. A postcode
+centroid near a border is otherwise named by whatever sits nearest across it,
+and "country: FR, admin_context: [..., Basel]" is a self-contradicting row.
 
 The detector (_postcode_variants) is deliberately conservative: whole-query
 match against a fixed list of country postcode shapes, so a query that could
@@ -491,32 +523,43 @@ _STRONG_TIER = 2
 
 def _rank_key(row: dict, query: str, region_population: dict[str, int]):
     """Sort key: (#215) literal-over-fuzzy, then (#221) strong-vs-substring
-    tier group, then whether a population is known at all, then the match
-    tier, then (#47) population, else a documented proxy chain of subtype
-    rank / hierarchy depth / the row's own region's population, then (#53)
-    literal-over-variant, then id for full determinism. All ascending
-    (smaller sorts first).
+    tier group, then whether a *nonzero* population is known, then the match
+    tier, then (#47) whether a population is known at all and its value,
+    else a documented proxy chain of subtype rank / hierarchy depth / the
+    row's own region's population, then (#53) literal-over-variant, then id
+    for full determinism. All ascending (smaller sorts first).
 
     Tier vs prominence (#221). Tier used to dominate outright, so any
     exact-tier row beat every prefix-tier row no matter what stood behind
     them: live, "東京" put a population-less Nagano neighborhood above 東京都
     and its 13.9M people, because 東京 is exactly the neighborhood's name and
-    only a prefix of the prefecture's. The rule now is that a *known
-    population* outranks the tier, but only within the strong (exact/prefix)
-    group and only against a row with no population at all — the exact-tier
+    only a prefix of the prefecture's. The rule now is that *real
+    prominence* outranks the tier, but only within the strong (exact/prefix)
+    group and only against a row with no prominence at all — the exact-tier
     namesakes this rescues past are Overture rows with population NULL, and
     that emptiness is itself the signal (#47) that the match is a spelling
-    coincidence rather than the place anyone means. Everything else is
-    unchanged and deliberately so: two populated rows still order by tier
-    first, so an exact match with 10k people still beats a prefix match with
-    10M ("Portland" is not a worse answer than "Portland Heights" because
-    the latter is bigger); two population-less rows still order by tier;
-    and a substring match still cannot leapfrog either, however populous,
-    because the group term sits ahead of the population one. This is the
-    same judgement #214 already made one level down — an alternate-name hit
-    (`_variant`) wins on its own prominence against a population-less
-    literal namesake, which is why "Munich" resolves to München — applied to
-    the tier ladder instead of the literal/variant one.
+    coincidence rather than the place anyone means.
+
+    "Real prominence" is a population greater than zero, not merely a
+    non-NULL one. Overture ships plenty of divisions carrying an explicit
+    population of 0 (abandoned and unincorporated places), and a bare
+    null-check would let one of those rescue a prefix match past an exact
+    one — reading a filled-in column as prominence when the value says the
+    opposite. A 0 therefore ranks with the NULLs *here*; it keeps its #47
+    meaning below the tier term, where "we know it is 0" still orders ahead
+    of "we do not know", which is the ordering #47 established and #221 does
+    not touch.
+
+    Everything else is unchanged and deliberately so: two populated rows
+    still order by tier first, so an exact match with 10k people still beats
+    a prefix match with 10M ("Portland" is not a worse answer than "Portland
+    Heights" because the latter is bigger); two population-less rows still
+    order by tier; and a substring match still cannot leapfrog either,
+    however populous, because the group term sits ahead of the population
+    one. This is the same judgement #214 already made one level down — an
+    alternate-name hit (`_variant`) wins on its own prominence against a
+    population-less literal namesake, which is why "Munich" resolves to
+    München — applied to the tier ladder instead of the literal/variant one.
 
     rank_score deliberately does *not* follow this (see _rank_score): it
     answers "how well does this name match what you typed", where an exact
@@ -550,8 +593,9 @@ def _rank_key(row: dict, query: str, region_population: dict[str, int]):
         1 if row.get("_fuzzy") else 0,
         -(row.get("_similarity") or 0.0),
         0 if tier >= _STRONG_TIER else 1,
-        0 if population is not None else 1,
+        0 if (population or 0) > 0 else 1,
         -tier,
+        0 if population is not None else 1,
         -(population or 0),
         -weight,
         depth,
@@ -741,11 +785,19 @@ _ALT_BUILD_ATTEMPTED: set[str] = set()
 
 def _try_materialize_alt_names_table(alt_path: Path, glob: str) -> None:
     """Build the alt table, logging and swallowing any failure — see
-    _materialize_divisions_table on why this half is best-effort."""
+    _materialize_divisions_table on why this half is best-effort.
+
+    OSError is caught alongside the query errors because the filesystem half
+    of the build (mkdir, and the tmp-file rename) fails on its own terms: a
+    read-only or full cache directory raises OSError, not duckdb.Error, and
+    every caller of this treats a failed alt build as "search primary names
+    only". Letting it escape would take down a geocode call whose primary
+    table had already been written successfully.
+    """
     t0 = time.time()
     try:
         _materialize_alt_names_table(alt_path, glob)
-    except (duckdb.Error, overture.UpstreamUnavailable) as e:
+    except (duckdb.Error, overture.UpstreamUnavailable, OSError) as e:
         logger.warning(
             "alternate-name table materialization failed, geocode will search "
             "primary names only: %s", e,
@@ -858,7 +910,7 @@ def _division_bbox(
     return xmin, ymin, xmax, ymax
 
 
-def _rebuild_once_for_bbox_columns(path: Path, glob: str) -> None:
+def _rebuild_once_for_bbox_columns(path: Path) -> None:
     """Rebuild a pre-#224 divisions table in place so it carries the bbox
     columns, at most once per release per process.
 
@@ -880,7 +932,14 @@ def _rebuild_once_for_bbox_columns(path: Path, glob: str) -> None:
     logger.info("divisions table at %s predates #224 (no bbox columns); rebuilding it", path)
     t0 = time.time()
     try:
-        _materialize_divisions_table(path, glob)
+        # Resolved here rather than by the caller: a warm table must not so
+        # much as name the upstream dataset (see #215's
+        # test_fuzzy_pass_never_scans_upstream), and this is the one branch
+        # that genuinely needs it. _local_alt_names_table resolves it the
+        # same way, for the same reason.
+        _materialize_divisions_table(
+            path, overture.upstream_glob(theme="divisions", type_="division")
+        )
     except (duckdb.Error, overture.UpstreamUnavailable) as e:
         logger.warning(
             "divisions table rebuild for bbox columns failed, keeping the "
@@ -901,10 +960,10 @@ def _local_divisions_table() -> str | None:
         return None
     active_release = release.resolve_release()
     path = _local_divisions_table_path(active_release)
-    glob = overture.upstream_glob(theme="divisions", type_="division")
     if path.exists():
-        _rebuild_once_for_bbox_columns(path, glob)
+        _rebuild_once_for_bbox_columns(path)
         return str(path)
+    glob = overture.upstream_glob(theme="divisions", type_="division")
     logger.info(
         "materializing local divisions name table for release %s "
         "(first geocode call this process; one-time cost per release)",
@@ -1193,14 +1252,34 @@ def _query_alt_names(
     canonical "München" at rank time would silently demote it to the
     substring tier). `_matched_name` carries one real spelling of the
     alternate for the caller-visible `matched_name`.
+
+    One row per division, not per matching alternate. A division has as many
+    alternate rows as it has distinct folded spellings — Москва carries
+    "moscow", "moskau", "moskva", "moskwa" — and a substring query ("Mosk")
+    matches several of them at once, which without the QUALIFY below returns
+    the same GERS id several times over and lets one division fill the
+    caller's whole `limit`. The de-duplication is done in SQL rather than in
+    Python so DIVISION_OVERFETCH bounds *divisions* and not near-duplicate
+    rows: the same ranking that orders the result picks which alternate
+    survives per id (best tier, then alt_name for determinism), so the row
+    kept is the one that matched `query` best.
+
+    Returns [] when the query folds away to nothing (a query of only
+    combining marks does: _fold_alt_name strips them). The pattern would
+    otherwise be a bare '%%' matching every alternate in the table, which
+    answers a nonsense query with arbitrary prominent divisions — the
+    literal search, matching raw names, returns nothing for those.
     """
     folded = _fold_alt_name(query)
+    if not folded:
+        return []
     q = overture._like_escape(folded)
     params: dict = {"pattern": f"%{q}%", "exact": q, "prefix": f"{q}%"}
     region_filter = ""
     if region_code:
         region_filter = "AND d.region = $region_code"
         params["region_code"] = region_code
+    match_order = _match_tier_order_sql("a.alt_name")
     sql = f"""
         SELECT d.id, d.name, d.subtype, d.country, d.region, d.lat, d.lon,
                d.admin_chain, d.population, a.alt_name, a.alt_display
@@ -1208,7 +1287,10 @@ def _query_alt_names(
         JOIN read_parquet('{table_path}') d ON d.id = a.id
         WHERE a.alt_name ILIKE $pattern ESCAPE '\\'
         {region_filter}
-        ORDER BY {_match_tier_order_sql("a.alt_name")}
+        QUALIFY row_number() OVER (
+            PARTITION BY d.id ORDER BY {match_order}, a.alt_name
+        ) = 1
+        ORDER BY {match_order}
         LIMIT {DIVISION_OVERFETCH}
     """
     try:
@@ -1230,6 +1312,34 @@ def _query_alt_names(
     return result
 
 
+def _alt_rows_not_already_found(
+    alt_table: str, table_path: str, query: str, region_code: str | None, found: list[dict]
+) -> list[dict]:
+    """#214 alternate-name matches for `query`, minus the divisions the
+    literal pass already returned — a division found under its canonical
+    name is not also reported as an alternate hit.
+
+    A vanished alt table degrades to primary-only rather than failing the
+    query, the same #230 shape _query_divisions handles for the primary
+    table one level up. It is milder here: no alt table at all is already
+    a supported state (a cache directory predating #214 is in it), so
+    there is nothing to fall back *to* and nothing lost but the alternate
+    spellings.
+    """
+    try:
+        rows = _query_alt_names(alt_table, table_path, query, region_code)
+    except overture.UpstreamUnavailable:
+        if Path(alt_table).exists():
+            raise
+        logger.warning(
+            "alternate-name table vanished mid-query (%s); answering from "
+            "primary names only", alt_table,
+        )
+        return []
+    seen = {r["id"] for r in found}
+    return [r for r in rows if r["id"] not in seen]
+
+
 def _query_divisions(
     query: str,
     region_code: str | None,
@@ -1249,15 +1359,26 @@ def _query_divisions(
     """
     if local_table is not None:
         name_expr = "strip_accents(name)" if fold_diacritics else "name"
-        rows = _query_divisions_from_local(local_table, query, region_code, name_expr)
-        if alt_table is not None:
-            seen = {r["id"] for r in rows}
-            rows = rows + [
-                r
-                for r in _query_alt_names(alt_table, local_table, query, region_code)
-                if r["id"] not in seen
-            ]
-        return rows
+        try:
+            rows = _query_divisions_from_local(local_table, query, region_code, name_expr)
+        except overture.UpstreamUnavailable:
+            if Path(local_table).exists():
+                raise
+            # The table was deleted out from under us between the exists()
+            # check in _local_divisions_table() and the read (external
+            # cleanup, or a cache sweep — #230). Upstream is not known to be
+            # unavailable, so don't report it as such: degrade to the direct
+            # upstream scan, same as if the table had never materialized.
+            logger.warning(
+                "local divisions table vanished mid-query (%s); falling back "
+                "to a direct upstream scan", local_table,
+            )
+        else:
+            if alt_table is not None:
+                rows = rows + _alt_rows_not_already_found(
+                    alt_table, local_table, query, region_code, rows
+                )
+            return rows
     name_expr = "strip_accents(names.primary)" if fold_diacritics else "names.primary"
     return _query_divisions_from_upstream(query, region_code, name_expr)
 
@@ -1298,15 +1419,18 @@ def _has_like_metacharacter(query: str) -> bool:
     return "%" in query or "_" in query
 
 
-def _query_divisions_fuzzy(table_path: str, query: str) -> list[dict]:
+def _query_divisions_fuzzy(
+    table_path: str, query: str, region_code: str | None = None
+) -> list[dict]:
     """Divisions whose folded name is within _FUZZY_SIMILARITY_THRESHOLD
     jaro-winkler of the folded query — the #215 typo tier.
 
-    No region filter, unlike the literal queries: this only runs when the
-    literal search came back empty, and a region-constrained literal miss
-    has already dropped its region code and retried unconstrained by then
-    (see geocode_detailed) — so there is never a live region constraint
-    left to honor here.
+    `region_code` narrows the pass to one region, the same filter the
+    literal queries take. The caller passes the code parsed off the
+    query's own "City, ST" suffix and retries without it if that comes
+    back empty, mirroring what the literal search one step up already does
+    — a region-constrained miss can mean the suffix was misread as a
+    region, and answering nothing would be the worse failure.
 
     Local table only, by construction: the caller passes a materialized
     table path or doesn't call this at all. A similarity predicate has
@@ -1333,14 +1457,29 @@ def _query_divisions_fuzzy(table_path: str, query: str) -> list[dict]:
     a threshold for it needs its own measurement, and a wrong fuzzy answer
     is the failure mode this tier is most careful about. Left for a
     follow-up with numbers behind it.
+
+    Returns [] when the query folds to the empty string — a query of only
+    combining marks does, since folding strips exactly those. DuckDB's
+    jaro_winkler_similarity(name, '') scores above the threshold rather
+    than at 0, so without this the tier answers a nonsense query with the
+    most populous divisions in the dataset, presented as spelling
+    corrections.
     """
-    params: dict = {"folded": _normalize_for_match(query)}
+    folded_query = _normalize_for_match(query)
+    if not folded_query:
+        return []
+    params: dict = {"folded": folded_query}
+    region_filter = ""
+    if region_code:
+        region_filter = "AND region = $region_code"
+        params["region_code"] = region_code
     sql = f"""
         SELECT id, name, subtype, country, region, lat, lon, admin_chain, population,
                jaro_winkler_similarity({_FOLDED_NAME_SQL}, $folded) AS similarity
         FROM read_parquet('{table_path}')
         WHERE jaro_winkler_similarity({_FOLDED_NAME_SQL}, $folded)
               >= {_FUZZY_SIMILARITY_THRESHOLD}
+        {region_filter}
         ORDER BY similarity DESC, population DESC NULLS LAST
         LIMIT {DIVISION_OVERFETCH}
     """
@@ -1418,18 +1557,21 @@ def _fallback_anchor(
     ILIKE '%the%' matches a large fraction of every place on Earth: 50.2s
     measured live, answering "the Met" with "The Core IAS". The caller
     treats a None name_query as "skip the places half entirely and say so",
-    which is strictly better than that. The significance rule is
-    _significant_words' — >=3 chars and not a _STOPWORD — so this stays in
-    step with how resolve_place decides which words are worth searching on.
+    which is strictly better than that. The rule is _nothing_but_stopwords':
+    reject only when *every* word left is a _STOPWORD. That is deliberately
+    looser than _significant_tokens' >=3-chars-and-not-a-stopword rule --
+    rejecting here means returning nothing at all, and short is not the same
+    as empty ("H&M Brooklyn", or a two-character Chinese name, has to reach
+    the anchored scan). See _nothing_but_stopwords.
 
     Note this gate is about *emptiness*, not correctness: a misspelling
     like "Sna Francisco" (anchor "Francisco", residual "Sna") clears it
-    just fine — "Sna" is a significant word by this rule. Typos are
-    handled a step earlier instead: #215's fuzzy tier retries the whole
-    query by edit distance and, when it finds a correction, stands the
-    places fallback down before this function is ever reached. Without a
-    local divisions table for that tier to read (cache off), such a query
-    still lands here and still reaches the substring scan of its own typo.
+    just fine — "Sna" is not a stopword. Typos are handled a step earlier
+    instead: #215's fuzzy tier retries the whole query by edit distance
+    and, when it finds a correction, stands the places fallback down
+    before this function is ever reached. Without a local divisions table
+    for that tier to read (cache off), such a query still lands here and
+    still reaches the substring scan of its own typo.
     """
     if divisions:
         top = divisions[0]
@@ -1444,7 +1586,7 @@ def _fallback_anchor(
             continue
         best = min(rows, key=lambda r: _rank_key(r, candidate, {}))
         base = " ".join(tokens[:-n]).strip()
-        name_query = base if _significant_words(base) else None
+        name_query = None if _nothing_but_stopwords(base) else base
         return best["lat"], best["lon"], name_query
     return None
 
@@ -1512,9 +1654,17 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
 #
 # The cost of a false positive is one wasted upstream aggregate plus a
 # fallthrough to the normal name search; the cost of a false negative is
-# today's empty answer. That asymmetry still doesn't buy loose patterns: the
-# aggregate is a ~12s cold scan of a 474M-row theme (R27, measured), which is
-# not a thing to spend on "1984".
+# today's empty answer.
+#
+# Be clear about what that buys: `\d{4}` matches years, so geocode("1984")
+# *does* pay the aggregate — a ~12s cold scan of a 474M-row theme (R27,
+# measured). That is deliberate and not fixable by a heuristic, because
+# four-digit postcodes are real and heavily used (DK/NO/AT/CH/BE/HU...), and
+# "2100" is Copenhagen Ø as surely as "1984" is a novel; no rule separates
+# them without breaking the countries this feature exists to serve. What
+# bounds the damage instead is _POSTCODE_AGGREGATE_CACHE below: the scan is
+# paid once per (dataset, code) per process, so a year-shaped query costs at
+# most one scan for the life of the process rather than one per call.
 _POSTCODE_PATTERNS = (
     re.compile(r"^\d{4}$"),           # AT BE AU CH DK HU LU NO NZ SI ...
     re.compile(r"^\d{5}$"),           # US ZIP, DE, FR, ES, IT, FI, MX
@@ -1547,10 +1697,26 @@ _POSTCODE_ZERO_COUNTRIES = ("CL", "CO", "EE", "HK", "IT", "JP", "NZ", "RS", "TW"
 # region away.
 _POSTCODE_LOCALITY_MAX_M = 25_000
 
-# Lat/lon window (degrees) prefiltering the local divisions table before the
+# Latitude window (degrees) prefiltering the local divisions table before the
 # distance sort -- generous next to _POSTCODE_LOCALITY_MAX_M, and only there
 # so the nearest-division scan reads a slice rather than the whole table.
+# 0.5 degrees of latitude is ~55km, comfortably outside the 25km cap.
 _POSTCODE_LOCALITY_WINDOW_DEG = 0.5
+
+# A degree of longitude shrinks with cos(latitude), so the same 0.5 degrees
+# that is ~55km at the equator is ~19km at 70N -- narrower than the 25km cap
+# it is supposed to be generous next to, which would silently drop a locality
+# that is genuinely in range from a northern-Norway or Alaskan postcode. The
+# window is therefore widened by 1/cos(lat), floored so the tropics keep the
+# plain 0.5 and clamped at the poles where the scale factor runs away.
+_POSTCODE_LOCALITY_COS_FLOOR = 0.05
+
+
+def _locality_lon_window(lat: float) -> float:
+    """Longitude half-window (degrees) covering _POSTCODE_LOCALITY_MAX_M at
+    `lat` -- see _POSTCODE_LOCALITY_COS_FLOOR."""
+    scale = max(math.cos(math.radians(lat)), _POSTCODE_LOCALITY_COS_FLOOR)
+    return min(_POSTCODE_LOCALITY_WINDOW_DEG / scale, 180.0)
 
 # Haversine against the local divisions table's flat lat/lon columns, which is
 # the one thing that table does not share with the raw theme (it stores the
@@ -1595,6 +1761,22 @@ def _postcode_display(query: str) -> str:
     return " ".join(query.strip().upper().split())
 
 
+# Aggregate results already computed this process, keyed by (dataset glob,
+# variants). The scan behind one entry is the most expensive read this module
+# makes, and it answers a question whose answer cannot change without the
+# release changing -- which changes the glob, and so the key. Keyed on the
+# glob rather than the code alone so a test (or an operator) pointing the
+# addresses theme at a different dataset gets that dataset's answer, not the
+# previous one's. Only successful reads land here; an UpstreamUnavailable is
+# a transient fact about the network, not about the data.
+_POSTCODE_AGGREGATE_CACHE: dict[tuple[str, tuple[str, ...]], list[tuple]] = {}
+
+# Bound on the above: postcode queries are a long tail, and an unbounded dict
+# in a long-lived server is a leak. Oldest-first eviction (dicts preserve
+# insertion order) is enough -- the cost of a miss is one scan, not an error.
+_POSTCODE_AGGREGATE_CACHE_MAX = 256
+
+
 def _query_postcode_countries(variants: list[str]) -> list[tuple]:
     """One upstream aggregate over the addresses theme: (country, count,
     lat, lon) per country carrying this postcode, most points first.
@@ -1606,9 +1788,29 @@ def _query_postcode_countries(variants: list[str]) -> list[tuple]:
     materialized) or answer from a slice, which for this query is not a
     slower answer but a wrong one. So it is a direct upstream scan with the
     usual duckdb.Error -> UpstreamUnavailable conversion, ~12s cold
-    (R27-measured); the note says so when the read is remote.
+    (R27-measured); the note says so when the read is remote. Repeats within
+    the process are served from _POSTCODE_AGGREGATE_CACHE.
+
+    Two filters keep the answer internally consistent:
+
+    `upper(trim(postcode))` on the column side, because the variants are
+    uppercased and a source that wrote "1011 ab" or padded the value is
+    otherwise invisible -- and an invisible row would come back as the
+    coverage note, which asserts something quite different (that the theme
+    does not carry the country) than "we compared case-sensitively".
+
+    A NOT NULL guard on the bbox corners, because count(*) and avg() do not
+    treat NULLs alike: avg() skips them, count(*) does not. A country whose
+    rows are all bbox-less would hand back a NULL centroid -- which used to
+    reach round() and raise TypeError -- and one whose rows are partly
+    bbox-less would report an address_count measured over more rows than the
+    centroid was. Filtering first makes both numbers describe one row set.
     """
     glob = addresses._upstream_glob()
+    key = (glob, tuple(variants))
+    cached = _POSTCODE_AGGREGATE_CACHE.get(key)
+    if cached is not None:
+        return cached
     cols = overture.probe_schema(glob)
     if cols is not None and ("postcode" not in cols or "country" not in cols):
         return []
@@ -1618,25 +1820,46 @@ def _query_postcode_countries(variants: list[str]) -> list[tuple]:
         SELECT country, count(*) AS n,
                avg(bbox.ymin) AS lat, avg(bbox.xmin) AS lon
         FROM read_parquet('{glob}', hive_partitioning=1)
-        WHERE postcode IN ({in_list}) AND country IS NOT NULL
+        WHERE upper(trim(postcode)) IN ({in_list})
+          AND country IS NOT NULL
+          AND bbox.ymin IS NOT NULL AND bbox.xmin IS NOT NULL
         GROUP BY country
         ORDER BY n DESC, country
         LIMIT {_POSTCODE_MAX_COUNTRIES}
     """
     try:
         with overture._conn_lock:
-            return overture.conn().execute(sql, params).fetchall()
+            rows = overture.conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
+    if len(_POSTCODE_AGGREGATE_CACHE) >= _POSTCODE_AGGREGATE_CACHE_MAX:
+        del _POSTCODE_AGGREGATE_CACHE[next(iter(_POSTCODE_AGGREGATE_CACHE))]
+    _POSTCODE_AGGREGATE_CACHE[key] = rows
+    return rows
 
 
-def _covering_division_from_local(lat: float, lon: float, local_table: str) -> dict | None:
+def _covering_division_from_local(
+    lat: float, lon: float, local_table: str, country: str | None = None
+) -> dict | None:
     """Nearest locality-ish division to a point, from the #43 local table.
 
     60ms measured (R27) against the already-materialized table, which is why
     the postcode answer can afford to name a place per country rather than
     handing back bare coordinates.
+
+    `country` constrains the search to the country the caller already knows
+    the point is in. A postcode centroid near a border is otherwise named by
+    whatever locality is nearest across it -- 68300 in France sits a couple of
+    km from Basel, and a row reading {"country": "FR", admin_context ending
+    "Basel"} contradicts itself. Distance alone cannot catch this: the nearest
+    division genuinely is the foreign one.
     """
+    lon_window = _locality_lon_window(lat)
+    params: dict = {"lat": lat, "lon": lon}
+    country_filter = ""
+    if country:
+        country_filter = "AND country = $country"
+        params["country"] = country
     sql = f"""
         SELECT name, subtype, admin_chain,
                {_LOCAL_DISTANCE_EXPR} AS distance_m
@@ -1644,14 +1867,15 @@ def _covering_division_from_local(lat: float, lon: float, local_table: str) -> d
         WHERE subtype IN {_POSTCODE_LOCALITY_SUBTYPES}
           AND lat BETWEEN $lat - {_POSTCODE_LOCALITY_WINDOW_DEG}
                       AND $lat + {_POSTCODE_LOCALITY_WINDOW_DEG}
-          AND lon BETWEEN $lon - {_POSTCODE_LOCALITY_WINDOW_DEG}
-                      AND $lon + {_POSTCODE_LOCALITY_WINDOW_DEG}
+          AND lon BETWEEN $lon - {lon_window}
+                      AND $lon + {lon_window}
+          {country_filter}
         ORDER BY distance_m
         LIMIT 1
     """
     try:
         with overture._conn_lock:
-            row = overture.conn().execute(sql, {"lat": lat, "lon": lon}).fetchone()
+            row = overture.conn().execute(sql, params).fetchone()
     except duckdb.Error as e:
         logger.warning("local divisions lookup for postcode locality failed: %s", e)
         return None
@@ -1661,22 +1885,25 @@ def _covering_division_from_local(lat: float, lon: float, local_table: str) -> d
                                               row[0]]}
 
 
-def _covering_division(lat: float, lon: float, local_table: str | None) -> dict | None:
+def _covering_division(
+    lat: float, lon: float, local_table: str | None, country: str | None = None
+) -> dict | None:
     """The place a postcode centroid sits in, local table first.
 
     Falls back to _nearest_division's upstream scan when there is no local
     table (PLACEROOT_CACHE=off, or materialization failed) -- the same
     degrade every other #43 caller makes, and it keeps the postcode answer
     naming a place rather than dropping to coordinates just because caching
-    is off.
+    is off. Both paths take the same `country` constraint, so turning the
+    cache off changes what the answer costs but not what it says.
     """
     if local_table is not None:
-        return _covering_division_from_local(lat, lon, local_table)
-    return _nearest_division(lat, lon)
+        return _covering_division_from_local(lat, lon, local_table, country)
+    return _nearest_division(lat, lon, country=country)
 
 
 def _postcode_results(
-    display: str, rows: list[tuple], local_table: str | None
+    display: str, rows: list[tuple], local_table: str | None, limit: int
 ) -> list[dict]:
     """Aggregate rows -> geocode result rows, type "postcode".
 
@@ -1691,12 +1918,19 @@ def _postcode_results(
     rank_score is the row's share of the largest country's point count, so
     it says what it is measured on: 94110's US row scores 1.0 and its SK row
     0.12 because that is the ratio of the evidence behind them.
+
+    `limit` is applied here rather than to the returned list, because each
+    row costs a covering-division lookup: with the cache off that is an
+    upstream scan retried at three radii, so trimming afterwards paid for up
+    to _POSTCODE_MAX_COUNTRIES x 3 scans to build rows the caller never saw.
+    Trimming first is safe for rank_score -- the aggregate is ordered by
+    count descending, so the largest count is in the first row either way.
     """
     top = max((r[1] for r in rows), default=0) or 1
     results = []
-    for country, count, lat, lon in rows:
+    for country, count, lat, lon in rows[:limit]:
         lat, lon = round(lat, 6), round(lon, 6)
-        covering = _covering_division(lat, lon, local_table)
+        covering = _covering_division(lat, lon, local_table, country)
         results.append({
             "name": display,
             "type": "postcode",
@@ -1782,7 +2016,9 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
     A "note" also comes back *with* results when nothing matched literally
     and the answer came from the #215 fuzzy tier instead: it names the
     spelling the results were corrected to ("Berekley" -> "Berkeley"), so
-    a caller can tell a correction from a match.
+    a caller can tell a correction from a match. Those rows also carry
+    "matched_by": "fuzzy" individually, which is what resolve_place reads
+    to label them (it returns no note of its own).
 
     A query that is entirely a postcode ("94110", "1011AB", "SW1A 1AA") is
     answered from the addresses theme instead of by name (#223): one row per
@@ -1792,12 +2028,13 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
     section.
 
     Never more than `limit` results. Each result: {name, type, lat, lon, id
-    (GERS), admin_context, rank_score}, plus (#214) `matched_name` on the
-    rows found through one of Overture's alternate names rather than the
-    canonical one — "Munich" answers München, with matched_name "Munich".
-    Raises overture.UpstreamUnavailable
-    if the remote scan fails after retries; the caller (server.py) turns
-    that into a structured error like the other tools.
+    (GERS), admin_context, rank_score, plus "matched_by" on a #215 fuzzy
+    row, plus (#214) "matched_name" on a row found through one of
+    Overture's alternate names rather than the canonical one — "Munich"
+    answers München, with matched_name "Munich"}. Raises
+    overture.UpstreamUnavailable if the remote scan fails after retries;
+    the caller (server.py) turns that into a structured error like the
+    other tools.
 
     Handles "City, ST" / "City, Region" suffixes (#46) and ranks same-tier
     ties by population/prominence (#47) — see the module docstring.
@@ -1816,7 +2053,18 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
     # country carrying the code. A postcode-shaped query that matches nothing
     # still falls through to the name search below -- the shape detector is
     # conservative but not infallible, and a real name that happens to be
-    # shaped like a postcode must still be findable. Its note is kept aside
+    # shaped like a postcode must still be findable.
+    #
+    # A postcode that *does* match returns here and the name search never
+    # runs, which is intended and is the one case where the detector costs
+    # something: a division literally named "2100" is unreachable through
+    # geocode in a dataset where 2100 is also a live Danish postcode. The
+    # alternative -- merging the two halves -- would have to rank a point
+    # count against a population on one scale, and would put a namesake
+    # village in the middle of an answer about a postal code. Pinned by
+    # test_a_postcode_hit_short_circuits_the_name_search.
+    #
+    # Its note is kept aside
     # (postcode_note) rather than assigned to `note`: when both halves come
     # back empty, "this is what an empty postcode answer means" is the more
     # useful of the two explanations, so it wins at the return below.
@@ -1827,7 +2075,7 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
         postcode_rows = _query_postcode_countries(variants)
         if postcode_rows:
             return {
-                "results": _postcode_results(display, postcode_rows, local_table)[:limit],
+                "results": _postcode_results(display, postcode_rows, local_table, limit),
                 "note": _postcode_note(display),
             }
         postcode_note = _postcode_empty_note(display)
@@ -1839,6 +2087,10 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
     alt_table = _local_alt_names_table(local_table)
     base_query, region_code, _region_name = _parse_region_suffix(query, local_table)
     search_query = base_query if region_code else query
+    # `region_code` is cleared below if its constrained search comes up
+    # empty; the #215 fuzzy pass still wants the code the query itself
+    # carried, so keep it.
+    suffix_region_code = region_code
 
     divisions = _query_divisions(search_query, region_code, local_table, alt_table=alt_table)
     if region_code and not divisions:
@@ -1881,9 +2133,12 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
         and c.get("population") is not None
         for c in divisions
     )
+    literal_answer_is_good_enough = (
+        best_literal_tier >= _STRONG_TIER and literal_match_has_prominence
+    )
     seen_ids = {c["id"] for c in divisions}
     variant_rows: list[dict] = []
-    if best_literal_tier < _STRONG_TIER or not literal_match_has_prominence:
+    if not literal_answer_is_good_enough:
         for variant_query in _abbreviation_variant_queries(search_query):
             for row in _query_divisions(variant_query, region_code, local_table):
                 if row["id"] not in seen_ids:
@@ -1895,41 +2150,79 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
                     variant_rows.append(row)
                     seen_ids.add(row["id"])
 
-    # #221: the diacritic-folded pass runs unconditionally, outside the
-    # "literal match lacks prominence" gate above. Under the gate it never
-    # ran for "Zurich": the literal ILIKE finds a Dutch village spelled
-    # exactly that, and it carries a population (190), so the gate read the
-    # literal search as having already found something real — while Zürich,
-    # 443k, was not merely ranked below but absent from the candidate pool
-    # entirely, since ILIKE '%Zurich%' does not match "Zürich". A prominence
-    # gate cannot work here: whether the folded spelling is worth looking
-    # for has nothing to do with how prominent the *unfolded* one turned out
-    # to be. So the pass always runs and _rank_key decides, which is what it
-    # is for. Cheap enough to do every time — one more predicate over the
-    # same local divisions table the literal pass just read (0.2s measured,
-    # #214).
+    # #221: with a local table (#43) the diacritic-folded pass runs
+    # unconditionally, outside the "literal match lacks prominence" gate
+    # above. Under the gate it never ran for "Zurich": the literal ILIKE
+    # finds a Dutch village spelled exactly that, and it carries a
+    # population (190), so the gate read the literal search as having
+    # already found something real — while Zürich, 443k, was not merely
+    # ranked below but absent from the candidate pool entirely, since ILIKE
+    # '%Zurich%' does not match "Zürich". A prominence gate cannot work
+    # here: whether the folded spelling is worth looking for has nothing to
+    # do with how prominent the *unfolded* one turned out to be. So the pass
+    # runs and _rank_key decides, which is what it is for. Cheap enough to
+    # do every time — one more predicate over the same local divisions table
+    # the literal pass just read (0.2s measured, #214).
     #
-    # The abbreviation retries above stay gated: they fire one extra query
-    # per expandable token ("St." -> "Saint", "N." -> "North"), and unlike
-    # folding they rewrite the query into a genuinely different string, so
-    # running them against an already-good literal answer buys noise rather
-    # than reach.
-    stripped_query = _strip_diacritics(search_query)
-    for row in _query_divisions(stripped_query, region_code, local_table, fold_diacritics=True):
-        if row["id"] not in seen_ids:
-            row["_variant"] = True
-            row["_tier"] = _match_tier(row["name"], stripped_query)
-            variant_rows.append(row)
-            seen_ids.add(row["id"])
+    # Without a local table it stays gated, exactly as before #221. That
+    # 0.2s is a local-parquet number; with no local table _query_divisions
+    # falls through to _query_divisions_from_upstream, and an unanchored
+    # ILIKE over the divisions theme has nothing to prune by, so running it
+    # unconditionally would roughly double the upstream work for every query
+    # that used to stop at a good literal answer. That is the cost class
+    # #105/#216 exist to avoid and that _query_divisions_fuzzy declines to
+    # pay upstream for the same reason. The consequence is deliberate and
+    # narrow: cache-off callers keep the pre-#221 "Zurich" answer (the fold
+    # still runs for them whenever the literal search came back weak, which
+    # is what "Sao Paulo" -> "São Paulo" needs), and warming the cache is
+    # what buys the fix.
+    #
+    # The abbreviation retries above stay gated on both paths: they fire one
+    # extra query per expandable token ("St." -> "Saint", "N." -> "North"),
+    # and unlike folding they rewrite the query into a genuinely different
+    # string, so running them against an already-good literal answer buys
+    # noise rather than reach.
+    if local_table is not None or not literal_answer_is_good_enough:
+        stripped_query = _strip_diacritics(search_query)
+        # Not when stripping left nothing: a query of only combining marks
+        # folds to "", and searching for it is an ILIKE '%%' that matches
+        # every division in the dataset — a nonsense query answered with
+        # whichever places are most populous. The literal pass, matching raw
+        # names, correctly returns nothing for those.
+        rows = (
+            _query_divisions(stripped_query, region_code, local_table, fold_diacritics=True)
+            if stripped_query
+            else []
+        )
+        for row in rows:
+            if row["id"] not in seen_ids:
+                row["_variant"] = True
+                row["_tier"] = _match_tier(row["name"], stripped_query)
+                variant_rows.append(row)
+                seen_ids.add(row["id"])
     divisions = divisions + variant_rows
 
     # #215: the literal search (and its #53 variant retries) found nothing
     # at all — the shape a typo makes. Retry by edit distance against the
     # local table only; see the module docstring for why emptiness is the
     # whole trigger and why this never runs upstream.
+    #
+    # Matched against `base_query`, not `search_query`: when a region
+    # suffix was recognized and its constrained search came up empty,
+    # search_query has been reset to the *whole* original string, suffix
+    # included, and no division name is within edit distance of
+    # "Berekley, CA" — the correction would be lost on the single most
+    # common way a caller writes a place. base_query is the name half
+    # either way (_parse_region_suffix returns the query unchanged when it
+    # recognizes no suffix), and the region it was parsed off of is passed
+    # as a filter, dropped on a miss the same way the literal search drops
+    # it.
     fuzzy_rows: list[dict] = []
-    if not divisions and local_table is not None and not _has_like_metacharacter(search_query):
-        fuzzy_rows = _query_divisions_fuzzy(local_table, search_query)
+    fuzzy_query = base_query
+    if not divisions and local_table is not None and not _has_like_metacharacter(fuzzy_query):
+        fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query, suffix_region_code)
+        if not fuzzy_rows and suffix_region_code:
+            fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query)
         divisions = fuzzy_rows
 
     region_population = _region_population_lookup(local_table)
@@ -2009,13 +2302,24 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
             # canonical one. `name` stays canonical either way, so this is
             # what tells a caller "Munich" found "München" on purpose.
             entry["matched_name"] = row["_matched_name"]
+        if row.get("_fuzzy"):
+            # #215: the note says "these answer a corrected spelling" in
+            # prose, which is what a human reader needs; this says it per
+            # row, in a field, which is what code needs. resolve_place
+            # returns no note at all and has to label each candidate's
+            # match on its own — without this it can only re-derive a tier
+            # from a name that doesn't contain the query, and call a
+            # correction a "substring" match.
+            entry["matched_by"] = "fuzzy"
         out.append(entry)
     result = {"results": out}
     fuzzy_out = [row for row in candidates[:limit] if row.get("_fuzzy")]
     if fuzzy_out:
         # #215: unlike the skip notes below, this one accompanies real
-        # results — it says which spelling they actually answer.
-        result["note"] = _fuzzy_correction_note(fuzzy_out, search_query)
+        # results — it says which spelling they actually answer. Named
+        # against the string actually fuzzed, which is the query minus any
+        # region suffix.
+        result["note"] = _fuzzy_correction_note(fuzzy_out, fuzzy_query)
     if postcode_note and not out:
         # #223: the query was postcode-shaped, the postcode aggregate found
         # nothing, and neither did the name search. What that emptiness means
@@ -2099,6 +2403,13 @@ _RESOLVE_PLACE_RADIUS_M = 20_000
 
 _MATCH_TIER_LABELS = {3: "exact", 2: "prefix", 1: "substring"}
 
+# resolve_place's `match` labels, best first. "fuzzy" (#215) is not a tier
+# the literal search can produce — it means the name doesn't contain the
+# query at all and was reached by edit distance instead — so it ranks
+# below every literal label, matching how _rank_key already orders the
+# rows themselves.
+_MATCH_LABEL_RANK = {"exact": 3, "prefix": 2, "substring": 1, "fuzzy": 0}
+
 # Small enough to filter, generic enough that requiring them in a name
 # match would be actively wrong ("the Whole Foods on Lamar" — "the"/"on"
 # aren't part of any real place name). Dropped before a query is split into
@@ -2106,8 +2417,19 @@ _MATCH_TIER_LABELS = {3: "exact", 2: "prefix", 1: "substring"}
 _STOPWORDS = {"the", "a", "an", "on", "in", "at", "near", "of", "and", "by"}
 
 
-def _match_label(name: str, query: str) -> str:
-    return _MATCH_TIER_LABELS[_match_tier(name, query)]
+def _match_label(row: dict, query: str) -> str:
+    """A geocode() result row -> how it matched `query`.
+
+    A #215 fuzzy row is labeled from its own provenance, not re-derived
+    from its name: `_match_tier` reports "substring" for any name it is
+    handed, including one that doesn't contain the query at all, so
+    deriving a label from "Berkeley" against "Berekley" would claim a
+    containment that isn't there — the one thing a caller reads this field
+    to rule out.
+    """
+    if row.get("matched_by") == "fuzzy":
+        return "fuzzy"
+    return _MATCH_TIER_LABELS[_match_tier(row["name"], query)]
 
 
 # resolve_place runs one find_places per significant token, each taking the
@@ -2118,16 +2440,19 @@ def _match_label(name: str, query: str) -> str:
 _MAX_RESOLVE_TOKENS = 12
 
 
-def _significant_words(text: str) -> list[str]:
-    """text -> the words in it worth searching a name index on: >=3 chars and
-    not a _STOPWORD, in order of appearance.
+def _nothing_but_stopwords(text: str) -> bool:
+    """Whether `text` holds no word a place could be named after — every word
+    in it is a _STOPWORD, or there are no words at all.
 
-    The shared rule behind _significant_tokens (which layers resolve_place's
-    fan-out cap and its own never-search-nothing fallback on top) and
-    _fallback_anchor's residual gate (#216, which needs the raw answer —
-    "nothing here is worth searching for" is exactly the case it acts on).
+    _fallback_anchor's residual gate (#216). Deliberately *not*
+    _significant_tokens' rule: that one also drops words under 3 characters,
+    which is safe there only because it layers a never-search-nothing
+    fallback on top. Here the answer is load-bearing — "reject" means
+    returning no results at all — and plenty of real names are nothing but
+    short words ("H&M", and most two-character Chinese/Japanese/Korean place
+    names). Those are distinctive enough to search on; "the" is not.
     """
-    return [t for t in re.findall(r"[\w'-]+", text) if len(t) >= 3 and t.lower() not in _STOPWORDS]
+    return not any(w.lower() not in _STOPWORDS for w in re.findall(r"[\w'-]+", text))
 
 
 def _significant_tokens(query: str) -> list[str]:
@@ -2137,7 +2462,8 @@ def _significant_tokens(query: str) -> list[str]:
     rather than searching nothing.
     """
     tokens = [t for t in re.findall(r"[\w'-]+", query) if len(t) >= 3]
-    return (_significant_words(query) or tokens or [query])[:_MAX_RESOLVE_TOKENS]
+    significant = [t for t in tokens if t.lower() not in _STOPWORDS]
+    return (significant or tokens or [query])[:_MAX_RESOLVE_TOKENS]
 
 
 def _place_match_label(name: str, query: str) -> str | None:
@@ -2191,12 +2517,15 @@ def resolve_place(
     just down-ranked — see _place_match_label.
 
     Each candidate: {"id" (GERS), "kind": "division" | "place", "name",
-    "lat", "lon", "match": "exact" | "prefix" | "substring", plus
-    "admin_context" (division) or "category" (place)}. Ranked by match tier
-    first — kind-agnostic, an exact place beats a prefix-matched division —
-    then by prominence (division rank_score / place confidence, both
-    roughly 0-1 scales), then id for determinism. Never more than `limit`
-    results.
+    "lat", "lon", "match": "exact" | "prefix" | "substring" | "fuzzy", plus
+    "admin_context" (division) or "category" (place)}. "fuzzy" (#215,
+    divisions only) means the name doesn't contain the query at all and was
+    reached by close spelling instead — the caller asked for one string and
+    is being handed the answer to another, so it ranks below every literal
+    label. Ranked by match tier first — kind-agnostic, an exact place beats
+    a prefix-matched division — then by prominence (division rank_score /
+    place confidence, both roughly 0-1 scales), then id for determinism.
+    Never more than `limit` results.
 
     No match is a valid answer, not an error: an unresolvable query returns
     an empty list. Raises overture.UpstreamUnavailable if a remote scan
@@ -2242,7 +2571,7 @@ def resolve_place(
             "id": r["id"], "kind": "division", "name": r["name"],
             "lat": r["lat"], "lon": r["lon"],
             "admin_context": r["admin_context"],
-            "match": _match_label(r["name"], query),
+            "match": _match_label(r, query),
             "_prominence": r["rank_score"],
         })
     for r in place_rows:
@@ -2261,7 +2590,7 @@ def resolve_place(
         })
 
     candidates.sort(key=lambda c: (
-        -{"exact": 3, "prefix": 2, "substring": 1}[c["match"]],
+        -_MATCH_LABEL_RANK[c["match"]],
         -c["_prominence"],
         c["id"],
     ))
@@ -2312,21 +2641,34 @@ def _nearest_address(lat: float, lon: float) -> dict | None:
     return None
 
 
-def _nearest_division(lat: float, lon: float) -> dict | None:
+def _nearest_division(lat: float, lon: float, country: str | None = None) -> dict | None:
+    """Nearest locality-ish division to a point, scanning the divisions theme.
+
+    `country` (#223) restricts the search to one country, for callers that
+    already know which one the point is in and would contradict themselves by
+    naming a place across the border. Left None by reverse_geocode, which
+    knows only the coordinate and so wants the nearest division full stop.
+    """
     glob = overture.upstream_glob(theme="divisions", type_="division")
     cols = overture.probe_schema(glob)
     if cols is not None and "names" not in cols:
         return None
+    country_filter = ""
+    if country and (cols is None or "country" in cols):
+        country_filter = "AND country = $country"
     for radius_m in (2000, 20000, 100000):
         bbox_filter, distance_filter, params, _bbox, _radius_m = overture.area_geometry(
             lat, lon, radius_m
         )
+        if country_filter:
+            params = {**params, "country": country}
         sql = f"""
             SELECT names.primary AS name, subtype, hierarchies,
                    round({overture.DISTANCE_EXPR}, 1) AS distance_m
             FROM read_parquet('{glob}', hive_partitioning=1)
             WHERE {bbox_filter} AND {distance_filter}
               AND subtype IN ('locality', 'localadmin', 'neighborhood')
+              {country_filter}
             ORDER BY distance_m
             LIMIT 1
         """
