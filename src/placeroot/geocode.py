@@ -256,7 +256,15 @@ behind them.
 The aggregate is the one addresses read in this codebase that does NOT go
 through cache.py's tile machinery: tiles are bboxes, and "which countries
 carry this code" has no bbox to be sliced by -- a tile-shaped answer here
-would be wrong, not merely partial. See _query_postcode_countries.
+would be wrong, not merely partial. See _query_postcode_countries. It is
+memoized per (dataset, code) for the life of the process instead
+(_POSTCODE_AGGREGATE_CACHE), which is what keeps the scan a one-off rather
+than a per-call cost -- including for the year-shaped queries the detector
+cannot tell from four-digit postcodes.
+
+Each row's locality is looked up in the row's own country. A postcode
+centroid near a border is otherwise named by whatever sits nearest across it,
+and "country: FR, admin_context: [..., Basel]" is a self-contradicting row.
 
 The detector (_postcode_variants) is deliberately conservative: whole-query
 match against a fixed list of country postcode shapes, so a query that could
@@ -1345,9 +1353,17 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
 #
 # The cost of a false positive is one wasted upstream aggregate plus a
 # fallthrough to the normal name search; the cost of a false negative is
-# today's empty answer. That asymmetry still doesn't buy loose patterns: the
-# aggregate is a ~12s cold scan of a 474M-row theme (R27, measured), which is
-# not a thing to spend on "1984".
+# today's empty answer.
+#
+# Be clear about what that buys: `\d{4}` matches years, so geocode("1984")
+# *does* pay the aggregate — a ~12s cold scan of a 474M-row theme (R27,
+# measured). That is deliberate and not fixable by a heuristic, because
+# four-digit postcodes are real and heavily used (DK/NO/AT/CH/BE/HU...), and
+# "2100" is Copenhagen Ø as surely as "1984" is a novel; no rule separates
+# them without breaking the countries this feature exists to serve. What
+# bounds the damage instead is _POSTCODE_AGGREGATE_CACHE below: the scan is
+# paid once per (dataset, code) per process, so a year-shaped query costs at
+# most one scan for the life of the process rather than one per call.
 _POSTCODE_PATTERNS = (
     re.compile(r"^\d{4}$"),           # AT BE AU CH DK HU LU NO NZ SI ...
     re.compile(r"^\d{5}$"),           # US ZIP, DE, FR, ES, IT, FI, MX
@@ -1380,10 +1396,26 @@ _POSTCODE_ZERO_COUNTRIES = ("CL", "CO", "EE", "HK", "IT", "JP", "NZ", "RS", "TW"
 # region away.
 _POSTCODE_LOCALITY_MAX_M = 25_000
 
-# Lat/lon window (degrees) prefiltering the local divisions table before the
+# Latitude window (degrees) prefiltering the local divisions table before the
 # distance sort -- generous next to _POSTCODE_LOCALITY_MAX_M, and only there
 # so the nearest-division scan reads a slice rather than the whole table.
+# 0.5 degrees of latitude is ~55km, comfortably outside the 25km cap.
 _POSTCODE_LOCALITY_WINDOW_DEG = 0.5
+
+# A degree of longitude shrinks with cos(latitude), so the same 0.5 degrees
+# that is ~55km at the equator is ~19km at 70N -- narrower than the 25km cap
+# it is supposed to be generous next to, which would silently drop a locality
+# that is genuinely in range from a northern-Norway or Alaskan postcode. The
+# window is therefore widened by 1/cos(lat), floored so the tropics keep the
+# plain 0.5 and clamped at the poles where the scale factor runs away.
+_POSTCODE_LOCALITY_COS_FLOOR = 0.05
+
+
+def _locality_lon_window(lat: float) -> float:
+    """Longitude half-window (degrees) covering _POSTCODE_LOCALITY_MAX_M at
+    `lat` -- see _POSTCODE_LOCALITY_COS_FLOOR."""
+    scale = max(math.cos(math.radians(lat)), _POSTCODE_LOCALITY_COS_FLOOR)
+    return min(_POSTCODE_LOCALITY_WINDOW_DEG / scale, 180.0)
 
 # Haversine against the local divisions table's flat lat/lon columns, which is
 # the one thing that table does not share with the raw theme (it stores the
@@ -1428,6 +1460,22 @@ def _postcode_display(query: str) -> str:
     return " ".join(query.strip().upper().split())
 
 
+# Aggregate results already computed this process, keyed by (dataset glob,
+# variants). The scan behind one entry is the most expensive read this module
+# makes, and it answers a question whose answer cannot change without the
+# release changing -- which changes the glob, and so the key. Keyed on the
+# glob rather than the code alone so a test (or an operator) pointing the
+# addresses theme at a different dataset gets that dataset's answer, not the
+# previous one's. Only successful reads land here; an UpstreamUnavailable is
+# a transient fact about the network, not about the data.
+_POSTCODE_AGGREGATE_CACHE: dict[tuple[str, tuple[str, ...]], list[tuple]] = {}
+
+# Bound on the above: postcode queries are a long tail, and an unbounded dict
+# in a long-lived server is a leak. Oldest-first eviction (dicts preserve
+# insertion order) is enough -- the cost of a miss is one scan, not an error.
+_POSTCODE_AGGREGATE_CACHE_MAX = 256
+
+
 def _query_postcode_countries(variants: list[str]) -> list[tuple]:
     """One upstream aggregate over the addresses theme: (country, count,
     lat, lon) per country carrying this postcode, most points first.
@@ -1439,9 +1487,29 @@ def _query_postcode_countries(variants: list[str]) -> list[tuple]:
     materialized) or answer from a slice, which for this query is not a
     slower answer but a wrong one. So it is a direct upstream scan with the
     usual duckdb.Error -> UpstreamUnavailable conversion, ~12s cold
-    (R27-measured); the note says so when the read is remote.
+    (R27-measured); the note says so when the read is remote. Repeats within
+    the process are served from _POSTCODE_AGGREGATE_CACHE.
+
+    Two filters keep the answer internally consistent:
+
+    `upper(trim(postcode))` on the column side, because the variants are
+    uppercased and a source that wrote "1011 ab" or padded the value is
+    otherwise invisible -- and an invisible row would come back as the
+    coverage note, which asserts something quite different (that the theme
+    does not carry the country) than "we compared case-sensitively".
+
+    A NOT NULL guard on the bbox corners, because count(*) and avg() do not
+    treat NULLs alike: avg() skips them, count(*) does not. A country whose
+    rows are all bbox-less would hand back a NULL centroid -- which used to
+    reach round() and raise TypeError -- and one whose rows are partly
+    bbox-less would report an address_count measured over more rows than the
+    centroid was. Filtering first makes both numbers describe one row set.
     """
     glob = addresses._upstream_glob()
+    key = (glob, tuple(variants))
+    cached = _POSTCODE_AGGREGATE_CACHE.get(key)
+    if cached is not None:
+        return cached
     cols = overture.probe_schema(glob)
     if cols is not None and ("postcode" not in cols or "country" not in cols):
         return []
@@ -1451,25 +1519,46 @@ def _query_postcode_countries(variants: list[str]) -> list[tuple]:
         SELECT country, count(*) AS n,
                avg(bbox.ymin) AS lat, avg(bbox.xmin) AS lon
         FROM read_parquet('{glob}', hive_partitioning=1)
-        WHERE postcode IN ({in_list}) AND country IS NOT NULL
+        WHERE upper(trim(postcode)) IN ({in_list})
+          AND country IS NOT NULL
+          AND bbox.ymin IS NOT NULL AND bbox.xmin IS NOT NULL
         GROUP BY country
         ORDER BY n DESC, country
         LIMIT {_POSTCODE_MAX_COUNTRIES}
     """
     try:
         with overture._conn_lock:
-            return overture.conn().execute(sql, params).fetchall()
+            rows = overture.conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
+    if len(_POSTCODE_AGGREGATE_CACHE) >= _POSTCODE_AGGREGATE_CACHE_MAX:
+        del _POSTCODE_AGGREGATE_CACHE[next(iter(_POSTCODE_AGGREGATE_CACHE))]
+    _POSTCODE_AGGREGATE_CACHE[key] = rows
+    return rows
 
 
-def _covering_division_from_local(lat: float, lon: float, local_table: str) -> dict | None:
+def _covering_division_from_local(
+    lat: float, lon: float, local_table: str, country: str | None = None
+) -> dict | None:
     """Nearest locality-ish division to a point, from the #43 local table.
 
     60ms measured (R27) against the already-materialized table, which is why
     the postcode answer can afford to name a place per country rather than
     handing back bare coordinates.
+
+    `country` constrains the search to the country the caller already knows
+    the point is in. A postcode centroid near a border is otherwise named by
+    whatever locality is nearest across it -- 68300 in France sits a couple of
+    km from Basel, and a row reading {"country": "FR", admin_context ending
+    "Basel"} contradicts itself. Distance alone cannot catch this: the nearest
+    division genuinely is the foreign one.
     """
+    lon_window = _locality_lon_window(lat)
+    params: dict = {"lat": lat, "lon": lon}
+    country_filter = ""
+    if country:
+        country_filter = "AND country = $country"
+        params["country"] = country
     sql = f"""
         SELECT name, subtype, admin_chain,
                {_LOCAL_DISTANCE_EXPR} AS distance_m
@@ -1477,14 +1566,15 @@ def _covering_division_from_local(lat: float, lon: float, local_table: str) -> d
         WHERE subtype IN {_POSTCODE_LOCALITY_SUBTYPES}
           AND lat BETWEEN $lat - {_POSTCODE_LOCALITY_WINDOW_DEG}
                       AND $lat + {_POSTCODE_LOCALITY_WINDOW_DEG}
-          AND lon BETWEEN $lon - {_POSTCODE_LOCALITY_WINDOW_DEG}
-                      AND $lon + {_POSTCODE_LOCALITY_WINDOW_DEG}
+          AND lon BETWEEN $lon - {lon_window}
+                      AND $lon + {lon_window}
+          {country_filter}
         ORDER BY distance_m
         LIMIT 1
     """
     try:
         with overture._conn_lock:
-            row = overture.conn().execute(sql, {"lat": lat, "lon": lon}).fetchone()
+            row = overture.conn().execute(sql, params).fetchone()
     except duckdb.Error as e:
         logger.warning("local divisions lookup for postcode locality failed: %s", e)
         return None
@@ -1494,22 +1584,25 @@ def _covering_division_from_local(lat: float, lon: float, local_table: str) -> d
                                               row[0]]}
 
 
-def _covering_division(lat: float, lon: float, local_table: str | None) -> dict | None:
+def _covering_division(
+    lat: float, lon: float, local_table: str | None, country: str | None = None
+) -> dict | None:
     """The place a postcode centroid sits in, local table first.
 
     Falls back to _nearest_division's upstream scan when there is no local
     table (PLACEROOT_CACHE=off, or materialization failed) -- the same
     degrade every other #43 caller makes, and it keeps the postcode answer
     naming a place rather than dropping to coordinates just because caching
-    is off.
+    is off. Both paths take the same `country` constraint, so turning the
+    cache off changes what the answer costs but not what it says.
     """
     if local_table is not None:
-        return _covering_division_from_local(lat, lon, local_table)
-    return _nearest_division(lat, lon)
+        return _covering_division_from_local(lat, lon, local_table, country)
+    return _nearest_division(lat, lon, country=country)
 
 
 def _postcode_results(
-    display: str, rows: list[tuple], local_table: str | None
+    display: str, rows: list[tuple], local_table: str | None, limit: int
 ) -> list[dict]:
     """Aggregate rows -> geocode result rows, type "postcode".
 
@@ -1524,12 +1617,19 @@ def _postcode_results(
     rank_score is the row's share of the largest country's point count, so
     it says what it is measured on: 94110's US row scores 1.0 and its SK row
     0.12 because that is the ratio of the evidence behind them.
+
+    `limit` is applied here rather than to the returned list, because each
+    row costs a covering-division lookup: with the cache off that is an
+    upstream scan retried at three radii, so trimming afterwards paid for up
+    to _POSTCODE_MAX_COUNTRIES x 3 scans to build rows the caller never saw.
+    Trimming first is safe for rank_score -- the aggregate is ordered by
+    count descending, so the largest count is in the first row either way.
     """
     top = max((r[1] for r in rows), default=0) or 1
     results = []
-    for country, count, lat, lon in rows:
+    for country, count, lat, lon in rows[:limit]:
         lat, lon = round(lat, 6), round(lon, 6)
-        covering = _covering_division(lat, lon, local_table)
+        covering = _covering_division(lat, lon, local_table, country)
         results.append({
             "name": display,
             "type": "postcode",
@@ -1649,7 +1749,18 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
     # country carrying the code. A postcode-shaped query that matches nothing
     # still falls through to the name search below -- the shape detector is
     # conservative but not infallible, and a real name that happens to be
-    # shaped like a postcode must still be findable. Its note is kept aside
+    # shaped like a postcode must still be findable.
+    #
+    # A postcode that *does* match returns here and the name search never
+    # runs, which is intended and is the one case where the detector costs
+    # something: a division literally named "2100" is unreachable through
+    # geocode in a dataset where 2100 is also a live Danish postcode. The
+    # alternative -- merging the two halves -- would have to rank a point
+    # count against a population on one scale, and would put a namesake
+    # village in the middle of an answer about a postal code. Pinned by
+    # test_a_postcode_hit_short_circuits_the_name_search.
+    #
+    # Its note is kept aside
     # (postcode_note) rather than assigned to `note`: when both halves come
     # back empty, "this is what an empty postcode answer means" is the more
     # useful of the two explanations, so it wins at the return below.
@@ -1660,7 +1771,7 @@ def geocode_detailed(query: str, limit: int = DEFAULT_LIMIT) -> dict:
         postcode_rows = _query_postcode_countries(variants)
         if postcode_rows:
             return {
-                "results": _postcode_results(display, postcode_rows, local_table)[:limit],
+                "results": _postcode_results(display, postcode_rows, local_table, limit),
                 "note": _postcode_note(display),
             }
         postcode_note = _postcode_empty_note(display)
@@ -2145,21 +2256,34 @@ def _nearest_address(lat: float, lon: float) -> dict | None:
     return None
 
 
-def _nearest_division(lat: float, lon: float) -> dict | None:
+def _nearest_division(lat: float, lon: float, country: str | None = None) -> dict | None:
+    """Nearest locality-ish division to a point, scanning the divisions theme.
+
+    `country` (#223) restricts the search to one country, for callers that
+    already know which one the point is in and would contradict themselves by
+    naming a place across the border. Left None by reverse_geocode, which
+    knows only the coordinate and so wants the nearest division full stop.
+    """
     glob = overture.upstream_glob(theme="divisions", type_="division")
     cols = overture.probe_schema(glob)
     if cols is not None and "names" not in cols:
         return None
+    country_filter = ""
+    if country and (cols is None or "country" in cols):
+        country_filter = "AND country = $country"
     for radius_m in (2000, 20000, 100000):
         bbox_filter, distance_filter, params, _bbox, _radius_m = overture.area_geometry(
             lat, lon, radius_m
         )
+        if country_filter:
+            params = {**params, "country": country}
         sql = f"""
             SELECT names.primary AS name, subtype, hierarchies,
                    round({overture.DISTANCE_EXPR}, 1) AS distance_m
             FROM read_parquet('{glob}', hive_partitioning=1)
             WHERE {bbox_filter} AND {distance_filter}
               AND subtype IN ('locality', 'localadmin', 'neighborhood')
+              {country_filter}
             ORDER BY distance_m
             LIMIT 1
         """

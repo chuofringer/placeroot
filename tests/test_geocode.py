@@ -1,3 +1,5 @@
+import math
+
 import duckdb
 import pytest
 
@@ -1270,3 +1272,181 @@ def test_the_cold_scan_warning_only_appears_for_a_remote_read(monkeypatch):
     )
     monkeypatch.setattr(geocode, "_is_remote", lambda glob: True)
     assert "~12s" in geocode.geocode_detailed("94110", limit=5)["note"]
+
+
+# --- #223 follow-ups: consistency of the postcode answer -------------------
+
+
+def test_a_country_whose_rows_all_lack_a_bbox_is_reported_as_no_data(tmp_path):
+    """avg() skips NULLs and count(*) does not, so an all-NULL group used to
+    produce a NULL centroid that reached round() and raised TypeError."""
+    path = tmp_path / "addresses-without-bboxes.parquet"
+    duckdb.connect().execute(f"""
+        COPY (
+            SELECT id,
+                   CAST(NULL AS STRUCT(xmin DOUBLE, ymin DOUBLE,
+                                       xmax DOUBLE, ymax DOUBLE)) AS bbox,
+                   country, number, street, unit, postcode, address_levels
+            FROM read_parquet('{ADDRESSES_FIXTURE_PATH}')
+        ) TO '{path}' (FORMAT PARQUET)
+    """)
+    overture.set_data_path(str(path), theme="addresses", type_="address")
+    try:
+        result = geocode.geocode_detailed("94110", limit=5)
+    finally:
+        overture.set_data_path(str(ADDRESSES_FIXTURE_PATH), theme="addresses",
+                               type_="address")
+    assert result["results"] == []
+    assert "postcode-shaped" in result["note"]
+
+
+def test_address_count_and_centroid_are_measured_over_the_same_rows(tmp_path):
+    """A partly bbox-less country must not report a count taken over more
+    rows than the centroid was averaged from."""
+    path = tmp_path / "addresses-with-some-bboxes.parquet"
+    duckdb.connect().execute(f"""
+        COPY (
+            SELECT id,
+                   CASE WHEN id IN ('gers-addr-pc-us-94110-00',
+                                    'gers-addr-pc-us-94110-01')
+                        THEN NULL ELSE bbox END AS bbox,
+                   country, number, street, unit, postcode, address_levels
+            FROM read_parquet('{ADDRESSES_FIXTURE_PATH}')
+        ) TO '{path}' (FORMAT PARQUET)
+    """)
+    overture.set_data_path(str(path), theme="addresses", type_="address")
+    try:
+        rows = geocode.geocode("94110", limit=5)
+    finally:
+        overture.set_data_path(str(ADDRESSES_FIXTURE_PATH), theme="addresses",
+                               type_="address")
+    us = next(r for r in rows if r["country"] == "US")
+    assert us["address_count"] == 10, "the two bbox-less points are out of both"
+    assert us["lat"] is not None and us["lon"] is not None
+
+
+def test_the_covering_locality_is_looked_up_in_the_rows_own_country(tmp_path):
+    """A postcode centroid near a border is otherwise named by whatever is
+    nearest across it, contradicting the row's own `country`."""
+    # Mission District is nudged ~200m off the US cluster's centroid and a
+    # foreign locality dropped exactly on it, so the nearest division really
+    # is the foreign one and distance alone cannot produce the right answer.
+    path = tmp_path / "divisions-with-a-border-town.parquet"
+    duckdb.connect().execute(f"""
+        COPY (
+            SELECT id,
+                   CASE WHEN id = 'gers-div-mission-district'
+                        THEN {{'xmin': bbox.xmin + 0.002, 'ymin': bbox.ymin + 0.002,
+                               'xmax': bbox.xmax + 0.002, 'ymax': bbox.ymax + 0.002}}
+                        ELSE bbox END AS bbox,
+                   names, subtype, country, region, hierarchies, population
+            FROM read_parquet('{DIVISIONS_FIXTURE_PATH}')
+            UNION ALL
+            SELECT 'gers-div-border-town',
+                   {{'xmin': -122.4148, 'ymin': 37.7599,
+                     'xmax': -122.4148, 'ymax': 37.7599}},
+                   {{'primary': 'Border Town', 'common': MAP {{}}}},
+                   'locality', 'CA', NULL, NULL, NULL
+        ) TO '{path}' (FORMAT PARQUET)
+    """)
+    overture.set_data_path(str(path), theme="divisions", type_="division")
+    try:
+        rows = geocode.geocode("94110", limit=5)
+    finally:
+        overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions",
+                               type_="division")
+    us = next(r for r in rows if r["country"] == "US")
+    assert us["admin_context"][-1] == "Mission District"
+    assert "Border Town" not in us["admin_context"]
+
+
+def test_only_the_rows_actually_returned_pay_for_a_covering_lookup(monkeypatch):
+    """With the cache off each lookup is an upstream scan retried at three
+    radii, so rows trimmed by `limit` must never reach one."""
+    real = geocode._covering_division
+    looked_up = []
+
+    def counting(lat, lon, local_table, country=None):
+        looked_up.append(country)
+        return real(lat, lon, local_table, country)
+
+    monkeypatch.setattr(geocode, "_covering_division", counting)
+    rows = geocode.geocode("94110", limit=1)
+    assert len(rows) == 1
+    assert looked_up == ["US"], "the SK and FR rows were dropped before their lookups"
+
+
+def test_postcodes_match_regardless_of_case_and_padding(tmp_path):
+    """Overture stores what the source wrote; "1011 ab" with stray padding is
+    the same code, and missing it would be reported as a coverage gap."""
+    path = tmp_path / "addresses-with-untidy-postcodes.parquet"
+    duckdb.connect().execute(f"""
+        COPY (
+            SELECT id, bbox, country, number, street, unit,
+                   CASE WHEN postcode IS NULL THEN NULL
+                        ELSE '  ' || lower(postcode) || ' ' END AS postcode,
+                   address_levels
+            FROM read_parquet('{ADDRESSES_FIXTURE_PATH}')
+        ) TO '{path}' (FORMAT PARQUET)
+    """)
+    overture.set_data_path(str(path), theme="addresses", type_="address")
+    try:
+        rows = geocode.geocode("94110", limit=5)
+        dutch = geocode.geocode("1011 AB", limit=5)
+    finally:
+        overture.set_data_path(str(ADDRESSES_FIXTURE_PATH), theme="addresses",
+                               type_="address")
+    assert [r["country"] for r in rows] == ["US", "SK", "FR"]
+    assert dutch[0]["country"] == "NL"
+
+
+def test_the_locality_longitude_window_still_covers_the_distance_cap_up_north():
+    """A degree of longitude shrinks with cos(lat): the flat 0.5 degrees is
+    ~19km at 70N, narrower than the 25km the search is allowed to reach."""
+    for lat in (0.0, 45.0, 60.0, 70.0, 78.0, -70.0):
+        metres_per_degree_lon = 111_320 * math.cos(math.radians(lat))
+        reach = geocode._locality_lon_window(lat) * metres_per_degree_lon
+        assert reach >= geocode._POSTCODE_LOCALITY_MAX_M, f"window too narrow at {lat}"
+    assert geocode._locality_lon_window(0.0) == geocode._POSTCODE_LOCALITY_WINDOW_DEG
+    assert geocode._locality_lon_window(89.99) <= 180.0, "no runaway window at the pole"
+
+
+def test_the_postcode_aggregate_is_memoized_for_the_process(geocode_cache, monkeypatch):
+    """The scan behind one code is the most expensive read this module makes,
+    and its answer cannot change without the release (and so the glob)
+    changing — including for the year-shaped queries the detector can't
+    distinguish from four-digit postcodes."""
+    geocode._POSTCODE_AGGREGATE_CACHE.clear()
+    first = geocode.geocode("94110", limit=5)
+    assert (geocode.addresses._upstream_glob(), ("94110",)) \
+        in geocode._POSTCODE_AGGREGATE_CACHE
+
+    def boom(glob):
+        raise AssertionError("the addresses theme was re-scanned for a cached postcode")
+
+    monkeypatch.setattr(geocode.overture, "probe_schema", boom)
+    assert geocode.geocode("94110", limit=5) == first
+
+
+def test_a_postcode_hit_short_circuits_the_name_search(tmp_path):
+    """Intended, and the one thing the detector costs: where a code is live,
+    a division that happens to share its name is not reachable by geocode."""
+    path = tmp_path / "divisions-named-like-a-live-postcode.parquet"
+    duckdb.connect().execute(f"""
+        COPY (
+            SELECT * FROM read_parquet('{DIVISIONS_FIXTURE_PATH}')
+            UNION ALL
+            SELECT 'gers-div-94110',
+                   {{'xmin': 4.9, 'ymin': 52.4, 'xmax': 4.9, 'ymax': 52.4}},
+                   {{'primary': '94110', 'common': MAP {{}}}},
+                   'locality', 'NL', 'NL-NH', NULL, NULL
+        ) TO '{path}' (FORMAT PARQUET)
+    """)
+    overture.set_data_path(str(path), theme="divisions", type_="division")
+    try:
+        result = geocode.geocode_detailed("94110", limit=5)
+    finally:
+        overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions",
+                               type_="division")
+    assert all(r["type"] == "postcode" for r in result["results"])
+    assert "gers-div-94110" not in [r["id"] for r in result["results"]]
