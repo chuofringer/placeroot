@@ -1,0 +1,84 @@
+{
+  "routes": [
+    {
+      "weight_name": "auto",
+      "weight": 729.764,
+      "duration": 1371.657958984375,
+      "distance": 4575.367,
+      "legs": [
+        {
+          "via_waypoints": [],
+          "summary": "Ifflandstra\u00dfe, B 2R",
+          "admins": [
+            {
+              "iso_3166_1_alpha3": "DEU",
+              "iso_3166_1": "DE"
+            }
+          ],
+          "weight": 333.797,
+          "duration": 255.738,
+          "steps": [],
+          "distance": 2262.614
+        },
+        {
+          "via_waypoints": [],
+          "summary": "Arabellastra\u00dfe, Englschalkinger Stra\u00dfe",
+          "admins": [
+            {
+              "iso_3166_1_alpha3": "DEU",
+              "iso_3166_1": "DE"
+            }
+          ],
+          "weight": 395.967,
+          "duration": 327.92,
+          "steps": [],
+          "distance": 2312.754
+        }
+      ]
+    }
+  ],
+  "waypoints": [
+    {
+      "name": "Ifflandstra\u00dfe",
+      "location": [
+        11.59804,
+        48.149988
+      ],
+      "distance": 30.207000732421875,
+      "metadata": null
+    },
+    {
+      "name": "Arabellastra\u00dfe",
+      "location": [
+        11.617788,
+        48.153125
+      ],
+      "distance": 18.554000854492188,
+      "metadata": {
+        "type": "charging-station",
+        "name": "BayWa Zentrale",
+        "charge_time": 788,
+        "charge_to": 5369,
+        "charge_at_arrival": 250,
+        "plug_type": "ccs_combo_type2",
+        "power_kw": 150,
+        "station_id": "ocm-128831",
+        "provider_names": [
+          "Tesla",
+          "Shell Recharge Solutions"
+        ]
+      }
+    },
+    {
+      "name": "Barlowstra\u00dfe",
+      "location": [
+        11.646591,
+        48.156744
+      ],
+      "distance": 1.1330000162124634,
+      "metadata": null
+    }
+  ],
+  "code": "Ok",
+  "uuid": "QJuXPALlclx4ciVHn-UPxhqlUD0W7jjiv1tXFH_haUpp_VkdD0sqGQ=="
+}

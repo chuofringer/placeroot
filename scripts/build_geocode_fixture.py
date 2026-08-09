@@ -303,7 +303,8 @@ def build_divisions() -> list[tuple]:
     # population, so the #53 "literal match lacks prominence" gate saw a
     # good-enough literal answer and never ran the diacritic-folded pass that
     # is the only way to reach "Zürich" at all (ILIKE '%Zurich%' does not
-    # match "Zürich"). The fold now always runs and ranking decides.
+    # match "Zürich"). The fold now runs ungated whenever there is a local
+    # table to run it against, and ranking decides.
     add(
         "gers-div-zurich-ch", "Zürich", "locality", "CH", "CH-ZH",
         47.37, 8.54, _chain("Switzerland", "Zürich"),
