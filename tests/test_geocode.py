@@ -402,6 +402,262 @@ def test_fuzzy_matching_folds_case_and_diacritics(geocode_cache):
     assert results[0]["name"] == "São Paulo"
 
 
+# --- #214: alternate names (Overture's names.common) ----------------------
+# Live repro on release 2026-07-22.0: "Munich" answered Munich, North
+# Dakota; "Tokyo" answered Tokyo, Papua New Guinea; "Moskva" answered
+# Moskva, Tajikistan. The fixture carries each endonym with its names.common
+# alternates *and* the small namesake the live probe actually returned, so
+# these pin the ranking and not just "the alternate matched". Alt matching
+# needs the #43 local table (and the alt table beside it), hence
+# `geocode_cache` throughout.
+
+
+def _alt_table_path(cache_dir):
+    (table,) = cache_dir.rglob(geocode._DIVISIONS_TABLE_FILENAME)
+    return table.with_name(geocode._ALT_NAMES_TABLE_FILENAME)
+
+
+def test_exonym_resolves_to_the_endonym_division(geocode_cache):
+    results = geocode.geocode("Munich", limit=5)
+    assert results[0]["name"] == "München"
+    assert results[0]["id"] == "gers-div-munchen"
+
+
+def test_each_live_verified_exonym_probe_resolves(geocode_cache):
+    for query, expected in [
+        ("Munich", "München"),
+        ("Tokyo", "東京都"),
+        ("Moskva", "Москва"),
+        ("Vienna", "Wien"),
+    ]:
+        results = geocode.geocode(query, limit=5)
+        assert results, f"{query!r} found nothing"
+        assert results[0]["name"] == expected, query
+
+
+def test_exonym_hit_outranks_the_populationless_literal_namesake(geocode_cache):
+    # Munich, ND is a *literal* exact match; München is only an alternate
+    # one. The alternate wins the #47 way — same tier, and it is the one
+    # carrying a population — not by outranking literal matches as a class.
+    names = [r["name"] for r in geocode.geocode("Munich", limit=5)]
+    assert names.index("München") < names.index("Munich")
+
+
+def test_alt_hit_returns_the_canonical_name_and_names_what_matched(geocode_cache):
+    top = geocode.geocode("Munich", limit=5)[0]
+    assert top["name"] == "München"
+    assert top["matched_name"] == "Munich"
+
+
+def test_matched_name_is_absent_on_ordinary_literal_matches(geocode_cache):
+    # The only response-shape change #214 makes is this optional field, and
+    # it must not appear on rows that matched names.primary.
+    for row in geocode.geocode("Brooklyn", limit=5):
+        assert "matched_name" not in row
+
+
+def test_matched_name_reaches_the_geocode_tool(geocode_cache):
+    payload = server.geocode("Vienna", limit=5)
+    assert payload["results"][0]["name"] == "Wien"
+    assert payload["results"][0]["matched_name"] == "Vienna"
+
+
+def test_alt_match_folds_letters_strip_accents_leaves_alone(geocode_cache):
+    # duckdb#15706: strip_accents() doesn't touch ß, so the German exonym
+    # "Preßburg" is only reachable from a plain-ASCII query through the
+    # explicit _UNFOLDED_LETTERS map — applied identically at build time in
+    # SQL and at query time in Python.
+    results = geocode.geocode("Pressburg", limit=5)
+    assert results[0]["name"] == "Bratislava"
+    assert results[0]["matched_name"] == "Preßburg"
+
+
+# Strings picked to stress every way the two folds could drift apart: each
+# _UNFOLDED_LETTERS entry in both cases, letters whose uppercase form has no
+# single-character lowercase (ẞ), the dotted/dotless Turkish I pair (where
+# Python's str.lower and DuckDB's lower() are documented to differ on İ),
+# titlecase digraphs, compatibility ligatures, fullwidth forms, and
+# non-Latin scripts that must pass through untouched.
+_FOLD_CORPUS = [
+    "Preßburg", "Łódź", "Malmø", "München", "Ísafjörður", "Straße", "STRAẞE", "ẞ",
+    "İstanbul", "İzmir", "ı", "I", "Kœnigsberg", "Ærøskøbing", "Þingvellir", "Đakovo",
+    "Ħamrun", "Ðurđevac", "ǅakovo", "ǇUBLJANA", "ﬁrenze", "Ｔｏｋｙｏ", "ØSTERBRO",
+    "ŁÓDŹ", "ÆRØ", "ÞÓRSHÖFN", "Nürnberg", "Reykjavík", "Kraków", "Aš", "Ḥalab",
+    "Αθήνα", "ΑΘΗΝΑ", "Москва", "東京都", "São Paulo",
+]
+
+
+def test_alt_fold_matches_between_python_and_sql():
+    # The whole #214 design rests on this: alternates are folded once in SQL
+    # at materialization time and the query is folded in Python per call, and
+    # the two only ever meet as an ILIKE comparison — so a divergence on any
+    # letter silently makes those alternates unreachable rather than raising.
+    # Run the real SQL fold through DuckDB and compare, rather than asserting
+    # the Python side against itself.
+    con = duckdb.connect()
+    sql = f"SELECT {geocode._fold_alt_name_sql('?')}"
+    for name in _FOLD_CORPUS:
+        assert con.execute(sql, [name]).fetchone()[0] == geocode._fold_alt_name(name), name
+    assert geocode._fold_alt_name("Preßburg") == "pressburg"
+    assert geocode._fold_alt_name("Łódź") == "lodz"
+    assert geocode._fold_alt_name("Malmø") == "malmo"
+
+
+def test_endonym_queries_are_unaffected_by_the_alt_table(geocode_cache):
+    # The regression this feature is most at risk of: querying the canonical
+    # spelling must still return it as a plain literal match.
+    for query, expected in [("München", "München"), ("Wien", "Wien"), ("Москва", "Москва")]:
+        top = geocode.geocode(query, limit=5)[0]
+        assert top["name"] == expected
+        assert "matched_name" not in top
+
+
+def test_one_result_per_division_however_many_alternates_match(geocode_cache):
+    # A division has one alt row per distinct folded spelling — Москва
+    # carries "moscow", "moskau", "moskva", "moskwa" — and a substring query
+    # matches several at once. Without the per-id de-duplication that came
+    # back as the same GERS id three times over, which at a small `limit`
+    # crowded every other division out of the answer entirely.
+    results = geocode.geocode("Mosk", limit=10)
+    ids = [r["id"] for r in results]
+    assert len(ids) == len(set(ids)), results
+    assert "gers-div-moskva-ru" in ids and "gers-div-moskva-tj" in ids
+    # The surviving alternate is the one that matched best, not an arbitrary
+    # one of the four: "Moskva" is an exact match for the query's fold.
+    top = geocode.geocode("Moskva", limit=5)[0]
+    assert top["name"] == "Москва"
+    assert top["matched_name"] == "Moskva"
+
+
+def test_alternate_crowding_does_not_consume_the_limit(geocode_cache):
+    # The user-visible half of the same bug: three of the caller's three
+    # slots went to one city.
+    names = [r["name"] for r in geocode.geocode("Mosk", limit=3)]
+    assert names.count("Москва") == 1
+    assert "Moskva" in names  # the Tajik namesake still gets a slot
+
+
+def test_query_that_folds_to_nothing_matches_no_alternates(geocode_cache):
+    # A query of only combining marks folds away to "" (that is what
+    # stripping diacritics does to it), which as an ILIKE pattern is a bare
+    # '%%' matching every alternate in the table — answering a nonsense
+    # query with whichever divisions happen to be most prominent. The
+    # literal search, which matches raw names, returns nothing for these.
+    #
+    # The #215 fuzzy tier had the same hole independently — DuckDB scores
+    # jaro_winkler_similarity(name, '') above the threshold — and the query
+    # reaches it precisely because the literal and alternate passes both
+    # come back empty, so both guards are needed for this to hold.
+    assert geocode._fold_alt_name("́") == ""
+    for query in ["́", "́̈"]:
+        assert geocode.geocode(query, limit=5) == [], query
+
+
+def test_alt_table_is_materialized_beside_the_divisions_table(geocode_cache):
+    geocode.geocode("Brooklyn", limit=1)
+    alt = _alt_table_path(geocode_cache)
+    assert alt.exists()
+    rows = duckdb.connect().execute(
+        f"SELECT alt_name, alt_display FROM read_parquet('{alt}') ORDER BY alt_name"
+    ).fetchall()
+    assert ("munich", "Munich") in rows
+    # Folded, so one row for the several languages that spell it "Munich",
+    # and none at all for an alternate that folds to the primary name.
+    assert [r for r in rows if r[0] == "munich"] == [("munich", "Munich")]
+    assert "münchen" not in [r[0] for r in rows]
+    assert "munchen" not in [r[0] for r in rows]
+
+
+def test_missing_alt_table_degrades_to_primary_only(geocode_cache, monkeypatch):
+    # A cache directory written before #214: divisions table present, alt
+    # table absent, and the one rebuild attempt fails (offline). Must answer
+    # from primary names alone rather than erroring.
+    geocode.geocode("Brooklyn", limit=1)
+    _alt_table_path(geocode_cache).unlink()
+    monkeypatch.setattr(geocode, "_ALT_BUILD_ATTEMPTED", set())
+
+    def boom(path, glob):
+        raise duckdb.Error("no upstream here")
+
+    monkeypatch.setattr(geocode, "_materialize_alt_names_table", boom)
+
+    results = geocode.geocode("Munich", limit=5)
+
+    assert [r["name"] for r in results] == ["Munich"]  # the North Dakota one
+    assert "matched_name" not in results[0]
+
+
+def test_missing_alt_table_is_rebuilt_once_per_process(geocode_cache, monkeypatch):
+    # The other half of the pre-#214 cache story: existing installs get the
+    # feature without waiting for the next Overture release, and a failing
+    # build costs one attempt, not one per geocode call.
+    geocode.geocode("Brooklyn", limit=1)
+    _alt_table_path(geocode_cache).unlink()
+    monkeypatch.setattr(geocode, "_ALT_BUILD_ATTEMPTED", set())
+    attempts = []
+    real = geocode._materialize_alt_names_table
+
+    def counted(path, glob):
+        attempts.append(glob)
+        raise duckdb.Error("no upstream here")
+
+    monkeypatch.setattr(geocode, "_materialize_alt_names_table", counted)
+    geocode.geocode("Munich", limit=5)
+    geocode.geocode("Vienna", limit=5)
+    assert len(attempts) == 1
+
+    # And once it can succeed, the rebuilt table is picked up.
+    monkeypatch.setattr(geocode, "_ALT_BUILD_ATTEMPTED", set())
+    monkeypatch.setattr(geocode, "_materialize_alt_names_table", real)
+    assert geocode.geocode("Munich", limit=5)[0]["name"] == "München"
+
+
+def test_alt_search_never_runs_without_a_local_table(monkeypatch):
+    # No geocode_cache fixture, so PLACEROOT_CACHE=off: there is no local
+    # table to join against and nowhere to put an alt one, so this stays the
+    # pre-#214 upstream primary-name scan rather than degrading to something
+    # that reads names.common off S3 per query.
+    def boom(*a, **kw):
+        raise AssertionError("alt-name query must not run without a local table")
+
+    monkeypatch.setattr(geocode, "_query_alt_names", boom)
+    assert [r["name"] for r in geocode.geocode("Munich", limit=5)] == ["Munich"]
+
+
+def test_alt_hits_rank_like_variant_hits_not_above_literal_ones(geocode_cache):
+    # An alt row is tagged _variant, so against a same-tier literal row with
+    # the same prominence the literal one wins — the #53 tiebreak, unchanged.
+    literal = {
+        "id": "a", "name": "Vienna", "subtype": "locality", "region": "US-IL",
+        "admin_context": ["a", "b"], "population": 5_000,
+    }
+    alt = {
+        "id": "b", "name": "Wien", "subtype": "locality", "region": "AT-9",
+        "admin_context": ["a", "b"], "population": 5_000,
+        "_variant": True, "_tier": 3, "_matched_name": "Vienna",
+    }
+    ranked = sorted([alt, literal], key=lambda r: geocode._rank_key(r, "Vienna", {}))
+    assert [r["id"] for r in ranked] == ["a", "b"]
+
+
+def test_exact_alt_match_stands_down_the_places_fallback(geocode_cache, monkeypatch):
+    # An exact match is an exact match whichever name column found it: no
+    # reason to pay for a places scan to pad the answer out to `limit`.
+    calls = _count_places_fallback(monkeypatch)
+    geocode.geocode("Vienna", limit=5)
+    assert calls == []
+
+
+def test_alt_names_do_not_feed_the_fuzzy_tier(geocode_cache):
+    # Stated limit of this change (see _query_divisions_fuzzy): the #215
+    # threshold was calibrated on primary names, so a typo of an *exonym*
+    # is not corrected. "Pressburg" resolves Bratislava through names.common;
+    # "Pressbrug" — one transposition away, and nowhere near any *primary*
+    # name in the fixture — finds nothing.
+    assert geocode.geocode("Pressburg", limit=5)[0]["name"] == "Bratislava"
+    assert [r["name"] for r in geocode.geocode("Pressbrug", limit=5)] == []
+
+
 def test_typo_with_a_region_suffix_still_reaches_the_fuzzy_tier(geocode_cache, monkeypatch):
     # "City, ST" is the most common shape a caller writes, and a region
     # suffix must not cost the correction. The literal search drops the
