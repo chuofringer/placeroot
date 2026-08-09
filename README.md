@@ -195,6 +195,10 @@ uv run ruff check .
 - [docs/WEBSITE.md](docs/WEBSITE.md) — the marketing site: serve locally and deploy
 - [docs/MIRROR.md](docs/MIRROR.md) · [docs/METRICS.md](docs/METRICS.md) · [docs/launch/](docs/launch/)
 
+## Contact
+
+`hello@placeroot.dev`
+
 ## License and attribution
 
 The code is [MIT](https://github.com/chuofringer/placeroot/blob/main/LICENSE). The data it queries is the Overture Maps public
