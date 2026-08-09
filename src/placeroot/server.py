@@ -17,6 +17,7 @@ import os
 import threading
 from collections.abc import Callable
 
+from mcp.server.caching import CacheableMethod, CacheHint
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
@@ -1638,6 +1639,48 @@ def data_version() -> dict:
 
 _UNSET = object()
 
+# MCP 2026-07-28 caching hints (SEP-2549). The spec requires a `ttlMs` and a
+# `cacheScope` on every `resultType: "complete"` listing result; the SDK's
+# default is ttlMs=0 ("immediately stale"), which is valid but throws away the
+# whole point for a server whose listings are frozen at build time.
+#
+# Why 24 hours: our listings are a pure function of the installed placeroot
+# version and PLACEROOT_TOOLS. Nothing at runtime can change them — no tool is
+# registered after startup, and we never send notifications/tools/list_changed
+# — so the only event that invalidates a cached listing is the operator
+# upgrading the package. TTL is therefore a bound on how long a client could
+# keep showing a pre-upgrade tool list, and one day is the honest trade: it
+# spares a re-fetch of a ~12.2k-token schema surface on every session within a
+# day, while an upgrade is visible by the next one. A week would buy almost
+# nothing extra (sessions cluster well inside a day) for seven times the
+# staleness window; 0 is what we'd declare if the surface could move at
+# runtime, and it can't.
+#
+# Why "public": these listings carry no caller-specific data. PlaceRoot is
+# keyless, does no per-caller filtering, and returns the same bytes to every
+# request on a given process, so a shared gateway may serve one caller's copy
+# to another.
+#
+# Two of the six cacheable methods are deliberately left at the SDK default
+# (ttlMs=0/private), for the same reason: their bodies carry the resolved
+# Overture release, which is discovered from S3 at process start rather than
+# baked into the build, so a day-long shared cache could outlive the value.
+#   `resources/read` — placeroot://data-version reports the release directly.
+#   `server/discover` — its DiscoverResult carries `instructions`, and main()
+#       appends "Backed by Overture Maps release {release}." to those at
+#       startup (the SDK's default handler reads them at call time). A 24h
+#       public entry would keep serving the pre-restart release string — to
+#       other callers too, under "public" — after an operator restarts onto a
+#       new Overture release, and that string is model-visible grounding.
+_LISTING_TTL_MS = 24 * 60 * 60 * 1000
+_LISTING_CACHE_HINT = CacheHint(ttl_ms=_LISTING_TTL_MS, scope="public")
+CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
+    "tools/list": _LISTING_CACHE_HINT,
+    "prompts/list": _LISTING_CACHE_HINT,
+    "resources/list": _LISTING_CACHE_HINT,
+    "resources/templates/list": _LISTING_CACHE_HINT,
+}
+
 
 def build_server(spec=_UNSET) -> MCPServer:
     """An MCPServer with the PLACEROOT_TOOLS-selected subset registered.
@@ -1650,7 +1693,11 @@ def build_server(spec=_UNSET) -> MCPServer:
     if spec is _UNSET:
         spec = os.environ.get("PLACEROOT_TOOLS")
     selected = tool_profiles.resolve(spec, set(_TOOL_FUNCS))
-    server = MCPServer("placeroot", instructions=BASE_INSTRUCTIONS)
+    # cache_hints are filled in by the SDK's response serializer and sieved
+    # out again for pre-2026-07-28 clients, so an older client's tools/list is
+    # byte-identical to what it got before this existed (asserted in
+    # tests/test_caching.py).
+    server = MCPServer("placeroot", instructions=BASE_INSTRUCTIONS, cache_hints=CACHE_HINTS)
     for name, fn in _TOOL_FUNCS.items():
         if name in selected:
             # Title + hints are applied here, once, for every selected tool —

@@ -1,14 +1,10 @@
 """CLI transport selection (#24) and an end-to-end streamable-HTTP smoke test.
 
-The HTTP server is started in-thread (not a subprocess) so it shares this
-process's module state — in particular the `offline_data` autouse fixture's
-`overture.set_data_path(...)` fixture overrides, which are plain module
-globals, not environment variables a subprocess would inherit.
+The server itself is started by the `running_http_server` fixture in
+conftest.py, shared with tests/test_caching.py.
 """
 
 import json
-import socket
-import threading
 
 import pytest
 
@@ -36,49 +32,6 @@ def test_parse_transport_args_custom_host_and_port():
     assert args.http is True
     assert args.host == "0.0.0.0"
     assert args.port == 9999
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-@pytest.fixture
-def running_http_server():
-    """Start placeroot's streamable-HTTP transport on an ephemeral port.
-
-    Uses uvicorn.Server directly (rather than server.mcp.run(), which blocks
-    forever) so the test can request a graceful shutdown afterward; this is
-    the same Starlette app server.mcp.run(transport="streamable-http", ...)
-    builds internally (mcp.streamable_http_app()), so it exercises the exact
-    code path --http uses in production.
-    """
-    try:
-        import uvicorn
-    except ImportError:
-        pytest.skip("uvicorn not installed; this SDK build lacks streamable-HTTP support")
-
-    host = "127.0.0.1"
-    port = _free_port()
-    app = server.mcp.streamable_http_app(host=host)
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
-    usrv = uvicorn.Server(config)
-
-    thread = threading.Thread(target=usrv.run, daemon=True)
-    thread.start()
-    for _ in range(200):
-        if usrv.started:
-            break
-        threading.Event().wait(0.05)
-    else:
-        pytest.fail("streamable-HTTP server did not start within 10s")
-
-    try:
-        yield f"http://{host}:{port}/mcp"
-    finally:
-        usrv.should_exit = True
-        thread.join(timeout=5)
 
 
 def test_http_find_places_matches_stdio_path(running_http_server):
