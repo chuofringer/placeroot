@@ -1,5 +1,17 @@
 # Open-source release checklist
 
+> **Superseded — the live version of this checklist is issue
+> [#241](https://github.com/chuofringer/placeroot/issues/241)** (with
+> distribution split into
+> [#242](https://github.com/chuofringer/placeroot/issues/242)). The issue
+> carries later revisions this file does not, most importantly a reversed
+> ordering: the visibility flip now happens *early* — it unblocks CI (Actions
+> minutes are exhausted on the private Free plan; public repos get unlimited
+> free minutes) and rulesets (not enforced on private Free-plan repos) — while
+> only the secrets/history scan and moving `PLAN.md` out gate the flip itself.
+> Everything else gates the *announcement*. This file is kept as the original
+> snapshot; work from the issue.
+
 Going from a private `chuofringer/placeroot` to a public repository, and what
 follows for releases, docs and the website.
 
