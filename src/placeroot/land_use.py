@@ -71,6 +71,13 @@ TYPE_LAND_COVER = "land_cover"
 REQUIRED_COLUMNS = ["id", "geometry", "bbox", "subtype", "class", "names"]
 ESSENTIAL_COLUMNS = {"geometry", "bbox"}
 
+# What land_cover actually carries: it has neither class nor names upstream
+# (see the note above — those degrade to None there by design), so a schema
+# watch on that type must expect only these. scripts/overture_canary.py reads
+# this list; without it the canary would report the by-design absences as
+# drift every week.
+LAND_COVER_REQUIRED_COLUMNS = ["id", "geometry", "bbox", "subtype"]
+
 # Small bbox around the query point — this is a point-in-polygon lookup,
 # not a radius search, so the box only needs to be big enough that
 # geo.bbox_around's degree math and floating point don't put the point

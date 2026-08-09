@@ -120,6 +120,12 @@ REQUIRED_COLUMNS = [
 ]
 ESSENTIAL_COLUMNS = {"bbox", "street"}
 
+# Columns the nearest-division country fallback reads off theme=divisions
+# type=division (a different dataset from the division_area polygons
+# divisions.py uses). Named so scripts/overture_canary.py can watch the same
+# list this module degrades against.
+DIVISION_REQUIRED_COLUMNS = ["country", "hierarchies"]
+
 # Optional row fields dropped from a result row when null, rather than
 # emitted as explicit nulls — most address points carry only some of these,
 # and a row of `"unit": null, "postal_city": null` is padding, not an answer.
@@ -413,7 +419,7 @@ def _country_by_nearest(lat: float, lon: float) -> Country:
     runs when containment found nothing to be exact about.
     """
     glob = overture.upstream_glob(theme="divisions", type_="division")
-    missing = set(overture.missing_columns(glob, ["country", "hierarchies"]))
+    missing = set(overture.missing_columns(glob, DIVISION_REQUIRED_COLUMNS))
     if "country" in missing:
         return Country(LOOKUP_FAILED)
     # hierarchies[1] is the first containing-chain path, top-level ancestor
