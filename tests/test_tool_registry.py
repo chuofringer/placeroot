@@ -18,9 +18,15 @@ NON_TOOLS = {"main", "parse_transport_args", "build_server"}
 
 
 def _intended_tool_names() -> set[str]:
+    """Public tool-shaped functions that belong on the *full* surface.
+
+    The PLACEROOT_TOOLS=progressive meta-tools (issue #210) are public
+    functions in server.py but are deliberately absent from every other
+    selection, so they're excluded here and asserted separately below.
+    """
     names = set()
     for name, obj in vars(server).items():
-        if name.startswith("_") or name in NON_TOOLS:
+        if name.startswith("_") or name in NON_TOOLS or name in server._META_TOOL_FUNCS:
             continue
         if not inspect.isfunction(obj):
             continue
@@ -122,9 +128,16 @@ def test_every_other_tool_is_still_read_only():
 
 
 def test_annotation_overrides_are_declared_for_real_tools():
-    """_TOOL_ANNOTATIONS can't drift from _TOOL_FUNCS, or from this test."""
-    assert set(server._TOOL_ANNOTATIONS) == set(WRITING_TOOLS)
-    assert set(server._TOOL_ANNOTATIONS) <= set(server._TOOL_FUNCS)
+    """_TOOL_ANNOTATIONS can't drift from _TOOL_FUNCS, or from this test.
+
+    placeroot_call is the second non-read entry: it dispatches to anything,
+    render_map included, so it carries the same "not read-only" claim from
+    the meta registry (issue #210, asserted in tests/test_progressive.py).
+    """
+    assert set(server._TOOL_ANNOTATIONS) == set(WRITING_TOOLS) | {"placeroot_call"}
+    assert set(server._TOOL_ANNOTATIONS) <= set(server._TOOL_FUNCS) | set(
+        server._META_TOOL_FUNCS
+    )
 
 
 def test_every_registered_tool_has_a_nonempty_unique_title():
@@ -143,7 +156,7 @@ def test_titles_are_defined_for_exactly_the_marked_tools():
     """_TOOL_TITLES can't drift from _TOOL_FUNCS — build_server() indexes it
     by name, so a missing entry would be a KeyError at import.
     """
-    assert set(server._TOOL_TITLES) == set(server._TOOL_FUNCS)
+    assert set(server._TOOL_TITLES) == set(server._TOOL_FUNCS) | set(server._META_TOOL_FUNCS)
 
 
 @pytest.mark.parametrize("profile", sorted(tool_profiles.PROFILES))
