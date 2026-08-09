@@ -59,7 +59,7 @@
       <div>
         <div style="font:600 11px 'Fira Code',monospace;color:#e8b04b;margin-bottom:16px">INSTALL · <span id="activeName1"></span></div>
         <div id="surfacePick" style="display:none;margin-bottom:16px">
-          <div style="font-size:13px;color:#c9d4c4;margin-bottom:8px">Where do you want it? The two tabs read separate configs — an install in one doesn't show up in the other.</div>
+          <div style="font-size:13px;color:#c9d4c4;margin-bottom:8px">Where do you want it? The surfaces read separate configs — an install in one doesn't show up in the other.</div>
           <div id="surfaceChips" style="display:flex;gap:8px;flex-wrap:wrap"></div>
         </div>
         <div id="oneclick" style="display:none;margin-bottom:16px"><a id="oneclickLink" href="#" style="display:inline-block;font:600 13px 'Fira Code',monospace;color:#171c17;background:#8fbf96;padding:10px 20px;border-radius:99px;text-decoration:none">⚡ one-click install</a><div style="margin-top:8px;font-size:12px;color:#8a9482">Opens the app and pre-fills the config — you just confirm a dialog.</div></div>
@@ -113,18 +113,21 @@
   (function () {
     var JSON_SNIPPET = '"mcpServers": {\n  "placeroot": { "command": "uvx", "args": ["placeroot"] }\n}';
     var JSON_FULL = '{\n  "mcpServers": {\n    "placeroot": {\n      "command": "uvx",\n      "args": ["placeroot"]\n    }\n  }\n}';
-    var PROMPT = 'Install the PlaceRoot MCP server for me. It is a local stdio server run with "uvx placeroot" (requires uv; if uv is not installed, use "npx placeroot", which needs Node 18+). Add it to this tool\'s MCP configuration — tell me which config file you are changing before you edit it. Restart whatever needs restarting, then verify the install by listing the MCP tools and confirming that "find_places" from placeroot is available.';
+    var PROMPT = 'Install the PlaceRoot MCP server for me. It is a local stdio server run with "uvx placeroot", which requires uv (docs.astral.sh/uv). If uv is not installed, tell me so and ask before installing anything. Add the server to this tool\'s MCP configuration — tell me which config file you are changing before you edit it. Restart whatever needs restarting, then verify the install by listing the MCP tools and confirming that "find_places" from placeroot is available.';
     var apps = [
       { name: "Claude Desktop", surfaces: [
-        { label: "Claude chat", prompt: false, manualOpen: true, note: "The Chat tab has no file or shell access, so an agent can't install this for itself — use the steps below. (Installing in the Code tab does NOT make it appear here; the two read separate configs.)", step1: "In the Claude Desktop app, open Settings → Developer → Edit Config. This opens claude_desktop_config.json.", step2: "Add the server config:", file: "claude_desktop_config.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Quit and reopen Claude Desktop, then ask: \"What's around downtown Palo Alto?\"" },
-        { label: "the Code tab", prompt: true, note: "This installs for the Code tab (Claude Code) only — Claude chat reads a separate config; pick \"Claude chat\" above for that.", step1: "In the Code tab's session, run one command:", step2: "Command:", file: "terminal", snippet: "claude mcp add placeroot -- uvx placeroot", copy: "claude mcp add placeroot -- uvx placeroot", step3: "Check with /mcp inside the session, and verify in the SAME tab you installed for — then just ask." }
+        { label: "Claude chat", prompt: false, manualOpen: true, warn: true, note: "The Chat tab has no file or shell access, so an agent can't install this for itself — use the steps below. Installing in the Code tab does NOT make it appear here.", step1: "In the Claude Desktop app, open Settings → Developer → Edit Config. This opens claude_desktop_config.json.", step2: "Add the server config:", file: "claude_desktop_config.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Quit and reopen Claude Desktop, then ask: \"What's around downtown Palo Alto?\"" },
+        { label: "the Code tab", prompt: true, warn: true, note: "This installs for the Code tab (Claude Code) only — Claude chat reads a separate config; pick \"Claude chat\" above for that.", step1: "Open the integrated terminal in the Code tab and run one command:", step2: "Command:", file: "terminal", snippet: "claude mcp add placeroot -- uvx placeroot", copy: "claude mcp add placeroot -- uvx placeroot", step3: "Check with /mcp inside the session, and verify in the SAME tab you installed for — then just ask." }
       ] },
       { name: "Claude Code", prompt: true, step1: "In a terminal, from any project directory:", step2: "Run one command:", file: "terminal", snippet: "claude mcp add placeroot -- uvx placeroot", copy: "claude mcp add placeroot -- uvx placeroot", step3: "Check with /mcp inside a session — then just ask. (Add --scope user to enable it in every project.)" },
-      { name: "ChatGPT Desktop", prompt: true, note: "ChatGPT Desktop, Codex CLI, and the IDE extension share one MCP config — an install in any of them shows up in all three.", step1: "In the ChatGPT desktop app, add an MCP server in settings: enter a name, choose STDIO, and give it the command \"uvx placeroot\". (ChatGPT on the web takes remote servers only — or use Codex: codex mcp add placeroot -- uvx placeroot.)", step2: "Command to paste:", file: "server command · STDIO", snippet: "uvx placeroot", copy: "uvx placeroot", step3: "Save, restart, then type /mcp in the composer to confirm placeroot is connected." },
+      { name: "ChatGPT Desktop", surfaces: [
+        { label: "the ChatGPT app", prompt: false, manualOpen: true, note: "The chat app can't run the install for itself — use the steps below. (ChatGPT on the web takes remote servers only.)", step1: "In the ChatGPT desktop app, add an MCP server in settings: enter a name, choose STDIO, and give it the command \"uvx placeroot\".", step2: "Command to paste:", file: "server command · STDIO", snippet: "uvx placeroot", copy: "uvx placeroot", step3: "Save, restart, then type /mcp in the composer to confirm placeroot is connected." },
+        { label: "Codex CLI", prompt: true, note: "Codex CLI and the Codex IDE extension share one config (~/.codex/config.toml), so an install here covers both.", step1: "In a terminal:", step2: "Run one command:", file: "terminal", snippet: "codex mcp add placeroot -- uvx placeroot", copy: "codex mcp add placeroot -- uvx placeroot", step3: "Restart codex and check /mcp — placeroot should be listed." }
+      ] },
       { name: "Gemini CLI", prompt: true, step1: "MCP servers work in Gemini CLI (the consumer Gemini app doesn't take custom servers). Open ~/.gemini/settings.json — create it if it doesn't exist.", step2: "Add the server config:", file: "~/.gemini/settings.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Restart gemini and type /mcp — placeroot should be listed. Then just ask." },
       { name: "Cursor", prompt: true, step1: "Open Cursor Settings → MCP → Add new server, or create .cursor/mcp.json in your project.", step2: "Add the server config:", file: ".cursor/mcp.json", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Ask the agent about places around any address in your code or docs.", deeplink: "cursor://anysphere.cursor-deeplink/mcp/install?name=placeroot&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJwbGFjZXJvb3QiXX0=" },
       { name: "VS Code", prompt: true, step1: "Create .vscode/mcp.json in your project (or run: code --add-mcp '{\"name\":\"placeroot\",\"command\":\"uvx\",\"args\":[\"placeroot\"]}').", step2: "Add the server config:", file: ".vscode/mcp.json", snippet: '"servers": {\n  "placeroot": { "type": "stdio", "command": "uvx", "args": ["placeroot"] }\n}', copy: '{\n  "servers": {\n    "placeroot": {\n      "type": "stdio",\n      "command": "uvx",\n      "args": ["placeroot"]\n    }\n  }\n}', step3: "Open Chat in Agent mode and check the tools icon — placeroot's tools should be listed.", deeplink: "https://vscode.dev/redirect/mcp/install?name=placeroot&config=%7B%22name%22%3A%22placeroot%22%2C%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22placeroot%22%5D%7D" },
-      { name: "any MCP agent", prompt: true, step1: "Register a stdio MCP server pointing at the command below.", step2: "Server config (stdio transport):", file: "mcp config", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Call find_places or summarize_area from your agent loop." }
+      { name: "any MCP agent", prompt: true, note: "The prompt works when your client hosts an agent with file access. If it's a plain chat UI, use the manual steps below.", step1: "Register a stdio MCP server pointing at the command below.", step2: "Server config (stdio transport):", file: "mcp config", snippet: JSON_SNIPPET, copy: JSON_FULL, step3: "Call find_places or summarize_area from your agent loop." }
     ];
 
     var state = { tab: 0, surface: 0, copied: false, promptCopied: false };
@@ -143,6 +146,7 @@
           ";background:" + (active ? "#5c8a63" : "transparent") +
           ";color:" + (active ? "#fbfaf5" : "#55604f");
         el.addEventListener("click", function () {
+          if (state.tab === i) return;
           state.tab = i;
           state.surface = 0;
           state.copied = false;
@@ -231,28 +235,39 @@
         promptBlock.style.display = "none";
       }
       var note = document.getElementById("surfaceNote");
-      if (a.note) { note.style.display = "block"; note.textContent = a.note; }
-      else { note.style.display = "none"; }
+      if (a.note) {
+        note.style.display = "block";
+        note.textContent = a.note;
+        // Amber only for the config-split warnings; plain gray for info.
+        note.style.color = a.warn ? "#e8b04b" : "#8a9482";
+      } else {
+        note.style.display = "none";
+      }
       document.getElementById("manualSummary").textContent =
         a.prompt || a.deeplink ? "do it by hand instead" : "install steps";
       document.getElementById("copyBtn").textContent = state.copied ? "copied ✓" : "copy";
       document.getElementById("promptCopyBtn").textContent = state.promptCopied ? "copied ✓" : "copy";
     }
 
+    // "copied ✓" only after the write actually resolves — a denied clipboard
+    // permission must not report success over text the user never got.
+    function copyThenFlag(text, flag) {
+      if (!navigator.clipboard) return;
+      navigator.clipboard.writeText(text).then(function () {
+        state[flag] = true;
+        render();
+        clearTimeout(flag === "copied" ? copyTimer : promptCopyTimer);
+        var t = setTimeout(function () { state[flag] = false; render(); }, 1500);
+        if (flag === "copied") copyTimer = t; else promptCopyTimer = t;
+      }).catch(function () {});
+    }
+
     document.getElementById("copyBtn").addEventListener("click", function () {
-      if (navigator.clipboard) navigator.clipboard.writeText(activeEntry().copy);
-      state.copied = true;
-      render();
-      clearTimeout(copyTimer);
-      copyTimer = setTimeout(function () { state.copied = false; render(); }, 1500);
+      copyThenFlag(activeEntry().copy, "copied");
     });
 
     document.getElementById("promptCopyBtn").addEventListener("click", function () {
-      if (navigator.clipboard) navigator.clipboard.writeText(PROMPT);
-      state.promptCopied = true;
-      render();
-      clearTimeout(promptCopyTimer);
-      promptCopyTimer = setTimeout(function () { state.promptCopied = false; render(); }, 1500);
+      copyThenFlag(PROMPT, "promptCopied");
     });
 
     resetManualFold();
