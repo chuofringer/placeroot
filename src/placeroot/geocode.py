@@ -3135,9 +3135,10 @@ def _division_area_bbox(division_id: str) -> tuple[float, float, float, float] |
     that city out of the cache, with no query and so no chance of recovery.
     The caller renders that None as "Overture carries no boundary extent for
     it", which for a city that plainly has one is a wrong answer the process
-    would keep repeating until restart. Same reasoning as #230's
-    _restore_vanished_tables: a transient absence must not be recorded as a
-    permanent one.
+    would keep repeating until restart. Same reasoning as #230's vanished-
+    table fallback in _query_divisions, which declines to report a missing
+    local table as an upstream outage: a transient absence must not be
+    recorded as a permanent one.
     """
     key = (release.resolve_release(), division_id)
     if key in _AREA_BBOX_CACHE:

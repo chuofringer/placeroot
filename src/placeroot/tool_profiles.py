@@ -108,9 +108,9 @@ ALWAYS_INCLUDED: frozenset[str] = frozenset({"data_version"})
 ALL = "all"
 
 # Progressive disclosure (issue #210): instead of a slice of the surface,
-# a *meta* surface — a catalog tool plus a dispatcher — that keeps all 28
+# a *meta* surface — a catalog tool plus a dispatcher — that keeps all 29
 # tools reachable at the standing cost of three schemas. For the install
-# that wants everything available but can't pay 12.2k tokens for it in
+# that wants everything available but can't pay 13.2k tokens for it in
 # every conversation; profiles need you to know up front which tools you
 # want, this doesn't.
 PROGRESSIVE = "progressive"
@@ -178,7 +178,7 @@ def resolve(spec: str | None, known_tools: set[str]) -> set[str]:
     # `progressive` replaces the surface rather than adding to it. Honoring
     # a mix would register the meta-tools *on top of* whatever else was
     # named — paying both costs, when the whole point is paying neither the
-    # full 12.2k nor a guess at which tools this install needs. So it fails
+    # full 13.2k nor a guess at which tools this install needs. So it fails
     # like a typo does, rather than quietly producing a surface nobody asked
     # for.
     if PROGRESSIVE in entries:

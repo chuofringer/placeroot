@@ -362,6 +362,24 @@ def build_divisions() -> list[tuple]:
         52.3728, 4.8936, _chain("Netherlands", "North Holland", "Amsterdam"),
         population=921_402,
     )
+    # #188: a division in a country the addresses theme does NOT cover (GB is
+    # not one of addresses.COVERED_COUNTRIES), so address_at has somewhere to
+    # resolve "this coordinate is in an uncovered country" from. Deliberately
+    # not named "London" — the two fixture Londons above are load-bearing for
+    # the ambiguity tests, and a third would change what they assert.
+    add(
+        "gers-div-kensington-gb", "Kensington", "locality", "GB", "GB-ENG",
+        UNCOVERED_LAT, UNCOVERED_LON,
+        _chain("United Kingdom", "England", "Kensington"),
+    )
+    # Everything below is appended at the very end of build_divisions on
+    # purpose: several fixture queries tie on match tier, and which of the
+    # tied rows survives the DIVISION_OVERFETCH LIMIT is decided by physical
+    # row order. Inserting these mid-list shifted the pre-existing rows and
+    # silently changed the answer to unrelated queries (live: 河南 came back
+    # under a different province). Appending leaves every earlier row's
+    # position exactly as it was.
+    #
     # #225: the two anchors geocode_address resolves a street search inside.
     # San Francisco is already above (the #215 fuzzy target); these add the
     # Mountain View that "1600 Amphitheatre Parkway, Mountain View" anchors on
@@ -413,16 +431,6 @@ def build_divisions() -> list[tuple]:
     add(
         "gers-div-tx", "Texas", "region", "US", "US-TX", 31.0, -100.0,
         _chain("United States", "Texas"), population=30_503_301,
-    )
-    # #188: a division in a country the addresses theme does NOT cover (GB is
-    # not one of addresses.COVERED_COUNTRIES), so address_at has somewhere to
-    # resolve "this coordinate is in an uncovered country" from. Deliberately
-    # not named "London" — the two fixture Londons above are load-bearing for
-    # the ambiguity tests, and a third would change what they assert.
-    add(
-        "gers-div-kensington-gb", "Kensington", "locality", "GB", "GB-ENG",
-        UNCOVERED_LAT, UNCOVERED_LON,
-        _chain("United Kingdom", "England", "Kensington"),
     )
     return rows
 
