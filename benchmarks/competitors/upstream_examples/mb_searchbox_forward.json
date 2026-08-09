@@ -1,0 +1,81 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "coordinates": [
+          -122.059627,
+          37.56153
+        ],
+        "type": "Point"
+      },
+      "properties": {
+        "name": "34170 Gannon Terrace",
+        "mapbox_id": "{mapbox_id}",
+        "feature_type": "address",
+        "address": "34170 Gannon Terrace",
+        "full_address": "34170 Gannon Terrace, Fremont, California 94555, United States",
+        "place_formatted": "Fremont, California 94555, United States",
+        "context": {
+          "country": {
+            "id": "COUNTRY_ID",
+            "name": "United States",
+            "country_code": "US",
+            "country_code_alpha_3": "USA"
+          },
+          "region": {
+            "id": "REGION_ID",
+            "name": "California",
+            "region_code": "CA",
+            "region_code_full": "US-CA"
+          },
+          "postcode": {
+            "id": "POSTCODE_ID",
+            "name": "94555"
+          },
+          "district": {
+            "id": "DISTRICT_ID",
+            "name": "Alameda County"
+          },
+          "place": {
+            "id": "PLACE_ID",
+            "name": "Fremont"
+          },
+          "neighborhood": {
+            "id": "NEIGHBORHOOD_ID",
+            "name": "Ardenwood"
+          },
+          "address": {
+            "id": "ADDRESS_ID",
+            "name": "34170 Gannon Terrace",
+            "address_number": "34170",
+            "street_name": "Gannon Terrace"
+          },
+          "street": {
+            "id": "STREET_ID",
+            "name": "Gannon Terrace"
+          }
+        },
+        "coordinates": {
+          "latitude": 37.56153,
+          "longitude": -122.059627,
+          "accuracy": "rooftop",
+          "routable_points": [
+            {
+              "name": "Address",
+              "latitude": 37.561365,
+              "longitude": -122.059675
+            }
+          ]
+        },
+        "language": "en",
+        "maki": "marker",
+        "metadata": {},
+        "distance": 20045
+      }
+    }
+  ],
+  "attribution": "\u00a9 2026 Mapbox and its suppliers. All rights reserved. Use of this data is subject to the Mapbox Terms of Service. (https://www.mapbox.com/about/maps/)",
+  "response_id": "RESPONSE_ID"
+}

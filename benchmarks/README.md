@@ -1,6 +1,6 @@
 # Benchmarks
 
-Two scripts live here, measuring different things:
+Three scripts live here, measuring different things:
 
 - **`token_benchmark.py`** (issue #26) — accuracy plus tokens-per-correct-
   answer against **live** Overture data, versus the raw payload an agent
@@ -12,6 +12,17 @@ Two scripts live here, measuring different things:
   fixed scenario suite. Writes the generated section of
   [`../docs/benchmarks.md`](../docs/benchmarks.md), which carries its
   methodology and analysis.
+- **`competitor_comparison.py`** (issue #208) — the same two numbers, but
+  head-to-head against **Mapbox MCP** and the archived Anthropic **Google
+  Maps** reference server. Also fully offline: their tool lists and their
+  answers are vendored snapshots under [`competitors/`](competitors/), with
+  repo, commit and capture date in
+  [`competitors/provenance.json`](competitors/provenance.json). Writes the
+  generated section of
+  [`../docs/benchmarks-vs.md`](../docs/benchmarks-vs.md), which carries the
+  methodology and the honest-limitations paragraph. The network-using
+  capture scripts in [`competitors/capture/`](competitors/capture/) are run
+  by hand, never by CI.
 
 # Token benchmark (issue #26)
 
