@@ -31,10 +31,11 @@ budget-module estimate stays under 1.5k tokens.
 """
 
 import json
+from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
 
-from placeroot import budget, categories, release
+from placeroot import budget, categories, overture, release
 
 DATA_VERSION_URI = "placeroot://data-version"
 CATEGORIES_URI = "placeroot://categories"
@@ -88,6 +89,39 @@ def data_version_payload() -> dict:
             " This release is older than the staleness threshold — "
             "discovery may be failing in this deployment."
         )
+    supplement = supplement_payload()
+    if supplement is not None:
+        payload["supplement"] = supplement
+    return payload
+
+
+# Sidecar keys worth reporting to an agent: what the layer holds and how old
+# it is. The rest of scripts/build_supplement.py's metadata (the bboxes it
+# fetched, the per-category duplicate counts) is operator detail that would
+# cost context without changing an answer.
+_SUPPLEMENT_META_KEYS = ("built_at", "rows", "per_source", "per_category", "script_version")
+
+
+def supplement_payload() -> dict | None:
+    """The active supplemental places layer, or None when it isn't enabled.
+
+    Answers that are drawn partly from a locally built, non-Overture layer
+    have to say so — a `find_places` result whose provenance the caller
+    can't see is exactly the silently-partial answer CONTRIBUTING.md's
+    honesty rule exists to prevent. The sidecar `<path>.meta.json` that
+    scripts/build_supplement.py writes supplies the row counts and build
+    date when it's there; a supplement without one still reports its path.
+    """
+    path = overture.supplement_path()
+    if not path:
+        return None
+    payload = {"path": path, "sources": "OpenStreetMap (ODbL), IMLS PLS (public domain)"}
+    try:
+        meta = json.loads(Path(f"{path}.meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        payload["note"] = "no sidecar metadata alongside this file; row counts unknown"
+        return payload
+    payload.update({k: meta[k] for k in _SUPPLEMENT_META_KEYS if k in meta})
     return payload
 
 

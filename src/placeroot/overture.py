@@ -217,8 +217,90 @@ def _check_schema(
     return missing
 
 
+# Opt-in supplemental places layer (docs/SUPPLEMENT.md). Points at a local
+# GeoParquet file, built by scripts/build_supplement.py, of family and
+# recreation places that business-listing data is thin on — playgrounds,
+# splash pads, beaches, trailheads, campgrounds. Unset (the default),
+# nothing below this line does anything: the critical path stays
+# Overture-only, keyless and zero-ETL.
+SUPPLEMENT_ENV_VAR = "PLACEROOT_PLACES_SUPPLEMENT"
+
+# Test-side override, mirroring _data_path_overrides/set_data_path. Sentinel
+# rather than None so a test can override the env var *back* to "no
+# supplement" (set_supplement_path(None) restores the env default instead).
+_UNSET = object()
+_supplement_override = _UNSET
+
+
+def set_supplement_path(path: str | None) -> None:
+    """Point the query layer at a supplement file instead of reading the env var.
+
+    Pass None to restore the default (the PLACEROOT_PLACES_SUPPLEMENT env
+    var, or no supplement at all). Intended for tests, mirroring
+    set_data_path.
+    """
+    global _supplement_override
+    _supplement_override = _UNSET if path is None else path
+
+
+def supplement_path() -> str | None:
+    """The active supplement file path, or None when the layer is off."""
+    if _supplement_override is not _UNSET:
+        return _supplement_override
+    return os.environ.get(SUPPLEMENT_ENV_VAR) or None
+
+
+def _supplement_read() -> str | None:
+    """`read_parquet(...)` for the active supplement, or None when off.
+
+    Fails loudly rather than quietly answering Overture-only if the file
+    isn't there: an operator who set the variable is expecting those rows,
+    and a silently missing layer looks exactly like "the area has no
+    playgrounds" (CONTRIBUTING.md design rule #4).
+    """
+    path = supplement_path()
+    if not path:
+        return None
+    if "://" not in path and "*" not in path and not os.path.exists(path):
+        raise UpstreamUnavailable(
+            f"places supplement not found at {path!r} (from {SUPPLEMENT_ENV_VAR}); "
+            "build it with scripts/build_supplement.py, or unset the variable to "
+            "query Overture alone — see docs/SUPPLEMENT.md"
+        )
+    return f"read_parquet('{path}')"
+
+
+def _with_supplement(source: str, theme: str = THEME) -> str:
+    """`source`, unioned with the supplement layer when one is configured.
+
+    A parenthesized `UNION ALL BY NAME` subquery rather than a two-path
+    `read_parquet([...])`: upstream is read with hive_partitioning=1, and
+    DuckDB rejects a list mixing a hive-partitioned path with a plain file
+    ("Hive partition mismatch ... key \"theme\" not found"). BY NAME fills
+    the columns each side lacks with NULL, so upstream's hive columns and
+    any Overture column the supplement doesn't carry both stay harmless.
+    Filters still push down into both branches, so bbox pruning is
+    unaffected.
+
+    Only places: no other theme has a supplement, and passing one through
+    here would silently union places rows into a divisions query.
+    """
+    if theme != THEME:
+        return source
+    supplement = _supplement_read()
+    if supplement is None:
+        return source
+    return f"(SELECT * FROM {source} UNION ALL BY NAME SELECT * FROM {supplement})"
+
+
 def _from_source(bbox: tuple[float, float, float, float], theme: str = THEME) -> str:
-    """SQL FROM-clause source for a places query: local cache tiles, or upstream."""
+    """SQL FROM-clause source for a places query: local cache tiles, or upstream.
+
+    The supplement (when configured) is appended *after* cache resolution:
+    tiles materialize upstream rows only, so a cached tile is always a
+    faithful copy of Overture and turning the supplement off doesn't leave
+    its rows behind in the cache.
+    """
     upstream = _upstream_glob(theme)
     if cache.enabled():
         try:
@@ -231,8 +313,8 @@ def _from_source(bbox: tuple[float, float, float, float], theme: str = THEME) ->
             raise UpstreamUnavailable(str(e)) from e
         if paths:
             joined = ", ".join(f"'{p}'" for p in paths)
-            return f"read_parquet([{joined}])"
-    return f"read_parquet('{upstream}', hive_partitioning=1)"
+            return _with_supplement(f"read_parquet([{joined}])", theme)
+    return _with_supplement(f"read_parquet('{upstream}', hive_partitioning=1)", theme)
 
 
 # Haversine great-circle distance in meters between (bbox.ymin, bbox.xmin)
@@ -1131,7 +1213,8 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
         if tile_paths:
             joined = ", ".join(f"'{p}'" for p in tile_paths)
             row = _run_place_details_query(
-                f"read_parquet([{joined}])", ["id = $id"], "1", {"id": id}, missing
+                _with_supplement(f"read_parquet([{joined}])"),
+                ["id = $id"], "1", {"id": id}, missing,
             )
             if row is not None:
                 return row
@@ -1156,7 +1239,8 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
         "no near_lat/near_lon hint given, or the hint missed) — issue #41", id,
     )
     return _run_place_details_query(
-        f"read_parquet('{upstream}', hive_partitioning=1)", ["id = $id"], "1", {"id": id}, missing
+        _with_supplement(f"read_parquet('{upstream}', hive_partitioning=1)"),
+        ["id = $id"], "1", {"id": id}, missing,
     )
 
 
