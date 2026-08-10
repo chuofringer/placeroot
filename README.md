@@ -188,7 +188,6 @@ uv run ruff check .
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, design rules, how to propose a tool · [CHANGELOG.md](CHANGELOG.md) · [SECURITY.md](SECURITY.md)
 - [docs/DATA-LICENSE.md](docs/DATA-LICENSE.md) — the data's licenses (the code is MIT; the data is per-theme) and what you owe downstream
-- [ROADMAP.md](ROADMAP.md) — where this is going
 - [docs/benchmarks.md](docs/benchmarks.md) — token efficiency: per-answer cost, and the schema surface it's paid against
 - [docs/benchmarks-vs.md](docs/benchmarks-vs.md) — head-to-head against Mapbox MCP and the Google Maps MCP reference server
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) — how releases reach PyPI + npm

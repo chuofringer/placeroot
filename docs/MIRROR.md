@@ -6,7 +6,9 @@ this only if you want to run your own mirror.
 
 ## Why
 
-ROADMAP.md rule #3 is "no hard dependency on anyone else." Right now that
+CONTRIBUTING.md design rule #3 is that nothing on the critical path may
+depend on an API key, another project's roadmap, or someone else's rate
+limit. Right now that
 rule has one real gap: every query ultimately depends on
 `s3://overturemaps-us-west-2` staying reachable, in the same region, with
 the same `theme=<x>/type=<y>/*` layout it has today. Overture changing that
