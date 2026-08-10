@@ -1,0 +1,3 @@
+# Review is auto-requested from these owners for every PR.
+# Not yet enforced by a ruleset; revisit when a co-maintainer exists (#241 §2.4 F).
+* @chuofringer
