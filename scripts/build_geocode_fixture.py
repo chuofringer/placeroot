@@ -297,7 +297,7 @@ def build_divisions() -> list[tuple]:
         common={"de": "Preßburg", "hu": "Pozsony"},
     )
     # #221: the two pairs the ranking fix is measured on, each mirroring the
-    # live 2026-07-22.0 shape the R26 probes hit.
+    # live 2026-07-22.0 shape the live probes hit.
     #
     # "Zurich" literally matches this tiny Dutch village — and it carries a
     # population, so the #53 "literal match lacks prominence" gate saw a
@@ -349,7 +349,7 @@ def build_divisions() -> list[tuple]:
     # #223: the divisions the postcode answer names. "Mission District" is the
     # locality-ish row nearest the synthetic 94110 US cluster below, so
     # geocode("94110") can report *where* the centroid is rather than bare
-    # coordinates -- mirroring the live R27 probe, which put 94110's US
+    # coordinates -- mirroring the live probe, which put 94110's US
     # centroid in the Mission in San Francisco. Amsterdam does the same job
     # for the NL "1011AB" cluster.
     add(
@@ -397,7 +397,7 @@ def build_divisions() -> list[tuple]:
         52.52, 13.405, _chain("Germany", "Berlin"),
         population=3_677_472,
     )
-    # R28/#229: the quadrant case. Washington's streets carry NW/NE/SW/SE as
+    # #229: the quadrant case. Washington's streets carry NW/NE/SW/SE as
     # part of the name, and Overture writes the abbreviation -- so
     # "Pennsylvania Avenue NW" only matches through the quadrant variant map,
     # and a bare "Pennsylvania Avenue" only through a prefix match.
@@ -406,7 +406,7 @@ def build_divisions() -> list[tuple]:
         38.9072, -77.0369, _chain("United States", "District of Columbia", "Washington"),
         population=689_545,
     )
-    # R28/#229: the house-number parse case. "Calle 8" is the *street*; a
+    # #229: the house-number parse case. "Calle 8" is the *street*; a
     # rule that strips a trailing integer searches for a street named
     # "Calle" and finds nothing.
     add(
@@ -414,14 +414,14 @@ def build_divisions() -> list[tuple]:
         25.7617, -80.1918, _chain("United States", "Florida", "Miami"),
         population=442_241,
     )
-    # R29: the English numbered-route parse case, the twin of Miami's
+    # the English numbered-route parse case, the twin of Miami's
     # "Calle 8" above -- Flagstaff is where Route 66 is a street name.
     add(
         "gers-div-flagstaff", "Flagstaff", "locality", "US", "US-AZ",
         35.1983, -111.6513, _chain("United States", "Arizona", "Flagstaff"),
         population=76_831,
     )
-    # R29: a division whose boundary is a *state*, so geocode_address has a
+    # a division whose boundary is a *state*, so geocode_address has a
     # case where the anchor step succeeds and the extent is still far too big
     # to scan addresses inside (see geocode._MAX_ANCHOR_SPAN_DEG). Texas
     # rather than an invented name because its real extent, 13.1 x 10.7
@@ -505,12 +505,12 @@ STREET_CLUSTERS = (
      tuple(str(n) for n in range(1, 13)), 3),
     ("AMPHITHEATRE PKWY", "US", "94043", "Mountain View", "CA", 37.4220, -122.0841,
      ("1600", "1601", "1900"), 1),
-    # No transformation needed for DE (R27-verified): "Hauptstraße" is one
+    # No transformation needed for DE (verified against the live release): "Hauptstraße" is one
     # token in the query and one in the data, so this cluster only exercises
     # the trailing-house-number parse ("Hauptstraße 5").
     ("Hauptstraße", "DE", "10827", "Berlin", None, 52.5200, 13.4050,
      ("5", "7", "9"), 1),
-    # R28/#229: one street name, two quadrants -- different streets, and
+    # #229: one street name, two quadrants -- different streets, and
     # neither is reachable from "Pennsylvania Avenue NW" without the
     # quadrant variant map or from "Pennsylvania Avenue" without a prefix
     # match. They stay separate rows in the answer, which is the point.
@@ -518,10 +518,10 @@ STREET_CLUSTERS = (
      ("1600", "1700"), 1),
     ("PENNSYLVANIA AVE SE", "US", "20003", "Washington", "DC", 38.8810, -76.9900,
      ("1600",), 1),
-    # R28/#229: Calle Ocho. The street name ends in the digit.
+    # #229: Calle Ocho. The street name ends in the digit.
     ("CALLE 8", "US", "33135", "Miami", "FL", 25.7650, -80.2200,
      ("1", "3", "5"), 1),
-    # R29: the English twin of Calle 8. "ROUTE 66" is the street's whole
+    # the English twin of Calle 8. "ROUTE 66" is the street's whole
     # name, and the Romance-only leading-type list split the 66 off it and
     # searched for a street called "Route". Numbers are even so the
     # doorway-on-a-numbered-route case ("4 Route 66") has something to land
@@ -561,7 +561,7 @@ def build_street_addresses() -> list[tuple]:
     return rows
 
 
-# R28/#229: two municipalities inside one city's bounding box, and one
+# #229: two municipalities inside one city's bounding box, and one
 # doorway with many units — the two shapes that made the address dedup lie.
 #
 # Live, Boston's bbox covers Hingham, Charlestown and Cambridge, each with
@@ -604,7 +604,7 @@ def build_shared_bbox_addresses() -> list[tuple]:
 
 
 # #223: the postcode clusters geocode("94110") / geocode("1011AB") answer from.
-# Synthetic, but shaped like what the live R27 probe measured on release
+# Synthetic, but shaped like what the live probe measured on release
 # 2026-07-22.0: one code carried by three different countries, with the US
 # cluster the largest, SK second and FR third (live: 29,956 / 3,491 / 3,310) --
 # so the fixture exercises a genuinely ambiguous postcode, not a tidy one.

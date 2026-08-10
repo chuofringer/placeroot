@@ -62,7 +62,7 @@ def test_number_and_street_lands_on_the_exact_point():
 
 def test_trailing_house_number_is_the_german_convention():
     """"Hauptstraße 5" — the number is the *last* token, and the street name
-    needs no suffix transformation at all (R27-verified for DE/NL)."""
+    needs no suffix transformation at all (verified live for DE/NL)."""
     result = geocode.geocode_address("Hauptstraße 5, Berlin")
 
     assert _streets(result) == [("5", "Hauptstraße")]
@@ -83,7 +83,7 @@ def test_trailing_house_number_is_the_german_convention():
         ("94110", (None, "94110")),
         # Mid-query digits are part of the street name, not the house number.
         ("West 42nd Street", (None, "West 42nd Street")),
-        # R28 MED-6: the five parse cases the sweep hit. A trailing number
+        # The five parse cases the sweep hit. A trailing number
         # after a leading street type is the street's own name...
         ("Calle 8", (None, "Calle 8")),
         ("Avenida 9", (None, "Avenida 9")),
@@ -96,7 +96,7 @@ def test_trailing_house_number_is_the_german_convention():
         # The German convention is the mirror image of Calle 8 -- the street
         # type is glued to the name, so the trailing number still splits.
         ("Hauptstraße 5", ("5", "Hauptstraße")),
-        # R29: the English numbered routes, which are the same grammar as
+        # The English numbered routes, which are the same grammar as
         # Calle 8 and are ordinary US address data -- the original rule was
         # Romance-only and split every one of these.
         ("Route 66", (None, "Route 66")),
@@ -124,7 +124,7 @@ def test_house_number_is_leading_or_trailing_only(text, expected):
 
 
 def test_route_66_searches_for_the_street_not_house_number_66():
-    """The English half of the Calle 8 bug (R29): "ROUTE 66" is the street's
+    """The English half of the Calle 8 bug: "ROUTE 66" is the street's
     own name, and stripping the 66 searched Flagstaff for a street called
     "Route" -- an empty that looks like an honest one."""
     result = geocode.geocode_address("Route 66, Flagstaff", limit=10)
@@ -210,7 +210,7 @@ def test_directionals_expand_anywhere_in_a_street_name():
     assert geocode._token_variants("north", leading=False) == []
 
 
-# --- quadrants and prefix matching (R28 MED-5, #229) -----------------------
+# --- quadrants and prefix matching (#229) -----------------------
 
 
 @pytest.mark.parametrize(
@@ -289,7 +289,7 @@ def test_a_city_with_no_boundary_extent_declines_to_guess_one():
     assert "address_at(" in result["note"]
 
 
-# --- dedup does not merge municipalities (R28 HIGH-4, #229) ----------------
+# --- dedup does not merge municipalities (#229) ----------------
 
 
 def test_same_number_in_two_municipalities_stays_two_rows():
@@ -336,7 +336,7 @@ def test_a_doorway_with_one_unit_still_names_it():
     assert "unit_count" not in row
 
 
-# --- the anchor is never in another country (R28 HIGH-1, #229) -------------
+# --- the anchor is never in another country (#229) -------------
 
 
 def test_anchor_carries_its_country_and_admin_context():
@@ -426,7 +426,7 @@ def test_tool_is_in_the_search_profile():
     assert "geocode_address" in tool_profiles.PROFILES["search"]
 
 
-# --- the extent lookup memoizes facts, not failures (R29) ------------------
+# --- the extent lookup memoizes facts, not failures ------------------
 
 
 def _failing_conn(state, real):
@@ -513,7 +513,7 @@ def test_a_confirmed_absent_extent_is_still_memoized(monkeypatch):
     assert len(calls) == 1
 
 
-# --- an anchor too big to scan inside (R29) --------------------------------
+# --- an anchor too big to scan inside --------------------------------
 
 
 def test_a_state_sized_anchor_is_refused_rather_than_scanned():
@@ -583,7 +583,7 @@ def test_a_cross_border_runner_up_is_rejected_before_its_extent_is_looked_up(mon
     assert "gers-div-cambridge-ma" not in looked_up
 
 
-# --- a dataset with no number column says so (R29) -------------------------
+# --- a dataset with no number column says so -------------------------
 
 
 def test_a_dataset_without_a_number_column_says_the_house_number_was_ignored(monkeypatch):

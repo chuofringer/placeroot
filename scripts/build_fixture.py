@@ -275,7 +275,7 @@ def _wkt_bbox(wkt: str) -> dict:
 # (division_id, name, country, (xmin, ymin, xmax, ymax))
 #
 # Mountain View's box is the live 2026-07-22.0 extent verbatim
-# (-122.1176,37.3542 .. -122.0449,37.4711), which is exactly the box R27's
+# (-122.1176,37.3542 .. -122.0449,37.4711), which is exactly the box the live probe's
 # hand-guessed one was 0.002 degrees short of — so the fixture's anchor step
 # is the same size as the real one, not a convenient rounding of it.
 GEOCODE_ANCHOR_AREAS = (
@@ -290,7 +290,7 @@ GEOCODE_ANCHOR_AREAS = (
     # backs. Without a boundary here the query would stop one step earlier
     # and never reach that note.
     ("gers-div-kensington-gb", "Kensington", "GB", (-0.22, 51.48, -0.16, 51.52)),
-    # R28/#229: the wrong-country anchor repro, at fixture scale. Cambridge
+    # #229: the wrong-country anchor repro, at fixture scale. Cambridge
     # resolves to the UK one (145,700 over Cambridge MA's 118,403), which has
     # *no* boundary here -- exactly the shape live "London" has, where the UK
     # London carries no division_area row at all. Only the Massachusetts one
@@ -301,14 +301,14 @@ GEOCODE_ANCHOR_AREAS = (
     # legitimately exists for: Springfield resolves to the MA one (155,929),
     # which has no boundary, and the IL runner-up supplies one.
     ("gers-div-springfield-il", "Springfield", "US", (-89.75, 39.72, -89.58, 39.84)),
-    # R28/#229: the quadrant repro (Washington's NW/SE streets) and the
+    # #229: the quadrant repro (Washington's NW/SE streets) and the
     # house-number-parse one ("Calle 8, Miami"), each needing a real extent
     # for the scan step to be reached at all.
     ("gers-div-washington-dc", "Washington", "US", (-77.12, 38.79, -76.90, 39.00)),
     ("gers-div-miami", "Miami", "US", (-80.32, 25.70, -80.14, 25.86)),
-    # R29: the English numbered-route parse case ("Route 66, Flagstaff").
+    # the English numbered-route parse case ("Route 66, Flagstaff").
     ("gers-div-flagstaff", "Flagstaff", "US", (-111.72, 35.14, -111.56, 35.26)),
-    # R29: the extent that must be refused rather than scanned. Texas's real
+    # the extent that must be refused rather than scanned. Texas's real
     # bounding box, 13.1 x 10.7 degrees — well past
     # geocode._MAX_ANCHOR_SPAN_DEG, and the size at which an address scan
     # stops being an answer. Every other anchor here is a city, so without

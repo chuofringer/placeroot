@@ -76,8 +76,8 @@ normal suite, no network required.
 ## The other half of the cost: the schema surface
 
 This benchmark measures the tokens an *answer* costs. The tool schemas cost
-tokens too — ~9.2k estimated tokens across all 25 tools, paid once per
-conversation before the agent asks anything, which is roughly 56 median
+tokens too — ~13.2k estimated tokens across all 29 tools, paid once per
+conversation before the agent asks anything, which is dozens of median
 answers' worth. That side isn't reduced by better answers; it's reduced by
 registering fewer tools. See `PLACEROOT_TOOLS` in the top-level README
 (issue #182) for the profiles and their measured per-profile surface —

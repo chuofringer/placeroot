@@ -193,7 +193,7 @@ uv run ruff check .
 - [docs/benchmarks-vs.md](docs/benchmarks-vs.md) — head-to-head against Mapbox MCP and the Google Maps MCP reference server
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) — how releases reach PyPI + npm
 - [docs/WEBSITE.md](docs/WEBSITE.md) — the marketing site: serve locally and deploy
-- [docs/MIRROR.md](docs/MIRROR.md) · [docs/METRICS.md](docs/METRICS.md) · [docs/launch/](docs/launch/)
+- [docs/MIRROR.md](docs/MIRROR.md) — running your own mirror of the data
 
 ## Contact
 

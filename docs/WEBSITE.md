@@ -56,8 +56,8 @@ Any static file server works; there is nothing to build.
 
 ## Deploy — Cloudflare Pages (primary)
 `.github/workflows/deploy-site.yml` direct-uploads `site/` on every push to
-`main` that touches it (same pattern as the funradar/flood sibling repos —
-`wrangler pages deploy`, not the Pages Git-integration build). Manual runs:
+`main` that touches it (direct `wrangler pages deploy`, not the Pages
+Git-integration build). Manual runs:
 **Actions → Deploy Site → Run workflow**.
 
 One-time setup (owner):

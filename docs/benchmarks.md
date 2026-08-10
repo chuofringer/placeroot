@@ -132,18 +132,19 @@ conclusion rather than the evidence. `benchmarks/token_benchmark.py` (issue
 versus the raw Overture payload an agent would otherwise have had to read
 itself — and the ratios there run into the hundreds and thousands.
 
-**The schema surface is the real cost, and it is not small.** At 25 tools it
+**The schema surface is the real cost, and it is not small.** At 29 tools it
 is thousands of tokens, paid before the agent does anything. The break-even
 line in the generated section is the honest framing: the schemas cost roughly
 what several dozen answers cost. An agent that asks two spatial questions in
 a session spends far more context on *being able to* ask than on the answers.
 
 **Tool annotations cost about a tenth of a token budget line.** Declaring MCP
-`annotations` (readOnlyHint and friends) plus a display `title` on all 25
-tools — issue #193 — added **839 tokens** to the schema surface (9192 →
+`annotations` (readOnlyHint and friends) plus a display `title` on what were
+then 25 tools (#193) added **839 tokens** to the schema surface (9192 →
 10031, +9.1%; ~134 chars per tool). That is the price of letting a client
-know, before it prompts the user, which calls touch nothing — 24 of the 25
-are pure lookups, and `render_map`, which writes an HTML file, says so. It is
+know, before it prompts the user, which calls touch nothing — every tool
+except `render_map` is a pure lookup, and `render_map`, which writes an HTML
+file, says so. It is
 paid once per conversation and it is worth it, but it is not free, and it is
 one more reason the fix for schema surface is fewer *loaded* tools.
 

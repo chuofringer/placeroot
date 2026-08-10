@@ -1,8 +1,7 @@
 """The site-hosted Desktop Extension bundle can't go stale silently (#233).
 
 site/placeroot.mcpb is the public one-click install for Claude Desktop's
-Chat surface, served from placeroot.dev (the repo is private, so a GitHub
-release asset can't be the public download). It is a build artifact
+Chat surface, served from placeroot.dev. It is a build artifact
 committed to git, which is exactly the shape that drifts: a release bump
 that forgets `uv run python scripts/build_mcpb.py site/placeroot.mcpb`
 would ship a site advertising version X while handing out bundle X-1.
