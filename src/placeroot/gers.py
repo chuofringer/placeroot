@@ -259,6 +259,21 @@ def _lookup_row(
     )
 
 
+# Ids minted by the opt-in supplemental places layer (docs/SUPPLEMENT.md).
+# place_details resolves them — it queries the union — but gers_lookup must
+# not: a GERS id is a cross-dataset identity claim Overture makes, and these
+# are local row keys that mean nothing outside one operator's file.
+# _validate_id already rejects them today, since neither ':' nor '/' is in
+# ID_CHARSET_RE; this is the explicit statement of the rule, so loosening
+# that charset later can't quietly start certifying supplement rows as GERS
+# entities.
+_SUPPLEMENT_ID_PREFIXES = ("osm:", "imls:")
+
+
+def _is_supplement_id(id: str) -> bool:
+    return id.startswith(_SUPPLEMENT_ID_PREFIXES)
+
+
 def _probe_places(id: str, near_lat: float | None, near_lon: float | None) -> dict | None:
     """Places probe, delegating wholesale to place_details' id resolution.
 
@@ -269,6 +284,8 @@ def _probe_places(id: str, near_lat: float | None, near_lon: float | None) -> di
     cross-theme answer. bound_to_hint drops its last stage so this probe
     treats a hint as a boundary like the other two do.
     """
+    if _is_supplement_id(id):
+        return None
     row = overture.place_details(
         id=id, near_lat=near_lat, near_lon=near_lon, bound_to_hint=True
     )

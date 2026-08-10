@@ -1706,6 +1706,11 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
     resolve_place already applies to its own places search. Without an
     anchor, this still runs (row-capped by the existing LIMIT, same as
     before #83) rather than dropping a genuine name-only query to nothing.
+
+    Reads through overture._with_supplement so the opt-in supplemental
+    places layer (docs/SUPPLEMENT.md) is in scope here too: a playground
+    find_places returns but geocode/resolve_place can't name is a
+    surface-dependent answer, which is worse than not having the layer.
     """
     glob = overture.upstream_glob(theme="places", type_="place")
     cols = overture.probe_schema(glob)
@@ -1723,7 +1728,7 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
     sql = f"""
         SELECT id, names.primary AS name, bbox.ymin AS lat, bbox.xmin AS lon,
                coalesce(confidence, 0) AS confidence
-        FROM read_parquet('{glob}', hive_partitioning=1)
+        FROM {overture._with_supplement(f"read_parquet('{glob}', hive_partitioning=1)")}
         WHERE {' AND '.join(filters)}
         ORDER BY confidence DESC
         LIMIT {DIVISION_OVERFETCH}

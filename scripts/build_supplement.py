@@ -58,6 +58,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -172,9 +173,21 @@ CATEGORIES: tuple[OsmCategory, ...] = (
 CATEGORIES_BY_NAME = {c.name: c for c in CATEGORIES}
 
 
-def classify(tags: dict) -> OsmCategory | None:
-    """The category an OSM element's tags map to, or None if none apply."""
+def classify(tags: dict, allowed: Iterable[str] | None = None) -> OsmCategory | None:
+    """The category an OSM element's tags map to, or None if none apply.
+
+    `allowed` restricts the answer to a subset of category names — what
+    `--categories` asked for. Without it, an element carrying two mapped
+    tags (leisure=park + tourism=zoo is a real and common combination) could
+    be classified as a category the run deliberately excluded: a
+    `--categories zoo` build would emit it as `taxonomy.primary = "park"`
+    and report zero zoos. CATEGORIES' order still decides among the allowed
+    ones, so the splash-pad rule keeps its precedence over the plain
+    playground rule whenever both are in play.
+    """
     for category in CATEGORIES:
+        if allowed is not None and category.name not in allowed:
+            continue
         if category.matches(tags):
             return category
     return None
@@ -279,15 +292,16 @@ def osm_address(tags: dict) -> dict | None:
     return parts
 
 
-def osm_row(element: dict) -> tuple | None:
+def osm_row(element: dict, allowed: Iterable[str] | None = None) -> tuple | None:
     """One Overpass element -> a places row, or None if it can't be used.
 
     Dropped: elements with no usable coordinate (a way with no `center`,
     which is what `out center` exists to provide), tags matching no
-    category, and unnamed elements outside the allow_unnamed categories.
+    category (of those `allowed` — see classify), and unnamed elements
+    outside the allow_unnamed categories.
     """
     tags = element.get("tags") or {}
-    category = classify(tags)
+    category = classify(tags, allowed)
     if category is None:
         return None
     name = tags.get("name")
@@ -442,6 +456,31 @@ def overpass_query(category: OsmCategory, bbox: tuple[float, float, float, float
     return f"[out:json][timeout:{OVERPASS_TIMEOUT_S}];\n(\n{clauses});\nout center tags;\n"
 
 
+class OverpassRuntimeError(RuntimeError):
+    """Overpass reported a query failure inside a 200 OK response."""
+
+
+def check_overpass_remark(payload: dict) -> None:
+    """Raise if Overpass smuggled a runtime error into a successful response.
+
+    Overpass answers a timed-out or out-of-memory query with HTTP 200, an
+    empty (or partial) `elements` list, and a `remark` explaining what went
+    wrong. Unchecked, that reads as "this bbox genuinely has no playgrounds"
+    — the build writes a silently partial file and exits 0, which is the
+    worst possible outcome for a dataset whose whole purpose is filling
+    coverage gaps.
+    """
+    remark = payload.get("remark")
+    if not remark:
+        return
+    lowered = remark.lower()
+    # Overpass phrases these as "runtime error: Query timed out ..." / "...
+    # Query run out of memory ...". Advisory remarks that say none of these
+    # are passed through — a warning is not a reason to fail a build.
+    if any(marker in lowered for marker in ("error", "timed out", "out of memory")):
+        raise OverpassRuntimeError(remark.strip())
+
+
 class OverpassClient:
     """Polite, single-threaded Overpass caller: throttled, backing off, named.
 
@@ -473,17 +512,32 @@ class OverpassClient:
                 with urllib.request.urlopen(request, timeout=OVERPASS_TIMEOUT_S) as resp:
                     payload = json.loads(resp.read().decode("utf-8"))
                 self._last_request_at = time.monotonic()
+                check_overpass_remark(payload)
                 return payload
+            except OverpassRuntimeError as e:
+                if attempt == MAX_ATTEMPTS:
+                    raise
+                reason = str(e)
             except urllib.error.HTTPError as e:
                 self._last_request_at = time.monotonic()
                 if e.code not in (429, 504) or attempt == MAX_ATTEMPTS:
                     raise
-                delay = BACKOFF_BASE_S * (2 ** (attempt - 1))
-                logger.warning(
-                    "Overpass returned %s (attempt %d/%d); backing off %.0fs",
-                    e.code, attempt, MAX_ATTEMPTS, delay,
-                )
-                time.sleep(delay)
+                reason = f"HTTP {e.code}"
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                # A dropped connection, DNS blip or read timeout mid-run
+                # would otherwise throw away every row fetched so far — a
+                # build is many minutes of throttled requests, and the
+                # transport failing is exactly what the backoff is for.
+                self._last_request_at = time.monotonic()
+                if attempt == MAX_ATTEMPTS:
+                    raise
+                reason = f"{type(e).__name__}: {e}"
+            delay = BACKOFF_BASE_S * (2 ** (attempt - 1))
+            logger.warning(
+                "Overpass request failed (%s; attempt %d/%d); backing off %.0fs",
+                reason, attempt, MAX_ATTEMPTS, delay,
+            )
+            time.sleep(delay)
         raise RuntimeError("unreachable")  # pragma: no cover
 
 
@@ -498,6 +552,7 @@ def fetch_osm_rows(
     construction (a splash pad carries leisure=playground too), and the
     first match wins because CATEGORIES puts the specific rule first.
     """
+    allowed = set(category_names)
     by_id: dict[str, tuple] = {}
     for bbox in bboxes:
         for name in category_names:
@@ -506,7 +561,7 @@ def fetch_osm_rows(
             payload = client.fetch(overpass_query(category, bbox))
             kept = 0
             for element in payload.get("elements", []):
-                row = osm_row(element)
+                row = osm_row(element, allowed)
                 if row is None or row[0] in by_id:
                     continue
                 by_id[row[0]] = row
@@ -663,7 +718,10 @@ def write_parquet(rows: list[tuple], out: Path) -> None:
         placeholders = ", ".join("?" * len(COLUMNS))
         con.executemany(f"INSERT INTO supplement VALUES ({placeholders})", rows)
     out.parent.mkdir(parents=True, exist_ok=True)
-    con.execute(f"COPY supplement TO '{out}' (FORMAT PARQUET)")
+    # COPY TO takes a literal, not a bind parameter, so an apostrophe in the
+    # path (ordinary in a macOS home directory) has to be escaped rather
+    # than ending the string mid-path.
+    con.execute(f"COPY supplement TO {db._sql_str(str(out))} (FORMAT PARQUET)")
     con.close()
 
 
@@ -744,11 +802,19 @@ def main(argv: list[str] | None = None) -> int:
 
     dedup_release = None
     dropped: dict[str, int] = {}
-    if rows and not args.no_dedup:
-        # Dedup needs bboxes to prune the remote scan; with only --imls-csv
-        # and no --bbox there is no box to scan, so derive one per row batch
-        # from the rows themselves.
-        dedup_bboxes = bboxes or [rows_bbox(rows)]
+    if rows and not args.no_dedup and not bboxes:
+        # The dedup scan is pruned by the --bbox values; with none, the only
+        # window available is one covering every row, and a US-wide IMLS
+        # build spans Alaska to Guam — that is a fetchall() over essentially
+        # the whole global places release, minutes of transfer to dedup a
+        # few thousand libraries. Skip it and say so rather than do it.
+        logger.warning(
+            "skipping dedup: it needs --bbox to prune the Overture scan, and this "
+            "run has none. Supplement rows may duplicate Overture places. Re-run "
+            "with --bbox covering the areas you care about to enable it."
+        )
+    elif rows and not args.no_dedup:
+        dedup_bboxes = bboxes
         dedup_release = release.resolve_release()
         glob = overture.upstream_glob()
         # The runtime's own connection setup: anonymous credentials for the
@@ -774,14 +840,6 @@ def main(argv: list[str] | None = None) -> int:
         gone = summary.per_category_dropped.get(slug, 0)
         print(f"  {slug}: kept {kept}, dropped as duplicate {gone}")
     return 0
-
-
-def rows_bbox(rows: list[tuple]) -> tuple[float, float, float, float]:
-    """Bounding box covering every row — the dedup scan window when the run
-    had no --bbox of its own (IMLS-only builds)."""
-    lons = [r[1]["xmin"] for r in rows]
-    lats = [r[1]["ymin"] for r in rows]
-    return min(lons), min(lats), max(lons), max(lats)
 
 
 if __name__ == "__main__":

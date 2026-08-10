@@ -119,7 +119,13 @@ def supplement_payload() -> dict | None:
     try:
         meta = json.loads(Path(f"{path}.meta.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        payload["note"] = "no sidecar metadata alongside this file; row counts unknown"
+        meta = None
+    # A sidecar that parses but isn't an object (a bare string or list — a
+    # truncated or hand-edited file) is as unusable as a missing one, and
+    # subscripting it would turn a cosmetic metadata problem into a
+    # TypeError out of data_version.
+    if not isinstance(meta, dict):
+        payload["note"] = "no readable sidecar metadata alongside this file; row counts unknown"
         return payload
     payload.update({k: meta[k] for k in _SUPPLEMENT_META_KEYS if k in meta})
     return payload

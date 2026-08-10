@@ -94,6 +94,13 @@ nothing to match on. The pass runs one query per fetch bbox against the live
 Overture release, so it needs network access; the release it compared
 against is recorded in the sidecar.
 
+Dedup needs `--bbox` to prune that scan. A run with only `--imls-csv` and no
+`--bbox` **skips the pass with a warning** rather than running it: the only
+window available would be one covering every row, and a US-wide library file
+spans Alaska to Guam — effectively a scan of the whole global places
+release. If you want an IMLS-only build deduplicated, pass the `--bbox`
+values covering the areas you care about.
+
 **Confidence** is a documented heuristic, not a measurement: 0.5 for OSM
 rows (a volunteer edit of unknown vintage), 0.7 for IMLS rows (a surveyed
 federal record). Both sit below what typical Overture places carry, so
@@ -108,9 +115,11 @@ characters, and reading `LONGITUDE` silently yields nothing.
 
 **Row ids are not GERS ids.** They are `osm:<type>/<id>` and
 `imls:<FSCSKEY>-<FSCS_SEQ>`. They are stable within this file and meaningless
-outside it — an id from the supplement will not resolve in `gers_lookup`, and
-an Overture GERS id will not resolve to a supplement row. `place_details`
-accepts both, because it is querying the union.
+outside it. `place_details` accepts them, because it is querying the union.
+`gers_lookup` deliberately does not: a GERS id is Overture's cross-dataset
+identity claim, and certifying a local row key as one would be a promise
+nothing can keep. Passing a supplement id to `gers_lookup` comes back as
+"not a GERS id", never as a resolved entity.
 
 ## 3. Enable it
 
@@ -120,9 +129,14 @@ export PLACEROOT_PLACES_SUPPLEMENT=~/.placeroot/supplement-nyc.parquet
 
 Every places tool — `find_places`, `place_details`, `summarize_area`,
 `compare_areas`, `within_distance`, `places_along_route`, division-bounded
-`find_places` — then answers from both datasets at once. No tool gains an
-argument and no response changes shape; the extra rows simply appear, ranked
-on the same distance scale.
+`find_places`, and the places half of `geocode`/`resolve_place` — then
+answers from both datasets at once. No tool gains an argument and no
+response changes shape; the extra rows simply appear, ranked on the same
+distance scale.
+
+`~` in the path is expanded, so the value is safe to write as
+`~/.placeroot/supplement.parquet` in an MCP client's JSON config, where
+there is no shell to expand it.
 
 `data_version` reports the layer while it is active: the file path, its
 build date, and the per-source and per-category row counts from the sidecar

@@ -44,6 +44,28 @@ def no_ambient_tool_selection(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_ambient_supplement(monkeypatch):
+    """Every test sees the supplemental places layer off unless it opts in.
+
+    PLACEROOT_PLACES_SUPPLEMENT is a variable the README tells operators to
+    export, so a maintainer running the suite in a shell where they have it
+    set would otherwise get supplement rows unioned into the fixture and
+    eight unrelated failures (find_places' ground-truth counts,
+    summarize_area's totals, data_version's payload). Same reasoning as
+    no_ambient_tool_selection above, and not folded into offline_data
+    because that one returns early for @live tests — which hit real S3 and
+    have even less business seeing a local supplement.
+
+    A test's own monkeypatch.setenv or overture.set_supplement_path still
+    wins; the module-level override is reset afterwards either way.
+    """
+    monkeypatch.delenv("PLACEROOT_PLACES_SUPPLEMENT", raising=False)
+    overture.set_supplement_path(None)
+    yield
+    overture.set_supplement_path(None)
+
+
+@pytest.fixture(autouse=True)
 def offline_data(request, monkeypatch):
     """Point the query layer at the committed fixtures for every test except @live ones.
 

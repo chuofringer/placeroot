@@ -264,6 +264,102 @@ def test_other_themes_never_see_the_supplement(supplement):
     assert "UNION ALL BY NAME" in overture._with_supplement("read_parquet('x')")
 
 
+def test_the_suite_neutralizes_an_ambient_supplement(monkeypatch):
+    """conftest's no_ambient_supplement, pinned.
+
+    PLACEROOT_PLACES_SUPPLEMENT is a variable the README tells operators to
+    export. Without the autouse fixture, a maintainer who has it set in
+    their shell gets supplement rows unioned into the fixture and eight
+    unrelated failures across find_places, summarize_area and data_version —
+    a suite that only passes on machines that never used the feature.
+    """
+    import os
+
+    assert os.environ.get("PLACEROOT_PLACES_SUPPLEMENT") is None
+    assert overture.supplement_path() is None
+
+
+def test_gers_lookup_does_not_certify_a_supplement_id(supplement):
+    """A GERS id is Overture's cross-dataset identity claim; a supplement id
+    is a local row key. place_details resolves one (it queries the union),
+    gers_lookup must not."""
+    from placeroot import gers
+
+    assert gers._probe_places("osm:node/100000", None, None) is None
+    assert gers._probe_places("imls:NY0042-000", None, None) is None
+    # ...while the same id still resolves through place_details, which is
+    # the surface that legitimately answers for the union.
+    assert overture.place_details(id="osm:node/100000") is not None
+
+    # The public tool rejects the shape outright — ':' and '/' are not GERS
+    # characters — so a caller gets "not a GERS id", never a fabricated
+    # entity.
+    for bad in ("osm:node/100000", "imls:NY0042-000"):
+        with pytest.raises(ValueError, match="not a GERS id"):
+            gers.gers_lookup(bad)
+
+
+def test_name_search_sees_the_supplement_like_find_places_does(supplement):
+    """geocode/resolve_place's places fallback reads the union too.
+
+    A playground that find_places returns but resolve_place cannot name
+    would make the answer depend on which tool the agent happened to reach
+    for — worse than not having the layer.
+    """
+    from placeroot import geocode
+
+    rows = geocode._query_places_fallback("Foxglove", anchor=(CENTER_LAT, CENTER_LON))
+    assert "Foxglove Park" in {r["name"] for r in rows}
+
+    overture.set_supplement_path(None)
+    assert not geocode._query_places_fallback("Foxglove", anchor=(CENTER_LAT, CENTER_LON))
+
+
+def test_a_path_with_an_apostrophe_is_a_path_not_a_syntax_error(tmp_path):
+    """The path is a SQL literal, not a bind parameter. An apostrophe in a
+    directory name is ordinary on macOS ("/Users/o'brien/...")."""
+    import shutil
+
+    quoted_dir = tmp_path / "o'brien's data"
+    quoted_dir.mkdir()
+    target = quoted_dir / "supp.parquet"
+    shutil.copy(SUPPLEMENT_FIXTURE_PATH, target)
+
+    overture.set_supplement_path(str(target))
+    try:
+        rows = overture.find_places(
+            CENTER_LAT, CENTER_LON, radius_m=1000, category="playground", limit=25
+        )
+    finally:
+        overture.set_supplement_path(None)
+    assert "Riverbend Playground" in {r["name"] for r in rows}
+
+
+def test_a_tilde_path_is_expanded(monkeypatch, tmp_path):
+    """MCP client configs (Claude Desktop, Cursor) pass env values through
+    verbatim — there is no shell to expand `~` before the process sees it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv(overture.SUPPLEMENT_ENV_VAR, "~/supp.parquet")
+    assert overture.supplement_path() == str(tmp_path / "supp.parquet")
+
+
+def test_an_unusable_sidecar_degrades_to_path_only(tmp_path):
+    """A sidecar that parses but isn't an object shouldn't turn a cosmetic
+    metadata problem into a TypeError out of data_version."""
+    supplement_path = tmp_path / "supp.parquet"
+    supplement_path.write_bytes(b"")
+    Path(f"{supplement_path}.meta.json").write_text('"not an object"', encoding="utf-8")
+
+    overture.set_supplement_path(str(supplement_path))
+    try:
+        block = resources.data_version_payload()["supplement"]
+    finally:
+        overture.set_supplement_path(None)
+
+    assert block["path"] == str(supplement_path)
+    assert "row counts unknown" in block["note"]
+
+
 # --- builder: OSM tag -> Overture taxonomy ----------------------------------
 
 
@@ -298,6 +394,35 @@ def test_a_splash_pad_is_classified_before_the_plain_playground_rule():
     the row loses the water_park alternate that makes it findable."""
     tags = {"leisure": "playground", "playground": "splash_pad"}
     assert build_supplement.classify(tags).name == "splash_pad"
+
+
+def test_classify_honors_the_requested_category_set():
+    """--categories has to reach the mapping, not just the fetching.
+
+    leisure=park + tourism=zoo is a real and common combination. Classified
+    against the full table, a `--categories zoo` run would emit that element
+    as taxonomy.primary="park" — a slug the run excluded — and report zero
+    zoos, so the one category the operator asked for is the one they don't
+    get.
+    """
+    tags = {"leisure": "park", "tourism": "zoo", "name": "Civic Gardens & Zoo"}
+    assert build_supplement.classify(tags).name == "park"  # full table, first match
+    assert build_supplement.classify(tags, {"zoo"}).name == "zoo"
+    assert build_supplement.classify(tags, {"museum"}) is None
+
+    row = build_supplement.osm_row(
+        {"type": "node", "id": 1, "lat": 40.7, "lon": -73.9, "tags": tags}, {"zoo"}
+    )
+    assert row[3] == {"primary": "zoo", "alternates": []}
+
+
+def test_restricting_categories_keeps_splash_pad_precedence():
+    """The subset filter must not disturb the ordering rule it walks."""
+    tags = {"leisure": "playground", "playground": "splash_pad"}
+    assert build_supplement.classify(tags, {"playground", "splash_pad"}).name == "splash_pad"
+    # Asked for playgrounds only, a splash pad is still a playground — it
+    # just doesn't get the water_park alternate it was not asked for.
+    assert build_supplement.classify(tags, {"playground"}).name == "playground"
 
 
 def test_unmapped_tags_are_not_invented():
@@ -525,6 +650,102 @@ def test_an_unknown_category_names_the_valid_ones():
         build_supplement.parse_categories("playground,skatepark")
     assert "skatepark" in str(excinfo.value)
     assert "playground" in str(excinfo.value)
+
+
+# --- builder: Overpass failure handling ------------------------------------
+
+
+@pytest.mark.parametrize("remark", [
+    'runtime error: Query timed out in "recurse" at line 5 after 180 seconds.',
+    'runtime error: Query run out of memory in "query" at line 3.',
+])
+def test_a_runtime_error_smuggled_into_a_200_is_not_an_empty_area(remark):
+    """Overpass answers a timed-out or OOM query with HTTP 200, an empty
+    elements list, and a remark. Unchecked, that reads as "this bbox has no
+    playgrounds" and the build writes a silently partial file, exit 0."""
+    with pytest.raises(build_supplement.OverpassRuntimeError):
+        build_supplement.check_overpass_remark({"elements": [], "remark": remark})
+
+
+def test_an_advisory_remark_does_not_fail_the_build():
+    build_supplement.check_overpass_remark({"elements": [], "remark": "Warning: something"})
+    build_supplement.check_overpass_remark({"elements": []})
+
+
+def test_a_dropped_connection_is_retried_rather_than_losing_the_whole_build(monkeypatch):
+    """A build is many minutes of throttled requests; a DNS blip or reset
+    socket on request 40 must not throw away the 39 before it."""
+    import urllib.error
+
+    calls = []
+
+    def flaky(request, timeout=None):
+        calls.append(1)
+        if len(calls) < 3:
+            raise urllib.error.URLError("connection reset by peer")
+        raise AssertionError("stop here; the retry loop is what is under test")
+
+    monkeypatch.setattr(build_supplement.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(build_supplement.time, "sleep", lambda _s: None)
+    client = build_supplement.OverpassClient(throttle_s=0)
+
+    with pytest.raises(AssertionError):
+        client.fetch("[out:json];")
+    assert len(calls) == 3, "URLError should have been retried, not raised on the first hit"
+
+
+def test_a_runtime_error_is_retried_too(monkeypatch):
+    payloads = [
+        {"elements": [], "remark": "runtime error: Query timed out"},
+        {"elements": [{"type": "node", "id": 1, "lat": 40.7, "lon": -73.9,
+                       "tags": {"leisure": "park", "name": "Elm Park"}}]},
+    ]
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def read(self):
+            import json
+
+            return json.dumps(self._payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        build_supplement.urllib.request, "urlopen",
+        lambda request, timeout=None: _Resp(payloads.pop(0)),
+    )
+    monkeypatch.setattr(build_supplement.time, "sleep", lambda _s: None)
+
+    result = build_supplement.OverpassClient(throttle_s=0).fetch("[out:json];")
+    assert len(result["elements"]) == 1
+
+
+def test_an_imls_only_build_does_not_dedup_against_the_whole_planet(tmp_path, monkeypatch):
+    """Without --bbox there is no window to prune the Overture scan with, and
+    a US-wide library file spans Alaska to Guam — that "window" is the whole
+    global release. Skip the pass and say so rather than run it."""
+    csv_path = tmp_path / "outlets.csv"
+    csv_path.write_text(
+        "FSCSKEY,FSCS_SEQ,C_OUT_TY,LIBNAME,ADDRESS,CITY,STABR,ZIP,PHONE,LATITUDE,LONGITUD\n"
+        "AK0001,000,CE,Anchorage Library,1 Elm St,Anchorage,AK,99501,-3,61.21,-149.90\n"
+        "GU0001,000,CE,Hagatna Library,2 Oak St,Hagatna,GU,96910,-3,13.47,144.75\n",
+        encoding="utf-8",
+    )
+
+    def fail(*a, **kw):
+        raise AssertionError("dedup must not run without --bbox")
+
+    monkeypatch.setattr(build_supplement, "dedup_against_overture", fail)
+    out = tmp_path / "supp.parquet"
+
+    assert build_supplement.main(["--imls-csv", str(csv_path), "--out", str(out)]) == 0
+    assert out.exists()
 
 
 def test_overpass_query_asks_for_nodes_and_ways_with_a_center():

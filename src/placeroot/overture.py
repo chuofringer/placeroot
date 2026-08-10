@@ -244,10 +244,19 @@ def set_supplement_path(path: str | None) -> None:
 
 
 def supplement_path() -> str | None:
-    """The active supplement file path, or None when the layer is off."""
+    """The active supplement file path, or None when the layer is off.
+
+    `~` is expanded: this variable is typically set in an MCP client's JSON
+    config (Claude Desktop, Cursor), which passes env values through to the
+    process verbatim without a shell to expand them — so a perfectly
+    reasonable "~/.placeroot/supplement.parquet" would otherwise arrive as a
+    literal path with a tilde directory in it and fail as "not found".
+    """
     if _supplement_override is not _UNSET:
-        return _supplement_override
-    return os.environ.get(SUPPLEMENT_ENV_VAR) or None
+        path = _supplement_override
+    else:
+        path = os.environ.get(SUPPLEMENT_ENV_VAR) or None
+    return os.path.expanduser(path) if path else None
 
 
 def _supplement_read() -> str | None:
@@ -257,6 +266,11 @@ def _supplement_read() -> str | None:
     isn't there: an operator who set the variable is expecting those rows,
     and a silently missing layer looks exactly like "the area has no
     playgrounds" (CONTRIBUTING.md design rule #4).
+
+    The path is a SQL literal, not a bind parameter (read_parquet's argument
+    is part of the plan), so it goes through db._sql_str — an apostrophe in
+    a directory name is ordinary on macOS and would otherwise end the string
+    literal mid-path.
     """
     path = supplement_path()
     if not path:
@@ -267,7 +281,7 @@ def _supplement_read() -> str | None:
             "build it with scripts/build_supplement.py, or unset the variable to "
             "query Overture alone — see docs/SUPPLEMENT.md"
         )
-    return f"read_parquet('{path}')"
+    return f"read_parquet({db._sql_str(path)})"
 
 
 def _with_supplement(source: str, theme: str = THEME) -> str:
