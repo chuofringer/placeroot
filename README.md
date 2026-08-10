@@ -176,6 +176,22 @@ A few things that set it apart:
 - **Fast repeat queries.** Frequently used data is cached locally, so repeat questions answer in milliseconds and keep working offline.
 - **Self-hostable end to end.** Run it locally, serve it over HTTP, or point it at your own copy of the data — no dependency on anyone else's service.
 
+## Supplemental places (optional)
+
+Overture's places theme is derived from business listings, which makes it strong on businesses and thin on family and recreation places that nobody lists as one — playgrounds, splash pads, beaches, trailheads, campgrounds. If you need those, PlaceRoot can query a **local, opt-in** supplemental layer alongside Overture, built from OpenStreetMap (via the keyless Overpass API) and the IMLS Public Libraries Survey.
+
+```bash
+uv run python scripts/build_supplement.py \
+    --bbox -74.05,40.60,-73.85,40.85 \
+    --out ~/.placeroot/supplement-nyc.parquet
+
+export PLACEROOT_PLACES_SUPPLEMENT=~/.placeroot/supplement-nyc.parquet
+```
+
+Every places tool then answers from both datasets at once, with no other change: same tools, same response shape, same category filters. Unset the variable and PlaceRoot is Overture-only again — the default path stays keyless and zero-ETL, and nothing is downloaded unless you run the builder yourself.
+
+Licensing: OSM-derived rows are © OpenStreetMap contributors under [ODbL 1.0](https://opendatacommons.org/licenses/odbl/); IMLS survey rows are US federal public domain. Every row names its origin in `sources[0].dataset`, so the two are always tellable apart. Full runbook: [docs/SUPPLEMENT.md](docs/SUPPLEMENT.md).
+
 ## Development
 
 ```bash
@@ -193,6 +209,7 @@ uv run ruff check .
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) — how releases reach PyPI + npm
 - [docs/WEBSITE.md](docs/WEBSITE.md) — the marketing site: serve locally and deploy
 - [docs/MIRROR.md](docs/MIRROR.md) — running your own mirror of the data
+- [docs/SUPPLEMENT.md](docs/SUPPLEMENT.md) — building the optional supplemental places layer
 
 ## Contact
 

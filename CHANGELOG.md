@@ -9,6 +9,14 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- Optional supplemental places layer (`PLACEROOT_PLACES_SUPPLEMENT`): a
+  locally built GeoParquet of family and recreation places that
+  business-listing data is thin on — playgrounds, splash pads, beaches,
+  trailheads, campgrounds — from OpenStreetMap (ODbL) and the IMLS Public
+  Libraries Survey (public domain), queried alongside Overture by every
+  places tool. Built by `scripts/build_supplement.py`; opt-in, never
+  distributed, and the critical path stays Overture-only and keyless. See
+  [docs/SUPPLEMENT.md](docs/SUPPLEMENT.md)
 - `geocode_address`: street-level forward search — "1600 Amphitheatre
   Parkway, Mountain View" → coordinates, city-bounded and deduplicated
   (#225, #229)
