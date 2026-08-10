@@ -47,6 +47,7 @@ def main() -> int:
         stage = Path(tmp) / "placeroot"
         stage.mkdir()
         shutil.copy2(REPO_ROOT / "mcpb" / "manifest.json", stage / "manifest.json")
+        shutil.copy2(REPO_ROOT / "mcpb" / "icon.png", stage / "icon.png")
         for name in STAGED:
             shutil.copy2(REPO_ROOT / name, stage / name)
         for tree in STAGED_TREES:
