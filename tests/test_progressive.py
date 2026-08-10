@@ -288,7 +288,7 @@ def test_non_object_args_is_a_bad_request():
     assert "geocode" in result["detail"]
 
 
-# --- Argument types (R28 HIGH-3) --------------------------------------------
+# --- Argument types --------------------------------------------
 #
 # The catalog ships argument names without types, so a caller guessing a type
 # wrong is the expected path, not the exotic one. Dispatch therefore validates

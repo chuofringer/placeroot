@@ -1,7 +1,5 @@
 # PlaceRoot Roadmap
 
-Tracked on the [project board](https://github.com/users/chuofringer/projects/2).
-
 ## Design rules
 
 1. **Answers, not data.** Every tool response fits in ~2K tokens. Large results
@@ -38,8 +36,7 @@ tests, and a hardcoded upstream release.
 - [x] `admin_lookup` — point → admin hierarchy (#11)
 - [x] `compare_areas`, `within_distance` (#12, #13)
 - [x] `simplify_geometry` — the payload tool (#14)
-- [x] Expose GERS ids in every tool response — stable place references, no
-      competitor surfaces them (#25)
+- [x] Expose GERS ids in every tool response — stable place references (#25)
 
 ## v0.3 — capabilities nobody else has keyless (core shipped 2026-08-06)
 
@@ -62,31 +59,6 @@ tests, and a hardcoded upstream release.
       scripts/mirror_theme.py, PLACEROOT_UPSTREAM_BASE, docs/MIRROR.md —
       bucket + the 10.5 GB transfer are the owner-side remainder)
 - [ ] Live layers: transit feeds, weather context
-
-## Competitive watch (verified 2026-08-06)
-
-A three-track market re-verification confirmed the
-category position: no other project ships token-budgeted answers, GERS ids in every
-response, keyless Overture geocoding, keyless global own-graph isochrones, or
-self-contained offline map artifacts. The position is features, not a moat — two
-adjacent projects appeared within three weeks and one the day of the check. Standing
-watch items, none blocking:
-
-- **sparkgeo/geo-mcp-servers** — curated tracker of 77 geo MCP servers; our listing
-  target and the category radar. Check on each release.
-- **capan/isochrone** — keyless own-graph isochrones (Berlin-only, pedestrian-only);
-  the nearest conceptual neighbor to our routing stack.
-- **thatapicompany/overture-maps-mcp** — keyed hosted-API wrapper claiming
-  "token-efficient summaries"; first competitor gesturing at our headline.
-- **Camino AI** — commercial "location intelligence for agents" startup, keyed/metered.
-- **Google Maps Grounding Lite** — free while Experimental; a GA pricing decision
-  ($2.80–7.00/1K published as potential) changes the cost-comparison story.
-- **Overture first-party tooling** — ORATOR is still an SF-Bay prototype; any move
-  toward an official Overture MCP server changes the competitive picture more
-  than anything else on this list.
-
-The empty "overture" search in the official MCP registry is the clock: #16 ships
-before someone else fills it.
 
 ## Relationships, not dependencies
 

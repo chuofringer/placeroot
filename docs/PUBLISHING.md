@@ -94,8 +94,9 @@ rejected.
 ## Desktop Extension bundle (.mcpb, issue #233)
 
 `site/placeroot.mcpb` is the one-click install for Claude Desktop's **Chat**
-surface, served publicly from placeroot.dev (release assets aren't reachable
-by visitors while the repo is private). It is a committed build artifact:
+surface, served publicly from placeroot.dev (a stable URL that install
+instructions can point at, independent of GitHub). It is a committed build
+artifact:
 
 ```bash
 uv run python scripts/build_mcpb.py site/placeroot.mcpb   # rebuild after a version bump

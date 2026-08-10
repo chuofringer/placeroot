@@ -110,10 +110,6 @@ jobs:
       # older npm. Upgrade, then publish — auth is via the OIDC token, so there
       # is no token to leak and no one-time-password prompt (which is what
       # blocked the automation-token path, EOTP).
-      # NOTE: no --provenance. Sigstore provenance requires a PUBLIC source
-      # repository ("Unsupported GitHub Actions source repository visibility:
-      # private"); this repo is private, so provenance is impossible and the
-      # flag hard-fails the publish. 0.3.0 shipped this same way, sans flag.
       # Requires a configured trusted publisher on npmjs.com for this repo +
       # workflow; see docs/PUBLISHING.md.
       - name: Upgrade npm for trusted publishing
@@ -130,14 +126,13 @@ jobs:
           if npm view "placeroot@${VERSION}" version >/dev/null 2>&1; then
             echo "placeroot@${VERSION} is already on npm — nothing to publish."
           else
-            npm publish --access public
+            npm publish --access public --provenance
           fi
 
   # The Desktop Extension bundle (#233): rebuilt from the tagged tree and
   # attached to the release, so repo users get the exact artifact the tag
-  # describes. The public download stays site/placeroot.mcpb on
-  # placeroot.dev (the repo is private, so release assets aren't reachable
-  # by visitors); tests/test_mcpb_bundle.py keeps that copy in sync.
+  # describes. The canonical public download stays site/placeroot.mcpb on
+  # placeroot.dev; tests/test_mcpb_bundle.py keeps that copy in sync.
   mcpb:
     needs: verify
     if: github.event_name == 'release'
