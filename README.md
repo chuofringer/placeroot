@@ -176,17 +176,19 @@ A few things that set it apart:
 - **Fast repeat queries.** Frequently used data is cached locally, so repeat questions answer in milliseconds and keep working offline.
 - **Self-hostable end to end.** Run it locally, serve it over HTTP, or point it at your own copy of the data — no dependency on anyone else's service.
 
-## Recreation places (optional)
+## Recreation places
 
-Overture's places theme is derived from business listings, which makes it strong on businesses and thin on the places a family goes on a Saturday — playgrounds, neighbourhood parks, dog parks, beaches. Those features aren't missing from Overture, though; they're in a different theme. Overture's `base` theme is a direct conflation of OpenStreetMap, and PlaceRoot already queries it for `land_use_at` and `infrastructure_near`. One variable points the places tools at it too:
+Overture's places theme is derived from business listings, which makes it strong on businesses and thin on the places a family goes on a Saturday — playgrounds, neighbourhood parks, dog parks, beaches. Those features aren't missing from Overture, though; they're in a different theme. Overture's `base` theme is a direct conflation of OpenStreetMap, and PlaceRoot already queries it for `land_use_at` and `infrastructure_near`. The places tools read it too, by default.
+
+Nothing is downloaded, built, or hosted — it's one more live scan of the same public Overture release, and it roughly **2.5x**es playground coverage (1,552 vs 674 across New York City in release `2026-07-22.0`, with 1,013 of them more than 150 m from any places-theme playground). Every places tool answers from both at once, with no other change: same tools, same response shape, same category filters.
+
+The cost is a second dataset scan per places query (cached like everything else), and these rows carry no `confidence` or `operating_status` and are often unnamed — an unnamed playground comes back with `name: null` rather than being dropped. If you'd rather have the latency than the coverage:
 
 ```bash
-export PLACEROOT_RECREATION_LAYER=1
+export PLACEROOT_RECREATION_LAYER=0
 ```
 
-Nothing is downloaded, built, or hosted — it's one more live scan of the same public Overture release, and it roughly **2.5x**es playground coverage (1,552 vs 674 across New York City in release `2026-07-22.0`, with 1,013 of them more than 150 m from any places-theme playground). Every places tool answers from both at once, with no other change: same tools, same response shape, same category filters. Unset the variable and PlaceRoot is one scan over one theme again — the default stays the fastest correct thing.
-
-It is opt-in because it costs a second dataset scan per query, and because these rows carry no `confidence` or `operating_status` and are often unnamed. `data_version` reports the layer whenever it's on. Full details, including why live Overpass queries and raw OSM Parquet were measured and rejected: [docs/RECREATION.md](docs/RECREATION.md).
+`data_version` reports the layer whenever it's active. Full details, including why live Overpass queries and raw OSM Parquet were measured and rejected: [docs/RECREATION.md](docs/RECREATION.md).
 
 ## Development
 
@@ -205,7 +207,7 @@ uv run ruff check .
 - [docs/PUBLISHING.md](docs/PUBLISHING.md) — how releases reach PyPI + npm
 - [docs/WEBSITE.md](docs/WEBSITE.md) — the marketing site: serve locally and deploy
 - [docs/MIRROR.md](docs/MIRROR.md) — running your own mirror of the data
-- [docs/RECREATION.md](docs/RECREATION.md) — the optional recreation layer, and why it reads Overture's base theme rather than OSM directly
+- [docs/RECREATION.md](docs/RECREATION.md) — the recreation layer, and why it reads Overture's base theme rather than OSM directly
 
 ## Contact
 

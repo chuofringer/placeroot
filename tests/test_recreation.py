@@ -131,8 +131,12 @@ def _ids(rows):
 # --- the default path is untouched -----------------------------------------
 
 
-def test_layer_off_by_default(base_fixtures):
-    """Fixtures present but the variable unset: results are places-only."""
+def test_layer_can_be_switched_off(base_fixtures):
+    """Fixtures present but the layer off: results are places-only.
+
+    The suite pins it off (see conftest.recreation_layer_off), which is what
+    every other test module's ground-truth counts depend on.
+    """
     assert recreation.enabled() is False
     rows = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=25)
     assert not _ids(rows) & {"lu-play-named", "lu-park", "land-beach"}
@@ -143,22 +147,34 @@ def test_union_branches_empty_when_disabled(base_fixtures):
     assert recreation.union_branches((-74.0, 40.0, -73.0, 41.0)) == []
 
 
+def test_the_layer_is_on_by_default(monkeypatch):
+    """The variable is an opt-out: unset means on."""
+    monkeypatch.delenv(recreation.ENV_VAR, raising=False)
+    recreation.set_enabled(None)
+    assert recreation.enabled() is True
+
+
 @pytest.mark.parametrize(
     "value,expected",
-    [("1", True), ("true", True), ("TRUE", True), ("yes", True), ("on", True),
-     ("0", False), ("false", False), ("", False), ("  ", False), ("maybe", False)],
+    [("0", False), ("false", False), ("FALSE", False), ("no", False), ("off", False),
+     (" off ", False),
+     ("1", True), ("true", True), ("yes", True), ("on", True), ("maybe", True),
+     # An empty value is a shell accident (`FOO= placeroot`), not a
+     # considered "no", so it reads as the default rather than as off.
+     ("", True), ("  ", True)],
 )
 def test_env_var_parsing(monkeypatch, value, expected):
     monkeypatch.setenv(recreation.ENV_VAR, value)
+    recreation.set_enabled(None)
     assert recreation.enabled() is expected
 
 
 def test_set_enabled_none_restores_env(monkeypatch):
-    monkeypatch.setenv(recreation.ENV_VAR, "1")
-    recreation.set_enabled(False)
-    assert recreation.enabled() is False
-    recreation.set_enabled(None)
+    monkeypatch.setenv(recreation.ENV_VAR, "0")
+    recreation.set_enabled(True)
     assert recreation.enabled() is True
+    recreation.set_enabled(None)
+    assert recreation.enabled() is False
 
 
 # --- what the layer adds ---------------------------------------------------
@@ -376,10 +392,10 @@ def test_every_mapped_slug_exists_in_the_bundled_taxonomy():
             assert categories.hierarchy_for(slug), f"{class_} -> {slug} not in the taxonomy"
 
 
-def test_the_suite_neutralizes_an_ambient_layer(monkeypatch):
-    """A maintainer with PLACEROOT_RECREATION_LAYER exported in their shell
-    gets the same results from the suite as CI does — the autouse fixture in
-    conftest clears it, including for @live tests."""
+def test_the_suite_pins_the_layer_off(monkeypatch):
+    """Every test module other than this one queries places-only fixtures,
+    so the autouse fixture in conftest pins the layer off — including for
+    @live tests, which would otherwise pay for a second live scan."""
     assert recreation.enabled() is False
 
 

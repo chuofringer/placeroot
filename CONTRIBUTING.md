@@ -61,9 +61,10 @@ be asked to change direction, however good the code is.
 3. **Open data only, keyless by default.** Overture Maps GeoParquet and
    services that permit anonymous use. Nothing on the critical path may
    depend on an API key, another project's roadmap, or someone else's rate
-   limit. An opt-in second read of open data an operator switches on is
-   compatible with this — see the recreation layer
-   (`docs/RECREATION.md`), which changes nothing on the critical path.
+   limit. A second read of the *same* keyless open data is compatible with
+   this — see the recreation layer (`docs/RECREATION.md`), which adds no
+   key, no account and no third-party service, only another scan of the
+   Overture release already on the critical path.
 4. **Honest responses.** If a result is clamped, degraded, truncated, or
    outside data coverage, the response says so explicitly rather than
    returning a silently partial answer.

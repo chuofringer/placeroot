@@ -45,11 +45,22 @@ built OSM extract. Both were tried and rejected:
 
 ## What the layer does and does not change
 
-Enabled by setting `PLACEROOT_RECREATION_LAYER=1`. Unset (the default),
-nothing here runs and the places tools are byte-for-byte what they were:
-one theme, one scan. It is opt-in because it costs a second S3 dataset scan
-on every places query, and doubling the latency of `find_places` for
-everyone is not a trade the majority of callers would choose.
+**On by default.** `PLACEROOT_RECREATION_LAYER=0` (or `false`/`no`/`off`)
+turns it back off; anything else, including leaving the variable unset,
+leaves it on. The variable is an opt-*out*.
+
+The cost it buys the coverage with is one extra dataset scan per places
+query. That is not free, and an install that cares more about `find_places`
+latency than about playgrounds should set the variable to `0`. It goes
+through the same tile cache as everything else, under land_use.py's
+existing `base_<type>` keys, so the second and later queries over an area
+are served locally.
+
+It also adds a failure surface: a places query now depends on the base
+theme being readable as well as the places theme. A base type whose schema
+drifted is dropped and logged (see union_branches) rather than failing the
+query, but an unreachable dataset fails the way an unreachable places
+dataset already does. That is the trade default-on makes.
 
 Rows arrive with real GERS ids (base-theme features are GERS-registered
 like any other Overture feature), so a row composes with `gers_lookup` and
@@ -160,17 +171,19 @@ ESSENTIAL_COLUMNS = {"bbox", "class"}
 _UNSET = object()
 _enabled_override = _UNSET
 
-# Env values that turn the layer on. Anything else (including "0", "false"
-# and the empty string) leaves it off, so a shell that exports the variable
-# empty behaves like an unset one.
-_TRUTHY = {"1", "true", "yes", "on"}
+# Env values that turn the layer *off*. The layer is on by default, so this
+# variable is an opt-out and anything not in this set — including an unset
+# variable and one a shell exported empty — leaves the layer on. An empty
+# value reading as "on" is deliberate: `FOO= placeroot` is a shell accident,
+# not a considered "no", and the safe reading of an accident is the default.
+_FALSEY = {"0", "false", "no", "off"}
 
 
 def enabled() -> bool:
-    """Whether the recreation layer is active for this process."""
+    """Whether the recreation layer is active for this process. Default True."""
     if _enabled_override is not _UNSET:
         return bool(_enabled_override)
-    return os.environ.get(ENV_VAR, "").strip().lower() in _TRUTHY
+    return os.environ.get(ENV_VAR, "").strip().lower() not in _FALSEY
 
 
 def set_enabled(value: bool | None) -> None:

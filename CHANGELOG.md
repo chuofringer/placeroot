@@ -9,16 +9,18 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
-- Optional recreation layer (`PLACEROOT_RECREATION_LAYER`): the places
-  tools additionally read Overture's OSM-derived `base` theme
-  (`type=land_use`, `type=land`) for the recreation areas that
-  listings-derived data under-counts — playgrounds, parks, dog parks,
-  nature reserves, beaches. ~2.5x the playground coverage (1,552 vs 674
-  across New York City), live, with no build step, no download and no
-  hosting: it is one more scan of the release PlaceRoot already queries.
-  Opt-in because it costs a second scan per query; unset, the critical
-  path is unchanged. Rows carry real GERS ids but no confidence or
-  operating_status, and unnamed ones are returned rather than dropped.
+- Recreation layer, **on by default**: the places tools additionally read
+  Overture's OSM-derived `base` theme (`type=land_use`, `type=land`) for
+  the recreation areas that listings-derived data under-counts —
+  playgrounds, parks, dog parks, nature reserves, beaches. ~2.5x the
+  playground coverage (1,552 vs 674 across New York City), live, with no
+  build step, no download and no hosting: it is one more scan of the
+  release PlaceRoot already queries. Costs a second dataset scan per
+  places query (tile-cached like every other read) and widens the failure
+  surface to the base theme; set `PLACEROOT_RECREATION_LAYER=0` to
+  restore the previous single-theme behavior exactly. Rows carry real
+  GERS ids but no confidence or operating_status, and unnamed ones are
+  returned with `name: null` rather than dropped.
   See [docs/RECREATION.md](docs/RECREATION.md)
 - `geocode_address`: street-level forward search — "1600 Amphitheatre
   Parkway, Mountain View" → coordinates, city-bounded and deduplicated

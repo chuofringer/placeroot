@@ -44,23 +44,26 @@ def no_ambient_tool_selection(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def no_ambient_recreation_layer(monkeypatch):
-    """Every test sees the recreation layer off unless it opts in.
+def recreation_layer_off(monkeypatch):
+    """Every test runs with the recreation layer off unless it opts in.
 
-    PLACEROOT_RECREATION_LAYER is a variable the README tells operators to
-    export, so a maintainer running the suite in a shell where they have it
-    set would otherwise get base-theme rows unioned into the fixture and a
-    spread of unrelated failures (find_places' ground-truth counts,
-    summarize_area's totals, data_version's payload). Same reasoning as
-    no_ambient_tool_selection above, and not folded into offline_data
-    because that one returns early for @live tests — which hit real S3 and
-    would pay for a second live scan they never asked for.
+    The layer is on by default in production, but the fixtures the suite
+    queries only cover theme=places: with the layer live, every existing
+    places test would try to read theme=base from real S3 (there is no
+    base-theme fixture to fall back to), and @live tests would pay for a
+    second live scan they never asked for. So the default is pinned off
+    here and test_recreation.py switches it back on against its own
+    base-theme fixtures — which is also what keeps every other module's
+    ground-truth counts stable.
+
+    Not folded into offline_data because that one returns early for @live
+    tests, which need this just as much.
 
     A test's own monkeypatch.setenv or recreation.set_enabled still wins;
     the module-level override is reset afterwards either way.
     """
     monkeypatch.delenv(recreation.ENV_VAR, raising=False)
-    recreation.set_enabled(None)
+    recreation.set_enabled(False)
     yield
     recreation.set_enabled(None)
 

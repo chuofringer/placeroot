@@ -220,7 +220,7 @@ def _check_schema(
 def _with_recreation(
     source: str, bbox: tuple[float, float, float, float] | None, theme: str = THEME
 ) -> tuple[str, bool]:
-    """`source`, unioned with the opt-in recreation layer when it is enabled.
+    """`source`, unioned with the recreation layer unless it is switched off.
 
     Returns (sql, layer_active). layer_active is what tells a caller the
     marker column exists and can be referenced — the layer being *enabled*
@@ -230,8 +230,9 @@ def _with_recreation(
     The layer is a second read of Overture's *base* theme — the OSM-derived
     playground/park/beach polygons that the listings-derived places theme
     under-counts — projected into the places row shape. See recreation.py
-    for what it carries and why. Off by default; then this returns `source`
-    untouched and a places query is the single scan it has always been.
+    for what it carries and why. It is on by default;
+    PLACEROOT_RECREATION_LAYER=0 turns it off, and then this returns
+    `source` untouched and a places query is a single scan again.
 
     A parenthesized `UNION ALL BY NAME` subquery rather than one
     `read_parquet([...])` over both: the two sides are different datasets
@@ -265,7 +266,7 @@ def _places_source(
     """SQL FROM-clause source for a places query, and whether the recreation
     layer is part of it: local cache tiles, or upstream.
 
-    The recreation layer (when enabled) is appended *after* cache
+    The recreation layer (unless switched off) is appended *after* cache
     resolution: a places tile materializes theme=places rows only, so a
     cached tile is always a faithful copy of that dataset and turning the
     layer off never leaves base-theme rows behind in it. The layer's own

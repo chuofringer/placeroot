@@ -1,12 +1,15 @@
-# The optional recreation layer
+# The recreation layer
 
-**One environment variable. No build, no download, no hosting.**
+**On by default. No build, no download, no hosting, nothing to switch on.**
+
+To turn it *off*:
 
 ```bash
-export PLACEROOT_RECREATION_LAYER=1
+export PLACEROOT_RECREATION_LAYER=0
 ```
 
-That is the whole runbook. There is no step 2.
+That is the whole runbook. The variable is an opt-out — unset (or any value
+other than `0`/`false`/`no`/`off`) leaves the layer on.
 
 ## Why it exists
 
@@ -40,14 +43,22 @@ already reading.
 
 ## What it costs
 
-One extra S3 dataset scan per places query. That is why it is **opt-in**:
-doubling `find_places` latency is not a trade most callers would choose, and
-PlaceRoot's default has to stay the fastest correct thing. Unset the variable
-and the places tools are byte-for-byte what they were — one theme, one scan.
+One extra dataset scan per places query, and it is worth being explicit that
+this is not free: a cold `find_places` pays for two remote scans instead of
+one. The layer's reads go through the same tile cache as everything else,
+under the `base_land_use` / `base_land` keys `land_use_at` already warms, so
+the second and later queries over an area are served locally.
 
-The layer's reads go through the same tile cache as everything else, under
-the `base_land_use` / `base_land` keys `land_use_at` already warms, so a
-second query over the same area is served locally.
+It also widens the failure surface. A places query now depends on the base
+theme being readable as well as the places theme. A base type whose *schema*
+drifted is dropped and logged, and the places answer still lands (with
+`data_version` naming the dropped type) — but an unreachable dataset fails
+the way an unreachable places dataset already does.
+
+An install that cares more about `find_places` latency than about
+playgrounds should set `PLACEROOT_RECREATION_LAYER=0`. Then the places tools
+are byte-for-byte what they were before this layer existed: one theme, one
+scan.
 
 ## Which tools change
 
@@ -91,8 +102,9 @@ places rows behave (one point per feature) and is the same approximation
 
 **`data_version` says when it's on.** The `data_version` tool and the
 `placeroot://data-version` resource both carry a `recreation_layer` block
-whenever the variable is set, listing the categories it contributes, so an
-answer's provenance is never invisible.
+whenever the layer is active, listing the categories it contributes, so an
+answer's provenance is never invisible — and its absence is how a caller
+knows the layer was switched off.
 
 ## What it deliberately leaves out
 

@@ -114,9 +114,10 @@ def recreation_payload() -> dict | None:
         "source": "Overture base theme (types: " + ", ".join(recreation.SOURCES) + ")",
         "categories": recreation.CATEGORIES,
         "note": (
-            "Opt-in via " + recreation.ENV_VAR + ". Adds OSM-derived recreation "
-            "areas the listings-derived places theme under-counts. These rows carry "
-            "no confidence or operating_status, and may have no name."
+            "On by default; set " + recreation.ENV_VAR + "=0 to turn it off. "
+            "Adds OSM-derived recreation areas the listings-derived places theme "
+            "under-counts. These rows carry no confidence or operating_status, "
+            "and may have no name."
         ),
     }
     degraded = recreation.degraded_types()
