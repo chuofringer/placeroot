@@ -66,8 +66,10 @@ be asked to change direction, however good the code is.
    outside data coverage, the response says so explicitly rather than
    returning a silently partial answer.
 
-See [ROADMAP.md](ROADMAP.md) for where the project is going and what is
-deliberately out of scope.
+Permanently out of scope: **hazard- and property-risk scoring.** PlaceRoot
+answers "what is where" questions. It will not ship flood/fire/wind risk
+scores, property risk ratings, or insurance-flavored analytics. For what is
+planned next, see the open issues.
 
 ## Proposing a new tool
 

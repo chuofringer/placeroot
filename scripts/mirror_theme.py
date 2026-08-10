@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Mirrors one theme+type of an Overture release to our own storage (#20).
 
-Owns the tooling side of "no hard dependency on anyone else" (ROADMAP.md
-rule #3) for the Overture bucket itself: an upstream layout change, region
+Owns the tooling side of "open data only, keyless by default" (CONTRIBUTING.md
+design rule #3) for the Overture bucket itself: an upstream layout change, region
 outage, or listing-format change should be an inconvenience (re-point
 PLACEROOT_UPSTREAM_BASE at a mirror), not an outage. The bucket/account this
 writes to is the operator's call — see docs/MIRROR.md for the runbook

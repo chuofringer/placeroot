@@ -1,7 +1,7 @@
 """Token-budget enforcement for tool responses.
 
 Every tool answer should fit an agent's working context — see the "answers,
-not data" rule in ROADMAP.md. We estimate size with a chars/4 heuristic:
+not data" rule in CONTRIBUTING.md. We estimate size with a chars/4 heuristic:
 not a real tokenizer, but a dependency-free approximation close enough for
 a soft budget, and cheap enough to run on every response.
 

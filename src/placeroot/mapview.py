@@ -18,7 +18,7 @@ matter, only that holes are listed as additional rings.
 The MCP tool boundary (server.render_map) returns only a tiny
 {"path", "bytes", "features_rendered", "skipped_features"} envelope (plus
 "truncated": True when applicable) so the (potentially large) HTML never
-counts against the token budget in ROADMAP.md's "answers, not data dumps"
+counts against the token budget in CONTRIBUTING.md's "answers, not data"
 rule — the file on disk is the artifact.
 
 Vertex cap (#74, defense in depth): render_map's cost is linear in feature/
