@@ -350,6 +350,8 @@ def union_branches(bbox: tuple[float, float, float, float] | None) -> list[str]:
 
     branches = []
     for type_, class_map in SOURCES.items():
+        if _reaches_past_a_pinned_deployment(type_):
+            continue
         glob = _upstream_glob(type_)
         missing = set(overture.missing_columns(glob, REQUIRED_COLUMNS))
         essential_missing = sorted(missing & ESSENTIAL_COLUMNS)
@@ -364,6 +366,46 @@ def union_branches(bbox: tuple[float, float, float, float] | None) -> list[str]:
     return branches
 
 
+# One warning per (type, places dataset) pair, not one per query: a pinned
+# deployment would otherwise log this on every find_places call forever.
+_pinned_warned: set[tuple[str, str]] = set()
+
+
+def _reaches_past_a_pinned_deployment(type_: str) -> bool:
+    """Whether reading this base type would ignore the deployment's own config.
+
+    The layer follows the places dataset. If an operator (or the offline
+    demo, or a mirror deployment) pointed places at a local extract via
+    PLACEROOT_DATA_PATH and said nothing about theme=base, resolving base to
+    the live S3 release would reach straight past that configuration — and
+    a query that was meant to be local and fast becomes a planet-scale
+    remote scan. `examples/site_selection/run_demo.py --offline` is exactly
+    this shape, and it is how the case was found.
+
+    So: places pinned and this base type not pinned means the branch is
+    skipped, with one warning naming the variable that would fix it. Pin
+    base too (PLACEROOT_DATA_PATH_BASE, or scripts/mirror_theme.py) and the
+    layer comes back.
+    """
+    from placeroot import overture
+
+    if not overture.dataset_is_pinned(overture.THEME, "place"):
+        return False
+    if overture.dataset_is_pinned(THEME, type_):
+        return False
+    key = (type_, overture._upstream_glob(overture.THEME, "place"))
+    if key not in _pinned_warned:
+        _pinned_warned.add(key)
+        logger.warning(
+            "recreation layer: theme=places is pinned to a local dataset but "
+            "theme=%s/type=%s is not, so reading it would mean a live S3 scan this "
+            "deployment did not ask for — skipping that branch. Set "
+            "PLACEROOT_DATA_PATH_BASE to include it, or %s=0 to silence this.",
+            THEME, type_, ENV_VAR,
+        )
+    return True
+
+
 def degraded_types() -> list[str]:
     """Base-theme types the layer cannot currently read, for data_version.
 
@@ -376,6 +418,8 @@ def degraded_types() -> list[str]:
 
     degraded = []
     for type_ in SOURCES:
+        if _reaches_past_a_pinned_deployment(type_):
+            continue
         missing = set(overture.missing_columns(_upstream_glob(type_), REQUIRED_COLUMNS))
         if missing & ESSENTIAL_COLUMNS:
             degraded.append(type_)

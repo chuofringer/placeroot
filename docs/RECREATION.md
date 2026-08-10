@@ -60,6 +60,27 @@ playgrounds should set `PLACEROOT_RECREATION_LAYER=0`. Then the places tools
 are byte-for-byte what they were before this layer existed: one theme, one
 scan.
 
+## The layer follows the places dataset
+
+If you point PlaceRoot at your own copy of the data — `PLACEROOT_DATA_PATH`
+at a local extract, or a mirror built with `scripts/mirror_theme.py` (see
+[MIRROR.md](MIRROR.md)) — and say nothing about `theme=base`, the layer
+**skips itself** rather than resolving base to the live S3 release. Pinning
+places to a local file is not consent to a planet-scale remote scan of a
+different theme, and a query that was meant to be local and fast would
+quietly stop being either.
+
+You get one warning naming the fix. To have the layer in a pinned
+deployment, mirror or extract the base theme too and set:
+
+```bash
+export PLACEROOT_DATA_PATH_BASE=/path/to/base
+```
+
+Or set `PLACEROOT_RECREATION_LAYER=0` if you don't want the layer there at
+all. A deployment that pins nothing — the ordinary install — is unaffected
+and reads both themes from the release.
+
 ## Which tools change
 
 Every places tool, because the change lives in the query layer's shared

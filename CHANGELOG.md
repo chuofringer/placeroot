@@ -18,7 +18,10 @@ fixing behavior is patch.
   release PlaceRoot already queries. Costs a second dataset scan per
   places query (tile-cached like every other read) and widens the failure
   surface to the base theme; set `PLACEROOT_RECREATION_LAYER=0` to
-  restore the previous single-theme behavior exactly. Rows carry real
+  restore the previous single-theme behavior exactly. A deployment that
+  pins places to its own dataset (`PLACEROOT_DATA_PATH`, a mirror) without
+  pinning `theme=base` skips the layer rather than reaching past that
+  configuration to live S3 — set `PLACEROOT_DATA_PATH_BASE` to include it. Rows carry real
   GERS ids but no confidence or operating_status, and unnamed ones are
   returned with `name: null` rather than dropped.
   See [docs/RECREATION.md](docs/RECREATION.md)

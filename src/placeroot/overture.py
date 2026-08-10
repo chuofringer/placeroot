@@ -141,6 +141,22 @@ def _upstream_glob(theme: str = THEME, type_: str = "place") -> str:
     return f"{_upstream_base()}/{active_release}/theme={theme}/type={type_}/*"
 
 
+def dataset_is_pinned(theme: str = THEME, type_: str = "place") -> bool:
+    """Whether theme/type_ resolves to a caller-supplied dataset rather than
+    the discovered live release — a test fixture override, or a
+    PLACEROOT_DATA_PATH[_<THEME>] pointing at a local extract or a mirror.
+
+    recreation.py uses this to keep its layer from reaching past a
+    deployment's own configuration: an operator who pinned places at a
+    local file did not thereby agree to a live S3 scan of theme=base.
+    """
+    if _override_key(theme, type_) in _data_path_overrides or theme in _data_path_overrides:
+        return True
+    if os.environ.get(_env_var_for_theme(theme)):
+        return True
+    return bool(theme == "transportation" and os.environ.get(_TRANSPORTATION_LEGACY_ENV_VAR))
+
+
 def conn() -> duckdb.DuckDBPyConnection:
     """The shared DuckDB connection, for other modules (e.g. geocode.py) that
     query themes beyond places but want the same httpfs setup and warm cache.

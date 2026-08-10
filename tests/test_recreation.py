@@ -417,3 +417,46 @@ def test_name_search_sees_the_layer_like_find_places_does(layer_on):
 
     rows = geocode._query_places_fallback("Riverside Playground")
     assert "lu-play-named" in {r["id"] for r in rows}
+
+
+# --- the layer follows the places dataset ----------------------------------
+
+
+def test_a_places_only_pin_does_not_drag_the_base_theme_live(tmp_path, monkeypatch, caplog):
+    """The shape examples/site_selection/run_demo.py --offline has, and the
+    reason this rule exists: PLACEROOT_DATA_PATH pins places at a local file
+    and says nothing about theme=base. Resolving base to the live release
+    there would turn a deliberately-local query into a planet-scale remote
+    scan, so the branch is skipped instead — with one warning naming the
+    variable that would bring it back."""
+    monkeypatch.setenv("PLACEROOT_DATA_PATH", str(tmp_path / "places.parquet"))
+    recreation.set_enabled(True)
+    recreation._pinned_warned.clear()
+    try:
+        with caplog.at_level("WARNING"):
+            assert recreation.union_branches((-74.0, 40.0, -73.0, 41.0)) == []
+        assert "PLACEROOT_DATA_PATH_BASE" in caplog.text
+        assert recreation.degraded_types() == []
+    finally:
+        recreation.set_enabled(None)
+        recreation._pinned_warned.clear()
+
+
+def test_pinning_the_base_theme_too_brings_the_layer_back(layer_on):
+    """Both pinned — what every other test in this module runs under — is the
+    configuration where the layer is expected to read the local datasets."""
+    assert overture.dataset_is_pinned("places", "place") is True
+    assert overture.dataset_is_pinned("base", "land_use") is True
+    assert len(recreation.union_branches((-74.0, 40.0, -73.0, 41.0))) == 2
+
+
+def test_an_unpinned_deployment_is_unaffected(monkeypatch):
+    """Nothing pinned at all — the ordinary live install — reads both themes
+    from the release, which is the whole point of the layer."""
+    monkeypatch.delenv("PLACEROOT_DATA_PATH", raising=False)
+    overture.set_data_path(None)
+    recreation.set_enabled(True)
+    try:
+        assert recreation._reaches_past_a_pinned_deployment("land_use") is False
+    finally:
+        recreation.set_enabled(None)
