@@ -15,7 +15,7 @@ os.environ.pop("PLACEROOT_TOOLS", None)
 import duckdb  # noqa: E402
 import pytest  # noqa: E402
 
-from placeroot import buildings, gers, overture, release, routing  # noqa: E402
+from placeroot import buildings, gers, overture, recreation, release, routing  # noqa: E402
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "places.parquet"
 # type=division_area (polygons; consumed by divisions.py's admin_lookup) and
@@ -44,25 +44,25 @@ def no_ambient_tool_selection(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def no_ambient_supplement(monkeypatch):
-    """Every test sees the supplemental places layer off unless it opts in.
+def no_ambient_recreation_layer(monkeypatch):
+    """Every test sees the recreation layer off unless it opts in.
 
-    PLACEROOT_PLACES_SUPPLEMENT is a variable the README tells operators to
+    PLACEROOT_RECREATION_LAYER is a variable the README tells operators to
     export, so a maintainer running the suite in a shell where they have it
-    set would otherwise get supplement rows unioned into the fixture and
-    eight unrelated failures (find_places' ground-truth counts,
+    set would otherwise get base-theme rows unioned into the fixture and a
+    spread of unrelated failures (find_places' ground-truth counts,
     summarize_area's totals, data_version's payload). Same reasoning as
     no_ambient_tool_selection above, and not folded into offline_data
     because that one returns early for @live tests — which hit real S3 and
-    have even less business seeing a local supplement.
+    would pay for a second live scan they never asked for.
 
-    A test's own monkeypatch.setenv or overture.set_supplement_path still
-    wins; the module-level override is reset afterwards either way.
+    A test's own monkeypatch.setenv or recreation.set_enabled still wins;
+    the module-level override is reset afterwards either way.
     """
-    monkeypatch.delenv("PLACEROOT_PLACES_SUPPLEMENT", raising=False)
-    overture.set_supplement_path(None)
+    monkeypatch.delenv(recreation.ENV_VAR, raising=False)
+    recreation.set_enabled(None)
     yield
-    overture.set_supplement_path(None)
+    recreation.set_enabled(None)
 
 
 @pytest.fixture(autouse=True)

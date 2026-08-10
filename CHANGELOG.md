@@ -9,14 +9,17 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
-- Optional supplemental places layer (`PLACEROOT_PLACES_SUPPLEMENT`): a
-  locally built GeoParquet of family and recreation places that
-  business-listing data is thin on — playgrounds, splash pads, beaches,
-  trailheads, campgrounds — from OpenStreetMap (ODbL) and the IMLS Public
-  Libraries Survey (public domain), queried alongside Overture by every
-  places tool. Built by `scripts/build_supplement.py`; opt-in, never
-  distributed, and the critical path stays Overture-only and keyless. See
-  [docs/SUPPLEMENT.md](docs/SUPPLEMENT.md)
+- Optional recreation layer (`PLACEROOT_RECREATION_LAYER`): the places
+  tools additionally read Overture's OSM-derived `base` theme
+  (`type=land_use`, `type=land`) for the recreation areas that
+  listings-derived data under-counts — playgrounds, parks, dog parks,
+  nature reserves, beaches. ~2.5x the playground coverage (1,552 vs 674
+  across New York City), live, with no build step, no download and no
+  hosting: it is one more scan of the release PlaceRoot already queries.
+  Opt-in because it costs a second scan per query; unset, the critical
+  path is unchanged. Rows carry real GERS ids but no confidence or
+  operating_status, and unnamed ones are returned rather than dropped.
+  See [docs/RECREATION.md](docs/RECREATION.md)
 - `geocode_address`: street-level forward search — "1600 Amphitheatre
   Parkway, Mountain View" → coordinates, city-bounded and deduplicated
   (#225, #229)

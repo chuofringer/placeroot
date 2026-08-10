@@ -1707,10 +1707,12 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
     anchor, this still runs (row-capped by the existing LIMIT, same as
     before #83) rather than dropping a genuine name-only query to nothing.
 
-    Reads through overture._with_supplement so the opt-in supplemental
-    places layer (docs/SUPPLEMENT.md) is in scope here too: a playground
-    find_places returns but geocode/resolve_place can't name is a
-    surface-dependent answer, which is worse than not having the layer.
+    Reads through overture._with_recreation so the opt-in recreation layer
+    (docs/RECREATION.md) is in scope here too: a playground find_places
+    returns but geocode/resolve_place can't name is a surface-dependent
+    answer, which is worse than not having the layer. There is no bbox to
+    bound this by — it is a name search — so the layer's own reads fall
+    back to whatever base-theme tiles are already cached, then upstream.
     """
     glob = overture.upstream_glob(theme="places", type_="place")
     cols = overture.probe_schema(glob)
@@ -1728,7 +1730,7 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
     sql = f"""
         SELECT id, names.primary AS name, bbox.ymin AS lat, bbox.xmin AS lon,
                coalesce(confidence, 0) AS confidence
-        FROM {overture._with_supplement(f"read_parquet('{glob}', hive_partitioning=1)")}
+        FROM {overture._with_recreation(f"read_parquet('{glob}', hive_partitioning=1)", None)[0]}
         WHERE {' AND '.join(filters)}
         ORDER BY confidence DESC
         LIMIT {DIVISION_OVERFETCH}

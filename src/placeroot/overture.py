@@ -29,7 +29,7 @@ import threading
 
 import duckdb
 
-from placeroot import budget, cache, db, geo, release
+from placeroot import budget, cache, db, geo, recreation, release
 from placeroot.errors import (  # noqa: F401 - re-exported; see below
     SchemaDegraded,
     UpstreamUnavailable,
@@ -217,106 +217,63 @@ def _check_schema(
     return missing
 
 
-# Opt-in supplemental places layer (docs/SUPPLEMENT.md). Points at a local
-# GeoParquet file, built by scripts/build_supplement.py, of family and
-# recreation places that business-listing data is thin on — playgrounds,
-# splash pads, beaches, trailheads, campgrounds. Unset (the default),
-# nothing below this line does anything: the critical path stays
-# Overture-only, keyless and zero-ETL.
-SUPPLEMENT_ENV_VAR = "PLACEROOT_PLACES_SUPPLEMENT"
+def _with_recreation(
+    source: str, bbox: tuple[float, float, float, float] | None, theme: str = THEME
+) -> tuple[str, bool]:
+    """`source`, unioned with the opt-in recreation layer when it is enabled.
 
-# Test-side override, mirroring _data_path_overrides/set_data_path. Sentinel
-# rather than None so a test can override the env var *back* to "no
-# supplement" (set_supplement_path(None) restores the env default instead).
-_UNSET = object()
-_supplement_override = _UNSET
+    Returns (sql, layer_active). layer_active is what tells a caller the
+    marker column exists and can be referenced — the layer being *enabled*
+    isn't enough, since a base-theme branch whose schema drifted is dropped
+    (recreation.union_branches) and would leave the column undefined.
 
+    The layer is a second read of Overture's *base* theme — the OSM-derived
+    playground/park/beach polygons that the listings-derived places theme
+    under-counts — projected into the places row shape. See recreation.py
+    for what it carries and why. Off by default; then this returns `source`
+    untouched and a places query is the single scan it has always been.
 
-def set_supplement_path(path: str | None) -> None:
-    """Point the query layer at a supplement file instead of reading the env var.
+    A parenthesized `UNION ALL BY NAME` subquery rather than one
+    `read_parquet([...])` over both: the two sides are different datasets
+    with different schemas, and the places side is read with
+    hive_partitioning=1, which DuckDB will not mix into a list with
+    anything else ("Hive partition mismatch ... key \"theme\" not found").
+    BY NAME fills the columns each branch lacks with NULL, which is the
+    truthful value on both sides. Filters still push down into every
+    branch — EXPLAIN over the fixtures shows the query's bbox predicate and
+    the layer's own class filter both reaching each READ_PARQUET, so a
+    places query does not turn into a full scan of the base theme.
 
-    Pass None to restore the default (the PLACEROOT_PLACES_SUPPLEMENT env
-    var, or no supplement at all). Intended for tests, mirroring
-    set_data_path.
-    """
-    global _supplement_override
-    _supplement_override = _UNSET if path is None else path
-
-
-def supplement_path() -> str | None:
-    """The active supplement file path, or None when the layer is off.
-
-    `~` is expanded: this variable is typically set in an MCP client's JSON
-    config (Claude Desktop, Cursor), which passes env values through to the
-    process verbatim without a shell to expand them — so a perfectly
-    reasonable "~/.placeroot/supplement.parquet" would otherwise arrive as a
-    literal path with a tilde directory in it and fail as "not found".
-    """
-    if _supplement_override is not _UNSET:
-        path = _supplement_override
-    else:
-        path = os.environ.get(SUPPLEMENT_ENV_VAR) or None
-    return os.path.expanduser(path) if path else None
-
-
-def _supplement_read() -> str | None:
-    """`read_parquet(...)` for the active supplement, or None when off.
-
-    Fails loudly rather than quietly answering Overture-only if the file
-    isn't there: an operator who set the variable is expecting those rows,
-    and a silently missing layer looks exactly like "the area has no
-    playgrounds" (CONTRIBUTING.md design rule #4).
-
-    The path is a SQL literal, not a bind parameter (read_parquet's argument
-    is part of the plan), so it goes through db._sql_str — an apostrophe in
-    a directory name is ordinary on macOS and would otherwise end the string
-    literal mid-path.
-    """
-    path = supplement_path()
-    if not path:
-        return None
-    if "://" not in path and "*" not in path and not os.path.exists(path):
-        raise UpstreamUnavailable(
-            f"places supplement not found at {path!r} (from {SUPPLEMENT_ENV_VAR}); "
-            "build it with scripts/build_supplement.py, or unset the variable to "
-            "query Overture alone — see docs/SUPPLEMENT.md"
-        )
-    return f"read_parquet({db._sql_str(path)})"
-
-
-def _with_supplement(source: str, theme: str = THEME) -> str:
-    """`source`, unioned with the supplement layer when one is configured.
-
-    A parenthesized `UNION ALL BY NAME` subquery rather than a two-path
-    `read_parquet([...])`: upstream is read with hive_partitioning=1, and
-    DuckDB rejects a list mixing a hive-partitioned path with a plain file
-    ("Hive partition mismatch ... key \"theme\" not found"). BY NAME fills
-    the columns each side lacks with NULL, so upstream's hive columns and
-    any Overture column the supplement doesn't carry both stay harmless.
-    Filters still push down into both branches, so bbox pruning is
-    unaffected.
-
-    Only places: no other theme has a supplement, and passing one through
-    here would silently union places rows into a divisions query.
+    Only places: no other theme has a recreation layer, and passing one
+    through here would union places rows into a divisions query.
     """
     if theme != THEME:
-        return source
-    supplement = _supplement_read()
-    if supplement is None:
-        return source
-    return f"(SELECT * FROM {source} UNION ALL BY NAME SELECT * FROM {supplement})"
+        return source, False
+    branches = recreation.union_branches(bbox)
+    if not branches:
+        return source, False
+    # FALSE, not NULL, on the Overture side: the marker is read as a plain
+    # boolean by the name filter below, and spelling it out here means no
+    # call site has to remember to coalesce it.
+    places_branch = f"SELECT *, FALSE AS {recreation.MARKER_COLUMN} FROM {source}"
+    return f"({' UNION ALL BY NAME '.join([places_branch, *branches])})", True
 
 
-def _from_source(bbox: tuple[float, float, float, float], theme: str = THEME) -> str:
-    """SQL FROM-clause source for a places query: local cache tiles, or upstream.
+def _places_source(
+    bbox: tuple[float, float, float, float] | None, theme: str = THEME
+) -> tuple[str, bool]:
+    """SQL FROM-clause source for a places query, and whether the recreation
+    layer is part of it: local cache tiles, or upstream.
 
-    The supplement (when configured) is appended *after* cache resolution:
-    tiles materialize upstream rows only, so a cached tile is always a
-    faithful copy of Overture and turning the supplement off doesn't leave
-    its rows behind in the cache.
+    The recreation layer (when enabled) is appended *after* cache
+    resolution: a places tile materializes theme=places rows only, so a
+    cached tile is always a faithful copy of that dataset and turning the
+    layer off never leaves base-theme rows behind in it. The layer's own
+    branches do their own cache resolution against the base theme's tiles,
+    which land under land_use.py's existing "base_<type>" cache keys.
     """
     upstream = _upstream_glob(theme)
-    if cache.enabled():
+    if cache.enabled() and bbox is not None:
         try:
             with db.conn_lock:
                 paths = cache.local_paths_for_query(
@@ -327,8 +284,31 @@ def _from_source(bbox: tuple[float, float, float, float], theme: str = THEME) ->
             raise UpstreamUnavailable(str(e)) from e
         if paths:
             joined = ", ".join(f"'{p}'" for p in paths)
-            return _with_supplement(f"read_parquet([{joined}])", theme)
-    return _with_supplement(f"read_parquet('{upstream}', hive_partitioning=1)", theme)
+            return _with_recreation(f"read_parquet([{joined}])", bbox, theme)
+    return _with_recreation(f"read_parquet('{upstream}', hive_partitioning=1)", bbox, theme)
+
+
+def _from_source(bbox: tuple[float, float, float, float], theme: str = THEME) -> str:
+    """_places_source's SQL alone, for the call sites that don't filter on names."""
+    return _places_source(bbox, theme)[0]
+
+
+def _name_filter(missing: set[str], has_recreation: bool) -> list[str]:
+    """The "named places only" filter, relaxed for recreation-layer rows.
+
+    Overture places rows without a primary name are dropped: an unnamed
+    business listing is a row an agent can do nothing with. Recreation-layer
+    rows are the opposite case — 77% of base-theme playgrounds carry no name
+    because a playground usually isn't named at all, and "there is a
+    playground 120 m from you" is exactly the answer that was asked for. So
+    those rows survive with name: null rather than being filtered out. No
+    name is invented for them (see recreation.py).
+    """
+    if "names" in missing:
+        return []
+    if has_recreation:
+        return [f"(names.primary IS NOT NULL OR {recreation.MARKER_COLUMN})"]
+    return ["names.primary IS NOT NULL"]
 
 
 # Haversine great-circle distance in meters between (bbox.ymin, bbox.xmin)
@@ -608,9 +588,9 @@ def find_places(
     upstream = _upstream_glob()
     missing = set(_check_schema(upstream))
     bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(lat, lon, radius_m)
+    from_source, has_recreation = _places_source(bbox)
     filters = [bbox_filter, distance_filter]
-    if "names" not in missing:
-        filters.append("names.primary IS NOT NULL")
+    filters.extend(_name_filter(missing, has_recreation))
     filters.extend(_place_category_name_filters(missing, category, name, params))
     filters.extend(
         _place_attribute_filters(missing, min_confidence, operating_status, params)
@@ -635,7 +615,7 @@ def find_places(
             round(bbox.ymin, 6)                 AS lat,
             round(bbox.xmin, 6)                 AS lon,
             round({_DISTANCE_EXPR}, 0)          AS distance_m
-        FROM {_from_source(bbox)}
+        FROM {from_source}
         WHERE {' AND '.join(filters)}
         ORDER BY distance_m
         LIMIT {limit}
@@ -711,9 +691,9 @@ def find_places_in_bbox(
     missing = set(_check_schema(upstream))
     xmin, ymin, xmax, ymax = bbox
     bbox_filter, params = _bbox_filter_sql(xmin, ymin, xmax, ymax)
+    from_source, has_recreation = _places_source(bbox)
     filters = [bbox_filter]
-    if "names" not in missing:
-        filters.append("names.primary IS NOT NULL")
+    filters.extend(_name_filter(missing, has_recreation))
     filters.extend(_place_category_name_filters(missing, category, name, params))
 
     order_by = "name, id"
@@ -742,7 +722,7 @@ def find_places_in_bbox(
             {exprs["has_phone"]}                 AS has_phone,
             round(bbox.ymin, 6)                 AS lat,
             round(bbox.xmin, 6)                 AS lon
-        FROM {_from_source(bbox)}
+        FROM {from_source}
         WHERE {' AND '.join(filters)}
         ORDER BY {order_by}
         LIMIT {limit}
@@ -1034,9 +1014,10 @@ def find_places_in_division(
         "div_ymin": div_ymin, "div_ymax": div_ymax,
         "geom_wkb": geom_wkb,
     }
+    bbox = (div_xmin, div_ymin, div_xmax, div_ymax)
+    from_source, has_recreation = _places_source(bbox)
     filters = [bbox_filter, contains_filter]
-    if "names" not in missing:
-        filters.append("names.primary IS NOT NULL")
+    filters.extend(_name_filter(missing, has_recreation))
     filters.extend(_place_category_name_filters(missing, category, name, params))
     filters.extend(
         _place_attribute_filters(missing, min_confidence, operating_status, params)
@@ -1046,7 +1027,6 @@ def find_places_in_division(
     )
 
     exprs = _place_select_exprs(missing)
-    bbox = (div_xmin, div_ymin, div_xmax, div_ymax)
 
     sql = f"""
         SELECT
@@ -1061,7 +1041,7 @@ def find_places_in_division(
             {exprs["has_phone"]}                 AS has_phone,
             round(bbox.ymin, 6)                 AS lat,
             round(bbox.xmin, 6)                 AS lon
-        FROM {_from_source(bbox)}
+        FROM {from_source}
         WHERE {' AND '.join(filters)}
         ORDER BY name, id
         LIMIT {limit}
@@ -1095,6 +1075,7 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
         lat, lon, radius_m
     )
     category_expr = "NULL" if "basic_category" in missing else "basic_category"
+    from_source = _from_source(bbox)
     sql = f"""
         SELECT
             {category_expr} AS category,
@@ -1102,7 +1083,7 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
             sum(count(*)) OVER ()                                     AS total,
             coalesce(sum(count(*)) FILTER (WHERE {category_expr} IS NULL) OVER (), 0)
                                                                       AS uncategorized
-        FROM {_from_source(bbox)}
+        FROM {from_source}
         WHERE {bbox_filter} AND {distance_filter}
         GROUP BY 1
         ORDER BY n DESC
@@ -1227,7 +1208,7 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
         if tile_paths:
             joined = ", ".join(f"'{p}'" for p in tile_paths)
             row = _run_place_details_query(
-                _with_supplement(f"read_parquet([{joined}])"),
+                _with_recreation(f"read_parquet([{joined}])", None)[0],
                 ["id = $id"], "1", {"id": id}, missing,
             )
             if row is not None:
@@ -1253,7 +1234,7 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
         "no near_lat/near_lon hint given, or the hint missed) — issue #41", id,
     )
     return _run_place_details_query(
-        _with_supplement(f"read_parquet('{upstream}', hive_partitioning=1)"),
+        _with_recreation(f"read_parquet('{upstream}', hive_partitioning=1)", None)[0],
         ["id = $id"], "1", {"id": id}, missing,
     )
 

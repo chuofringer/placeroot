@@ -24,30 +24,22 @@ releases.
 | `buildings` | `summarize_buildings`, `buildings_at`, `gers_lookup` | Mixed per-feature (OSM/ODbL, Esri/Microsoft ML footprints, others) | Check the `sources` array on results you redistribute |
 | `base` (land use, water, infrastructure) | `land_use_at`, `water_near`, `infrastructure_at` | Substantially OSM-derived: **ODbL 1.0** | Same as `divisions` |
 
-## The optional supplemental places layer
+## The optional recreation layer
 
-`PLACEROOT_PLACES_SUPPLEMENT` (see [SUPPLEMENT.md](SUPPLEMENT.md)) points the
-places tools at a second, locally built dataset that is **not Overture and
-not distributed with PlaceRoot**. You build it yourself with
-`scripts/build_supplement.py`; nothing arrives with the package, and the
-layer does not exist unless you switch it on.
+`PLACEROOT_RECREATION_LAYER` (see [RECREATION.md](RECREATION.md)) makes the
+places tools additionally read Overture's `base` theme — `type=land_use` and
+`type=land` — for playgrounds, parks, dog parks, nature reserves and beaches.
 
-| Source | Rows it contributes | License | Key obligations |
-|---|---|---|---|
-| OpenStreetMap (via Overpass) | Playgrounds, splash pads, water parks, parks, beaches, trailheads, campgrounds, museums, zoos, aquariums, libraries | © OpenStreetMap contributors, **ODbL 1.0** | Attribution on produced works; **share-alike on derivative databases** |
-| IMLS Public Libraries Survey | US public library outlets (central and branch) | US federal government work — **public domain** | None; crediting IMLS is good practice |
+There is nothing new to accept here. It is the same Overture release, read
+the same way, under the terms already listed in the table above: the `base`
+theme is substantially OSM-derived, so **ODbL 1.0** applies to those rows
+exactly as it does to `land_use_at` and `infrastructure_at` results today.
+Rows carry Overture's own per-feature `sources` array and real GERS ids, so a
+mixed result set stays separable by license.
 
-Every supplement row is identifiable per row: `sources[0].dataset` is
-literally `OpenStreetMap` or `IMLS Public Libraries Survey`, and row ids are
-prefixed `osm:` / `imls:` (they are **not** GERS ids). So a mixed result set
-can always be separated back into its licenses, and a consumer that needs to
-avoid ODbL obligations can filter the OSM rows out rather than guess.
-
-The share-alike consequence is the reason this layer is built locally rather
-than shipped: a database you assemble from ODbL data is a derivative
-database, and redistributing it obliges you to offer it under ODbL. That is
-your call to make for your own copy — it isn't one PlaceRoot makes on every
-user's behalf.
+Because nothing is extracted, copied or redistributed — the layer is a query,
+not a dataset — the ODbL share-alike question a locally built OSM extract
+would raise does not arise.
 
 ## What this means in practice
 
@@ -86,9 +78,6 @@ is:
   [`src/placeroot/data/README.md`](../src/placeroot/data/README.md).
 - `tests/fixtures/*.parquet` — small extracts of the Overture release used
   by the offline test suite; the per-theme licenses above apply to them.
-  `places_supplement.parquet` is the exception: it is wholly synthetic, built
-  by `scripts/build_fixture.py` from invented playgrounds and libraries in a
-  fake downtown, and carries no OSM or IMLS data at all.
 - `benchmarks/competitors/` — snapshots of other projects' MIT-licensed
   output plus vendors' published documentation examples, kept for a
   reproducible benchmark; see

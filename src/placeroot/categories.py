@@ -71,18 +71,19 @@ def taxonomy_summary() -> dict:
     return {"total": len(rows), "top_level": top_level}
 
 
-def top_level_branch(slug: str) -> str | None:
-    """The root segment of a slug's taxonomy path, e.g. playground ->
-    active_life. None if the slug isn't in the bundled taxonomy.
+def hierarchy_for(slug: str) -> list[str] | None:
+    """A slug's full taxonomy path, root first, e.g. playground ->
+    ["active_life", "sports_and_recreation_venue", "playground"]. None if
+    the slug isn't in the bundled taxonomy.
 
-    Used by scripts/build_supplement.py to fill `basic_category` on the
-    supplemental places layer from the same pinned snapshot
-    search_categories answers from, rather than a second hand-written table
-    that could disagree with it.
+    Used by recreation.py to fill `taxonomy.hierarchy` and `basic_category`
+    (its root segment) on the base-theme rows it projects into the places
+    shape, from the same pinned snapshot search_categories answers from
+    rather than a second hand-written table that could disagree with it.
     """
     for row in _load_categories():
         if row["slug"] == slug:
-            return row["path"][0] if row["path"] else None
+            return list(row["path"]) or None
     return None
 
 

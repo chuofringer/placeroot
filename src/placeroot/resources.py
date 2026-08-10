@@ -31,11 +31,10 @@ budget-module estimate stays under 1.5k tokens.
 """
 
 import json
-from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
 
-from placeroot import budget, categories, overture, release
+from placeroot import budget, categories, recreation, release
 
 DATA_VERSION_URI = "placeroot://data-version"
 CATEGORIES_URI = "placeroot://categories"
@@ -89,45 +88,40 @@ def data_version_payload() -> dict:
             " This release is older than the staleness threshold — "
             "discovery may be failing in this deployment."
         )
-    supplement = supplement_payload()
-    if supplement is not None:
-        payload["supplement"] = supplement
+    layer = recreation_payload()
+    if layer is not None:
+        payload["recreation_layer"] = layer
     return payload
 
 
-# Sidecar keys worth reporting to an agent: what the layer holds and how old
-# it is. The rest of scripts/build_supplement.py's metadata (the bboxes it
-# fetched, the per-category duplicate counts) is operator detail that would
-# cost context without changing an answer.
-_SUPPLEMENT_META_KEYS = ("built_at", "rows", "per_source", "per_category", "script_version")
+def recreation_payload() -> dict | None:
+    """The active recreation layer, or None when it isn't enabled.
 
+    An answer drawn partly from a second theme has to say so: a
+    `find_places` result whose provenance the caller can't see is exactly
+    the silently-partial answer CONTRIBUTING.md's honesty rule exists to
+    prevent. Everything reported here is derivable from the code and the
+    pinned release — there is no local build whose vintage could drift, so
+    there is nothing to read off disk.
 
-def supplement_payload() -> dict | None:
-    """The active supplemental places layer, or None when it isn't enabled.
-
-    Answers that are drawn partly from a locally built, non-Overture layer
-    have to say so — a `find_places` result whose provenance the caller
-    can't see is exactly the silently-partial answer CONTRIBUTING.md's
-    honesty rule exists to prevent. The sidecar `<path>.meta.json` that
-    scripts/build_supplement.py writes supplies the row counts and build
-    date when it's there; a supplement without one still reports its path.
+    `degraded_types` is the one field worth an agent's attention: a base
+    type listed there is one whose schema drifted far enough that the layer
+    dropped it, so results are places-theme-only for its categories.
     """
-    path = overture.supplement_path()
-    if not path:
+    if not recreation.enabled():
         return None
-    payload = {"path": path, "sources": "OpenStreetMap (ODbL), IMLS PLS (public domain)"}
-    try:
-        meta = json.loads(Path(f"{path}.meta.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        meta = None
-    # A sidecar that parses but isn't an object (a bare string or list — a
-    # truncated or hand-edited file) is as unusable as a missing one, and
-    # subscripting it would turn a cosmetic metadata problem into a
-    # TypeError out of data_version.
-    if not isinstance(meta, dict):
-        payload["note"] = "no readable sidecar metadata alongside this file; row counts unknown"
-        return payload
-    payload.update({k: meta[k] for k in _SUPPLEMENT_META_KEYS if k in meta})
+    payload = {
+        "source": "Overture base theme (types: " + ", ".join(recreation.SOURCES) + ")",
+        "categories": recreation.CATEGORIES,
+        "note": (
+            "Opt-in via " + recreation.ENV_VAR + ". Adds OSM-derived recreation "
+            "areas the listings-derived places theme under-counts. These rows carry "
+            "no confidence or operating_status, and may have no name."
+        ),
+    }
+    degraded = recreation.degraded_types()
+    if degraded:
+        payload["degraded_types"] = degraded
     return payload
 
 

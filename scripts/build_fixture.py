@@ -25,15 +25,7 @@ buildings.parquet: an 8x10 grid of 80 synthetic rectangular footprints
 (issue #23) around places.parquet's downtown cluster — see the "Buildings
 fixture" comment further down for how areas are kept exact for tests.
 
-places_supplement.parquet: the opt-in supplemental places layer's fixture
-(see docs/SUPPLEMENT.md) — 20 family/recreation rows around the same fake
-downtown, built through scripts/build_supplement.py's own row constructor so
-the fixture can never drift from what the builder actually emits. No network:
-the OSM rows are synthetic Overpass elements and the library rows synthetic
-IMLS outlet records, each run through the same mapping functions a real build
-uses.
-
-All four are deterministic — same seed, same output — so they can be
+All three are deterministic — same seed, same output — so they can be
 regenerated and diffed. Run with:
 
     uv run python scripts/build_fixture.py
@@ -42,22 +34,14 @@ regenerated and diffed. Run with:
 import hashlib
 import math
 import random
-import sys
 from pathlib import Path
 
 import duckdb
-
-# scripts/ isn't a package; add it to the path so the supplement fixture can
-# be built by the real builder's mapping code rather than a copy of it.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import build_supplement  # noqa: E402
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 PLACES_FIXTURE_PATH = FIXTURES_DIR / "places.parquet"
 DIVISION_AREAS_FIXTURE_PATH = FIXTURES_DIR / "division_areas.parquet"
 BUILDINGS_FIXTURE_PATH = FIXTURES_DIR / "buildings.parquet"
-PLACES_SUPPLEMENT_FIXTURE_PATH = FIXTURES_DIR / "places_supplement.parquet"
 SEED = 42
 EARTH_RADIUS_M = 6371000.0
 METERS_PER_DEGREE_LAT = 111_320.0
@@ -474,98 +458,11 @@ def build_division_areas(con: duckdb.DuckDBPyConnection) -> None:
     print(f"wrote {len(rows)} rows to {DIVISION_AREAS_FIXTURE_PATH}")
 
 
-# --- Supplemental places fixture (docs/SUPPLEMENT.md) ----------------------
-# 20 family/recreation rows in the same fake downtown as the places fixture,
-# close enough that a 1000m find_places from CENTER sees all of them. Each is
-# expressed as the *input* the real builder consumes — an Overpass element or
-# a PLS outlet record — and mapped by build_supplement's own osm_row/imls_row,
-# so the fixture exercises the tag mapping, the unnamed-element rule and the
-# sentinel stripping rather than restating their output.
-#
-# (bearing_deg, distance_m, tags) — placement is a fixed spiral rather than a
-# random draw so a row's coordinate is readable from its position in the list.
-SUPPLEMENT_OSM_ELEMENTS = [
-    (0, 120, {"leisure": "playground", "name": "Riverbend Playground"}),
-    (30, 180, {"leisure": "playground", "name": "Maple Street Playground"}),
-    # Unnamed, and kept anyway: playgrounds are frequently mapped without a
-    # name and "there is one here" is still the answer someone wanted.
-    (60, 240, {"leisure": "playground"}),
-    (90, 150, {
-        "leisure": "playground", "playground": "splash_pad",
-        "name": "Cascade Splash Pad",
-    }),
-    (120, 210, {"leisure": "water_park", "name": "Wave Lagoon Water Park",
-                "website": "https://wavelagoon.example"}),
-    (150, 260, {"leisure": "park", "name": "Foxglove Park"}),
-    (180, 300, {"leisure": "park", "name": "Harbor Green Park"}),
-    (210, 340, {"natural": "beach", "name": "Little Cove Beach"}),
-    (240, 280, {"natural": "beach"}),
-    (270, 320, {"information": "trailhead", "name": "Ridgeline Trailhead"}),
-    (300, 360, {"information": "trailhead"}),
-    (330, 380, {"tourism": "camp_site", "name": "Cedar Hollow Campground",
-                "phone": "+1-555-0142"}),
-    (15, 400, {"tourism": "museum", "name": "Museum of Small Things",
-               "addr:housenumber": "5", "addr:street": "Curio Lane",
-               "addr:city": "Metropolis", "addr:state": "NY", "addr:postcode": "10001"}),
-    (45, 420, {"tourism": "zoo", "name": "Pocket Zoo"}),
-    (75, 440, {"tourism": "aquarium", "name": "Tidepool Aquarium"}),
-    (105, 460, {"amenity": "library", "name": "Volunteer Reading Room"}),
-    (135, 480, {"leisure": "playground", "name": "Cornerstone Playground"}),
-    (165, 500, {"tourism": "caravan_site", "name": "Lakeside Caravan Park"}),
-]
-
-# PLS outlet records, sentinels and all. The BS row is a bookmobile and must
-# not survive; the -3s in the CE row are IMLS's "not reported" and must not
-# reach the parquet as text.
-SUPPLEMENT_IMLS_RECORDS = [
-    (195, 200, {
-        "FSCSKEY": "NY0042", "FSCS_SEQ": "000", "C_OUT_TY": "CE",
-        "LIBNAME": "Metropolis Central Library", "ADDRESS": "400 Grand Concourse",
-        "CITY": "Metropolis", "STABR": "NY", "ZIP": "10001", "PHONE": "-3",
-    }),
-    (225, 260, {
-        "FSCSKEY": "NY0042", "FSCS_SEQ": "001", "C_OUT_TY": "BR",
-        "LIBNAME": "Riverside Branch Library", "ADDRESS": "-3",
-        "CITY": "Metropolis", "STABR": "NY", "ZIP": "10002", "PHONE": "+1-555-0177",
-    }),
-    (255, 300, {
-        "FSCSKEY": "NY0042", "FSCS_SEQ": "002", "C_OUT_TY": "BS",
-        "LIBNAME": "Metropolis Bookmobile", "CITY": "Metropolis", "STABR": "NY",
-    }),
-]
-
-
-def build_supplement_rows() -> list[tuple]:
-    """The supplement fixture's rows, via the builder's own mapping functions."""
-    rows = []
-    for i, (bearing, distance, tags) in enumerate(SUPPLEMENT_OSM_ELEMENTS):
-        lat, lon = offset_point(CENTER_LAT, CENTER_LON, distance, bearing)
-        element = {"type": "node", "id": 100_000 + i, "lat": lat, "lon": lon, "tags": tags}
-        row = build_supplement.osm_row(element)
-        if row is not None:
-            rows.append(row)
-    for bearing, distance, record in SUPPLEMENT_IMLS_RECORDS:
-        lat, lon = offset_point(CENTER_LAT, CENTER_LON, distance, bearing)
-        row = build_supplement.imls_row(
-            {**record, "LATITUDE": f"{lat:.6f}", "LONGITUD": f"{lon:.6f}"}
-        )
-        if row is not None:
-            rows.append(row)
-    return rows
-
-
-def build_places_supplement() -> None:
-    rows = build_supplement_rows()
-    build_supplement.write_parquet(rows, PLACES_SUPPLEMENT_FIXTURE_PATH)
-    print(f"wrote {len(rows)} rows to {PLACES_SUPPLEMENT_FIXTURE_PATH}")
-
-
 def main() -> None:
     con = duckdb.connect()
     build_places(con)
     build_division_areas(con)
     build_buildings(con)
-    build_places_supplement()
 
 
 if __name__ == "__main__":
