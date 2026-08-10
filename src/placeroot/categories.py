@@ -71,6 +71,21 @@ def taxonomy_summary() -> dict:
     return {"total": len(rows), "top_level": top_level}
 
 
+def top_level_branch(slug: str) -> str | None:
+    """The root segment of a slug's taxonomy path, e.g. playground ->
+    active_life. None if the slug isn't in the bundled taxonomy.
+
+    Used by scripts/build_supplement.py to fill `basic_category` on the
+    supplemental places layer from the same pinned snapshot
+    search_categories answers from, rather than a second hand-written table
+    that could disagree with it.
+    """
+    for row in _load_categories():
+        if row["slug"] == slug:
+            return row["path"][0] if row["path"] else None
+    return None
+
+
 def _match_rank(slug: str, query: str) -> int | None:
     """Lower is better; None means no match. query is already lowercased."""
     slug_l = slug.lower()
