@@ -125,12 +125,10 @@ def test_installer_page_keeps_verbatim_install_commands():
 
 
 def test_pages_cross_link_and_point_at_the_package():
-    # The repo is private, so pages link to the public PyPI project page
-    # instead of GitHub (which would 404 for visitors).
     for name in PAGES:
         doc = (SITE_DIR / name).read_text(encoding="utf-8")
         assert "pypi.org/project/placeroot" in doc, f"{name}: no package link"
-        assert "github.com/chuofringer/placeroot" not in doc, f"{name}: private repo link leaked"
+        assert "github.com/chuofringer/placeroot" in doc, f"{name}: no source link"
     for name in ("how-it-works.html", "add-to-your-ai.html"):
         doc = (SITE_DIR / name).read_text(encoding="utf-8")
         assert 'href="index.html"' in doc, f"{name}: no link back to landing"

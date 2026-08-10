@@ -271,7 +271,7 @@ the addresses theme -- 474M points carrying a `postcode` column -- so a query
 that is *entirely* a postcode is answered from there instead, by one
 aggregate: WHERE postcode IN (spellings) GROUP BY country, giving a point
 count and a centroid per country, joined to the covering locality from the
-already-materialized #43 divisions table (60ms). R27-measured live: 11.4-13.4s
+already-materialized #43 divisions table (60ms). measured live: 11.4-13.4s
 cold for the aggregate, and 94110 comes back genuinely ambiguous -- 29,956 US
 points in the Mission in San Francisco, 3,491 SK, 3,310 FR -- which is the
 honest answer, so all three are returned, ordered and scored by the evidence
@@ -301,7 +301,7 @@ code".
 
 --- #224: bbox columns on the local divisions table (and why they are empty) ---
 
-R27 wanted a city extent to bound a street-level address scan with (#225): a
+The street-level work (#225) wanted a city extent to bound an address scan: a
 hand-guessed Mountain View bbox 0.002 degrees too small returned empty for
 "1600 Amphitheatre Parkway". The divisions rows carry a `bbox` struct
 natively, so the four corners (xmin/ymin/xmax/ymax) now ride along in
@@ -337,7 +337,7 @@ whatever it finds once the span clears the degeneracy floor.
 
 geocode answers at city/neighborhood granularity, address_at answers "what is
 at this coordinate"; nothing answered "where is 1600 Amphitheatre Parkway".
-The data does: R27 measured `number='1600' AND street ILIKE 'AMPHITHEATRE%'`
+The data does: a live probe measured `number='1600' AND street ILIKE 'AMPHITHEATRE%'`
 inside a Mountain View bbox returning Google HQ exactly, 4.1s cold and 10ms
 from the addresses tile cache. So geocode_address is a *forward* search over
 the addresses theme, bounded by a city extent.
@@ -375,7 +375,7 @@ Four steps, each able to end the call honestly:
    verified live. DE/NL names need no transformation at all, which is why the
    map is US-only.
 4. Deduplicate, in SQL. MARKET ST in San Francisco is 2,980 address points
-   collapsing to 900 distinct number|street pairs (R27; 3,006 -> 915 on the
+   collapsing to 900 distinct number|street pairs (measured live; 3,006 -> 915 on the
    live 2026-07-22.0 run of this tool): without the GROUP BY an
    undeduplicated top-5 is five spellings of one doorway. The distinct count
    rides back as `distinct_in_range` with the usual truncated note.
@@ -1161,7 +1161,7 @@ _CARDINAL_VARIANTS: dict[str, list[str]] = {
 # does the work; the reverse is here so a caller who types the abbreviation
 # still matches a dataset that spells it out. DE/NL street names need no
 # transformation at all — "Hauptstraße" is one token in both the query and
-# the data (R27-verified), which is why this map is US-only.
+# the data (verified against the live release), which is why this map is US-only.
 _STREET_SUFFIX_VARIANTS: dict[str, list[str]] = {
     "street": ["St"], "st": ["Street"],
     "avenue": ["Ave"], "ave": ["Avenue"],
@@ -1174,7 +1174,7 @@ _STREET_SUFFIX_VARIANTS: dict[str, list[str]] = {
     "place": ["Pl"], "pl": ["Place"],
 }
 
-# #229/R28: the quadrant suffix, which is part of the street name in every
+# #229: the quadrant suffix, which is part of the street name in every
 # city that has one -- Washington DC's "PENNSYLVANIA AVE NW" is a different
 # street from "PENNSYLVANIA AVE SE", and Overture writes the abbreviated
 # form. Kept out of _CARDINAL_VARIANTS because those are single letters
@@ -1490,7 +1490,7 @@ def _query_divisions(
 # Minimum jaro_winkler_similarity (0..1) between a folded division name and
 # the folded query for a fuzzy row to be offered at all.
 #
-# Calibrated against the live 2026-07-22.0 release (R26): the three probes
+# Calibrated against the live 2026-07-22.0 release: the three probes
 # this tier exists for resolve top-1 correct well above it — "Berekley" ->
 # Berkeley at 0.97, "Cinncinati" -> Cincinnati at 0.98, "Sna Francisco" ->
 # San Francisco at 0.98 — so 0.92 keeps headroom for longer or two-typo
@@ -1759,8 +1759,9 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
 # today's empty answer.
 #
 # Be clear about what that buys: `\d{4}` matches years, so geocode("1984")
-# *does* pay the aggregate — a ~12s cold scan of a 474M-row theme (R27,
-# measured). That is deliberate and not fixable by a heuristic, because
+# *does* pay the aggregate — a ~12s cold scan of a 474M-row theme (measured
+# against release 2026-07-22.0). That is deliberate and not fixable by a
+# heuristic, because
 # four-digit postcodes are real and heavily used (DK/NO/AT/CH/BE/HU...), and
 # "2100" is Copenhagen Ø as surely as "1984" is a novel; no rule separates
 # them without breaking the countries this feature exists to serve. What
@@ -1788,7 +1789,7 @@ _NL_POSTCODE = re.compile(r"^\d{4}[A-Z]{2}$")
 _POSTCODE_MAX_COUNTRIES = 10
 
 # Covered countries whose address rows carry no postcode value at all
-# (R27, measured against release 2026-07-22.0). Membership in
+# (measured against release 2026-07-22.0). Membership in
 # addresses.COVERED_COUNTRIES therefore does NOT imply a postcode can be
 # looked up here, which is exactly what the empty-result note has to say.
 _POSTCODE_ZERO_COUNTRIES = ("CL", "CO", "EE", "HK", "IT", "JP", "NZ", "RS", "TW")
@@ -1890,7 +1891,7 @@ def _query_postcode_countries(variants: list[str]) -> list[tuple]:
     materialized) or answer from a slice, which for this query is not a
     slower answer but a wrong one. So it is a direct upstream scan with the
     usual duckdb.Error -> UpstreamUnavailable conversion, ~12s cold
-    (R27-measured); the note says so when the read is remote. Repeats within
+    (measured live); the note says so when the read is remote. Repeats within
     the process are served from _POSTCODE_AGGREGATE_CACHE.
 
     Two filters keep the answer internally consistent:
@@ -1945,7 +1946,7 @@ def _covering_division_from_local(
 ) -> dict | None:
     """Nearest locality-ish division to a point, from the #43 local table.
 
-    60ms measured (R27) against the already-materialized table, which is why
+    60ms measured against the already-materialized table, which is why
     the postcode answer can afford to name a place per country rather than
     handing back bare coordinates.
 
@@ -2924,7 +2925,7 @@ _STREET_VARIANT_CAP = 16
 
 # A house-number token: digits, optionally with one trailing letter. Overture's
 # `number` is a string and real data carries "74B" and "12 bis"; "221B Baker
-# Street" is the query shape that needs the letter (#229/R28), while "12 bis"
+# Street" is the query shape that needs the letter (#229), while "12 bis"
 # stays out of scope because it is two tokens and the second is a word. Unit
 # numbers ("Apt 3", "#204") are deliberately out of scope too: they sit in a
 # separate `unit` column, and guessing which trailing integer is which would
@@ -2932,11 +2933,11 @@ _STREET_VARIANT_CAP = 16
 _HOUSE_NUMBER_RE = re.compile(r"^\d+[A-Za-z]?$")
 
 # Street-type words that come *first* in the languages that number their
-# streets rather than name them (#229/R28). "Calle 8" is the name of a
+# streets rather than name them (#229). "Calle 8" is the name of a
 # street in Miami, not house number 8 on a street called "Calle" — and the
 # same holds for Avenida 9, Carrera 7, Via 20.
 #
-# English earns its entries here after all (R29). The original list stopped
+# English earns its entries here after all. The original list stopped
 # at the Romance types on the grounds that an English street type leads only
 # rarely ("Avenue 26" in Los Angeles) — true of "avenue", but numbered routes
 # are the same grammar and are ordinary US address data: "ROUTE 66",
@@ -2979,7 +2980,7 @@ _ADDRESS_SELECT_COLUMNS = ("number", "street", "unit", "postcode", "country", "p
 # the addresses of one city pays it once instead of once per query.
 _AREA_BBOX_CACHE: dict[tuple[str, str], tuple[float, float, float, float] | None] = {}
 
-# The widest anchor extent, per axis, an address scan will run inside (R29).
+# The widest anchor extent, per axis, an address scan will run inside.
 #
 # _division_area_bbox rejects an extent for being too *small* (a point's
 # rounding envelope, _DEGENERATE_BBOX_SPAN_DEG) but had no ceiling, and
@@ -3048,7 +3049,7 @@ def _split_house_number(text: str) -> tuple[str | None, str]:
     read, not a house number with an empty street.
 
     Two locale rules keep a number that belongs to the *street name* out of
-    the number slot (#229/R28), because stripping it searches for a street
+    the number slot (#229), because stripping it searches for a street
     that does not exist and returns an honest-looking empty:
 
     - a trailing number is not a house number when the street opens with one
@@ -3126,7 +3127,7 @@ def _division_area_bbox(division_id: str) -> tuple[float, float, float, float] |
     or an extent still under _DEGENERATE_BBOX_SPAN_DEG — all of which mean
     the same thing to the caller: no bbox, so no scan.
 
-    A *failed scan* is the one of those that is not memoized (R29). The other
+    A *failed scan* is the one of those that is not memoized. The other
     three are facts about the dataset: they will answer the same way for as
     long as this release is pinned, so caching them is what makes the 10.7s
     lookup a once-per-city cost. A duckdb error is not a fact about the
@@ -3226,16 +3227,16 @@ def _scan_addresses_in_bbox(
     number_filtered is False when a `number` was asked for but the dataset has
     no such column to match it against — the caller turns that into a note,
     because "every doorway on the street" is a different answer from "this
-    one address" and must not be handed back as if it were the latter (R29).
+    one address" and must not be handed back as if it were the latter.
 
     Dedup is not optional:
     Overture files one address point per source contribution, so MARKET ST in
     San Francisco is 2,980 rows collapsing to 900 distinct number|street
-    pairs (R27, live) — an undeduplicated top-5 is five spellings of the same
+    pairs (measured live) — an undeduplicated top-5 is five spellings of the same
     doorway. Grouping happens in SQL so the wire never carries the 2,980.
 
     The group key is (number, street, postcode), not (number, street)
-    (#229, R28). A city bbox is not a municipality: Boston's box covers
+    (#229). A city bbox is not a municipality: Boston's box covers
     Hingham, Charlestown and Cambridge, all of which have a 1 Main St, and
     grouping without the postcode collapsed three real, different doorways
     into one arbitrarily-chosen row — an answer that is wrong rather than
@@ -3265,7 +3266,7 @@ def _scan_addresses_in_bbox(
                     "xmax": xmax, "ymax": ymax}
     street_sql = []
     for i, pattern in enumerate(street_patterns):
-        # Prefix, not equality (#229/R28): US street names carry a trailing
+        # Prefix, not equality (#229): US street names carry a trailing
         # quadrant or directional that a caller routinely leaves off, and
         # "Pennsylvania Avenue" must still find "PENNSYLVANIA AVE NW". The
         # variant map handles the caller who *does* type it; this handles
@@ -3332,7 +3333,7 @@ def _address_row(row: tuple) -> dict:
     null, the same padding-is-not-an-answer rule address_at applies.
 
     `unit_count` replaces `unit` when the doorway carries more than one
-    (#229, R28): "which of the 458 units" is a question this tool cannot
+    (#229): "which of the 458 units" is a question this tool cannot
     answer, and naming one of them would be a fabricated answer to it.
     """
     number, street, unit, unit_count, postcode, country, lat, lon, distance_m = row[:9]
@@ -3413,7 +3414,7 @@ def _address_unresolved_anchor_note(
     if too_broad is not None:
         # A different failure from "no extent", and it must not borrow that
         # wording: this place has a boundary, it is simply a state-sized one
-        # (R29, see _MAX_ANCHOR_SPAN_DEG).
+        # (see _MAX_ANCHOR_SPAN_DEG).
         note = (
             f"\"{city}\" resolved to {anchor['name']}{_country_suffix(anchor)}, whose "
             f"boundary spans {_bbox_span_label(too_broad)} -- far larger than a city, "
@@ -3452,7 +3453,7 @@ def _country_suffix(row: dict) -> str:
 def _same_country(a: dict, b: dict) -> bool:
     """Are two geocode candidates in the same country?
 
-    #229/R28: the runner-up anchor loop below used to take *any* candidate
+    #229: the runner-up anchor loop below used to take *any* candidate
     that had an extent, so "Baker Street, London" — where the UK London has
     no division_area row at all — walked past it onto London, Ontario and
     returned Canadian doorways under a UK anchor. A fallback anchor is only
@@ -3541,7 +3542,7 @@ def geocode_address(
     notes: list[str] = []
     rejected: list[dict] = []
     # Why the top candidate's extent was unusable, for the notes below: it
-    # either had none, or had one too big to scan (R29). The runner-up note
+    # either had none, or had one too big to scan. The runner-up note
     # has to say which, or it tells the caller their state-sized "Texas" has
     # no boundary in Overture, which is false.
     too_broad: tuple[float, float, float, float] | None = None
@@ -3553,12 +3554,12 @@ def geocode_address(
         # A neighborhood or a place row can lose to its own containing city
         # here: geocode ranks by name match, not by "which of these has a
         # boundary". Try the runners-up before declaring no extent -- but
-        # only the ones in the *same country* as the top candidate (#229,
-        # R28): every division name worth searching for is shared across
+        # only the ones in the *same country* as the top candidate (#229):
+        # every division name worth searching for is shared across
         # borders, and a fallback that crosses one turns "no extent for the
         # London you meant" into confidently wrong doorways in Ontario.
         #
-        # The country test runs *first* (R29). It is a dict comparison, while
+        # The country test runs *first*. It is a dict comparison, while
         # the extent lookup behind it is the 10.7s uncached division_area
         # scan -- and a cross-border candidate can never become the anchor
         # whatever that scan returns, so paying for it before rejecting the
@@ -3603,7 +3604,7 @@ def geocode_address(
     }
     if number is not None and not number_filtered:
         # The dataset has no `number` column, so the house number could not be
-        # filtered on and these are every doorway on the street (R29). This
+        # filtered on and these are every doorway on the street. This
         # goes in the note, not just degraded_fields: a caller who asked for
         # one address and silently got the street back has been answered a
         # different question than the one they asked.
