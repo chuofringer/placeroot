@@ -83,7 +83,7 @@ import threading
 import time
 from pathlib import Path
 
-from placeroot import db, progress
+from placeroot import db, manifest, progress
 
 logger = logging.getLogger(__name__)
 
@@ -401,9 +401,16 @@ def ensure_tile(
     lat_min, lat_max = ty * deg, (ty + 1) * deg
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".parquet.tmp")
+    # Bundled release manifest (manifest.py): a tile COPY only needs the
+    # files whose extent intersects the tile — on a fresh connection this
+    # skips the footer pass over every other file in the theme.
+    source = (
+        manifest.pruned_source_sql(upstream_glob, (lon_min, lat_min, lon_max, lat_max))
+        or f"read_parquet('{upstream_glob}', hive_partitioning=1)"
+    )
     sql = f"""
         COPY (
-            SELECT * FROM read_parquet('{upstream_glob}', hive_partitioning=1)
+            SELECT * FROM {source}
             WHERE bbox.xmax >= {lon_min} AND bbox.xmin < {lon_max}
               AND bbox.ymax >= {lat_min} AND bbox.ymin < {lat_max}
         ) TO '{tmp_path}' (FORMAT PARQUET)
@@ -870,6 +877,12 @@ def source_sql(
             return f"read_parquet([{joined}])"
     if not upstream_fallback:
         return None
+    # Bundled release manifest (manifest.py): a bbox-bounded direct scan can
+    # read just the files whose extent intersects the box, skipping the
+    # per-file footer pass over the whole theme. None -> plain glob.
+    pruned = manifest.pruned_source_sql(upstream_glob, bbox)
+    if pruned is not None:
+        return pruned
     return f"read_parquet('{upstream_glob}', hive_partitioning=1)"
 
 

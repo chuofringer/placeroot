@@ -30,13 +30,48 @@ def test_place_resolution_with_near_hint():
     assert "admin_context" not in top
 
 
-def test_place_search_skipped_without_hint_or_division_match():
-    # No near hint given, and "Blue Bottle Roastery" doesn't match any
-    # division name, so resolve_place has no location reference to bound
-    # the places search — documented: the places half simply doesn't run,
-    # rather than falling back to an unbounded scan.
+def test_geocode_place_hits_flow_through_without_a_reference():
+    """No near hint and no division match — but geocode's own fallback can
+    still resolve the place, and resolve_place must not lose to the plain
+    geocoder on a place query (the "Shibuya Crossing Tokyo" bug: geocode
+    could answer, resolve_place returned nothing). Its place-type hits are
+    merged in as candidates; resolve_place's own reference-bounded places
+    search still doesn't run without a reference."""
     results = geocode.resolve_place("Blue Bottle Roastery", limit=5)
-    assert not any(r["kind"] == "place" for r in results)
+    assert results
+    top = results[0]
+    assert top["kind"] == "place"
+    assert top["name"] == "Blue Bottle Roastery"
+    assert top["match"] == "exact"
+
+
+def test_fallback_anchor_prefers_the_prominent_division(monkeypatch):
+    """The trailing-token anchor ranks candidates like geocode's main path:
+    _rank_key orders by each row's own population, so the 8M-person
+    namesake beats the 100-person one regardless of the region map."""
+    small = {"id": "d-small", "name": "Springfield", "subtype": "locality",
+             "country": "PG", "region": None, "lat": -5.0, "lon": 142.0,
+             "admin_context": [], "population": 100}
+    big = dict(small, id="d-big", country="JP", lat=35.0, lon=139.0,
+               population=8_000_000)
+    monkeypatch.setattr(geocode, "_query_divisions", lambda *a, **k: [small, big])
+    hit = geocode._fallback_anchor("Coffee Springfield", [], None, "unused")
+    assert hit == (35.0, 139.0, "Coffee")
+
+
+def test_fallback_anchor_searches_alternate_names_too(monkeypatch):
+    """The trailing token is the city as the user writes it, which for many
+    cities is an alternate spelling (Japan's Tokyo is primarily 東京都) — a
+    primary-names-only lookup doesn't even contain the right row."""
+    seen = {}
+
+    def fake_query(candidate, region_code, local_table, alt_table=None):
+        seen["alt_table"] = alt_table
+        return []
+
+    monkeypatch.setattr(geocode, "_query_divisions", fake_query)
+    geocode._fallback_anchor("Coffee Springfield", [], None, "t", alt_table="alt-t")
+    assert seen["alt_table"] == "alt-t"
 
 
 def test_merged_ordering_is_kind_agnostic_by_match_tier(monkeypatch):

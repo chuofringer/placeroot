@@ -83,7 +83,7 @@ from typing import NamedTuple
 
 import duckdb
 
-from placeroot import cache, db, geo, overture, release
+from placeroot import cache, db, geo, overture
 
 logger = logging.getLogger(__name__)
 
@@ -191,28 +191,20 @@ def _upstream_glob() -> str:
 def _from_source(bbox: tuple[float, float, float, float]) -> str:
     """SQL FROM-clause source for an addresses query: local cache tiles, or upstream.
 
-    Mirrors buildings._from_source / land_use._from_source, pinned to this
-    module's theme+type — see the module docstring's "Tile cache" section for
-    why it can't reuse overture._from_source (which hardcodes type_="place").
+    Delegates to cache.source_sql (tiles, else the bundled release
+    manifest's pruned file list, else the glob) pinned to this module's
+    theme+type — a cold city-bounded address scan reads the file(s) its
+    box intersects instead of paying the footer pass over the whole theme.
 
     Public to the package rather than to this module alone: geocode's
     reverse_geocode address hop calls it too, so both address readers share
     one set of tiles.
     """
     upstream = _upstream_glob()
-    if cache.enabled():
-        try:
-            with db.conn_lock:
-                paths = cache.local_paths_for_query(
-                    db.shared_conn(), release.resolve_release(), THEME, bbox, upstream,
-                    db.new_connection,
-                )
-        except duckdb.Error as e:
-            raise overture.UpstreamUnavailable(str(e)) from e
-        if paths:
-            joined = ", ".join(f"'{p}'" for p in paths)
-            return f"read_parquet([{joined}])"
-    return f"read_parquet('{upstream}', hive_partitioning=1)"
+    try:
+        return cache.source_sql(THEME, upstream, bbox)
+    except duckdb.Error as e:
+        raise overture.UpstreamUnavailable(str(e)) from e
 
 
 def _check_schema(glob: str) -> list[str]:

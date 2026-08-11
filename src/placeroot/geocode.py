@@ -391,6 +391,7 @@ import logging
 import math
 import os
 import re
+import threading
 import time
 import unicodedata
 from pathlib import Path
@@ -777,18 +778,40 @@ def _materialize_alt_names_table(path: Path, glob: str) -> None:
     tmp_path.replace(path)
 
 
+def _is_remote_glob(glob: str) -> bool:
+    return glob.startswith(("s3://", "http://", "https://"))
+
+
+def _stage1_sentinel(path: Path) -> Path:
+    return path.with_suffix(".stage1")
+
+
 def _materialize_divisions_table(path: Path, glob: str) -> None:
     """COPY just the columns geocode.py needs, for every type=division row, into
     a local parquet file at `path`. Raises UpstreamUnavailable/duckdb.Error on
     failure — callers treat that as "materialization failed" and fall back to
     direct upstream scans, same as a missing/incompatible schema.
 
-    Also writes the #214 alternate-name table beside it, from the same
-    upstream read. That half is best-effort: `names.common` is an optional
-    nested field this module can't probe for (probe_schema only sees
-    top-level columns), and losing alternate-name search is a much smaller
-    loss than losing the local table entirely — so a failure there is logged
-    and swallowed, leaving the install on primary names only.
+    Remote datasets build in two stages. The blocking first-call build
+    skips `hierarchies` (145MB of a ~394MB read — and DuckDB's parquet
+    reader cannot prune a struct subfield through list_transform/unnest,
+    measured, so referencing only x.name still downloads all of it) and
+    the alternate-name table, cutting the first name search's cold cost
+    roughly in half. A background upgrade then rebuilds the full table —
+    admin chains and alt names — and atomically replaces it; until it
+    lands, rows carry admin_chain NULL and geocode answers with
+    admin_context []. A .stage1 sentinel beside the table marks the
+    pending upgrade so a process that dies mid-upgrade resumes it on the
+    next geocode. Local datasets (pinned fixtures, mirrors on disk) build
+    the full table in one pass exactly as before — staging exists for the
+    network, not for them.
+
+    The #214 alternate-name half is best-effort either way: `names.common`
+    is an optional nested field this module can't probe for (probe_schema
+    only sees top-level columns), and losing alternate-name search is a
+    much smaller loss than losing the local table entirely — so a failure
+    there is logged and swallowed, leaving the install on primary names
+    only.
 
     #224 adds the four bbox corners as their own columns. They are internal
     (nothing in a tool response reads them) and, on today's data, degenerate —
@@ -797,14 +820,25 @@ def _materialize_divisions_table(path: Path, glob: str) -> None:
     probe_schema guard: a dataset without it fails the existing `names` check
     or the COPY itself, both of which the caller already handles.
     """
+    if _is_remote_glob(glob):
+        _materialize_divisions_pass(path, glob, with_hierarchies=False)
+        _stage1_sentinel(path).touch()
+        _spawn_divisions_upgrade(path, glob)
+    else:
+        _materialize_divisions_pass(path, glob, with_hierarchies=True)
+        _try_materialize_alt_names_table(path.with_name(_ALT_NAMES_TABLE_FILENAME), glob)
+
+
+def _materialize_divisions_pass(path: Path, glob: str, with_hierarchies: bool) -> None:
+    """One COPY of the local divisions table; see _materialize_divisions_table."""
     cols = overture.probe_schema(glob)
     if cols is not None and "names" not in cols:
         raise overture.UpstreamUnavailable("divisions dataset missing 'names' column")
     population_expr = "population" if cols is None or "population" in cols else "NULL AS population"
     hierarchies_expr = (
         "list_transform(hierarchies[1], x -> x.name) AS admin_chain"
-        if cols is None or "hierarchies" in cols
-        else "NULL AS admin_chain"
+        if with_hierarchies and (cols is None or "hierarchies" in cols)
+        else "NULL::VARCHAR[] AS admin_chain"
     )
     region_expr = "region" if cols is None or "region" in cols else "NULL AS region"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -823,7 +857,55 @@ def _materialize_divisions_table(path: Path, glob: str) -> None:
     """
     con.execute(sql)
     tmp_path.replace(path)
+
+
+# Upgrade threads already started this process, keyed by table path — one
+# upgrade per table at a time; a failed upgrade discards its key so the next
+# geocode retries.
+_UPGRADE_DELAY_S = 20.0
+
+_upgrade_started: set[str] = set()
+_upgrade_lock = threading.Lock()
+
+
+def _spawn_divisions_upgrade(path: Path, glob: str) -> None:
+    key = str(path)
+    with _upgrade_lock:
+        if key in _upgrade_started:
+            return
+        _upgrade_started.add(key)
+
+    def _run():
+        try:
+            # Let the request that triggered this build finish first: the
+            # upgrade re-reads ~394MB and, started immediately, it starved
+            # the very call it was spawned from (geocode_address measured
+            # 126s vs 26s with the delay — the same self-starvation the
+            # tile fetch semaphore exists for, which also gates this).
+            time.sleep(_UPGRADE_DELAY_S)
+            with cache._background_fetch_slots:
+                _upgrade_divisions_table(path, glob)
+        except Exception as e:  # noqa: BLE001 - background upgrade must never surface
+            logger.warning(
+                "divisions table upgrade failed (next geocode retries): %s", e
+            )
+            with _upgrade_lock:
+                _upgrade_started.discard(key)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _upgrade_divisions_table(path: Path, glob: str) -> None:
+    """Stage 2: rebuild the full table (admin chains) and the alt-name table,
+    atomically replacing stage 1, then clear the sentinel."""
+    t0 = time.time()
+    _materialize_divisions_pass(path, glob, with_hierarchies=True)
     _try_materialize_alt_names_table(path.with_name(_ALT_NAMES_TABLE_FILENAME), glob)
+    _stage1_sentinel(path).unlink(missing_ok=True)
+    logger.info(
+        "divisions table upgraded with admin chains in %.1fs -> %s",
+        time.time() - t0, path,
+    )
 
 
 # #214: releases whose alt table this process has already tried (and failed)
@@ -1015,6 +1097,13 @@ def _local_divisions_table() -> str | None:
     path = _local_divisions_table_path(active_release)
     if path.exists():
         _rebuild_once_for_bbox_columns(path)
+        if _stage1_sentinel(path).exists():
+            # A stage-1 table whose upgrade never finished (process died
+            # mid-upgrade): resume it in the background; this call answers
+            # from stage 1 meanwhile (admin_context [] until it lands).
+            _spawn_divisions_upgrade(
+                path, overture.upstream_glob(theme="divisions", type_="division")
+            )
         return str(path)
     glob = overture.upstream_glob(theme="divisions", type_="division")
     progress.report(
@@ -1632,6 +1721,8 @@ def _fallback_anchor(
     divisions: list[dict],
     region_code: str | None,
     local_table: str | None,
+    alt_table: str | None = None,
+    region_population: dict[str, int] | None = None,
 ) -> tuple[float, float, str | None] | None:
     """(lat, lon, name_query) to bound/aim the places fallback (#83), or None
     if no location context can be derived from the query at all — the
@@ -1687,10 +1778,21 @@ def _fallback_anchor(
         if len(tokens) <= n:
             continue
         candidate = " ".join(tokens[-n:])
-        rows = _query_divisions(candidate, region_code, local_table)
+        # alt_table is the load-bearing part of this lookup: the trailing
+        # token is a *city name as the user writes it*, and for many big
+        # cities that is an alternate spelling — Japan's Tokyo is primarily
+        # 東京都, so a primary-names-only lookup for "Tokyo" does not even
+        # contain the row every user means, and the measured failure was
+        # "Shibuya Crossing Tokyo" anchoring on a small Papua New Guinea
+        # division named Tokyo (the only primary-name match), aiming the
+        # bounded places search at the wrong hemisphere. Ranking itself is
+        # _rank_key, which orders by each row's own population first; the
+        # region_population map (passed down from geocode's main path
+        # rather than re-scanned here) only breaks region-level ties.
+        rows = _query_divisions(candidate, region_code, local_table, alt_table=alt_table)
         if not rows:
             continue
-        best = min(rows, key=lambda r: _rank_key(r, candidate, {}))
+        best = min(rows, key=lambda r: _rank_key(r, candidate, region_population or {}))
         base = " ".join(tokens[:-n]).strip()
         name_query = None if _nothing_but_stopwords(base) else base
         return best["lat"], best["lon"], name_query
@@ -1736,12 +1838,30 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
         )
         filters += [bbox_filter, distance_filter]
         params.update(geo_params)
-    from_source, _ = overture._with_recreation(
-        f"read_parquet('{glob}', hive_partitioning=1)", anchor_bbox
-    )
+    # Anchored: cache.source_sql resolves tiles-else-manifest-else-glob, so
+    # the search reads only the files/tiles its box touches instead of
+    # paying the per-file footer pass over the whole places theme (the cost
+    # the manifest layer exists to remove — and this is the path the
+    # anchored "Shibuya Crossing Tokyo" fix drives traffic into).
+    # Unanchored: the glob, deliberately. source_sql with no bbox serves
+    # cached tiles alone whenever any exist, which would silently narrow a
+    # worldwide name search to whatever areas this install happens to have
+    # touched — an empty answer for a place the dataset contains. The
+    # unanchored scan's cost is already governed by its own gate
+    # (_skip_unanchored_places_scan), not by the cache.
+    if anchor_bbox is not None:
+        try:
+            base_source = cache.source_sql("places", glob, anchor_bbox)
+        except Exception:  # noqa: BLE001 - cache resolution is an optimization here
+            base_source = f"read_parquet('{glob}', hive_partitioning=1)"
+    else:
+        base_source = f"read_parquet('{glob}', hive_partitioning=1)"
+    from_source, _ = overture._with_recreation(base_source, anchor_bbox)
+    category_expr = "taxonomy.primary" if cols is not None and "taxonomy" in cols else "NULL"
     sql = f"""
         SELECT id, names.primary AS name, bbox.ymin AS lat, bbox.xmin AS lon,
-               coalesce(confidence, 0) AS confidence
+               coalesce(confidence, 0) AS confidence,
+               {category_expr} AS category
         FROM {from_source}
         WHERE {' AND '.join(filters)}
         ORDER BY confidence DESC
@@ -1759,6 +1879,7 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
             "country": None, "region": None,
             "lat": round(r[2], 6), "lon": round(r[3], 6),
             "admin_context": [], "_confidence": r[4],
+            "_category": r[5],
         })
     return result
 
@@ -2380,7 +2501,10 @@ def geocode_detailed(
         # can be derived (a division match already in hand, or a trailing
         # location word in the query) instead of an unconstrained
         # worldwide scan — see _fallback_anchor/_query_places_fallback.
-        anchor_hit = _fallback_anchor(search_query, divisions, region_code, local_table)
+        anchor_hit = _fallback_anchor(
+            search_query, divisions, region_code, local_table, alt_table=alt_table,
+            region_population=region_population,
+        )
         anchor, name_query = (
             ((anchor_hit[0], anchor_hit[1]), anchor_hit[2]) if anchor_hit else (None, search_query)
         )
@@ -2430,6 +2554,10 @@ def geocode_detailed(
         }
         if include_country:
             entry["country"] = row.get("country")
+        if row.get("_category") is not None:
+            # Places-fallback rows only: the place's Overture category, so
+            # resolve_place (and any caller) doesn't lose it in the merge.
+            entry["category"] = row["_category"]
         if row.get("_matched_name"):
             # #214: only present when the row was found through one of
             # Overture's alternate (names.common) spellings rather than its
@@ -2721,6 +2849,27 @@ def resolve_place(
             "category": r["category"],
             "match": label,
             "_prominence": r.get("confidence") or 0.0,
+        })
+    # geocode() can resolve a place on its own — its anchored fallback
+    # handles "Shibuya Crossing Tokyo" by splitting the trailing city off
+    # and searching places around it. Discarding those hits (the previous
+    # behavior kept only division hits) meant resolve_place returned
+    # nothing for a query geocode could answer: a place resolver that
+    # loses to the plain geocoder on place queries. Merge them in with the
+    # same relatedness gate the near-reference path uses.
+    for r in geocode_hits:
+        if r["type"] != "place" or not r["id"] or r["id"] in seen_ids or not r["name"]:
+            continue
+        label = _place_match_label(r["name"], query)
+        if label is None:
+            continue
+        seen_ids.add(r["id"])
+        candidates.append({
+            "id": r["id"], "kind": "place", "name": r["name"],
+            "lat": r["lat"], "lon": r["lon"],
+            "category": r.get("category"),
+            "match": label,
+            "_prominence": r.get("rank_score") or 0.0,
         })
 
     candidates.sort(key=lambda c: (
@@ -3374,16 +3523,32 @@ def _address_row(row: tuple) -> dict:
     return out
 
 
-def _address_empty_note(origin: tuple[float, float], street: str) -> str:
+def _address_empty_note(
+    origin: tuple[float, float], street: str, anchor: dict | None = None
+) -> str:
     """Why a scan inside a resolved city extent found no such street.
 
     Coverage first, because it is the answer far more often than "no such
     street": the addresses theme is alpha and carries
     addresses.COVERED_COUNTRIES only, so a Manchester street search comes
-    back empty whether or not the street exists. Reuses address_at's
-    containment lookup so both tools name the same country by the same rule.
+    back empty whether or not the street exists.
+
+    The anchor already names its country (geocode resolved the city, and
+    country rides on every division row), so when one is in hand the note
+    reuses it instead of re-deriving the same fact with address_at's
+    ST_Contains polygon lookup — measured 18.9s cold against
+    division_area's geometry column, on a path whose whole output is one
+    explanatory sentence. Anchorless callers (address_at itself) still do
+    the containment lookup, so both tools keep naming the same country by
+    the same rule.
     """
-    country = addresses._country_at(*origin)
+    if anchor and anchor.get("country"):
+        context = anchor.get("admin_context") or []
+        country = addresses.Country(
+            addresses.RESOLVED, anchor["country"], context[0] if context else None
+        )
+    else:
+        country = addresses._country_at(*origin)
     covered = len(addresses.COVERED_COUNTRIES)
     if country.status == addresses.RESOLVED and not addresses._is_covered(country.code):
         return (
@@ -3633,7 +3798,7 @@ def geocode_address(
             f"\"{street}\", not that one address."
         )
     if not rows:
-        notes.append(_address_empty_note(origin, street))
+        notes.append(_address_empty_note(origin, street, anchor))
     elif distinct_in_range > len(rows):
         payload["truncated"] = True
         payload["distinct_in_range"] = distinct_in_range

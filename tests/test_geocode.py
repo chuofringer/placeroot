@@ -1838,3 +1838,64 @@ def test_a_postcode_hit_short_circuits_the_name_search(tmp_path):
                                type_="division")
     assert all(r["type"] == "postcode" for r in result["results"])
     assert "gers-div-94110" not in [r["id"] for r in result["results"]]
+
+
+# --- the two-stage remote build (cold-perf: hierarchies deferred) -----------
+
+
+def test_remote_build_stages_and_defers_hierarchies(geocode_cache, monkeypatch):
+    """A remote dataset's first build skips the 145MB hierarchies read and
+    leaves a .stage1 sentinel + a background-upgrade handoff; geocode
+    answers meanwhile with admin_context []."""
+    spawned = []
+    monkeypatch.setattr(geocode, "_is_remote_glob", lambda g: True)
+    monkeypatch.setattr(geocode, "_spawn_divisions_upgrade",
+                        lambda path, glob: spawned.append((path, glob)))
+    table = geocode._local_divisions_table()
+    assert table is not None
+    from pathlib import Path
+    assert geocode._stage1_sentinel(Path(table)).exists()
+    assert len(spawned) == 1
+    rows = geocode.geocode("Brooklyn", limit=3)
+    assert rows and rows[0]["name"] == "Brooklyn"
+    assert rows[0]["admin_context"] == []  # stage 1: chains not built yet
+
+
+def test_upgrade_fills_admin_chains_and_clears_the_sentinel(geocode_cache, monkeypatch):
+    spawned = []
+    monkeypatch.setattr(geocode, "_is_remote_glob", lambda g: True)
+    monkeypatch.setattr(geocode, "_spawn_divisions_upgrade",
+                        lambda path, glob: spawned.append((path, glob)))
+    table = geocode._local_divisions_table()
+    from pathlib import Path
+    geocode._upgrade_divisions_table(
+        Path(table), overture.upstream_glob(theme="divisions", type_="division")
+    )
+    assert not geocode._stage1_sentinel(Path(table)).exists()
+    rows = geocode.geocode("Brooklyn", limit=3)
+    assert rows[0]["admin_context"], "admin chains should be populated after upgrade"
+
+
+def test_local_datasets_build_in_one_pass(geocode_cache, monkeypatch):
+    """Pinned/local datasets (fixtures, on-disk mirrors) keep the old
+    single-pass full build — staging exists for the network."""
+    called = []
+    monkeypatch.setattr(geocode, "_spawn_divisions_upgrade",
+                        lambda *a: called.append(a))
+    table = geocode._local_divisions_table()
+    from pathlib import Path
+    assert not geocode._stage1_sentinel(Path(table)).exists()
+    assert called == []
+    assert geocode.geocode("Brooklyn", limit=3)[0]["admin_context"]
+
+
+def test_a_stranded_stage1_sentinel_resumes_the_upgrade(geocode_cache, monkeypatch):
+    monkeypatch.setattr(geocode, "_is_remote_glob", lambda g: True)
+    monkeypatch.setattr(geocode, "_spawn_divisions_upgrade", lambda *a: None)
+    table = geocode._local_divisions_table()
+    # New process, sentinel still there: the next lookup must re-kick it.
+    resumed = []
+    monkeypatch.setattr(geocode, "_spawn_divisions_upgrade",
+                        lambda path, glob: resumed.append(path))
+    assert geocode._local_divisions_table() == table
+    assert len(resumed) == 1
