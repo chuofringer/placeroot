@@ -470,9 +470,15 @@ def _branch_missing(type_: str) -> tuple[set[str] | None, bool]:
         # one (a local file; the probe caches successes) speaks for all —
         # claimed first so eviction can't delete it mid-probe, and only
         # that one, so a mere schema check doesn't shield the whole theme
-        # from eviction.
-        probed = cache._claim_existing_paths(tiles[:1])
-        tile_schema = overture.probe_schema(str(probed[0])) if probed else None
+        # from eviction. Walk the list until one claims: the listing takes
+        # no claims, so any individual tile may vanish to eviction between
+        # the listing and here without the rest becoming unservable.
+        tile_schema = None
+        for tile in tiles:
+            claimed = cache.claim_existing_paths([tile])
+            if claimed:
+                tile_schema = overture.probe_schema(str(claimed[0]))
+                break
         missing = (
             {c for c in REQUIRED_COLUMNS if c not in tile_schema}
             if tile_schema is not None else set(REQUIRED_COLUMNS)
