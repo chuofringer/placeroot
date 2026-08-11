@@ -1632,6 +1632,7 @@ def _fallback_anchor(
     divisions: list[dict],
     region_code: str | None,
     local_table: str | None,
+    alt_table: str | None = None,
 ) -> tuple[float, float, str | None] | None:
     """(lat, lon, name_query) to bound/aim the places fallback (#83), or None
     if no location context can be derived from the query at all — the
@@ -1687,10 +1688,22 @@ def _fallback_anchor(
         if len(tokens) <= n:
             continue
         candidate = " ".join(tokens[-n:])
-        rows = _query_divisions(candidate, region_code, local_table)
+        # alt_table included: the trailing token is a *city name as the
+        # user writes it*, and for many big cities that is an alternate
+        # spelling — Japan's Tokyo is primarily 東京都, and a
+        # primary-names-only lookup for "Tokyo" doesn't even contain it.
+        # Ranked with the real population map, exactly like geocode's main
+        # path: with an empty map every same-named division ties and the
+        # pick is effectively arbitrary. Measured failure of both together:
+        # "Shibuya Crossing Tokyo" anchored on a small Papua New Guinea
+        # division named Tokyo, aiming the bounded places search at the
+        # wrong hemisphere and answering a resolvable landmark query with
+        # nothing.
+        rows = _query_divisions(candidate, region_code, local_table, alt_table=alt_table)
         if not rows:
             continue
-        best = min(rows, key=lambda r: _rank_key(r, candidate, {}))
+        population = _region_population_lookup(local_table)
+        best = min(rows, key=lambda r: _rank_key(r, candidate, population))
         base = " ".join(tokens[:-n]).strip()
         name_query = None if _nothing_but_stopwords(base) else base
         return best["lat"], best["lon"], name_query
@@ -2380,7 +2393,9 @@ def geocode_detailed(
         # can be derived (a division match already in hand, or a trailing
         # location word in the query) instead of an unconstrained
         # worldwide scan — see _fallback_anchor/_query_places_fallback.
-        anchor_hit = _fallback_anchor(search_query, divisions, region_code, local_table)
+        anchor_hit = _fallback_anchor(
+            search_query, divisions, region_code, local_table, alt_table=alt_table
+        )
         anchor, name_query = (
             ((anchor_hit[0], anchor_hit[1]), anchor_hit[2]) if anchor_hit else (None, search_query)
         )
@@ -2721,6 +2736,27 @@ def resolve_place(
             "category": r["category"],
             "match": label,
             "_prominence": r.get("confidence") or 0.0,
+        })
+    # geocode() can resolve a place on its own — its anchored fallback
+    # handles "Shibuya Crossing Tokyo" by splitting the trailing city off
+    # and searching places around it. Discarding those hits (the previous
+    # behavior kept only division hits) meant resolve_place returned
+    # nothing for a query geocode could answer: a place resolver that
+    # loses to the plain geocoder on place queries. Merge them in with the
+    # same relatedness gate the near-reference path uses.
+    for r in geocode_hits:
+        if r["type"] != "place" or not r["id"] or r["id"] in seen_ids or not r["name"]:
+            continue
+        label = _place_match_label(r["name"], query)
+        if label is None:
+            continue
+        seen_ids.add(r["id"])
+        candidates.append({
+            "id": r["id"], "kind": "place", "name": r["name"],
+            "lat": r["lat"], "lon": r["lon"],
+            "category": r.get("category"),
+            "match": label,
+            "_prominence": r.get("rank_score") or 0.0,
         })
 
     candidates.sort(key=lambda c: (
