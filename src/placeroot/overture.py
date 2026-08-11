@@ -212,36 +212,23 @@ def warm_metadata() -> None:
     cold footer-read cost alone. Meant to run on a background thread at
     startup; failures are logged and swallowed, never raised.
 
-    Warms file-by-file rather than one LIMIT 0 over each glob: a whole-glob
-    warm holds conn_lock for the full footer pass (tens of seconds for the
-    heavy themes), which would block the very first real query this warm
-    exists to speed up. Per-file, the lock is held ~100ms at a time and a
-    real query interleaves freely; the warm just picks up where it left
-    off. Skips pinned themes (a local file needs no warm) and stops
-    entirely if the cache of a theme's file listing fails — upstream is
-    down, and every query will discover that on its own terms.
+    Runs on a cursor of the shared instance (db.new_connection), so it
+    holds no query lock and still warms the one per-instance metadata
+    cache every query reads from. Skips pinned themes (a local file needs
+    no warm), and skips everything when places itself is pinned — same
+    rule as recreation._reaches_past_a_pinned_deployment: an operator who
+    pinned places at a local extract (the offline demo, a mirror) did not
+    agree to background S3 traffic for themes they never configured.
     """
     places_pinned = dataset_is_pinned(THEME, "place")
     for theme, type_ in _WARM_THEMES:
-        if dataset_is_pinned(theme, type_):
-            continue  # a local file needs no footer warm
-        if places_pinned:
-            # Same rule as recreation._reaches_past_a_pinned_deployment: an
-            # operator who pinned places at a local extract (the offline
-            # demo, a mirror) did not agree to background S3 traffic for
-            # themes they never configured.
+        if dataset_is_pinned(theme, type_) or places_pinned:
             continue
         upstream = _upstream_glob(theme, type_)
         try:
-            with db.conn_lock:
-                files = [
-                    r[0] for r in db.shared_conn().execute(
-                        f"SELECT file FROM glob('{upstream}')"
-                    ).fetchall()
-                ]
-            for f in files:
-                with db.conn_lock:
-                    db.shared_conn().execute(f"SELECT * FROM read_parquet('{f}') LIMIT 0")
+            db.new_connection().execute(
+                f"SELECT * FROM read_parquet('{upstream}', hive_partitioning=1) LIMIT 0"
+            )
         except duckdb.Error as e:
             logger.warning("Metadata pre-warm failed for %s (continuing): %s", upstream, e)
             return

@@ -99,10 +99,10 @@ def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     # files). DuckDB parallelizes those reads across threads, so more
     # threads than cores is the right call here: measured on the buildings
     # theme (512 files), the cold metadata pass drops from ~52s at the
-    # 8-thread default to ~25s at 64. Local compute is unaffected in
+    # 8-thread default to ~25s at 64 and ~22s at 96. Local compute is unaffected in
     # practice — the extra threads idle when work is CPU-bound.
     try:
-        threads = max(1, int(os.environ.get("PLACEROOT_DUCKDB_THREADS", 64)))
+        threads = max(1, int(os.environ.get("PLACEROOT_DUCKDB_THREADS", 96)))
         con.execute(f"SET threads={threads};")
     except (ValueError, duckdb.Error) as e:
         logger.warning("Could not raise DuckDB thread count: %s", e)
@@ -135,14 +135,47 @@ def shared_conn() -> duckdb.DuckDBPyConnection:
 
 
 def new_connection() -> duckdb.DuckDBPyConnection:
-    """A fresh, independently-configured connection for background work.
+    """An independently-usable connection for background work: a *cursor*
+    of the shared instance, not a fresh database.
 
     Background tile materialization (cache.py) and one-off local-table
     builds (geocode.py's #43 divisions table) must not share shared_conn()
     with a main-thread query — DuckDB connections aren't safe for
-    concurrent use. Pass this (uncalled) as a connection factory.
+    concurrent use, but cursors of one instance are exactly the documented
+    way to use one database from many threads. The instance being shared
+    is the point, not a convenience: DuckDB's parquet metadata/object
+    cache is per *instance*, and the cold cost of a theme is one footer
+    read per file (buildings: 512 files, measured ~50s at default
+    threads). On separate instances every background COPY and every warm
+    pre-read paid that pass again for nothing; on cursors it is paid once
+    per process, and a warm run on any cursor warms every query. Instance
+    settings (httpfs, s3, threads) are already applied by shared_conn's
+    _configure.
     """
-    return _configure(duckdb.connect())
+    return shared_conn().cursor()
+
+
+def warm_globs_async(globs: list[str]) -> None:
+    """Warm the shared instance's parquet metadata for globs, in the
+    background, off the query lock.
+
+    For tools that know at entry they are about to touch a cold theme
+    (gers_lookup spans three, geocode_address two): a cursor pays the
+    footer pass concurrently with whatever the tool is already doing on
+    the shared connection, so by the time the tool's own query reaches
+    that theme its metadata is warm. Best-effort — failures are the next
+    query's problem to surface properly.
+    """
+    def _warm():
+        for glob in globs:
+            try:
+                new_connection().execute(
+                    f"SELECT * FROM read_parquet('{glob}', hive_partitioning=1) LIMIT 0"
+                )
+            except duckdb.Error as e:
+                logger.debug("speculative metadata warm failed for %s: %s", glob, e)
+
+    threading.Thread(target=_warm, daemon=True).start()
 
 
 def ensure_spatial() -> None:
