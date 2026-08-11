@@ -1,6 +1,9 @@
 <p align="center">
   <a href="https://placeroot.dev">
-    <img src="site/og-image.png" width="720" alt="PlaceRoot — Ask about anywhere. Get a real answer. Open map data for your AI — free, no account, no API key.">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="site/og-image-dark.png">
+      <img src="site/og-image.png" width="720" alt="PlaceRoot — Ask about anywhere. Get a real answer. Open map data for your AI — free, no account, no API key.">
+    </picture>
   </a>
 </p>
 
@@ -151,5 +154,5 @@ The code is [MIT](LICENSE). The data it queries is the Overture Maps public rele
 Per-theme obligations: [docs/DATA-LICENSE.md](docs/DATA-LICENSE.md).
 
 <p align="center">
-  <img src="site/logo-mark.svg" width="48" alt="PlaceRoot logo mark">
+  <img src="https://placeroot.dev/logo-mark.svg" width="48" alt="PlaceRoot logo mark">
 </p>

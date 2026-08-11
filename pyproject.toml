@@ -54,23 +54,38 @@ build-backend = "hatchling.build"
 # 404 there. This keeps README.md relative (correct on GitHub, including
 # branch views) and rewrites to absolute GitHub URLs only in the built
 # package metadata — same idea as scripts/sync_npm_readme.py for npm.
+# URLs pin the release tag ($HFPR_VERSION, filled in at build time) rather
+# than the mutable main branch, so a published package's README keeps
+# pointing at the docs of the version it shipped with. The patterns are
+# kept character-identical to scripts/sync_npm_readme.py's; a test
+# (tests/test_npm_readme_sync.py) fails if the two copies drift.
 [tool.hatch.metadata.hooks.fancy-pypi-readme]
 content-type = "text/markdown"
 
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
 path = "README.md"
 
+# GFM alerts ([!NOTE]) are GitHub-web-only; PyPI's renderer would print the
+# marker as literal text, so it becomes a plain bold blockquote lead-in.
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '> \[!NOTE\]'
+replacement = '> **Note:**'
+
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
 pattern = '\]\((?!https?://|#|mailto:)([^)]+)\)'
-replacement = '](https://github.com/chuofringer/placeroot/blob/main/\1)'
+replacement = '](https://github.com/chuofringer/placeroot/blob/v$HFPR_VERSION/\1)'
 
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
 pattern = 'src="(?!https?://)([^"]+)"'
-replacement = 'src="https://raw.githubusercontent.com/chuofringer/placeroot/main/\1"'
+replacement = 'src="https://raw.githubusercontent.com/chuofringer/placeroot/v$HFPR_VERSION/\1"'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = 'srcset="(?!https?://)([^"]+)"'
+replacement = 'srcset="https://raw.githubusercontent.com/chuofringer/placeroot/v$HFPR_VERSION/\1"'
 
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
 pattern = 'href="(?!https?://|#|mailto:)([^"]+)"'
-replacement = 'href="https://github.com/chuofringer/placeroot/blob/main/\1"'
+replacement = 'href="https://github.com/chuofringer/placeroot/blob/v$HFPR_VERSION/\1"'
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/placeroot"]

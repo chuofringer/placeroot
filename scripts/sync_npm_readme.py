@@ -35,6 +35,7 @@ than silently shipping whichever subset happened to match.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -42,6 +43,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ROOT_README = ROOT / "README.md"
 NPM_README = ROOT / "npm" / "README.md"
+NPM_PACKAGE_JSON = ROOT / "npm" / "package.json"
 
 GENERATED_BANNER = (
     "<!-- Generated from the root README.md by scripts/sync_npm_readme.py.\n"
@@ -59,8 +61,29 @@ INHERITED_SECTIONS = (
 
 # Repo-relative links and image srcs resolve on GitHub but 404 on npmjs.com,
 # which renders the README standalone — rewrite them to absolute GitHub URLs.
-GITHUB_BLOB = "https://github.com/chuofringer/placeroot/blob/main/"
-GITHUB_RAW = "https://raw.githubusercontent.com/chuofringer/placeroot/main/"
+# Pinned to the release tag for the version in npm/package.json rather than
+# the mutable main branch, so a published package's README keeps pointing at
+# the docs of the version it shipped with. Bumping package.json makes
+# --check fail (the version is embedded in these URLs) until the README is
+# regenerated, so the pin can't silently go stale. pyproject.toml's
+# fancy-pypi-readme substitutions are the PyPI copy of these same rewrites
+# ($HFPR_VERSION plays the version's role there); a test asserts the two
+# stay identical.
+_NPM_VERSION = json.loads(NPM_PACKAGE_JSON.read_text(encoding="utf-8"))["version"]
+GITHUB_BLOB = f"https://github.com/chuofringer/placeroot/blob/v{_NPM_VERSION}/"
+GITHUB_RAW = f"https://raw.githubusercontent.com/chuofringer/placeroot/v{_NPM_VERSION}/"
+
+# The rewrite rules, shared verbatim (patterns) with pyproject.toml's
+# fancy-pypi-readme substitutions — see tests/test_npm_readme_sync.py.
+# GFM alerts ([!NOTE]) are GitHub-web-only; npm's renderer would print the
+# marker as literal text, so it becomes a plain bold blockquote lead-in.
+REWRITES: tuple[tuple[str, str], ...] = (
+    (r"> \[!NOTE\]", "> **Note:**"),
+    (r"\]\((?!https?://|#|mailto:)([^)]+)\)", "](" + GITHUB_BLOB + r"\1)"),
+    (r'src="(?!https?://)([^"]+)"', 'src="' + GITHUB_RAW + r'\1"'),
+    (r'srcset="(?!https?://)([^"]+)"', 'srcset="' + GITHUB_RAW + r'\1"'),
+    (r'href="(?!https?://|#|mailto:)([^"]+)"', 'href="' + GITHUB_BLOB + r'\1"'),
+)
 
 # Placeholder held across the uvx -> npx rewrite so deliberately-uv text
 # survives it. Chosen to be something no README would contain on its own.
@@ -162,29 +185,10 @@ def render(root_markdown: str) -> str:
     rendered = _to_npx("\n\n".join(chunks) + "\n").replace(_KEEP_UVX, "uvx")
 
     # Relative links resolve against the repo on GitHub but 404 on npmjs.com,
-    # which renders the README standalone — point them at GitHub instead.
-    rendered = re.sub(
-        r"\]\((?!https?://|#|mailto:)([^)]+)\)",
-        lambda m: "](" + GITHUB_BLOB + m.group(1) + ")",
-        rendered,
-    )
-    rendered = re.sub(
-        r'src="(?!https?://)([^"]+)"',
-        lambda m: 'src="' + GITHUB_RAW + m.group(1) + '"',
-        rendered,
-    )
-    rendered = re.sub(
-        r'href="(?!https?://|#|mailto:)([^"]+)"',
-        lambda m: 'href="' + GITHUB_BLOB + m.group(1) + '"',
-        rendered,
-    )
-
-    relative = re.findall(r"\]\((?!https?://|#|mailto:)([^)]+)\)", rendered)
-    if relative:
-        raise SyncError(
-            "inherited README sections contain repo-relative links, which break "
-            "on npmjs.com: " + ", ".join(sorted(set(relative)))
-        )
+    # which renders the README standalone — point them at GitHub instead
+    # (and downgrade GitHub-only markup). See REWRITES.
+    for pattern, replacement in REWRITES:
+        rendered = re.sub(pattern, replacement, rendered)
     return rendered
 
 
