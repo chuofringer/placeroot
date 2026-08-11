@@ -83,13 +83,44 @@ import threading
 import time
 from pathlib import Path
 
-from placeroot import db
+from placeroot import db, progress
 
 logger = logging.getLogger(__name__)
 
 TILE_DEG = 1.0
 DEFAULT_CACHE_DIR = os.path.expanduser("~/.cache/placeroot")
 DEFAULT_MAX_MB = 500
+
+# Heavy themes get finer tiles and first-touch synchronous materialization.
+# Buildings and transportation rows carry full geometries, and a truly cold
+# query measured 60-181s on the direct-scan fallback (Tokyo box) — the scan
+# itself moves too many bytes to ever answer fast, so for these themes the
+# right first-touch is the places strategy inverted: COPY a *small* tile
+# (1/16th the area of the 1-degree grid), then answer locally. Measured
+# effect is the difference between racing a scan that loses and paying a
+# bounded, narrated fetch once per neighborhood.
+HEAVY_THEME_TILE_DEG: dict[str, float] = {
+    # Buildings queries are point-radius (≤ ~1km), so tiles can be small
+    # without any query spanning many of them; a 0.0625° tile (~7km) COPYs
+    # in seconds where the 1° tile (and the direct scan — buildings row
+    # groups are fat with geometry) measured a minute-plus.
+    "buildings": 0.0625,
+    # Transportation serves corridors (routes) as well as radii, so its
+    # tiles stay coarser; 0.125° (~14km) balances a seconds-scale COPY
+    # against how many tiles a metro-area route touches.
+    "transportation": 0.125,
+}
+
+# A wide query over a heavy theme (a long route corridor) would need too
+# many inline COPYs to answer interactively; past this many missing tiles
+# the query falls back to the ordinary direct-scan-plus-background path
+# rather than stalling on a fetch marathon.
+HEAVY_SYNC_MAX_TILES = 12
+
+
+def tile_deg_for(theme: str) -> float:
+    """Tile edge length in degrees for theme (see HEAVY_THEME_TILE_DEG)."""
+    return HEAVY_THEME_TILE_DEG.get(theme, TILE_DEG)
 
 # Ceiling on how many 1-degree tiles a single query may fan out into. Each
 # missing tile in a query costs one background thread + one upstream COPY
@@ -121,6 +152,46 @@ OVERSIZE_TILE_SPAN_GUARD = MAX_TILES_PER_QUERY * 4
 # both starting a fetch.
 _inflight: set[tuple[str, str, tuple[int, int]]] = set()
 _inflight_lock = threading.Lock()
+
+
+def _background_fetch_concurrency() -> int:
+    """How many background tile COPYs may run at once (default 2, min 1).
+
+    PLACEROOT_CACHE_FETCH_CONCURRENCY overrides — raise it on a fat pipe
+    where warming faster matters more than the foreground query's share of
+    bandwidth. See _materialize_in_background for why the bound exists.
+    """
+    try:
+        return max(1, int(os.environ.get("PLACEROOT_CACHE_FETCH_CONCURRENCY", 2)))
+    except ValueError:
+        return 2
+
+
+# One process-wide bound across every theme's fetches: the network pipe the
+# bound protects is shared process-wide too. Sized at import from the env
+# var; changing the variable mid-process does not resize it.
+_background_fetch_slots = threading.BoundedSemaphore(_background_fetch_concurrency())
+
+# Background fetch threads are ephemeral (one per tile), but a fresh DuckDB
+# connection pays the whole per-file parquet-footer pass again for the
+# theme it COPYs from (~25-50s cold on the heavy themes) — so connections
+# are pooled and reused across fetches instead of created per tile. The
+# pool never exceeds the fetch-concurrency bound in practice because
+# acquisitions happen under _background_fetch_slots.
+_fetcher_conns: list = []
+_fetcher_conns_lock = threading.Lock()
+
+
+def _acquire_fetcher_conn(new_connection):
+    with _fetcher_conns_lock:
+        if _fetcher_conns:
+            return _fetcher_conns.pop()
+    return new_connection()
+
+
+def _release_fetcher_conn(con) -> None:
+    with _fetcher_conns_lock:
+        _fetcher_conns.append(con)
 
 
 def enabled() -> bool:
@@ -278,8 +349,14 @@ def resolve_fingerprint(release: str, theme: str, upstream_glob: str) -> str | N
 
 
 def tile_path(release: str, theme: str, fingerprint: str, tile: tuple[int, int]) -> Path:
+    """Path for a tile. Non-default tile sizes carry the size in the name,
+    so a theme whose grid changed (buildings moving to 0.25°) can never
+    read a tile materialized under the old grid as if ids lined up —
+    old-grid files become inert and age out via LRU like any cold tile."""
     tx, ty = tile
-    return cache_dir() / release / theme / fingerprint / f"tile_{ty}_{tx}.parquet"
+    deg = tile_deg_for(theme)
+    suffix = "" if deg == TILE_DEG else f"@{deg:g}"
+    return cache_dir() / release / theme / fingerprint / f"tile_{ty}_{tx}{suffix}.parquet"
 
 
 def ensure_tile(
@@ -319,8 +396,9 @@ def ensure_tile(
         return path
 
     tx, ty = tile
-    lon_min, lon_max = tx * TILE_DEG, (tx + 1) * TILE_DEG
-    lat_min, lat_max = ty * TILE_DEG, (ty + 1) * TILE_DEG
+    deg = tile_deg_for(theme)
+    lon_min, lon_max = tx * deg, (tx + 1) * deg
+    lat_min, lat_max = ty * deg, (ty + 1) * deg
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".parquet.tmp")
     sql = f"""
@@ -442,7 +520,7 @@ def cached_tile_paths_for_bbox(
     fingerprint = resolve_fingerprint(release, theme, upstream_glob)
     if fingerprint is None:
         return []
-    tiles = tiles_for_bbox(*bbox)
+    tiles = tiles_for_bbox(*bbox, tile_deg=tile_deg_for(theme))
     if len(tiles) > MAX_TILES_PER_QUERY:
         return []
     found, _missing = _claim_existing_tiles(release, theme, fingerprint, tiles)
@@ -601,6 +679,17 @@ def _materialize_in_background(
     Never raises to the caller — a failed background fetch is logged and
     just leaves the tile uncached for next time (the calling query already
     got its answer from upstream directly).
+
+    Fetches hold _background_fetch_slots for the duration of the COPY. The
+    bound exists because the triggering query is *still running*: it fell
+    back to a direct upstream scan, and that scan shares one network pipe
+    with these fetches. Unbounded, a first query over a new area spawns one
+    COPY per touched (theme, tile) — six at once with the recreation layer
+    on — and the measured result was the answering scan starving for tens
+    of minutes behind its own cache warmers. Two concurrent fetches keep
+    warming meaningfully faster than one while leaving the foreground scan
+    most of the bandwidth; the rest of the tiles queue on the semaphore in
+    their (cheap, parked) threads.
     """
     key = (release, theme, fingerprint, tile)
     with _inflight_lock:
@@ -610,7 +699,12 @@ def _materialize_in_background(
 
     def _run():
         try:
-            ensure_tile(new_connection(), release, theme, tile, upstream_glob, fingerprint)
+            with _background_fetch_slots:
+                con = _acquire_fetcher_conn(new_connection)
+                try:
+                    ensure_tile(con, release, theme, tile, upstream_glob, fingerprint)
+                finally:
+                    _release_fetcher_conn(con)
         except Exception as e:  # noqa: BLE001 - background fetch must never surface
             logger.warning("Background tile materialization failed for %s: %s", key, e)
         finally:
@@ -657,7 +751,7 @@ def local_paths_for_query(
     fingerprint = resolve_fingerprint(release, theme, upstream_glob)
     if fingerprint is None:
         return None
-    tiles = tiles_for_bbox(*bbox)
+    tiles = tiles_for_bbox(*bbox, tile_deg=tile_deg_for(theme))
     if len(tiles) > MAX_TILES_PER_QUERY:
         # Oversized bbox: don't fan out into a tile-per-thread materialization
         # storm. Fall back to a single direct upstream scan for this query.
@@ -673,7 +767,17 @@ def local_paths_for_query(
     if not missing:
         return [str(p) for p in cached]
 
-    if sync_mode():
+    # Heavy themes materialize inline even without PLACEROOT_CACHE_SYNC:
+    # their direct-scan fallback measured 60-181s truly cold (the bytes,
+    # not the plan), so racing it loses — a few small-tile COPYs, narrated
+    # per tile, is the fast path AND leaves the area warm. A query wide
+    # enough to need more than HEAVY_SYNC_MAX_TILES fetches falls back to
+    # the ordinary path rather than stalling on a fetch marathon.
+    heavy_sync = (
+        theme in HEAVY_THEME_TILE_DEG and len(missing) <= HEAVY_SYNC_MAX_TILES
+    )
+
+    if sync_mode() or heavy_sync:
         # Claim every tile this query holds BEFORE each fetch (#158):
         # ensure_tile runs its own evict_if_needed() right after writing, so
         # a query spanning several missing tiles would otherwise evict the
@@ -687,16 +791,31 @@ def local_paths_for_query(
         # a not-yet-existing path is harmless: eviction only deletes files
         # that exist and skips claimed paths regardless.
         held = [str(p) for p in cached]
-        for t in missing:
+        for i, t in enumerate(missing):
+            progress.report(
+                f"Fetching map data for this area ({theme} tile {i + 1} of "
+                f"{len(missing)}) — the first query over a new area is slow; "
+                "results are cached, repeat queries answer in milliseconds",
+                i, len(missing),
+            )
             held.append(str(tile_path(release, theme, fingerprint, t)))
             claim_paths(held)
             cached.append(ensure_tile(con, release, theme, t, upstream_glob, fingerprint))
+        progress.report(
+            f"Map data for this area cached ({theme}) — running the query",
+            len(missing), len(missing),
+        )
         paths = [str(p) for p in cached]
         # Fresh TTL on the way out so the caller has the full window to read
         # the files, however long the fetch loop took.
         claim_paths(paths)
         return paths
 
+    progress.report(
+        f"First query over a new area: answering from a direct scan of Overture "
+        f"on S3 while {len(missing)} {theme} tile(s) cache in the background — "
+        "this query is slow, repeat queries over this area answer in milliseconds"
+    )
     for t in missing:
         _materialize_in_background(release, theme, t, upstream_glob, fingerprint, new_connection)
     return None

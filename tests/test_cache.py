@@ -43,6 +43,44 @@ def test_tiles_for_bbox_single_tile():
     assert cache.tiles_for_bbox(-73.95, 40.65, -73.85, 40.75) == [(-74, 40)]
 
 
+def test_heavy_themes_get_finer_tiles_and_suffixed_paths():
+    assert cache.tile_deg_for("places") == cache.TILE_DEG
+    assert cache.tile_deg_for("buildings") == 0.0625
+    assert cache.tile_deg_for("transportation") == 0.125
+    p = cache.tile_path("r", "buildings", "fp", (100, 200))
+    assert p.name == "tile_200_100@0.0625.parquet"
+    assert cache.tile_path("r", "places", "fp", (1, 2)).name == "tile_2_1.parquet"
+
+
+def test_heavy_theme_first_touch_materializes_inline(cache_dir, con, monkeypatch):
+    """A heavy theme's first query COPYs its (small) tiles synchronously even
+    without PLACEROOT_CACHE_SYNC — its direct-scan fallback measured
+    60-181s cold, so racing the scan loses (see HEAVY_THEME_TILE_DEG)."""
+    monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
+    monkeypatch.setitem(cache.HEAVY_THEME_TILE_DEG, THEME, cache.TILE_DEG)
+    glob = str(FIXTURE_PATH)
+    paths = cache.local_paths_for_query(
+        con, RELEASE, THEME, (-73.95, 40.65, -73.85, 40.75), glob, duckdb.connect
+    )
+    assert paths, "heavy theme should have materialized inline, not deferred"
+
+
+def test_heavy_theme_wide_query_falls_back_to_direct_scan(cache_dir, con, monkeypatch):
+    """More missing tiles than HEAVY_SYNC_MAX_TILES: don't stall on a fetch
+    marathon — return None (direct scan) and warm in the background."""
+    monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
+    monkeypatch.setitem(cache.HEAVY_THEME_TILE_DEG, THEME, 0.25)
+    monkeypatch.setattr(cache, "ensure_tile", lambda *a, **k: None)
+    glob = str(FIXTURE_PATH)
+    paths = cache.local_paths_for_query(
+        con, RELEASE, THEME, (-74.9, 40.1, -73.1, 41.9), glob, duckdb.connect
+    )
+    assert paths is None
+    deadline = time.monotonic() + 10
+    while cache._inflight and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
 def test_cached_tile_paths_for_bbox_prunes_to_the_box(cache_dir, con):
     """The cache-only bounded read returns the tiles the box touches, not
     every tile the theme has on disk — and materializes nothing."""

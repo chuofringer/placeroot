@@ -397,7 +397,7 @@ from pathlib import Path
 
 import duckdb
 
-from placeroot import addresses, cache, overture, release
+from placeroot import addresses, cache, overture, progress, release
 from placeroot.errors import AmbiguousArea
 
 logger = logging.getLogger(__name__)
@@ -1017,6 +1017,10 @@ def _local_divisions_table() -> str | None:
         _rebuild_once_for_bbox_columns(path)
         return str(path)
     glob = overture.upstream_glob(theme="divisions", type_="division")
+    progress.report(
+        "Building the place-name index (one-time per data release) — this "
+        "first name search is slow; every search after it answers instantly"
+    )
     logger.info(
         "materializing local divisions name table for release %s "
         "(first geocode call this process; one-time cost per release)",

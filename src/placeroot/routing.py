@@ -109,7 +109,7 @@ from collections import OrderedDict
 
 import duckdb
 
-from placeroot import budget, cache, db, errors, geo, overture, release, simplify
+from placeroot import budget, cache, db, errors, geo, overture, progress, release, simplify
 from placeroot.errors import UpstreamUnavailable  # noqa: F401 - re-exported; see below
 
 logger = logging.getLogger(__name__)
@@ -892,6 +892,11 @@ def build_graph(
     the returned Graph's `truncated` flag is set True — a partial-but-honest
     graph rather than an unbounded one, or a silent undercount.
     """
+    progress.report(
+        "Building the street graph for this area from Overture's road "
+        "network — the first routing query here is slow; the graph is "
+        "cached, repeat routing over this area answers in milliseconds"
+    )
     if mode not in MODE_CONFIG:
         raise UnsupportedMode(mode)
     config = MODE_CONFIG[mode]

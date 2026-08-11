@@ -114,7 +114,7 @@ import os
 
 import duckdb
 
-from placeroot import cache, db, release
+from placeroot import cache, db, geo, release
 
 logger = logging.getLogger(__name__)
 
@@ -325,7 +325,10 @@ def _basic_category_expr(class_map: dict[str, str]) -> str:
     return "CASE class " + " ".join(arms) + " END"
 
 
-def _projection(source: str, type_: str, missing: set[str]) -> str:
+def _projection(
+    source: str, type_: str, missing: set[str],
+    bbox: tuple[float, float, float, float] | None,
+) -> str:
     """One base-theme dataset, projected into the places row shape.
 
     Only the columns the places tools actually read are projected; UNION ALL
@@ -340,12 +343,33 @@ def _projection(source: str, type_: str, missing: set[str]) -> str:
     plot at its corner. Collapsing to the centre makes the row behave
     exactly like a point feature, at the cost documented in the module
     docstring.
+
+    The collapse has a scan-cost consequence this projection must pay for
+    itself: the query's own bbox predicate lands on the *computed* centroid
+    struct, which parquet row-group statistics can't be matched against, so
+    without help a cold direct scan of a base theme reads the whole planet
+    (measured: a first query over an uncached area took 14+ minutes, all of
+    it in millions-of-rows base-theme scans). So the query bbox is also
+    applied here, inside the projection, as an intersection test on the
+    *raw* bbox columns — physical columns, so row-group pruning works. It
+    is a strict superset of the outer centroid test (a centroid inside the
+    query box lies inside its own raw bbox, which then intersects the box),
+    so the outer filters still decide membership; this one only prunes I/O.
+    Bounds are interpolated as literals (they are floats computed by
+    geo.bbox_around, not caller input). A box that runs past [-180, 180]
+    (antimeridian) skips the prefilter rather than mis-pruning the wrapped
+    side — those queries stay correct, just unpruned, like before.
     """
     id_expr = "NULL" if "id" in missing else "id"
     names_expr = "NULL" if "names" in missing else "names"
     sources_expr = "NULL" if "sources" in missing else "sources"
     class_list = ", ".join(db._sql_str(c) for c in SOURCES[type_])
     taxonomy_expr, basic_category_expr = _case_exprs(type_)
+    prune = ""
+    if bbox is not None:
+        prune_sql = geo.bbox_prune_literal_sql(bbox)
+        if prune_sql:
+            prune = f" AND {prune_sql}"
     return f"""SELECT
             {id_expr} AS id,
             {names_expr} AS names,
@@ -358,7 +382,7 @@ def _projection(source: str, type_: str, missing: set[str]) -> str:
             {basic_category_expr} AS basic_category,
             TRUE AS {MARKER_COLUMN}
         FROM {source}
-        WHERE class IN ({class_list})"""
+        WHERE class IN ({class_list}){prune}"""
 
 
 def union_branches(bbox: tuple[float, float, float, float] | None) -> list[str]:
@@ -395,7 +419,7 @@ def union_branches(bbox: tuple[float, float, float, float] | None) -> list[str]:
             # cover the box) — see _from_source. Not a degradation of the
             # layer, just of this one query.
             continue
-        branches.append(_projection(source, type_, missing))
+        branches.append(_projection(source, type_, missing, bbox))
     return branches
 
 

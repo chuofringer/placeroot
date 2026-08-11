@@ -11,6 +11,7 @@ stays safe under that concurrency.
 """
 
 import argparse
+import asyncio
 import functools
 import inspect
 import logging
@@ -39,6 +40,7 @@ from placeroot import (
     land_use,
     mapview,
     overture,
+    progress,
     prompts,
     release,
     resources,
@@ -1917,6 +1919,63 @@ CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
 }
 
 
+async def _progress_middleware(ctx, call_next):
+    """Narrate slow tool calls via MCP progress notifications.
+
+    A cold query (first over a new area) legitimately spends tens of
+    seconds in S3 scans and tile COPYs; without this, the client shows a
+    silent spinner indistinguishable from a hang. When the caller attached
+    a progressToken to its tools/call, this installs a request-scoped
+    reporter (progress.set_reporter) that the query layer's phase
+    boundaries feed — the start of a direct upstream scan, each tile COPY
+    — and the client renders as live status. Callers without a token, and
+    every non-tool request, pass through untouched.
+
+    The reporter is called from the worker thread the SDK runs a sync tool
+    on, so the async send is scheduled onto the event loop with
+    run_coroutine_threadsafe, fire-and-forget: progress must never block or
+    fail the query it narrates (see progress.py's contract), and per the
+    spec a progress send for a completed request is dropped harmlessly.
+    """
+    token = (ctx.meta or {}).get("progress_token") if ctx.method == "tools/call" else None
+    if token is None:
+        return await call_next(ctx)
+
+    loop = asyncio.get_running_loop()
+    session, request_id = ctx.session, ctx.request_id
+    # The spec requires progress to increase with every notification on a
+    # token. Call sites report per-phase counts that reset between phases
+    # (tile 1..N for places, then 1..M for each base theme), so the wire
+    # value is a per-request monotonic sequence instead; the human-facing
+    # counts live in the message, which is what clients render anyway.
+    seq = 0
+    seq_lock = threading.Lock()
+
+    def reporter(message: str, current: float | None, total: float | None) -> None:
+        nonlocal seq
+        # Scheduling happens under the same lock as the increment so the
+        # wire order matches the sequence order even if two threads ever
+        # report concurrently — a later value must not reach the loop first.
+        with seq_lock:
+            seq += 1
+            future = asyncio.run_coroutine_threadsafe(
+                session.send_progress_notification(
+                    token, seq, None, message, related_request_id=request_id,
+                ),
+                loop,
+            )
+        # Consume the eventual result: a failed or cancelled send is already
+        # best-effort (progress.py's contract) and must not surface as an
+        # exception-was-never-retrieved warning at GC time.
+        future.add_done_callback(lambda f: f.cancelled() or f.exception())
+
+    reset_token = progress.set_reporter(reporter)
+    try:
+        return await call_next(ctx)
+    finally:
+        progress.reset(reset_token)
+
+
 def build_server(spec=_UNSET) -> MCPServer:
     """An MCPServer with the PLACEROOT_TOOLS-selected subset registered.
 
@@ -1932,7 +1991,10 @@ def build_server(spec=_UNSET) -> MCPServer:
     # out again for pre-2026-07-28 clients, so an older client's tools/list is
     # byte-identical to what it got before this existed (asserted in
     # tests/test_caching.py).
-    server = MCPServer("placeroot", instructions=BASE_INSTRUCTIONS, cache_hints=CACHE_HINTS)
+    server = MCPServer(
+        "placeroot", instructions=BASE_INSTRUCTIONS, cache_hints=CACHE_HINTS,
+        middleware=[_progress_middleware],
+    )
     # One registry for the loop: `progressive` selects meta-tool names, every
     # other selection selects only real ones, so the two never mix in a
     # single server even though they are registered by the same code.
