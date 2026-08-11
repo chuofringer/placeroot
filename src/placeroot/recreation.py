@@ -473,17 +473,19 @@ def _branch_missing(type_: str) -> tuple[set[str] | None, bool]:
         # from eviction. Walk the list until one claims: the listing takes
         # no claims, so any individual tile may vanish to eviction between
         # the listing and here without the rest becoming unservable.
+        # Bounded at three attempts: enough to ride out another process
+        # evicting a tile or two between the unclaimed listing and here
+        # (claims are per-process), without a mass eviction turning one
+        # schema check into a probe (plus a failure-memo entry and a
+        # warning, see db.probe_schema) per vanished tile.
         tile_schema = None
-        for tile in tiles:
+        for tile in tiles[:3]:
             claimed = cache.claim_existing_paths([tile])
             if not claimed:
                 continue
             tile_schema = overture.probe_schema(str(claimed[0]))
             if tile_schema is not None:
                 break
-            # The probe itself failed — another process can evict a tile
-            # between our claim and the read (claims are per-process). The
-            # next tile may still serve; only give up when none does.
         missing = (
             {c for c in REQUIRED_COLUMNS if c not in tile_schema}
             if tile_schema is not None else set(REQUIRED_COLUMNS)

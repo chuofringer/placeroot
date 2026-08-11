@@ -412,9 +412,9 @@ def cached_tile_paths(release: str, theme: str, upstream_glob: str) -> list[Path
     touched this release/theme/fingerprint yet, or if upstream is
     unreachable and no fingerprint directory exists to fall back to; never
     raises. The listing takes no eviction claims — claiming shields tiles
-    and marks them hot, which a mere listing must not do; a caller about
-    to *read* some of these paths claims exactly those via
-    claim_existing_paths first (source_sql does).
+    and marks them hot, which a mere listing must not do. To *read* the
+    whole listing, call claimed_tile_paths instead; to read a subset,
+    claim exactly those paths via claim_existing_paths first.
     """
     fingerprint = resolve_fingerprint(release, theme, upstream_glob)
     if fingerprint is None:
