@@ -191,18 +191,60 @@ _configure = db._configure
 
 
 
+# Themes the startup pre-warm walks, in the order a session is likely to
+# need them. places first (the headline tools), then the two heavy themes
+# whose cold footer pass is the largest (buildings 512 files measured
+# ~25-50s), then the rest of the query surface.
+_WARM_THEMES: tuple[tuple[str, str], ...] = (
+    ("places", "place"),
+    ("buildings", "building"),
+    ("transportation", "segment"),
+    ("base", "land_use"),
+    ("base", "land"),
+    ("divisions", "division"),
+    ("addresses", "address"),
+)
+
+
 def warm_metadata() -> None:
-    """Best-effort: touch the shared connection's parquet metadata cache for
-    the active upstream dataset (issue #31), so the first real query doesn't
-    pay the cold footer-read cost alone. Meant to run on a background thread
-    at startup; failures are logged and swallowed, never raised.
+    """Best-effort: warm the shared connection's parquet metadata cache for
+    every queried theme (issue #31), so a first real query doesn't pay the
+    cold footer-read cost alone. Meant to run on a background thread at
+    startup; failures are logged and swallowed, never raised.
+
+    Warms file-by-file rather than one LIMIT 0 over each glob: a whole-glob
+    warm holds conn_lock for the full footer pass (tens of seconds for the
+    heavy themes), which would block the very first real query this warm
+    exists to speed up. Per-file, the lock is held ~100ms at a time and a
+    real query interleaves freely; the warm just picks up where it left
+    off. Skips pinned themes (a local file needs no warm) and stops
+    entirely if the cache of a theme's file listing fails — upstream is
+    down, and every query will discover that on its own terms.
     """
-    upstream = _upstream_glob()
-    try:
-        with db.conn_lock:
-            db.shared_conn().execute(f"SELECT * FROM read_parquet('{upstream}') LIMIT 0")
-    except duckdb.Error as e:
-        logger.warning("Metadata pre-warm failed for %s (continuing): %s", upstream, e)
+    places_pinned = dataset_is_pinned(THEME, "place")
+    for theme, type_ in _WARM_THEMES:
+        if dataset_is_pinned(theme, type_):
+            continue  # a local file needs no footer warm
+        if places_pinned:
+            # Same rule as recreation._reaches_past_a_pinned_deployment: an
+            # operator who pinned places at a local extract (the offline
+            # demo, a mirror) did not agree to background S3 traffic for
+            # themes they never configured.
+            continue
+        upstream = _upstream_glob(theme, type_)
+        try:
+            with db.conn_lock:
+                files = [
+                    r[0] for r in db.shared_conn().execute(
+                        f"SELECT file FROM glob('{upstream}')"
+                    ).fetchall()
+                ]
+            for f in files:
+                with db.conn_lock:
+                    db.shared_conn().execute(f"SELECT * FROM read_parquet('{f}') LIMIT 0")
+        except duckdb.Error as e:
+            logger.warning("Metadata pre-warm failed for %s (continuing): %s", upstream, e)
+            return
 
 
 def missing_columns(glob: str, required: list[str] = REQUIRED_COLUMNS) -> list[str]:
