@@ -6,9 +6,23 @@ semver as it applies to an MCP server: removing a tool or changing a
 response shape is breaking, adding a tool is minor, loosening a filter or
 fixing behavior is patch.
 
-## [Unreleased]
+## [0.9.0] — 2026-08-11
 
 ### Added
+- Every tool answers a truly cold query — fresh install, uncached area,
+  dense city — in **under 30 seconds**, most in single digits (worst case
+  was 181s). The levers, each measured: wheel-bundled per-release
+  file-extent manifests (108KB) so a bbox-bounded scan reads only the
+  files its box intersects instead of paying a parquet-footer read per
+  file per theme; finer tiles with first-touch synchronous
+  materialization for the geometry-heavy themes (buildings 0.0625°,
+  transportation 0.125°); one shared DuckDB metadata cache across every
+  connection (cursors of one instance); DuckDB threads raised to 96 for
+  the IO-bound footer passes (`PLACEROOT_DUCKDB_THREADS`); a staged
+  divisions name-index build that defers admin chains to a background
+  upgrade; and a startup metadata pre-warm covering every queried theme.
+  `scripts/build_release_manifest.py` regenerates manifests when a new
+  Overture release is pinned.
 - Cold queries narrate themselves: when the client sends an MCP
   `progressToken`, slow phases — the direct S3 scan of a first query over
   a new area, each tile fetched by a synchronous cache warm — stream as
@@ -57,6 +71,16 @@ fixing behavior is patch.
 - `geocode`: guarded fuzzy fallback tier for typos (#215, #234); searches
   Overture's alternate names (`names.common`) (#214, #220); postcode-shaped
   queries return a centroid plus covering locality (#223, #226)
+
+### Fixed
+- `resolve_place` no longer loses to plain `geocode` on place queries:
+  geocode's place-type hits merge into its candidates, the trailing-token
+  anchor ranks namesake cities by prominence and searches alternate
+  names ("Shibuya Crossing Tokyo" used to anchor on a Papua New Guinea
+  division named Tokyo and return nothing), and place hits carry their
+  Overture category
+- `gers_lookup` reports a recreation-layer row's real owning theme/type;
+  `place_details` labels such rows `source_theme: base`
 
 ### Changed
 - README redesigned as a visual intro page: logo/OG banner header, nav

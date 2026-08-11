@@ -173,3 +173,30 @@ Overture's open data does not carry these, so PlaceRoot does not pretend to:
 If a question needs one of those three, a commercial maps API is the right
 tool. For where things are, what is around them, and what is reachable from
 them, PlaceRoot answers without a key.
+
+## Configuration
+
+Every setting is an environment variable; none is required. The ones an
+operator is most likely to reach for:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `PLACEROOT_TOOLS` | all 29 | Tool profile/subset — see the section above |
+| `PLACEROOT_RECREATION_LAYER` | on | `0`/`false`/`no`/`off` disables the base-theme recreation layer ([docs/RECREATION.md](RECREATION.md)) |
+| `PLACEROOT_CACHE` | on | `off` disables the local tile cache entirely |
+| `PLACEROOT_CACHE_DIR` | `~/.cache/placeroot` | Where tiles, the geocode name index, and support tables live |
+| `PLACEROOT_CACHE_MAX_MB` | `500` | LRU size cap for the cache directory |
+| `PLACEROOT_CACHE_SYNC` | off | Materialize missing tiles inline instead of in the background (tests, warm-starts) |
+| `PLACEROOT_CACHE_FETCH_CONCURRENCY` | `2` | Concurrent background tile fetches — bounded so a cold query's own scan isn't starved by its cache warmers |
+| `PLACEROOT_DUCKDB_THREADS` | `96` | DuckDB threads; deliberately above core count because cold parquet-footer reads are IO-bound |
+| `PLACEROOT_WARM_REGION` | unset | `lat,lon,radius_m` to pre-warm at startup, on top of the automatic metadata pre-warm |
+| `PLACEROOT_DATA_PATH` / `PLACEROOT_DATA_PATH_<THEME>` | unset | Pin a theme to a local dataset instead of live S3 |
+| `PLACEROOT_UPSTREAM_BASE` | Overture's public bucket | Point every theme at a mirror in the standard release layout ([docs/MIRROR.md](MIRROR.md)) |
+| `PLACEROOT_S3_REGION` / `PLACEROOT_S3_ENDPOINT` | `us-west-2` / AWS | Mirror plumbing: region, custom S3-compatible endpoint (credentials via `PLACEROOT_S3_ACCESS_KEY_ID`/`SECRET_ACCESS_KEY`) |
+| `PLACEROOT_RELEASE_TTL_HOURS` / `PLACEROOT_STALE_RELEASE_DAYS` | `6` / `60` | Release re-discovery cadence and the staleness warning threshold |
+
+Cold-query behavior worth knowing: the first query over a new area fetches
+that area's tiles (narrated via MCP progress when the client sends a
+`progressToken`); repeat queries answer from the local cache in
+milliseconds. Wheel-bundled per-release manifests keep even the first
+query's scan to the few files its bounding box intersects.
