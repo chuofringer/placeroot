@@ -111,6 +111,7 @@ places theme already covers them well.
 import functools
 import logging
 import os
+import time
 
 import duckdb
 
@@ -399,19 +400,43 @@ def union_branches(bbox: tuple[float, float, float, float] | None) -> list[str]:
     return branches
 
 
-# Warn once per (type, glob) for an unreadable or drifted dataset, mirroring
-# _pinned_warned: the condition holds for every query in such a deployment
-# and would otherwise log on each one, forever. Keyed by glob so re-pointing
-# the upstream (the fix) warns afresh if the new target is broken too.
-_unhealthy_warned: set[tuple[str, str]] = set()
+# Warn once per (reason, type, glob) for a condition that holds for every
+# query in a degraded deployment and would otherwise log on each one,
+# forever. Keyed by glob so re-pointing the upstream (the fix) warns afresh
+# if the new target is broken too, and by reason so a dataset that heals
+# from one failure mode into a different one still gets that mode's warning.
+_warned_once: set[tuple[str, str, str]] = set()
 
 
-def _warn_unhealthy_once(type_: str, glob: str, message: str, *args) -> None:
-    key = (type_, glob)
-    if key in _unhealthy_warned:
+def _warn_once(reason: str, type_: str, glob: str, message: str, *args) -> None:
+    key = (reason, type_, glob)
+    if key in _warned_once:
         return
-    _unhealthy_warned.add(key)
+    _warned_once.add(key)
     logger.warning(message, *args)
+
+
+# A failed schema probe is not retried for this long. The probe layer
+# (db.probe_schema) caches successes only, and its failure warning plus the
+# probe's own network timeout would otherwise repeat on every places query
+# of a degraded deployment; a short memo keeps the steady-state cost near
+# zero while the deployment still heals within a minute of its upstream.
+_PROBE_RETRY_S = 60.0
+_probe_failed_at: dict[tuple[str, str], float] = {}
+
+
+def _probe(type_: str, glob: str) -> frozenset | None:
+    from placeroot import overture
+
+    failed_at = _probe_failed_at.get((type_, glob))
+    if failed_at is not None and time.monotonic() - failed_at < _PROBE_RETRY_S:
+        return None
+    present = overture.probe_schema(glob)
+    if present is None:
+        _probe_failed_at[(type_, glob)] = time.monotonic()
+    else:
+        _probe_failed_at.pop((type_, glob), None)
+    return present
 
 
 def _branch_missing(type_: str) -> tuple[set[str] | None, bool]:
@@ -430,23 +455,34 @@ def _branch_missing(type_: str) -> tuple[set[str] | None, bool]:
     dataset when they were written, which keeps the layer answering from
     cache through an upstream outage the same way the places theme does —
     but the second element stays False so _from_source knows never to fall
-    back to the unreadable glob for a box the tiles don't cover.
+    back to (or materialize from) the unreadable glob for a box the tiles
+    don't cover. That partial state is warned about and reported in
+    degraded_types: some queries answering from tiles doesn't make the
+    silent gaps outside them acceptable.
 
-    The probe is retried on every call by design (db.probe_schema caches
-    successes, never failures), so a deployment heals the moment its
-    upstream does; the warning is emitted once per (type, glob).
+    The failed probe is retried after _PROBE_RETRY_S (db.probe_schema
+    caches successes, never failures), so a deployment heals within a
+    minute of its upstream; each warning fires once per (reason, type,
+    glob).
     """
-    from placeroot import overture
-
     glob = _upstream_glob(type_)
-    present = overture.probe_schema(glob)
+    present = _probe(type_, glob)
     if present is None:
         if cache.enabled() and cache.cached_tile_paths(
             release.resolve_release(), _cache_theme(type_), glob
         ):
+            _warn_once(
+                "unreadable-cached", type_, glob,
+                "recreation layer: theme=%s/type=%s is unreadable at %s — serving "
+                "that branch from already-cached tiles only; queries outside their "
+                "coverage will be Overture-places-only for its categories. A mirror "
+                "that carries only theme=places causes this: mirror theme=base too "
+                "(scripts/mirror_theme.py) or set %s=0.",
+                THEME, type_, glob, ENV_VAR,
+            )
             return set(), False
-        _warn_unhealthy_once(
-            type_, glob,
+        _warn_once(
+            "unreadable", type_, glob,
             "recreation layer: theme=%s/type=%s is unreadable at %s and nothing is "
             "cached for it — skipping that branch; places results will be "
             "Overture-places-only for its categories. A mirror that carries only "
@@ -458,19 +494,14 @@ def _branch_missing(type_: str) -> tuple[set[str] | None, bool]:
     missing = {c for c in REQUIRED_COLUMNS if c not in present}
     essential_missing = sorted(missing & ESSENTIAL_COLUMNS)
     if essential_missing:
-        _warn_unhealthy_once(
-            type_, glob,
+        _warn_once(
+            "schema-drift", type_, glob,
             "recreation layer: theme=%s/type=%s is missing %s — skipping that branch; "
             "places results will be Overture-places-only for its categories",
             THEME, type_, ", ".join(essential_missing),
         )
         return None, True
     return missing, True
-
-
-# One warning per (type, places dataset) pair, not one per query: a pinned
-# deployment would otherwise log this on every find_places call forever.
-_pinned_warned: set[tuple[str, str]] = set()
 
 
 def _reaches_past_a_pinned_deployment(type_: str) -> bool:
@@ -495,16 +526,14 @@ def _reaches_past_a_pinned_deployment(type_: str) -> bool:
         return False
     if overture.dataset_is_pinned(THEME, type_):
         return False
-    key = (type_, overture._upstream_glob(overture.THEME, "place"))
-    if key not in _pinned_warned:
-        _pinned_warned.add(key)
-        logger.warning(
-            "recreation layer: theme=places is pinned to a local dataset but "
-            "theme=%s/type=%s is not, so reading it would mean a live S3 scan this "
-            "deployment did not ask for — skipping that branch. Set "
-            "PLACEROOT_DATA_PATH_BASE to include it, or %s=0 to silence this.",
-            THEME, type_, ENV_VAR,
-        )
+    _warn_once(
+        "pinned", type_, overture._upstream_glob(overture.THEME, "place"),
+        "recreation layer: theme=places is pinned to a local dataset but "
+        "theme=%s/type=%s is not, so reading it would mean a live S3 scan this "
+        "deployment did not ask for — skipping that branch. Set "
+        "PLACEROOT_DATA_PATH_BASE to include it, or %s=0 to silence this.",
+        THEME, type_, ENV_VAR,
+    )
     return True
 
 
@@ -522,7 +551,15 @@ def degraded_types() -> list[str]:
     if not enabled():
         return []
 
-    return [
-        type_ for type_ in SOURCES
-        if _reaches_past_a_pinned_deployment(type_) or _branch_missing(type_)[0] is None
-    ]
+    degraded = []
+    for type_ in SOURCES:
+        if _reaches_past_a_pinned_deployment(type_):
+            degraded.append(type_)
+            continue
+        missing, upstream_readable = _branch_missing(type_)
+        # An unreadable upstream still serving from cached tiles counts as
+        # degraded: queries outside the tiles' coverage silently drop the
+        # branch, and data_version is where that has to be visible.
+        if missing is None or not upstream_readable:
+            degraded.append(type_)
+    return degraded

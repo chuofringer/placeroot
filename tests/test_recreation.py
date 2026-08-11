@@ -657,7 +657,7 @@ def test_a_places_only_pin_does_not_drag_the_base_theme_live(tmp_path, monkeypat
     variable that would bring it back."""
     monkeypatch.setenv("PLACEROOT_DATA_PATH", str(tmp_path / "places.parquet"))
     recreation.set_enabled(True)
-    recreation._pinned_warned.clear()
+    recreation._warned_once.clear()
     try:
         with caplog.at_level("WARNING"):
             assert recreation.union_branches((-74.0, 40.0, -73.0, 41.0)) == []
@@ -668,7 +668,7 @@ def test_a_places_only_pin_does_not_drag_the_base_theme_live(tmp_path, monkeypat
         assert resources.recreation_payload()["degraded_types"] == ["land_use", "land"]
     finally:
         recreation.set_enabled(None)
-        recreation._pinned_warned.clear()
+        recreation._warned_once.clear()
 
 
 def test_pinning_the_base_theme_too_brings_the_layer_back(layer_on):

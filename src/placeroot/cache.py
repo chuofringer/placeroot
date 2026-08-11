@@ -647,10 +647,13 @@ def source_sql(
     new is materialized — an unbounded lookup must not trigger a world-sized
     fetch.
 
-    upstream_fallback=False returns None instead of the upstream glob when
-    nothing local can serve the query — for callers (the recreation layer's
-    unbounded lookups) where scanning a remote glob with no bbox to prune by
-    would be a planet-scale scan, and skipping is the right degradation.
+    upstream_fallback=False means the upstream glob must not be touched *at
+    all*: no fallback scan, and no tile materialization either (with or
+    without a bbox, only tiles already on disk serve) — returning None when
+    nothing local can. For callers where the glob is known-unusable (the
+    recreation layer's unreadable-upstream case, where a COPY from it would
+    fail the query it was meant to supplement) or where an unprunable scan
+    of it would be planet-scale (the layer's unbounded lookups).
 
     Raises duckdb.Error on cache resolution failure; callers wrap it in their
     own unavailable-upstream error the way they wrap the query itself.
@@ -659,7 +662,7 @@ def source_sql(
         from placeroot import release as release_mod
 
         active_release = release_mod.resolve_release()
-        if bbox is None:
+        if bbox is None or not upstream_fallback:
             paths = cached_tile_paths(active_release, theme, upstream_glob)
         else:
             with db.conn_lock:
