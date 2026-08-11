@@ -336,6 +336,33 @@ def ensure_tile(
     return path
 
 
+def _claim_existing_tiles(
+    release: str, theme: str, fingerprint: str, tiles: list[tuple[int, int]]
+) -> tuple[list[Path], list[tuple[int, int]]]:
+    """(on-disk tile paths claimed against eviction, tiles not on disk).
+
+    The one implementation of the #142 critical section: each hit is
+    claimed in the same locked scan that finds it on disk, so eviction
+    can't delete a tile between the existence check and the claim that is
+    supposed to protect it. Callers materialize the missing tiles *outside*
+    this lock (a DB COPY and its own eviction pass do not belong under it).
+    """
+    cached, missing = [], []
+    with _claims_lock:
+        now = time.monotonic()
+        _prune_expired_locked(now)
+        deadline = now + _CLAIM_TTL_S
+        for t in tiles:
+            path = tile_path(release, theme, fingerprint, t)
+            if path.exists():
+                os.utime(path, None)  # bump mtime: this tile is recently used
+                _claim_locked(str(path), deadline)
+                cached.append(path)
+            else:
+                missing.append(t)
+    return cached, missing
+
+
 def cached_tile_paths(release: str, theme: str, upstream_glob: str) -> list[Path]:
     """Every tile parquet already materialized locally for release/theme's
     *currently resolved* schema fingerprint.
@@ -347,7 +374,9 @@ def cached_tile_paths(release: str, theme: str, upstream_glob: str) -> list[Path
     silently return stale-schema tiles. Returns [] if caching hasn't
     touched this release/theme/fingerprint yet, or if upstream is
     unreachable and no fingerprint directory exists to fall back to; never
-    raises.
+    raises. The returned tiles are claimed against eviction (#142) so the
+    caller's read — or its schema probe of one of them — can't race a
+    concurrent eviction pass.
     """
     fingerprint = resolve_fingerprint(release, theme, upstream_glob)
     if fingerprint is None:
@@ -355,7 +384,18 @@ def cached_tile_paths(release: str, theme: str, upstream_glob: str) -> list[Path
     d = cache_dir() / release / theme / fingerprint
     if not d.exists():
         return []
-    return sorted(d.glob("*.parquet"))
+    paths = sorted(d.glob("*.parquet"))
+    with _claims_lock:
+        now = time.monotonic()
+        _prune_expired_locked(now)
+        deadline = now + _CLAIM_TTL_S
+        existing = []
+        for path in paths:
+            if path.exists():
+                os.utime(path, None)
+                _claim_locked(str(path), deadline)
+                existing.append(path)
+    return existing
 
 
 def cached_tile_paths_for_bbox(
@@ -368,9 +408,9 @@ def cached_tile_paths_for_bbox(
     source_sql path where the upstream must not be touched: a query should
     read the tiles its box covers, not every tile the theme has ever
     cached. Tiles found are claimed against eviction for the query's
-    lifetime, same as local_paths_for_query (#142). An oversized bbox
-    (> MAX_TILES_PER_QUERY tiles) returns [] — with no upstream to fall
-    back to, skipping is the only bounded answer.
+    lifetime via the shared #142 critical section (_claim_existing_tiles).
+    An oversized bbox (> MAX_TILES_PER_QUERY tiles) returns [] — with no
+    upstream to fall back to, skipping is the only bounded answer.
     """
     fingerprint = resolve_fingerprint(release, theme, upstream_glob)
     if fingerprint is None:
@@ -378,17 +418,7 @@ def cached_tile_paths_for_bbox(
     tiles = tiles_for_bbox(*bbox)
     if len(tiles) > MAX_TILES_PER_QUERY:
         return []
-    found = []
-    with _claims_lock:
-        now = time.monotonic()
-        _prune_expired_locked(now)
-        deadline = now + _CLAIM_TTL_S
-        for t in tiles:
-            path = tile_path(release, theme, fingerprint, t)
-            if path.exists():
-                os.utime(path, None)
-                _claim_locked(str(path), deadline)
-                found.append(path)
+    found, _missing = _claim_existing_tiles(release, theme, fingerprint, tiles)
     return sorted(found)
 
 
@@ -611,24 +641,7 @@ def local_paths_for_query(
         )
         return None
 
-    cached, missing = [], []
-    # Claim each hit in the same critical section that finds it on disk, so
-    # eviction can't delete a tile between this existence check and the
-    # claim that is supposed to protect it (#142). ensure_tile is called
-    # *outside* this block: it runs a DB COPY and its own eviction pass, and
-    # holding the claims lock across either would be asking for trouble.
-    with _claims_lock:
-        now = time.monotonic()
-        _prune_expired_locked(now)
-        deadline = now + _CLAIM_TTL_S
-        for t in tiles:
-            path = tile_path(release, theme, fingerprint, t)
-            if path.exists():
-                os.utime(path, None)  # bump mtime: this tile is recently used
-                _claim_locked(str(path), deadline)
-                cached.append(path)
-            else:
-                missing.append(t)
+    cached, missing = _claim_existing_tiles(release, theme, fingerprint, tiles)
 
     if not missing:
         return [str(p) for p in cached]

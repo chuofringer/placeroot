@@ -451,37 +451,49 @@ def _branch_missing(type_: str) -> tuple[set[str] | None, bool]:
             cache.cached_tile_paths(release.resolve_release(), _cache_theme(type_), glob)
             if cache.enabled() else []
         )
+        if not tiles:
+            _warn_once(
+                "unreadable", type_, glob,
+                "recreation layer: theme=%s/type=%s is unreadable at %s and nothing is "
+                "cached for it — skipping that branch; places results will be "
+                "Overture-places-only for its categories. A mirror that carries only "
+                "theme=places causes this: mirror theme=base too (scripts/mirror_theme.py) "
+                "or set %s=0.",
+                THEME, type_, glob, ENV_VAR,
+            )
+            return None, False
         # The tiles' own schema decides `missing`, not an assumption that
         # they carry every REQUIRED column: tiles materialized while the
         # dataset lacked a non-essential column (missing={'sources'}, say)
         # must project NULL for it, not reference a column that isn't there
         # and fail the query. All tiles share a fingerprint dir, so probing
-        # the first (a local file; the probe caches successes) speaks for
-        # all of them.
-        tile_schema = overture.probe_schema(str(tiles[0])) if tiles else None
-        if tile_schema is not None:
-            missing = {c for c in REQUIRED_COLUMNS if c not in tile_schema}
-            if not missing & ESSENTIAL_COLUMNS:
-                _warn_once(
-                    "unreadable-cached", type_, glob,
-                    "recreation layer: theme=%s/type=%s is unreadable at %s — serving "
-                    "that branch from already-cached tiles only; queries outside their "
-                    "coverage will be Overture-places-only for its categories. A mirror "
-                    "that carries only theme=places causes this: mirror theme=base too "
-                    "(scripts/mirror_theme.py) or set %s=0.",
-                    THEME, type_, glob, ENV_VAR,
-                )
-                return missing, False
+        # the first (a local file, claimed against eviction by
+        # cached_tile_paths; the probe caches successes) speaks for all.
+        tile_schema = overture.probe_schema(str(tiles[0]))
+        missing = (
+            {c for c in REQUIRED_COLUMNS if c not in tile_schema}
+            if tile_schema is not None else set(REQUIRED_COLUMNS)
+        )
+        if tile_schema is None or missing & ESSENTIAL_COLUMNS:
+            _warn_once(
+                "unreadable-tiles-unusable", type_, glob,
+                "recreation layer: theme=%s/type=%s is unreadable at %s and its "
+                "cached tiles cannot serve either (unreadable tile, or a schema "
+                "missing an essential column) — skipping that branch; places "
+                "results will be Overture-places-only for its categories.",
+                THEME, type_, glob,
+            )
+            return None, False
         _warn_once(
-            "unreadable", type_, glob,
-            "recreation layer: theme=%s/type=%s is unreadable at %s and nothing is "
-            "cached for it — skipping that branch; places results will be "
-            "Overture-places-only for its categories. A mirror that carries only "
-            "theme=places causes this: mirror theme=base too (scripts/mirror_theme.py) "
-            "or set %s=0.",
+            "unreadable-cached", type_, glob,
+            "recreation layer: theme=%s/type=%s is unreadable at %s — serving "
+            "that branch from already-cached tiles only; queries outside their "
+            "coverage will be Overture-places-only for its categories. A mirror "
+            "that carries only theme=places causes this: mirror theme=base too "
+            "(scripts/mirror_theme.py) or set %s=0.",
             THEME, type_, glob, ENV_VAR,
         )
-        return None, False
+        return missing, False
     missing = {c for c in REQUIRED_COLUMNS if c not in present}
     essential_missing = sorted(missing & ESSENTIAL_COLUMNS)
     if essential_missing:

@@ -43,6 +43,34 @@ def test_tiles_for_bbox_single_tile():
     assert cache.tiles_for_bbox(-73.95, 40.65, -73.85, 40.75) == [(-74, 40)]
 
 
+def test_cached_tile_paths_for_bbox_prunes_to_the_box(cache_dir, con):
+    """The cache-only bounded read returns the tiles the box touches, not
+    every tile the theme has on disk — and materializes nothing."""
+    glob = str(FIXTURE_PATH)
+    fp = cache.resolve_fingerprint(RELEASE, THEME, glob)
+    cache.ensure_tile(con, RELEASE, THEME, (-74, 40), glob, fp)
+    cache.ensure_tile(con, RELEASE, THEME, (10, 50), glob, fp)  # far away, must be pruned
+
+    paths = cache.cached_tile_paths_for_bbox(
+        RELEASE, THEME, glob, (-73.95, 40.65, -73.85, 40.75)
+    )
+    assert [p.name for p in paths] == ["tile_40_-74.parquet"]
+    # The touched tile is claimed against eviction (#142).
+    with cache._claims_lock:
+        assert str(paths[0]) in cache._claims
+
+    # A box touching no cached tile returns [] without touching upstream.
+    assert cache.cached_tile_paths_for_bbox(
+        RELEASE, THEME, glob, (0.05, 0.05, 0.15, 0.15)
+    ) == []
+
+    # An oversized box (over MAX_TILES_PER_QUERY tiles) returns [] — there
+    # is no upstream fallback on this path, so skipping is the bounded answer.
+    assert cache.cached_tile_paths_for_bbox(
+        RELEASE, THEME, glob, (-179.0, -80.0, 179.0, 80.0)
+    ) == []
+
+
 def test_tiles_for_bbox_pole_query_stays_bounded():
     """Issue #163 (A1): bbox_around(90, 0, 500000) is clamped to a
     (still full-globe-width) box, but tiles_for_bbox must not materialize

@@ -105,13 +105,16 @@ def recreation_payload() -> dict | None:
     there is nothing to read off disk.
 
     `degraded_types` is the one field worth an agent's attention: a base
-    type listed there is one the layer cannot currently read — schema
-    drift, an unreadable dataset (a mirror carrying only theme=places), or
-    a pinned places dataset with no matching base pin (see
-    recreation._reaches_past_a_pinned_deployment) — so results are
-    places-theme-only for its categories. A payload whose degraded_types
-    covers every type is a layer that is switched on but contributing
-    nothing.
+    type listed there is not delivering full coverage. Either it is out of
+    the union entirely — schema drift, an unreadable dataset with nothing
+    cached (a mirror carrying only theme=places), or a pinned places
+    dataset with no matching base pin (see
+    recreation._reaches_past_a_pinned_deployment) — and results are
+    places-theme-only for its categories; or its upstream is unreadable
+    and it is serving from already-cached tiles only, so base rows still
+    arrive inside the tiles' coverage but queries outside it silently get
+    places-theme-only answers. A payload whose degraded_types covers every
+    type is a layer that is switched on but not delivering everything.
     """
     if not recreation.enabled():
         return None

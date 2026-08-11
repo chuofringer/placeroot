@@ -361,6 +361,36 @@ def test_the_unreadable_warning_fires_once_per_glob(layer_on, tmp_path, caplog):
                                theme="base", type_="land_use")
 
 
+def test_an_unreadable_upstream_serves_from_cached_tiles(layer_on, tmp_path, monkeypatch):
+    """Upstream breaks after tiles were warmed: the branch keeps answering
+    from the tiles (inside their coverage) and data_version reports the
+    type as degraded rather than healthy."""
+    from placeroot import db
+
+    monkeypatch.setenv("PLACEROOT_CACHE", "on")
+    monkeypatch.setenv("PLACEROOT_CACHE_SYNC", "1")
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "placeroot-cache"))
+    upstream = tmp_path / "deletable_land_use.parquet"
+    upstream.write_bytes((layer_on / "land_use.parquet").read_bytes())
+    overture.set_data_path(str(upstream), theme="base", type_="land_use")
+    try:
+        warmed = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000,
+                                      category="playground", limit=25)
+        assert "lu-play-named" in _ids(warmed)
+
+        upstream.unlink()
+        db._probe_schema_cached.cache_clear()  # a fresh process facing the dead glob
+
+        rows = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000,
+                                    category="playground", limit=25)
+        assert "lu-play-named" in _ids(rows)
+        assert "land_use" in recreation.degraded_types()
+    finally:
+        db._probe_schema_cached.cache_clear()
+        overture.set_data_path(str(layer_on / "land_use.parquet"),
+                               theme="base", type_="land_use")
+
+
 def test_an_unreadable_base_dataset_drops_the_branch(layer_on, tmp_path, caplog):
     """What a partial mirror looks like: the glob resolves but nothing is
     there. Before the probe check this passed 'assume nothing missing' and
