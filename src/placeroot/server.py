@@ -1943,19 +1943,29 @@ async def _progress_middleware(ctx, call_next):
 
     loop = asyncio.get_running_loop()
     session, request_id = ctx.session, ctx.request_id
+    # The spec requires progress to increase with every notification on a
+    # token. Call sites report per-phase counts that reset between phases
+    # (tile 1..N for places, then 1..M for each base theme), so the wire
+    # value is a per-request monotonic sequence instead; the human-facing
+    # counts live in the message, which is what clients render anyway.
+    seq = 0
+    seq_lock = threading.Lock()
 
     def reporter(message: str, current: float | None, total: float | None) -> None:
+        nonlocal seq
+        with seq_lock:
+            seq += 1
+            value = seq
         future = asyncio.run_coroutine_threadsafe(
             session.send_progress_notification(
-                token, current if current is not None else 0.0, total, message,
-                related_request_id=request_id,
+                token, value, None, message, related_request_id=request_id,
             ),
             loop,
         )
-        # Consume the eventual result: a failed send is already best-effort
-        # (progress.py's contract) and must not surface as an
+        # Consume the eventual result: a failed or cancelled send is already
+        # best-effort (progress.py's contract) and must not surface as an
         # exception-was-never-retrieved warning at GC time.
-        future.add_done_callback(lambda f: f.exception())
+        future.add_done_callback(lambda f: f.cancelled() or f.exception())
 
     reset_token = progress.set_reporter(reporter)
     try:

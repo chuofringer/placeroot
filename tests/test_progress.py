@@ -80,6 +80,10 @@ def test_async_fallback_reports_the_direct_scan(captured, tmp_path, monkeypatch)
     monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "c"))
     monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
     monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
+    # The call schedules real background fetch threads; stub the COPY so a
+    # thread outliving this test can't write a fixture-derived tile into
+    # the developer's real cache dir after the env monkeypatch is undone.
+    monkeypatch.setattr(cache, "ensure_tile", lambda *a, **k: None)
     con = duckdb.connect()
     bbox = (CENTER_LON - 0.01, CENTER_LAT - 0.01, CENTER_LON + 0.01, CENTER_LAT + 0.01)
     paths = cache.local_paths_for_query(
@@ -155,6 +159,7 @@ def test_middleware_installs_a_reporter_when_a_token_is_present():
 
     async def call_next(c):
         progress.report("slow phase", 1, 2)
+        progress.report("next phase", 1, 4)  # counts reset between phases...
         await asyncio.sleep(0.05)  # let run_coroutine_threadsafe land
         return "ok"
 
@@ -162,7 +167,13 @@ def test_middleware_installs_a_reporter_when_a_token_is_present():
         return await server._progress_middleware(ctx, call_next)
 
     assert asyncio.run(run()) == "ok"
-    assert ctx.session.sent == [("tok", 1, 2, "slow phase")]
+    # ...but the wire values are a per-request monotonic sequence (the spec
+    # requires progress to increase per notification); the human-facing
+    # counts travel in the message.
+    assert ctx.session.sent == [
+        ("tok", 1, None, "slow phase"),
+        ("tok", 2, None, "next phase"),
+    ]
     assert progress._reporter.get() is None  # reset after the call
 
 

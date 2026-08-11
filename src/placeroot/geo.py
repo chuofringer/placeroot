@@ -179,6 +179,26 @@ def bbox_filter_sql(
     return filter_sql, {"xmin": east_xmin, "ymin": ymin, "xmax": west_xmax, "ymax": ymax}
 
 
+def bbox_prune_literal_sql(bbox: tuple[float, float, float, float]) -> str:
+    """bbox_filter_sql's intersection test with literal bounds, or "" at the seam.
+
+    For call sites that build SQL where named parameters can't reach (the
+    recreation layer's per-branch projection prune, whose whole point is
+    pushing physical-column comparisons into a parquet scan). Shares this
+    module's seam rule: a box that ran past [-180, 180] returns "" — skip
+    the prune, stay correct, stay merely unpruned — rather than mis-pruning
+    the wrapped side. Kept next to bbox_filter_sql so the two can't
+    silently diverge on what "crosses the antimeridian" means.
+    """
+    xmin, ymin, xmax, ymax = (float(v) for v in bbox)
+    if not (xmin >= -180.0 and xmax <= 180.0):
+        return ""
+    return (
+        f"bbox.xmax >= {xmin!r} AND bbox.xmin <= {xmax!r}"
+        f" AND bbox.ymax >= {ymin!r} AND bbox.ymin <= {ymax!r}"
+    )
+
+
 @lru_cache(maxsize=16)
 def geom_expr(glob: str, as_wkt: bool = False) -> str:
     """SQL expression yielding a GEOMETRY (or, if as_wkt, its WKT text) for glob's geometry column.

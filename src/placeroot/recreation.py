@@ -114,7 +114,7 @@ import os
 
 import duckdb
 
-from placeroot import cache, db, release
+from placeroot import cache, db, geo, release
 
 logger = logging.getLogger(__name__)
 
@@ -366,12 +366,10 @@ def _projection(
     class_list = ", ".join(db._sql_str(c) for c in SOURCES[type_])
     taxonomy_expr, basic_category_expr = _case_exprs(type_)
     prune = ""
-    if bbox is not None and bbox[0] >= -180.0 and bbox[2] <= 180.0:
-        xmin, ymin, xmax, ymax = (float(v) for v in bbox)
-        prune = (
-            f" AND bbox.xmax >= {xmin!r} AND bbox.xmin <= {xmax!r}"
-            f" AND bbox.ymax >= {ymin!r} AND bbox.ymin <= {ymax!r}"
-        )
+    if bbox is not None:
+        prune_sql = geo.bbox_prune_literal_sql(bbox)
+        if prune_sql:
+            prune = f" AND {prune_sql}"
     return f"""SELECT
             {id_expr} AS id,
             {names_expr} AS names,

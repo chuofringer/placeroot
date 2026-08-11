@@ -256,10 +256,12 @@ def _with_recreation(
     hive_partitioning=1, which DuckDB will not mix into a list with
     anything else ("Hive partition mismatch ... key \"theme\" not found").
     BY NAME fills the columns each branch lacks with NULL, which is the
-    truthful value on both sides. Filters still push down into every
-    branch — EXPLAIN over the fixtures shows the query's bbox predicate and
-    the layer's own class filter both reaching each READ_PARQUET, so a
-    places query does not turn into a full scan of the base theme.
+    truthful value on both sides. The query's bbox predicate does NOT
+    prune the base-theme scans on its own: the projection collapses bbox
+    to a computed centroid struct that row-group statistics can't match
+    (measured cold cost: 14+ minutes of planet-wide base scans), so each
+    branch applies the query bbox to its raw bbox columns itself — see
+    recreation._projection's prune.
 
     Only places: no other theme has a recreation layer, and passing one
     through here would union places rows into a divisions query.
