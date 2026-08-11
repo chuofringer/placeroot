@@ -6,6 +6,16 @@ semver as it applies to an MCP server: removing a tool or changing a
 response shape is breaking, adding a tool is minor, loosening a filter or
 fixing behavior is patch.
 
+## [0.9.1] — 2026-08-11
+
+### Fixed
+- `geocode_address` folds ordinal street numbers both ways — "350 5th
+  Ave, New York" (and "350 Fifth Ave") now reaches NYC's "5 AVENUE"
+  rows, "1 Street" reaches "1st St", with correct 11th/21st/103rd
+  suffixes. A lone ordinal token never widens to a bare-digit prefix
+  match, and the variant cap rises to 24 so four-token streets keep
+  their abbreviated "W ... ST NW" branch.
+
 ## [0.9.0] — 2026-08-11
 
 ### Added
