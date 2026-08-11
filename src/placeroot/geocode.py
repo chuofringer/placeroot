@@ -397,7 +397,7 @@ from pathlib import Path
 
 import duckdb
 
-from placeroot import addresses, cache, overture, release
+from placeroot import addresses, cache, overture, progress, release
 from placeroot.errors import AmbiguousArea
 
 logger = logging.getLogger(__name__)
