@@ -111,7 +111,6 @@ places theme already covers them well.
 import functools
 import logging
 import os
-import time
 
 import duckdb
 
@@ -416,29 +415,6 @@ def _warn_once(reason: str, type_: str, glob: str, message: str, *args) -> None:
     logger.warning(message, *args)
 
 
-# A failed schema probe is not retried for this long. The probe layer
-# (db.probe_schema) caches successes only, and its failure warning plus the
-# probe's own network timeout would otherwise repeat on every places query
-# of a degraded deployment; a short memo keeps the steady-state cost near
-# zero while the deployment still heals within a minute of its upstream.
-_PROBE_RETRY_S = 60.0
-_probe_failed_at: dict[tuple[str, str], float] = {}
-
-
-def _probe(type_: str, glob: str) -> frozenset | None:
-    from placeroot import overture
-
-    failed_at = _probe_failed_at.get((type_, glob))
-    if failed_at is not None and time.monotonic() - failed_at < _PROBE_RETRY_S:
-        return None
-    present = overture.probe_schema(glob)
-    if present is None:
-        _probe_failed_at[(type_, glob)] = time.monotonic()
-    else:
-        _probe_failed_at.pop((type_, glob), None)
-    return present
-
-
 def _branch_missing(type_: str) -> tuple[set[str] | None, bool]:
     """(missing REQUIRED_COLUMNS or None, whether upstream itself is readable).
 
@@ -460,27 +436,42 @@ def _branch_missing(type_: str) -> tuple[set[str] | None, bool]:
     degraded_types: some queries answering from tiles doesn't make the
     silent gaps outside them acceptable.
 
-    The failed probe is retried after _PROBE_RETRY_S (db.probe_schema
-    caches successes, never failures), so a deployment heals within a
-    minute of its upstream; each warning fires once per (reason, type,
-    glob).
+    A failed probe is memoized briefly at the db layer
+    (db.PROBE_FAILURE_RETRY_S), so a degraded deployment pays the probe's
+    network timeout about once a minute rather than per query and heals
+    within a minute of its upstream; each warning here fires once per
+    (reason, type, glob).
     """
+    from placeroot import overture
+
     glob = _upstream_glob(type_)
-    present = _probe(type_, glob)
+    present = overture.probe_schema(glob)
     if present is None:
-        if cache.enabled() and cache.cached_tile_paths(
-            release.resolve_release(), _cache_theme(type_), glob
-        ):
-            _warn_once(
-                "unreadable-cached", type_, glob,
-                "recreation layer: theme=%s/type=%s is unreadable at %s — serving "
-                "that branch from already-cached tiles only; queries outside their "
-                "coverage will be Overture-places-only for its categories. A mirror "
-                "that carries only theme=places causes this: mirror theme=base too "
-                "(scripts/mirror_theme.py) or set %s=0.",
-                THEME, type_, glob, ENV_VAR,
-            )
-            return set(), False
+        tiles = (
+            cache.cached_tile_paths(release.resolve_release(), _cache_theme(type_), glob)
+            if cache.enabled() else []
+        )
+        # The tiles' own schema decides `missing`, not an assumption that
+        # they carry every REQUIRED column: tiles materialized while the
+        # dataset lacked a non-essential column (missing={'sources'}, say)
+        # must project NULL for it, not reference a column that isn't there
+        # and fail the query. All tiles share a fingerprint dir, so probing
+        # the first (a local file; the probe caches successes) speaks for
+        # all of them.
+        tile_schema = overture.probe_schema(str(tiles[0])) if tiles else None
+        if tile_schema is not None:
+            missing = {c for c in REQUIRED_COLUMNS if c not in tile_schema}
+            if not missing & ESSENTIAL_COLUMNS:
+                _warn_once(
+                    "unreadable-cached", type_, glob,
+                    "recreation layer: theme=%s/type=%s is unreadable at %s — serving "
+                    "that branch from already-cached tiles only; queries outside their "
+                    "coverage will be Overture-places-only for its categories. A mirror "
+                    "that carries only theme=places causes this: mirror theme=base too "
+                    "(scripts/mirror_theme.py) or set %s=0.",
+                    THEME, type_, glob, ENV_VAR,
+                )
+                return missing, False
         _warn_once(
             "unreadable", type_, glob,
             "recreation layer: theme=%s/type=%s is unreadable at %s and nothing is "
@@ -538,15 +529,15 @@ def _reaches_past_a_pinned_deployment(type_: str) -> bool:
 
 
 def degraded_types() -> list[str]:
-    """Base-theme types the layer cannot currently read, for data_version.
+    """Base-theme types the layer cannot currently read *in full*, for
+    data_version. A listed type is contributing nothing (drift, unreadable
+    with nothing cached, pinned places without a base pin) or serving from
+    cached tiles only while its upstream is unreadable — partial coverage
+    with silent gaps outside the tiles, which is exactly what the field
+    exists to make visible.
 
     Empty when the layer is off (nothing is being read, so nothing is
-    degraded) or when every branch is healthy. A branch skipped because the
-    places dataset is pinned and this type is not (see
-    _reaches_past_a_pinned_deployment) counts as degraded too: the layer is
-    nominally on but contributing nothing for that type, and data_version
-    saying so is the difference between a visible gap and a silently
-    partial answer.
+    degraded) or when every branch is healthy.
     """
     if not enabled():
         return []

@@ -44,6 +44,23 @@ def no_ambient_tool_selection(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_carried_probe_failures():
+    """Every test starts with an empty probe-failure memo.
+
+    db.probe_schema memoizes failures for PROBE_FAILURE_RETRY_S (60s —
+    longer than most of the suite takes), and the suite reuses fixture
+    globs across tests, so one test exercising a failure path would
+    otherwise blind schema probes in every later test touching the same
+    path.
+    """
+    from placeroot import db
+
+    db._probe_failed_at.clear()
+    yield
+    db._probe_failed_at.clear()
+
+
+@pytest.fixture(autouse=True)
 def recreation_layer_off(monkeypatch):
     """Every test runs with the recreation layer off unless it opts in.
 

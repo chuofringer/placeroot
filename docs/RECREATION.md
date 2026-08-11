@@ -53,10 +53,13 @@ It also widens the failure surface. A places query now depends on the base
 theme being readable as well as the places theme. A base type whose *schema*
 drifted, or whose dataset cannot be read at all (a mirror that carries only
 `theme=places`, say), is dropped and logged, and the places answer still
-lands — with `data_version` naming the dropped type under
-`recreation_layer.degraded_types`. That field covers every way a type can be
-out of the union (drift, unreadable, pinned-places-without-pinned-base), so
-a layer that is switched on but contributing nothing is visible, not silent.
+lands — with `data_version` naming the affected type under
+`recreation_layer.degraded_types`. That field covers every way a type can
+fall short of full coverage: dropped from the union entirely (drift,
+unreadable with nothing cached, pinned-places-without-pinned-base), or
+serving from already-cached tiles only while its upstream is unreadable —
+partial coverage with gaps outside the tiles. Either way, a layer that is
+switched on but not delivering everything is visible, not silent.
 
 An install that cares more about `find_places` latency than about
 playgrounds should set `PLACEROOT_RECREATION_LAYER=0`. Then the places tools

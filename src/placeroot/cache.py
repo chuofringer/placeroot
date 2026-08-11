@@ -358,6 +358,40 @@ def cached_tile_paths(release: str, theme: str, upstream_glob: str) -> list[Path
     return sorted(d.glob("*.parquet"))
 
 
+def cached_tile_paths_for_bbox(
+    release: str, theme: str, upstream_glob: str,
+    bbox: tuple[float, float, float, float],
+) -> list[Path]:
+    """Tiles already on disk that intersect bbox — nothing materialized.
+
+    The bounded, cache-only counterpart to cached_tile_paths, for the
+    source_sql path where the upstream must not be touched: a query should
+    read the tiles its box covers, not every tile the theme has ever
+    cached. Tiles found are claimed against eviction for the query's
+    lifetime, same as local_paths_for_query (#142). An oversized bbox
+    (> MAX_TILES_PER_QUERY tiles) returns [] — with no upstream to fall
+    back to, skipping is the only bounded answer.
+    """
+    fingerprint = resolve_fingerprint(release, theme, upstream_glob)
+    if fingerprint is None:
+        return []
+    tiles = tiles_for_bbox(*bbox)
+    if len(tiles) > MAX_TILES_PER_QUERY:
+        return []
+    found = []
+    with _claims_lock:
+        now = time.monotonic()
+        _prune_expired_locked(now)
+        deadline = now + _CLAIM_TTL_S
+        for t in tiles:
+            path = tile_path(release, theme, fingerprint, t)
+            if path.exists():
+                os.utime(path, None)
+                _claim_locked(str(path), deadline)
+                found.append(path)
+    return sorted(found)
+
+
 
 # --- #142: protecting in-flight tiles from eviction ------------------------
 #
@@ -662,8 +696,10 @@ def source_sql(
         from placeroot import release as release_mod
 
         active_release = release_mod.resolve_release()
-        if bbox is None or not upstream_fallback:
+        if bbox is None:
             paths = cached_tile_paths(active_release, theme, upstream_glob)
+        elif not upstream_fallback:
+            paths = cached_tile_paths_for_bbox(active_release, theme, upstream_glob, bbox)
         else:
             with db.conn_lock:
                 paths = local_paths_for_query(
