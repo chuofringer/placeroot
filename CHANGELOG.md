@@ -59,6 +59,12 @@ fixing behavior is patch.
   queries return a centroid plus covering locality (#223, #226)
 
 ### Changed
+- README redesigned as a visual intro page: logo/OG banner header, nav
+  links, grouped tool-family overview, collapsible per-client install
+  configs; the full tool catalog, prompts/resources, and
+  `PLACEROOT_TOOLS` details moved to `docs/REFERENCE.md`.
+  `scripts/sync_npm_readme.py` now inherits the new sections and
+  rewrites repo-relative links to absolute GitHub URLs for npmjs.com
 - `geocode` ranking: prominence can rescue prefix matches; diacritic
   folding always runs (#221, #222)
 - Divisions table carries bbox columns for city-bounded scans (#224, #228)

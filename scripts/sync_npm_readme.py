@@ -52,14 +52,15 @@ GENERATED_BANNER = (
 # Root-README `## ` headings carried into the npm package, in output order.
 # The document intro (everything above the first `## `) is always included.
 INHERITED_SECTIONS = (
-    "Why PlaceRoot",
     "Quick start",
     "What it can do",
-    "Workflow prompts",
-    "Resources",
-    "Loading fewer tools (`PLACEROOT_TOOLS`)",
-    "Design notes",
+    "Why PlaceRoot",
 )
+
+# Repo-relative links and image srcs resolve on GitHub but 404 on npmjs.com,
+# which renders the README standalone — rewrite them to absolute GitHub URLs.
+GITHUB_BLOB = "https://github.com/chuofringer/placeroot/blob/main/"
+GITHUB_RAW = "https://raw.githubusercontent.com/chuofringer/placeroot/main/"
 
 # Placeholder held across the uvx -> npx rewrite so deliberately-uv text
 # survives it. Chosen to be something no README would contain on its own.
@@ -68,14 +69,10 @@ _KEEP_UVX = "\x00KEEP_UVX\x00"
 # The root README's aside pointing uv readers at the npm launcher. On npm the
 # arrow points the other way. Exact-match: if this copy is reworded upstream
 # the generator fails rather than emitting a self-contradicting sentence.
-NPX_ASIDE = (
-    "(`npx placeroot` also works, if you'd rather use the npm launcher: "
-    'set `"command": "npx"`.)'
-)
+NPX_ASIDE = 'Prefer npm? Use `"command": "npx", "args": ["placeroot"]`.'
 UVX_ASIDE = (
-    f"(`{_KEEP_UVX} placeroot` also works, if you'd rather run the Python "
-    f'server directly: set `"command": "{_KEEP_UVX}"`. This package is a thin '
-    "wrapper around exactly that.)"
+    f'Prefer running the Python server directly? Use `"command": "{_KEEP_UVX}", '
+    '"args": ["placeroot"]`. This package is a thin wrapper around exactly that.'
 )
 
 LAUNCHER_NOTE = f"""\
@@ -165,9 +162,24 @@ def render(root_markdown: str) -> str:
     rendered = _to_npx("\n\n".join(chunks) + "\n").replace(_KEEP_UVX, "uvx")
 
     # Relative links resolve against the repo on GitHub but 404 on npmjs.com,
-    # which renders the README standalone. Inherited sections carry none today;
-    # this catches one being added upstream instead of shipping a dead link.
-    relative = re.findall(r"\]\((?!https?://|#)([^)]+)\)", rendered)
+    # which renders the README standalone — point them at GitHub instead.
+    rendered = re.sub(
+        r"\]\((?!https?://|#|mailto:)([^)]+)\)",
+        lambda m: "](" + GITHUB_BLOB + m.group(1) + ")",
+        rendered,
+    )
+    rendered = re.sub(
+        r'src="(?!https?://)([^"]+)"',
+        lambda m: 'src="' + GITHUB_RAW + m.group(1) + '"',
+        rendered,
+    )
+    rendered = re.sub(
+        r'href="(?!https?://|#|mailto:)([^"]+)"',
+        lambda m: 'href="' + GITHUB_BLOB + m.group(1) + '"',
+        rendered,
+    )
+
+    relative = re.findall(r"\]\((?!https?://|#|mailto:)([^)]+)\)", rendered)
     if relative:
         raise SyncError(
             "inherited README sections contain repo-relative links, which break "

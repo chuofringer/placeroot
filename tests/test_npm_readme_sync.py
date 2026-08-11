@@ -114,7 +114,7 @@ def test_generator_fails_loudly_on_a_renamed_section():
 def test_generator_fails_loudly_on_a_reworded_launcher_aside():
     """The aside this generator rewrites must still be findable."""
     mangled = _root_readme().replace(
-        "(`npx placeroot` also works", "(`npx placeroot` is also fine"
+        "Prefer npm? Use", "npm works too — use"
     )
     with pytest.raises(SyncError, match="npm-launcher aside"):
         render(mangled)
