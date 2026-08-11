@@ -94,6 +94,13 @@ def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     # footer-read cost. Combined with overture.warm_metadata's startup
     # pre-warm, this is often already paid before a real query arrives.
     con.execute("SET enable_object_cache=true;")
+    # Cache HTTP metadata (HEAD results, file handles) across queries on
+    # this connection too — shaves repeat round-trips off every scan that
+    # touches the same remote files this process has seen before.
+    try:
+        con.execute("SET enable_http_metadata_cache=true;")
+    except duckdb.Error as e:
+        logger.debug("enable_http_metadata_cache unavailable: %s", e)
     # Bounded timeout + retry on remote scans (issue #5): a slow or down
     # upstream fails fast instead of hanging a tool call.
     try:

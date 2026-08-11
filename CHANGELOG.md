@@ -9,6 +9,17 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- Cold queries narrate themselves: when the client sends an MCP
+  `progressToken`, slow phases — the direct S3 scan of a first query over
+  a new area, each tile fetched by a synchronous cache warm — stream as
+  `notifications/progress` messages instead of a silent spinner. Clients
+  that don't ask for progress see no change.
+- `PLACEROOT_CACHE_FETCH_CONCURRENCY` (default 2): background tile
+  fetches are now bounded. Unbounded, a first query over a new area
+  spawned one COPY per touched (theme, tile) — six at once with the
+  recreation layer — and the answering scan starved for minutes behind
+  its own cache warmers; measured first-answer latency over a two-tile
+  NYC box went from 20+ minutes to well under a minute with the bound.
 - Recreation layer, **on by default**: the places tools additionally read
   Overture's OSM-derived `base` theme (`type=land_use`, `type=land`) for
   the recreation areas that listings-derived data under-counts —
