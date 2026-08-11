@@ -108,6 +108,7 @@ zoos and golf courses are excluded because they *are* businesses, and the
 places theme already covers them well.
 """
 
+import functools
 import logging
 import os
 
@@ -235,30 +236,51 @@ def _cache_theme(type_: str) -> str:
     return f"{THEME}_{type_}"
 
 
-def _from_source(bbox: tuple[float, float, float, float] | None, type_: str) -> str | None:
+def _from_source(
+    bbox: tuple[float, float, float, float] | None, type_: str,
+    upstream_readable: bool = True,
+) -> str | None:
     """FROM-clause source for one base-theme type, or None to skip the branch.
 
     Delegates to cache.source_sql — the shared cached-tiles-else-upstream
-    resolution — with one policy of its own: for an *unbounded* lookup
+    resolution — with two policies of its own. For an *unbounded* lookup
     (bbox None: place_details resolving an id with no location hint,
     geocode's name-only fallback) the branch is served from tiles already
-    on disk or a pinned local dataset, and otherwise skipped. Falling back
+    on disk or a pinned local dataset, and otherwise skipped: falling back
     to the live glob there would be a scan of the whole base theme with no
     bbox to prune row groups by — a planet-scale read to answer one id —
-    so the layer degrades to places-only for that one query instead. A
-    bounded query, or an id lookup carrying a near_lat/near_lon hint,
-    reads the layer as usual.
+    so the layer degrades to places-only for that one query instead. And
+    when the upstream itself is unreadable (upstream_readable=False, from
+    _branch_missing's probe) there is no upstream fallback at all: a query
+    whose box the cached tiles don't cover skips the branch rather than
+    handing the scan a glob known to fail — which would take the whole
+    places query down with it.
     """
     from placeroot import overture
 
     upstream = _upstream_glob(type_)
-    unbounded_remote = bbox is None and not overture.dataset_is_pinned(THEME, type_)
+    fallback_ok = upstream_readable and (
+        bbox is not None or overture.dataset_is_pinned(THEME, type_)
+    )
     try:
         return cache.source_sql(
-            _cache_theme(type_), upstream, bbox, upstream_fallback=not unbounded_remote
+            _cache_theme(type_), upstream, bbox, upstream_fallback=fallback_ok
         )
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
+
+
+@functools.cache
+def _case_exprs(type_: str) -> tuple[str, str]:
+    """(taxonomy CASE, basic_category CASE) for one base type, built once.
+
+    Both fragments derive only from the static class maps and the bundled
+    taxonomy CSV — process constants — while _projection runs per query;
+    without this cache every places query re-walks the ~2,000-row taxonomy
+    list ~22 times to rebuild two identical strings.
+    """
+    class_map = SOURCES[type_]
+    return _taxonomy_expr(class_map), _basic_category_expr(class_map)
 
 
 def _taxonomy_expr(class_map: dict[str, str]) -> str:
@@ -303,7 +325,7 @@ def _basic_category_expr(class_map: dict[str, str]) -> str:
     return "CASE class " + " ".join(arms) + " END"
 
 
-def _projection(source: str, class_map: dict[str, str], missing: set[str]) -> str:
+def _projection(source: str, type_: str, missing: set[str]) -> str:
     """One base-theme dataset, projected into the places row shape.
 
     Only the columns the places tools actually read are projected; UNION ALL
@@ -322,7 +344,8 @@ def _projection(source: str, class_map: dict[str, str], missing: set[str]) -> st
     id_expr = "NULL" if "id" in missing else "id"
     names_expr = "NULL" if "names" in missing else "names"
     sources_expr = "NULL" if "sources" in missing else "sources"
-    class_list = ", ".join(db._sql_str(c) for c in class_map)
+    class_list = ", ".join(db._sql_str(c) for c in SOURCES[type_])
+    taxonomy_expr, basic_category_expr = _case_exprs(type_)
     return f"""SELECT
             {id_expr} AS id,
             {names_expr} AS names,
@@ -331,8 +354,8 @@ def _projection(source: str, class_map: dict[str, str], missing: set[str]) -> st
               'xmax': (bbox.xmin + bbox.xmax) / 2,
               'ymin': (bbox.ymin + bbox.ymax) / 2,
               'ymax': (bbox.ymin + bbox.ymax) / 2}} AS bbox,
-            {_taxonomy_expr(class_map)} AS taxonomy,
-            {_basic_category_expr(class_map)} AS basic_category,
+            {taxonomy_expr} AS taxonomy,
+            {basic_category_expr} AS basic_category,
             TRUE AS {MARKER_COLUMN}
         FROM {source}
         WHERE class IN ({class_list})"""
@@ -359,36 +382,59 @@ def union_branches(bbox: tuple[float, float, float, float] | None) -> list[str]:
         return []
 
     branches = []
-    for type_, class_map in SOURCES.items():
+    for type_ in SOURCES:
         if _reaches_past_a_pinned_deployment(type_):
             continue
-        missing = _branch_missing(type_)
+        missing, upstream_readable = _branch_missing(type_)
         if missing is None:
             continue
-        source = _from_source(bbox, type_)
+        source = _from_source(bbox, type_, upstream_readable)
         if source is None:
-            # Unbounded lookup with nothing local to serve it — see
-            # _from_source. Not a degradation of the layer, just of this
-            # one query.
+            # Nothing local can serve this branch for this query (an
+            # unbounded lookup, or an unreadable upstream whose tiles don't
+            # cover the box) — see _from_source. Not a degradation of the
+            # layer, just of this one query.
             continue
-        branches.append(_projection(source, class_map, missing))
+        branches.append(_projection(source, type_, missing))
     return branches
 
 
-def _branch_missing(type_: str) -> set[str] | None:
-    """Missing REQUIRED_COLUMNS for a readable base-theme type, else None.
+# Warn once per (type, glob) for an unreadable or drifted dataset, mirroring
+# _pinned_warned: the condition holds for every query in such a deployment
+# and would otherwise log on each one, forever. Keyed by glob so re-pointing
+# the upstream (the fix) warns afresh if the new target is broken too.
+_unhealthy_warned: set[tuple[str, str]] = set()
 
-    None means the branch must be dropped: the dataset is missing an
-    essential column (schema drift), or its schema cannot be probed at all
-    and no cached tiles exist to serve instead. The unreadable case is what
-    a partial mirror looks like — PLACEROOT_UPSTREAM_BASE pointing at a
-    bucket that carries theme=places but not theme=base resolves this
-    layer's globs to paths that do not exist, and before this check that
-    read "assume nothing missing" (missing_columns' contract) and failed
-    every places query at scan time. Cached tiles still count as readable:
-    their schema matched the dataset when they were written, which also
-    keeps the layer answering from cache through an upstream outage the
-    same way the places theme does.
+
+def _warn_unhealthy_once(type_: str, glob: str, message: str, *args) -> None:
+    key = (type_, glob)
+    if key in _unhealthy_warned:
+        return
+    _unhealthy_warned.add(key)
+    logger.warning(message, *args)
+
+
+def _branch_missing(type_: str) -> tuple[set[str] | None, bool]:
+    """(missing REQUIRED_COLUMNS or None, whether upstream itself is readable).
+
+    A None first element means the branch must be dropped: the dataset is
+    missing an essential column (schema drift), or its schema cannot be
+    probed at all and no cached tiles exist to serve instead. The
+    unreadable case is what a partial mirror looks like —
+    PLACEROOT_UPSTREAM_BASE pointing at a bucket that carries theme=places
+    but not theme=base resolves this layer's globs to paths that do not
+    exist, and before this check that read "assume nothing missing"
+    (missing_columns' contract) and failed every places query at scan time.
+
+    Cached tiles still count as *servable* — their schema matched the
+    dataset when they were written, which keeps the layer answering from
+    cache through an upstream outage the same way the places theme does —
+    but the second element stays False so _from_source knows never to fall
+    back to the unreadable glob for a box the tiles don't cover.
+
+    The probe is retried on every call by design (db.probe_schema caches
+    successes, never failures), so a deployment heals the moment its
+    upstream does; the warning is emitted once per (type, glob).
     """
     from placeroot import overture
 
@@ -398,8 +444,9 @@ def _branch_missing(type_: str) -> set[str] | None:
         if cache.enabled() and cache.cached_tile_paths(
             release.resolve_release(), _cache_theme(type_), glob
         ):
-            return set()
-        logger.warning(
+            return set(), False
+        _warn_unhealthy_once(
+            type_, glob,
             "recreation layer: theme=%s/type=%s is unreadable at %s and nothing is "
             "cached for it — skipping that branch; places results will be "
             "Overture-places-only for its categories. A mirror that carries only "
@@ -407,17 +454,18 @@ def _branch_missing(type_: str) -> set[str] | None:
             "or set %s=0.",
             THEME, type_, glob, ENV_VAR,
         )
-        return None
+        return None, False
     missing = {c for c in REQUIRED_COLUMNS if c not in present}
     essential_missing = sorted(missing & ESSENTIAL_COLUMNS)
     if essential_missing:
-        logger.warning(
+        _warn_unhealthy_once(
+            type_, glob,
             "recreation layer: theme=%s/type=%s is missing %s — skipping that branch; "
             "places results will be Overture-places-only for its categories",
             THEME, type_, ", ".join(essential_missing),
         )
-        return None
-    return missing
+        return None, True
+    return missing, True
 
 
 # One warning per (type, places dataset) pair, not one per query: a pinned
@@ -476,5 +524,5 @@ def degraded_types() -> list[str]:
 
     return [
         type_ for type_ in SOURCES
-        if _reaches_past_a_pinned_deployment(type_) or _branch_missing(type_) is None
+        if _reaches_past_a_pinned_deployment(type_) or _branch_missing(type_)[0] is None
     ]

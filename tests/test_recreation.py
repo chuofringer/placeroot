@@ -1,5 +1,7 @@
-"""The opt-in recreation layer: places queries additionally reading Overture's
-base theme (recreation.py, docs/RECREATION.md).
+"""The default-on recreation layer: places queries additionally reading
+Overture's base theme (recreation.py, docs/RECREATION.md). The env var is an
+opt-out; the *suite* pins the layer off (conftest.recreation_layer_off) and
+tests here switch it back on against synthetic fixtures.
 
 Everything here runs offline against synthetic base-theme fixtures built in
 this module with duckdb — the same WKT-free, bbox-and-columns pattern
@@ -327,6 +329,36 @@ def test_an_unbounded_lookup_never_scans_the_live_base_theme():
         assert recreation._from_source(None, "land_use") is None
     finally:
         recreation.set_enabled(None)
+
+
+def test_an_unreadable_upstream_never_serves_as_a_fallback():
+    """When the probe says the glob is broken, a query whose box the cached
+    tiles don't cover skips the branch instead of handing the scan a glob
+    known to fail — which would take the whole places query down."""
+    recreation.set_enabled(True)
+    try:
+        bbox = (CENTER_LON - 0.01, CENTER_LAT - 0.01, CENTER_LON + 0.01, CENTER_LAT + 0.01)
+        assert recreation._from_source(bbox, "land_use", upstream_readable=False) is None
+    finally:
+        recreation.set_enabled(None)
+
+
+def test_the_unreadable_warning_fires_once_per_glob(layer_on, tmp_path, caplog):
+    """A degraded deployment must not log the same warning on every query."""
+    overture.set_data_path(str(tmp_path / "gone.parquet"), theme="base", type_="land_use")
+    try:
+        with caplog.at_level("WARNING", logger="placeroot.recreation"):
+            recreation.union_branches((-74.0, 40.0, -73.0, 41.0))
+            recreation.union_branches((-74.0, 40.0, -73.0, 41.0))
+            recreation.degraded_types()
+        recreation_warnings = [
+            r for r in caplog.records
+            if r.name == "placeroot.recreation" and "is unreadable at" in r.getMessage()
+        ]
+        assert len(recreation_warnings) == 1
+    finally:
+        overture.set_data_path(str(layer_on / "land_use.parquet"),
+                               theme="base", type_="land_use")
 
 
 def test_an_unreadable_base_dataset_drops_the_branch(layer_on, tmp_path, caplog):

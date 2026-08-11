@@ -59,8 +59,11 @@ def recreation_layer_off(monkeypatch):
     Not folded into offline_data because that one returns early for @live
     tests, which need this just as much.
 
-    A test's own monkeypatch.setenv or recreation.set_enabled still wins;
-    the module-level override is reset afterwards either way.
+    A test that wants the layer on must call recreation.set_enabled(True)
+    (as test_recreation.py's layer_on fixture does): this fixture installs
+    the module-level override, which enabled() checks *before* the env
+    var, so monkeypatch.setenv alone cannot win. The override is reset
+    afterwards either way.
     """
     monkeypatch.delenv(recreation.ENV_VAR, raising=False)
     recreation.set_enabled(False)
