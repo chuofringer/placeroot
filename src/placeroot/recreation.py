@@ -467,9 +467,12 @@ def _branch_missing(type_: str) -> tuple[set[str] | None, bool]:
         # dataset lacked a non-essential column (missing={'sources'}, say)
         # must project NULL for it, not reference a column that isn't there
         # and fail the query. All tiles share a fingerprint dir, so probing
-        # the first (a local file, claimed against eviction by
-        # cached_tile_paths; the probe caches successes) speaks for all.
-        tile_schema = overture.probe_schema(str(tiles[0]))
+        # one (a local file; the probe caches successes) speaks for all —
+        # claimed first so eviction can't delete it mid-probe, and only
+        # that one, so a mere schema check doesn't shield the whole theme
+        # from eviction.
+        probed = cache._claim_existing_paths(tiles[:1])
+        tile_schema = overture.probe_schema(str(probed[0])) if probed else None
         missing = (
             {c for c in REQUIRED_COLUMNS if c not in tile_schema}
             if tile_schema is not None else set(REQUIRED_COLUMNS)
