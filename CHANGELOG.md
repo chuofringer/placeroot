@@ -64,7 +64,10 @@ fixing behavior is patch.
   configs; the full tool catalog, prompts/resources, and
   `PLACEROOT_TOOLS` details moved to `docs/REFERENCE.md`.
   `scripts/sync_npm_readme.py` now inherits the new sections and
-  rewrites repo-relative links to absolute GitHub URLs for npmjs.com
+  rewrites repo-relative links to absolute GitHub URLs for npmjs.com;
+  the PyPI long description gets the same rewrite at build time via
+  `hatch-fancy-pypi-readme`, so links and the banner image resolve on
+  pypi.org too
 - `geocode` ranking: prominence can rescue prefix matches; diacritic
   folding always runs (#221, #222)
 - Divisions table carries bbox columns for city-bounded scans (#224, #228)

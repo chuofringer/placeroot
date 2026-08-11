@@ -2,7 +2,7 @@
 name = "placeroot"
 version = "0.8.0"
 description = "Ground AI agents in open map data. MCP server for Overture Maps — compact answers, no API key."
-readme = "README.md"
+dynamic = ["readme"]
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
@@ -47,8 +47,30 @@ browser = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-fancy-pypi-readme>=24.1.0"]
 build-backend = "hatchling.build"
+
+# PyPI renders the README standalone, so repo-relative links and image srcs
+# 404 there. This keeps README.md relative (correct on GitHub, including
+# branch views) and rewrites to absolute GitHub URLs only in the built
+# package metadata — same idea as scripts/sync_npm_readme.py for npm.
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\((?!https?://|#|mailto:)([^)]+)\)'
+replacement = '](https://github.com/chuofringer/placeroot/blob/main/\1)'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = 'src="(?!https?://)([^"]+)"'
+replacement = 'src="https://raw.githubusercontent.com/chuofringer/placeroot/main/\1"'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = 'href="(?!https?://|#|mailto:)([^"]+)"'
+replacement = 'href="https://github.com/chuofringer/placeroot/blob/main/\1"'
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/placeroot"]
