@@ -607,3 +607,56 @@ def test_a_dataset_without_a_number_column_says_the_house_number_was_ignored(mon
 def test_the_dropped_number_note_stays_off_a_normal_answer():
     result = geocode.geocode_address("1600 Amphitheatre Parkway, Mountain View")
     assert "no `number` column" not in result.get("note", "")
+
+
+# --- ordinal folding (task #23) --------------------------------------------
+
+
+def test_street_variants_fold_ordinals_both_ways():
+    """City address datasets disagree on the form — NYC's Overture rows
+    spell Fifth Avenue "5 AVENUE" — so a query in either spelling must
+    reach data in the other."""
+    down = {v.lower() for v in geocode._street_variants("5th Ave")}
+    assert "5 avenue" in down
+    up = {v.lower() for v in geocode._street_variants("1 St")}
+    assert "1st street" in up
+
+
+@pytest.mark.parametrize("key,expected", [
+    ("5th", ["5"]), ("22nd", ["22"]), ("3rd", ["3"]), ("101st", ["101"]),
+    ("11th", ["11"]), ("13th", ["13"]),
+    ("5", ["5th"]), ("2", ["2nd"]), ("11", ["11th"]), ("112", ["112th"]),
+    ("21", ["21st"]), ("103", ["103rd"]),
+    ("main", []), ("5b", []), ("th", []),
+])
+def test_ordinal_variants_table(key, expected):
+    assert geocode._ordinal_variants(key) == expected
+
+
+def test_ordinals_fold_only_for_street_tokens():
+    """Division names keep the old behavior: "5th" in a place name is not
+    rewritten (the token is only bounded enough inside a street field)."""
+    assert "5" not in geocode._token_variants("5th", leading=False, street=False)
+    assert "5" in geocode._token_variants("5th", leading=False, street=True)
+
+
+def test_lone_ordinal_token_never_becomes_a_bare_digit_prefix():
+    """street="5th" would otherwise expand to "5" and match every street
+    ILIKE '5%' ("51 STREET", "52 AVENUE", ...)."""
+    variants = geocode._street_variants("5th")
+    assert "5" not in variants
+    # A street that *is* a bare digit keeps itself (and gains specificity).
+    assert "5" in geocode._street_variants("5")
+
+
+def test_word_ordinals_reach_the_digit_forms():
+    down = {v.lower() for v in geocode._street_variants("Fifth Ave")}
+    assert "5 avenue" in down and "5th avenue" in down
+
+
+def test_four_token_streets_keep_the_abbreviated_branch():
+    """The cap must not truncate the "W ... ST NW" branch — the form
+    Overture stores — now that ordinals add a combo dimension."""
+    variants = {v.lower() for v in geocode._street_variants("West 42nd Street Northwest")}
+    assert "w 42nd st nw" in variants
+    assert "w 42 st nw" in variants

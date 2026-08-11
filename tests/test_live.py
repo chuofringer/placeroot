@@ -96,3 +96,12 @@ def test_geocode_address_dedupes_a_whole_street():
     assert len(set(pairs)) == 5
     assert result["truncated"] is True
     assert result["distinct_in_range"] > 500
+
+
+@pytest.mark.live
+def test_geocode_address_folds_ordinals_to_nyc_spelling():
+    """Task #23's original repro: NYC writes Fifth Avenue as "5 AVENUE", so
+    "350 5th Ave" only resolves through the ordinal fold."""
+    result = geocode.geocode_address("350 5th Ave, New York")
+    assert result["results"], result.get("note")
+    assert any(r["street"].upper().startswith("5 AVE") for r in result["results"])
