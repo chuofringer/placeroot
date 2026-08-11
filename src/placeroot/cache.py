@@ -628,6 +628,53 @@ def local_paths_for_query(
     return None
 
 
+def source_sql(
+    theme: str,
+    upstream_glob: str,
+    bbox: tuple[float, float, float, float] | None,
+    *,
+    upstream_fallback: bool = True,
+) -> str | None:
+    """FROM-clause SQL for a theme: local cache tiles when available, upstream
+    otherwise. The one implementation of the "cached tiles else upstream glob"
+    resolution that overture.py and recreation.py previously each hand-copied
+    (and let diverge); the other theme modules can migrate here too.
+
+    With a bbox, missing tiles are materialized per local_paths_for_query's
+    contract (inline under PLACEROOT_CACHE_SYNC, in the background otherwise).
+    bbox None is the unbounded-lookup case (an id or name query with no
+    location to bound it): only tiles already on disk are used and nothing
+    new is materialized — an unbounded lookup must not trigger a world-sized
+    fetch.
+
+    upstream_fallback=False returns None instead of the upstream glob when
+    nothing local can serve the query — for callers (the recreation layer's
+    unbounded lookups) where scanning a remote glob with no bbox to prune by
+    would be a planet-scale scan, and skipping is the right degradation.
+
+    Raises duckdb.Error on cache resolution failure; callers wrap it in their
+    own unavailable-upstream error the way they wrap the query itself.
+    """
+    if enabled():
+        from placeroot import release as release_mod
+
+        active_release = release_mod.resolve_release()
+        if bbox is None:
+            paths = cached_tile_paths(active_release, theme, upstream_glob)
+        else:
+            with db.conn_lock:
+                paths = local_paths_for_query(
+                    db.shared_conn(), active_release, theme, bbox, upstream_glob,
+                    db.new_connection,
+                )
+        if paths:
+            joined = ", ".join(f"'{p}'" for p in paths)
+            return f"read_parquet([{joined}])"
+    if not upstream_fallback:
+        return None
+    return f"read_parquet('{upstream_glob}', hive_partitioning=1)"
+
+
 def parse_warm_region(spec: str) -> tuple[float, float, float] | None:
     """Parse "lat,lon,radius_m" -> (lat, lon, radius_m), or None if malformed."""
     parts = [p.strip() for p in spec.split(",")]

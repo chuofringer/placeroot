@@ -297,8 +297,172 @@ def test_place_details_resolves_a_base_theme_id(layer_on):
 
 
 def test_place_details_resolves_a_base_theme_id_without_a_hint(layer_on):
-    """The unbounded id path unions the layer too (docs: place_details by id)."""
+    """The unbounded id path unions the layer too (docs: place_details by id).
+
+    This works offline because the base datasets are pinned local files; an
+    unpinned deployment's unbounded lookup serves from cached tiles only —
+    see test_an_unbounded_lookup_never_scans_the_live_base_theme.
+    """
     assert overture.place_details(id="land-beach")["name"] == "Test Beach"
+
+
+def test_place_details_labels_the_source_theme(layer_on):
+    """A recreation-layer row says where it came from; places rows carry no
+    marker at all (their theme is the tool's default)."""
+    base_row = overture.place_details(id="lu-park", near_lat=CENTER_LAT, near_lon=CENTER_LON)
+    assert base_row["source_theme"] == "base"
+    places_id = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=2000, limit=25)
+    places_id = [r["id"] for r in places_id if not r["id"].startswith(("lu-", "land-"))][0]
+    places_row = overture.place_details(id=places_id, near_lat=CENTER_LAT, near_lon=CENTER_LON)
+    assert "source_theme" not in places_row
+
+
+def test_an_unbounded_lookup_never_scans_the_live_base_theme():
+    """bbox None with nothing pinned and nothing cached: the branch is
+    skipped (returns None), not resolved to a planet-scale S3 glob — the
+    place_details/geocode regression the review found."""
+    recreation.set_enabled(True)
+    try:
+        assert overture.dataset_is_pinned("base", "land_use") is False
+        assert recreation._from_source(None, "land_use") is None
+    finally:
+        recreation.set_enabled(None)
+
+
+def test_an_unreadable_base_dataset_drops_the_branch(layer_on, tmp_path, caplog):
+    """What a partial mirror looks like: the glob resolves but nothing is
+    there. Before the probe check this passed 'assume nothing missing' and
+    failed every places query at scan time; now the branch drops, the query
+    answers, and data_version names the gap."""
+    overture.set_data_path(str(tmp_path / "does_not_exist.parquet"),
+                           theme="base", type_="land_use")
+    try:
+        with caplog.at_level("WARNING"):
+            rows = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=25)
+        assert not _ids(rows) & {"lu-play-named", "lu-park"}
+        assert "unreadable" in caplog.text
+        # The healthy branch still contributes, and the gap is reported.
+        assert _ids(overture.find_places(CENTER_LAT, CENTER_LON, category="beach")) == {
+            "land-beach"
+        }
+        assert recreation.degraded_types() == ["land_use"]
+    finally:
+        overture.set_data_path(str(layer_on / "land_use.parquet"),
+                               theme="base", type_="land_use")
+
+
+# --- one real-world place, one row ------------------------------------------
+
+
+# The duplicate places playground sits ~28 m from lu-play-unnamed's centre
+# (same real place, so the places row must win) and ~167 m from
+# lu-play-named's centre (a distinct playground past DEDUP_RADIUS_M, kept).
+_DUP_LAT = CENTER_LAT + 1.2 * _DEG
+_DUP_LON = CENTER_LON + 0.8 * _DEG
+
+
+def _write_places_fixture_plus(path, extra_rows) -> None:
+    """The committed places fixture plus extra_rows: (id, name, slug, lat, lon).
+
+    Each extra row clones a fixture row's remaining columns, so the shape
+    stays exactly the committed one.
+    """
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE p AS SELECT * FROM read_parquet('{overture._upstream_glob()}')")
+    for id_, name, slug, lat, lon in extra_rows:
+        con.execute(f"""
+            INSERT INTO p
+            SELECT * REPLACE (
+                '{id_}' AS id,
+                {{'primary': '{name}'}} AS names,
+                {{'primary': '{slug}', 'alternates': []}} AS taxonomy,
+                'active_life' AS basic_category,
+                {{'xmin': {lon}, 'ymin': {lat}, 'xmax': {lon}, 'ymax': {lat}}} AS bbox
+            )
+            FROM p LIMIT 1
+        """)
+    con.execute(f"COPY p TO '{path}' (FORMAT PARQUET)")
+    con.close()
+
+
+@pytest.fixture
+def places_with_duplicate_playground(tmp_path):
+    """The committed places fixture plus one playground row that duplicates
+    a base-theme playground — the both-themes overlap dedup exists for."""
+    dup = tmp_path / "places_dup.parquet"
+    _write_places_fixture_plus(
+        dup, [("places-dup-playground", "Fixture Playground", "playground",
+               _DUP_LAT, _DUP_LON)]
+    )
+    overture.set_data_path(str(dup))
+    try:
+        yield dup
+    finally:
+        overture.set_data_path(None)
+
+
+def test_a_place_in_both_themes_returns_once(layer_on, places_with_duplicate_playground):
+    """The places row wins (it is the richer one); a base row past
+    DEDUP_RADIUS_M is a distinct real-world place and survives."""
+    rows = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000,
+                                category="playground", limit=25)
+    ids = _ids(rows)
+    assert "places-dup-playground" in ids
+    assert "lu-play-unnamed" not in ids
+    assert "lu-play-named" in ids
+
+
+def test_bbox_queries_dedup_too(layer_on, places_with_duplicate_playground):
+    rows, _capped = overture.find_places_in_bbox(
+        (CENTER_LON - 0.01, CENTER_LAT - 0.01, CENTER_LON + 0.01, CENTER_LAT + 0.01),
+        category="playground", limit=25,
+    )
+    assert "lu-play-unnamed" not in _ids(rows)
+    assert {"places-dup-playground", "lu-play-named"} <= _ids(rows)
+
+
+def test_summarize_area_counts_a_duplicated_place_once(layer_on, tmp_path):
+    """Adding a places listing for a place the base theme already carries
+    must not raise the area's total: the base row stops being counted the
+    moment the richer places row exists."""
+    before = overture.summarize_area(CENTER_LAT, CENTER_LON, radius_m=1000)["total_places"]
+    dup = tmp_path / "places_dup.parquet"
+    _write_places_fixture_plus(
+        dup, [("places-dup-playground", "Fixture Playground", "playground",
+               _DUP_LAT, _DUP_LON)]
+    )
+    overture.set_data_path(str(dup))
+    try:
+        after = overture.summarize_area(CENTER_LAT, CENTER_LON, radius_m=1000)["total_places"]
+    finally:
+        overture.set_data_path(None)
+    assert after == before
+
+
+def test_place_details_by_name_prefers_the_places_row(layer_on, tmp_path):
+    """Nearest-name-match must not surface the sparse base polygon when the
+    same real place has a places listing a few meters further away.
+
+    The listing here sits ~30 m from lu-play-named's centre — same real
+    playground — so the name search from the polygon's own centre must
+    return the places row even though the base row is nearer.
+    """
+    dup = tmp_path / "places_dup_named.parquet"
+    near_lat, near_lon = CENTER_LAT + 0.2 * _DEG, CENTER_LON + 2.2 * _DEG
+    _write_places_fixture_plus(
+        dup, [("places-dup-named", "Riverside Playground", "playground",
+               near_lat, near_lon)]
+    )
+    overture.set_data_path(str(dup))
+    try:
+        row = overture.place_details(
+            name="Riverside Playground", lat=CENTER_LAT, lon=CENTER_LON + 2 * _DEG,
+            radius_m=200,
+        )
+    finally:
+        overture.set_data_path(None)
+    assert row["id"] == "places-dup-named"
+    assert "source_theme" not in row
 
 
 # --- the honest limitations, asserted rather than assumed -------------------
@@ -402,12 +566,32 @@ def test_the_suite_pins_the_layer_off(monkeypatch):
 def test_gers_lookup_certifies_a_base_theme_id(layer_on):
     """The opposite of the rule the local supplement needed: these ids come
     from Overture's base theme and are real GERS ids, so gers_lookup should
-    resolve one rather than refuse it."""
+    resolve one rather than refuse it — and label the theme that actually
+    owns it, not the places theme it happened to resolve through."""
     from placeroot import gers
 
     row = gers.gers_lookup(id="lu-park", near_lat=CENTER_LAT, near_lon=CENTER_LON)
-    assert row["theme"] == "places"
+    assert row["theme"] == "base"
+    assert row["type"] == "land_use"
     assert row["name"] == "Test Park"
+
+
+def test_gers_lookup_types_a_beach_as_land(layer_on):
+    from placeroot import gers
+
+    row = gers.gers_lookup(id="land-beach", near_lat=CENTER_LAT, near_lon=CENTER_LON)
+    assert (row["theme"], row["type"]) == ("base", "land")
+
+
+def test_gers_lookup_still_labels_places_rows_as_places(layer_on):
+    from placeroot import gers
+
+    rows = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=2000, limit=1)
+    places_rows = [r for r in rows if not r["id"].startswith(("lu-", "land-"))]
+    if not places_rows:
+        pytest.skip("fixture returned no places rows in range")
+    row = gers.gers_lookup(id=places_rows[0]["id"], near_lat=CENTER_LAT, near_lon=CENTER_LON)
+    assert (row["theme"], row["type"]) == ("places", "place")
 
 
 def test_name_search_sees_the_layer_like_find_places_does(layer_on):
@@ -416,6 +600,16 @@ def test_name_search_sees_the_layer_like_find_places_does(layer_on):
     from placeroot import geocode
 
     rows = geocode._query_places_fallback("Riverside Playground")
+    assert "lu-play-named" in {r["id"] for r in rows}
+
+
+def test_an_anchored_name_search_bounds_the_layer_too(layer_on):
+    """The anchor bbox issue #83 builds for the places scan is passed through
+    to the layer's own reads instead of being discarded (review finding)."""
+    from placeroot import geocode
+
+    rows = geocode._query_places_fallback("Riverside Playground",
+                                          anchor=(CENTER_LAT, CENTER_LON))
     assert "lu-play-named" in {r["id"] for r in rows}
 
 
@@ -436,7 +630,10 @@ def test_a_places_only_pin_does_not_drag_the_base_theme_live(tmp_path, monkeypat
         with caplog.at_level("WARNING"):
             assert recreation.union_branches((-74.0, 40.0, -73.0, 41.0)) == []
         assert "PLACEROOT_DATA_PATH_BASE" in caplog.text
-        assert recreation.degraded_types() == []
+        # data_version must not advertise a layer that contributes nothing:
+        # both skipped types are reported as degraded (see recreation_payload).
+        assert recreation.degraded_types() == ["land_use", "land"]
+        assert resources.recreation_payload()["degraded_types"] == ["land_use", "land"]
     finally:
         recreation.set_enabled(None)
         recreation._pinned_warned.clear()
@@ -460,3 +657,23 @@ def test_an_unpinned_deployment_is_unaffected(monkeypatch):
         assert recreation._reaches_past_a_pinned_deployment("land_use") is False
     finally:
         recreation.set_enabled(None)
+
+
+# --- the default-on path against the real datasets ---------------------------
+
+
+@pytest.mark.live
+def test_live_union_of_the_two_real_themes():
+    """The one configuration the synthetic fixtures cannot vouch for: real
+    theme=places unioned with real theme=base. The two themes version their
+    struct columns (names, sources, bbox) independently; if they drift
+    apart, UNION ALL BY NAME fails outright and every places query in a
+    default-on deployment breaks — this is the test that sees it first.
+    """
+    recreation.set_enabled(True)
+    try:
+        rows = overture.find_places(40.7359, -73.9911, radius_m=500,
+                                    category="playground", limit=10)
+    finally:
+        recreation.set_enabled(False)
+    assert rows, "no playgrounds within 500 m of Union Square is itself a red flag"

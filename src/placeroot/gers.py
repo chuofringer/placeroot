@@ -76,7 +76,7 @@ import threading
 
 import duckdb
 
-from placeroot import buildings, db, divisions, geo, overture, release
+from placeroot import buildings, db, divisions, geo, overture, recreation, release
 
 logger = logging.getLogger(__name__)
 
@@ -269,20 +269,28 @@ def _probe_places(id: str, near_lat: float | None, near_lon: float | None) -> di
     cross-theme answer. bound_to_hint drops its last stage so this probe
     treats a hint as a boundary like the other two do.
 
-    The opt-in recreation layer (docs/RECREATION.md) needs no exclusion
-    here: its rows come from Overture's own base theme and carry real GERS
-    ids, so certifying one as a GERS entity is exactly right. That was not
-    true of the locally built supplement this replaced, whose ids were
-    local row keys.
+    The recreation layer (docs/RECREATION.md) needs no exclusion here: its
+    rows come from Overture's own base theme and carry real GERS ids, so
+    certifying one as a GERS entity is exactly right. That was not true of
+    the locally built supplement this replaced, whose ids were local row
+    keys. But the label must tell the truth about which theme owns the id:
+    place_details marks such a row source_theme=base, and this probe passes
+    that through as theme=base with the type (land_use, or land for
+    beaches) recovered from the layer's own category map — a caller who
+    follows the answer to theme=places would find no such row there.
     """
     row = overture.place_details(
         id=id, near_lat=near_lat, near_lon=near_lon, bound_to_hint=True
     )
     if row is None:
         return None
+    if row.get("source_theme") == "base":
+        theme, type_ = "base", recreation.type_for_category(row.get("category"))
+    else:
+        theme, type_ = "places", "place"
     return {
-        "theme": "places",
-        "type": "place",
+        "theme": theme,
+        "type": type_,
         "name": row.get("name"),
         "lat": row.get("lat"),
         "lon": row.get("lon"),

@@ -152,6 +152,27 @@ SOURCES: dict[str, dict[str, str]] = {
 # Every category slug this layer can produce, for docs and data_version.
 CATEGORIES = sorted({slug for m in SOURCES.values() for slug in m.values()})
 
+# A base-theme feature within this distance of a places row carrying the same
+# category is treated as the same real-world place, and the places row (the
+# richer one: confidence, addresses, the listing's own name) wins. 150 m is
+# the radius the coverage measurements in the module docstring were taken
+# at: of 1,552 base-theme playgrounds in the NYC box, the 539 with a places
+# playground inside 150 m are the both-themes duplicates this suppresses.
+DEDUP_RADIUS_M = 150
+
+
+def type_for_category(slug: str | None) -> str | None:
+    """Which base-theme type produces rows carrying this category slug.
+
+    For gers.py: a place_details row marked source_theme=base resolves its
+    Overture type (land for beaches, land_use for everything else in the
+    map) from the same tables the projection was built from.
+    """
+    for type_, class_map in SOURCES.items():
+        if slug in class_map.values():
+            return type_
+    return None
+
 # Marker column distinguishing this layer's rows from Overture places rows
 # inside the union. find_places reads it to relax its "named places only"
 # filter for these rows (see the module docstring). overture._with_recreation
@@ -214,40 +235,30 @@ def _cache_theme(type_: str) -> str:
     return f"{THEME}_{type_}"
 
 
-def _from_source(bbox: tuple[float, float, float, float] | None, type_: str) -> str:
-    """FROM-clause source for one base-theme type: cache tiles, or upstream.
+def _from_source(bbox: tuple[float, float, float, float] | None, type_: str) -> str | None:
+    """FROM-clause source for one base-theme type, or None to skip the branch.
 
-    Mirrors land_use.py's own _from_source (and buildings.py's before it).
-
-    bbox is None for the id-lookup path (place_details resolving a GERS id
-    with no location to bound it). There is no box to enumerate tiles for
-    there, so it takes whatever tiles are already on disk — the same
-    already-paid-for shortcut overture._place_details_by_id takes for the
-    places theme — and falls back to the upstream glob. It deliberately
-    does *not* materialize new tiles for an unbounded lookup: that would be
-    a world-sized fetch to answer one id.
+    Delegates to cache.source_sql — the shared cached-tiles-else-upstream
+    resolution — with one policy of its own: for an *unbounded* lookup
+    (bbox None: place_details resolving an id with no location hint,
+    geocode's name-only fallback) the branch is served from tiles already
+    on disk or a pinned local dataset, and otherwise skipped. Falling back
+    to the live glob there would be a scan of the whole base theme with no
+    bbox to prune row groups by — a planet-scale read to answer one id —
+    so the layer degrades to places-only for that one query instead. A
+    bounded query, or an id lookup carrying a near_lat/near_lon hint,
+    reads the layer as usual.
     """
     from placeroot import overture
 
     upstream = _upstream_glob(type_)
-    if cache.enabled():
-        try:
-            if bbox is None:
-                paths = cache.cached_tile_paths(
-                    release.resolve_release(), _cache_theme(type_), upstream
-                )
-            else:
-                with db.conn_lock:
-                    paths = cache.local_paths_for_query(
-                        db.shared_conn(), release.resolve_release(), _cache_theme(type_), bbox,
-                        upstream, db.new_connection,
-                    )
-        except duckdb.Error as e:
-            raise overture.UpstreamUnavailable(str(e)) from e
-        if paths:
-            joined = ", ".join(f"'{p}'" for p in paths)
-            return f"read_parquet([{joined}])"
-    return f"read_parquet('{upstream}', hive_partitioning=1)"
+    unbounded_remote = bbox is None and not overture.dataset_is_pinned(THEME, type_)
+    try:
+        return cache.source_sql(
+            _cache_theme(type_), upstream, bbox, upstream_fallback=not unbounded_remote
+        )
+    except duckdb.Error as e:
+        raise overture.UpstreamUnavailable(str(e)) from e
 
 
 def _taxonomy_expr(class_map: dict[str, str]) -> str:
@@ -346,24 +357,67 @@ def union_branches(bbox: tuple[float, float, float, float] | None) -> list[str]:
     """
     if not enabled():
         return []
-    from placeroot import overture
 
     branches = []
     for type_, class_map in SOURCES.items():
         if _reaches_past_a_pinned_deployment(type_):
             continue
-        glob = _upstream_glob(type_)
-        missing = set(overture.missing_columns(glob, REQUIRED_COLUMNS))
-        essential_missing = sorted(missing & ESSENTIAL_COLUMNS)
-        if essential_missing:
-            logger.warning(
-                "recreation layer: theme=%s/type=%s is missing %s — skipping that branch; "
-                "places results will be Overture-places-only for its categories",
-                THEME, type_, ", ".join(essential_missing),
-            )
+        missing = _branch_missing(type_)
+        if missing is None:
             continue
-        branches.append(_projection(_from_source(bbox, type_), class_map, missing))
+        source = _from_source(bbox, type_)
+        if source is None:
+            # Unbounded lookup with nothing local to serve it — see
+            # _from_source. Not a degradation of the layer, just of this
+            # one query.
+            continue
+        branches.append(_projection(source, class_map, missing))
     return branches
+
+
+def _branch_missing(type_: str) -> set[str] | None:
+    """Missing REQUIRED_COLUMNS for a readable base-theme type, else None.
+
+    None means the branch must be dropped: the dataset is missing an
+    essential column (schema drift), or its schema cannot be probed at all
+    and no cached tiles exist to serve instead. The unreadable case is what
+    a partial mirror looks like — PLACEROOT_UPSTREAM_BASE pointing at a
+    bucket that carries theme=places but not theme=base resolves this
+    layer's globs to paths that do not exist, and before this check that
+    read "assume nothing missing" (missing_columns' contract) and failed
+    every places query at scan time. Cached tiles still count as readable:
+    their schema matched the dataset when they were written, which also
+    keeps the layer answering from cache through an upstream outage the
+    same way the places theme does.
+    """
+    from placeroot import overture
+
+    glob = _upstream_glob(type_)
+    present = overture.probe_schema(glob)
+    if present is None:
+        if cache.enabled() and cache.cached_tile_paths(
+            release.resolve_release(), _cache_theme(type_), glob
+        ):
+            return set()
+        logger.warning(
+            "recreation layer: theme=%s/type=%s is unreadable at %s and nothing is "
+            "cached for it — skipping that branch; places results will be "
+            "Overture-places-only for its categories. A mirror that carries only "
+            "theme=places causes this: mirror theme=base too (scripts/mirror_theme.py) "
+            "or set %s=0.",
+            THEME, type_, glob, ENV_VAR,
+        )
+        return None
+    missing = {c for c in REQUIRED_COLUMNS if c not in present}
+    essential_missing = sorted(missing & ESSENTIAL_COLUMNS)
+    if essential_missing:
+        logger.warning(
+            "recreation layer: theme=%s/type=%s is missing %s — skipping that branch; "
+            "places results will be Overture-places-only for its categories",
+            THEME, type_, ", ".join(essential_missing),
+        )
+        return None
+    return missing
 
 
 # One warning per (type, places dataset) pair, not one per query: a pinned
@@ -410,17 +464,17 @@ def degraded_types() -> list[str]:
     """Base-theme types the layer cannot currently read, for data_version.
 
     Empty when the layer is off (nothing is being read, so nothing is
-    degraded) or when every branch is healthy.
+    degraded) or when every branch is healthy. A branch skipped because the
+    places dataset is pinned and this type is not (see
+    _reaches_past_a_pinned_deployment) counts as degraded too: the layer is
+    nominally on but contributing nothing for that type, and data_version
+    saying so is the difference between a visible gap and a silently
+    partial answer.
     """
     if not enabled():
         return []
-    from placeroot import overture
 
-    degraded = []
-    for type_ in SOURCES:
-        if _reaches_past_a_pinned_deployment(type_):
-            continue
-        missing = set(overture.missing_columns(_upstream_glob(type_), REQUIRED_COLUMNS))
-        if missing & ESSENTIAL_COLUMNS:
-            degraded.append(type_)
-    return degraded
+    return [
+        type_ for type_ in SOURCES
+        if _reaches_past_a_pinned_deployment(type_) or _branch_missing(type_) is None
+    ]

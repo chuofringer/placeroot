@@ -117,7 +117,7 @@ def run_tasks(tasks: list[Task]) -> list[TaskRun]:
 # point-in-polygon, or graph-building: unprocessed rows or full geometry,
 # over the *same* spatial predicate the placeroot tool call used. These
 # intentionally reuse overture.py's/divisions.py's/routing.py's private
-# query-building helpers (area_geometry, _from_source, _geom_expr, etc.)
+# query-building helpers (area_geometry, _places_source, _geom_expr, etc.)
 # rather than duplicating that SQL, so the raw side is measured against
 # exactly the same bbox/radius/predicate the placeroot side answered from.
 # ----------------------------------------------------------------------
@@ -136,7 +136,7 @@ def _raw_places_rows(
     if category:
         filters.append("(basic_category ILIKE $category OR taxonomy.primary ILIKE $category)")
         params["category"] = f"%{category}%"
-    sql = f"SELECT * FROM {overture._from_source(bbox)} WHERE {' AND '.join(filters)}"
+    sql = f"SELECT * FROM {overture._places_source(bbox)[0]} WHERE {' AND '.join(filters)}"
     with overture._conn_lock:
         cur = overture._conn().execute(sql, params)
         cols = [d[0] for d in cur.description]

@@ -51,9 +51,12 @@ the second and later queries over an area are served locally.
 
 It also widens the failure surface. A places query now depends on the base
 theme being readable as well as the places theme. A base type whose *schema*
-drifted is dropped and logged, and the places answer still lands (with
-`data_version` naming the dropped type) — but an unreachable dataset fails
-the way an unreachable places dataset already does.
+drifted, or whose dataset cannot be read at all (a mirror that carries only
+`theme=places`, say), is dropped and logged, and the places answer still
+lands — with `data_version` naming the dropped type under
+`recreation_layer.degraded_types`. That field covers every way a type can be
+out of the union (drift, unreadable, pinned-places-without-pinned-base), so
+a layer that is switched on but contributing nothing is visible, not silent.
 
 An install that cares more about `find_places` latency than about
 playgrounds should set `PLACEROOT_RECREATION_LAYER=0`. Then the places tools
@@ -93,12 +96,34 @@ Categories the layer contributes: `playground`, `dog_park`, `park`,
 through the ordinary taxonomy path — they carry real Overture category slugs,
 the same ones `search_categories` returns.
 
+**One real-world place, one row.** A place can exist in both themes at once —
+Central Park is a places listing *and* a base-theme polygon. A layer row with
+a places row of the same category within **150 m** in the same result set is
+treated as that place and dropped; the places row wins because it is the
+richer one (confidence, addresses, the listing's own name). 150 m is the
+radius the coverage numbers above were measured at. The dedup runs over the
+already-filtered candidate rows, so it costs no extra dataset scan, and it
+applies to counts too: `summarize_area`/`compare_areas` count a duplicated
+place once.
+
+**Unbounded lookups stay local.** A `place_details(id=...)` call with no
+location hint, or a name-only geocode fallback, has no bounding box to prune
+a scan with — and an unprunable scan of the live base theme would read the
+whole planet to answer one id. Those lookups serve the layer from base-theme
+tiles already cached (or a pinned local dataset) and otherwise skip it for
+that one query. A base-theme id always resolves with a `near_lat`/`near_lon`
+hint — which is what `find_places` results carry — or once its area's tiles
+are warm.
+
 ## What these rows are and are not
 
 **They are real GERS ids.** Base-theme features are GERS-registered like any
 other Overture feature, so a row composes with `gers_lookup` and
 `place_details` unchanged, and `sources` carries Overture's own OSM
-provenance per row.
+provenance per row. Provenance is labeled truthfully: `place_details` marks
+such a row `source_theme: base`, and `gers_lookup` reports `theme: base`
+with the owning type (`land_use`, or `land` for beaches) — not the places
+theme it happened to resolve through.
 
 **They carry no `confidence` and no `operating_status`.** The base theme has
 neither column. A `min_confidence=` or `operating_status=` filter therefore

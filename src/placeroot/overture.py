@@ -290,24 +290,11 @@ def _places_source(
     which land under land_use.py's existing "base_<type>" cache keys.
     """
     upstream = _upstream_glob(theme)
-    if cache.enabled() and bbox is not None:
-        try:
-            with db.conn_lock:
-                paths = cache.local_paths_for_query(
-                    db.shared_conn(), release.resolve_release(), theme, bbox, upstream,
-                    db.new_connection,
-                )
-        except duckdb.Error as e:
-            raise UpstreamUnavailable(str(e)) from e
-        if paths:
-            joined = ", ".join(f"'{p}'" for p in paths)
-            return _with_recreation(f"read_parquet([{joined}])", bbox, theme)
-    return _with_recreation(f"read_parquet('{upstream}', hive_partitioning=1)", bbox, theme)
-
-
-def _from_source(bbox: tuple[float, float, float, float], theme: str = THEME) -> str:
-    """_places_source's SQL alone, for the call sites that don't filter on names."""
-    return _places_source(bbox, theme)[0]
+    try:
+        source = cache.source_sql(theme, upstream, bbox)
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(str(e)) from e
+    return _with_recreation(source, bbox, theme)
 
 
 def _name_filter(missing: set[str], has_recreation: bool) -> list[str]:
@@ -326,6 +313,57 @@ def _name_filter(missing: set[str], has_recreation: bool) -> list[str]:
     if has_recreation:
         return [f"(names.primary IS NOT NULL OR {recreation.MARKER_COLUMN})"]
     return ["names.primary IS NOT NULL"]
+
+
+def _dedup_rows_sql(
+    from_source: str, filters: list[str], has_recreation: bool
+) -> tuple[str, str, list[str]]:
+    """(with_clause, from_clause, filters) deduplicating the union's two themes.
+
+    A real-world place can exist in both themes at once — Central Park is a
+    places listing *and* a base-theme land_use polygon — and returning both
+    rows spends two result slots (and two summarize_area counts) on one
+    place. So a recreation-layer row is dropped when the same filtered row
+    set also holds a places row with the same category within
+    recreation.DEDUP_RADIUS_M; the places row wins because it is the richer
+    one (confidence, addresses, the listing's own name).
+
+    The dedup is a self-anti-join over the *already filtered* rows, not
+    against the raw datasets: the candidate set is materialized once (AS
+    MATERIALIZED — DuckDB would otherwise inline the CTE into both
+    references and scan the source twice), so the upstream scan cost of the
+    query is unchanged and the join runs over the handful of rows that
+    survived the bbox/category filters. Callers interpolate the returned
+    pieces as f"{with_clause} SELECT ... FROM {from_clause} WHERE
+    {' AND '.join(filters)}". When the layer isn't in the union there is
+    nothing to dedup and the inputs pass through untouched.
+
+    Category equality (taxonomy.primary) plus proximity is deliberately the
+    whole test: name matching would miss the common case this exists for —
+    the base polygon is unnamed while the places listing is named — and a
+    places playground 100 m from a base playground being two distinct real
+    playgrounds is rarer than the two being one place, per the 150 m
+    overlap measurement in recreation.py.
+    """
+    if not has_recreation:
+        return "", from_source, filters
+    marker = recreation.MARKER_COLUMN
+    duplicate_distance = """2 * 6371000 * asin(sqrt(
+                pow(sin(radians(p.bbox.ymin - r.bbox.ymin) / 2), 2)
+                + cos(radians(r.bbox.ymin)) * cos(radians(p.bbox.ymin))
+                * pow(sin(radians(p.bbox.xmin - r.bbox.xmin) / 2), 2)
+            ))"""
+    with_clause = (
+        f"WITH _candidate_rows AS MATERIALIZED "
+        f"(SELECT * FROM {from_source} WHERE {' AND '.join(filters)})"
+    )
+    dedup_filter = f"""NOT (r.{marker} AND EXISTS (
+            SELECT 1 FROM _candidate_rows p
+            WHERE NOT p.{marker}
+              AND p.taxonomy.primary = r.taxonomy.primary
+              AND {duplicate_distance} <= {recreation.DEDUP_RADIUS_M}
+        ))"""
+    return with_clause, "_candidate_rows AS r", [dedup_filter]
 
 
 # Haversine great-circle distance in meters between (bbox.ymin, bbox.xmin)
@@ -617,8 +655,10 @@ def find_places(
     )
 
     exprs = _place_select_exprs(missing)
+    with_clause, from_clause, filters = _dedup_rows_sql(from_source, filters, has_recreation)
 
     sql = f"""
+        {with_clause}
         SELECT
             {exprs["id"]}                       AS id,
             {exprs["name"]}                      AS name,
@@ -632,7 +672,7 @@ def find_places(
             round(bbox.ymin, 6)                 AS lat,
             round(bbox.xmin, 6)                 AS lon,
             round({_DISTANCE_EXPR}, 0)          AS distance_m
-        FROM {from_source}
+        FROM {from_clause}
         WHERE {' AND '.join(filters)}
         ORDER BY distance_m
         LIMIT {limit}
@@ -726,7 +766,9 @@ def find_places_in_bbox(
         )
 
     exprs = _place_select_exprs(missing)
+    with_clause, from_clause, filters = _dedup_rows_sql(from_source, filters, has_recreation)
     sql = f"""
+        {with_clause}
         SELECT
             {exprs["id"]}                       AS id,
             {exprs["name"]}                      AS name,
@@ -739,7 +781,7 @@ def find_places_in_bbox(
             {exprs["has_phone"]}                 AS has_phone,
             round(bbox.ymin, 6)                 AS lat,
             round(bbox.xmin, 6)                 AS lon
-        FROM {from_source}
+        FROM {from_clause}
         WHERE {' AND '.join(filters)}
         ORDER BY {order_by}
         LIMIT {limit}
@@ -1044,8 +1086,10 @@ def find_places_in_division(
     )
 
     exprs = _place_select_exprs(missing)
+    with_clause, from_clause, filters = _dedup_rows_sql(from_source, filters, has_recreation)
 
     sql = f"""
+        {with_clause}
         SELECT
             {exprs["id"]}                       AS id,
             {exprs["name"]}                      AS name,
@@ -1058,7 +1102,7 @@ def find_places_in_division(
             {exprs["has_phone"]}                 AS has_phone,
             round(bbox.ymin, 6)                 AS lat,
             round(bbox.xmin, 6)                 AS lon
-        FROM {from_source}
+        FROM {from_clause}
         WHERE {' AND '.join(filters)}
         ORDER BY name, id
         LIMIT {limit}
@@ -1092,16 +1136,20 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
         lat, lon, radius_m
     )
     category_expr = "NULL" if "basic_category" in missing else "basic_category"
-    from_source = _from_source(bbox)
+    from_source, has_recreation = _places_source(bbox)
+    with_clause, from_clause, filters = _dedup_rows_sql(
+        from_source, [bbox_filter, distance_filter], has_recreation
+    )
     sql = f"""
+        {with_clause}
         SELECT
             {category_expr} AS category,
             count(*) AS n,
             sum(count(*)) OVER ()                                     AS total,
             coalesce(sum(count(*)) FILTER (WHERE {category_expr} IS NULL) OVER (), 0)
                                                                       AS uncategorized
-        FROM {from_source}
-        WHERE {bbox_filter} AND {distance_filter}
+        FROM {from_clause}
+        WHERE {" AND ".join(filters)}
         GROUP BY 1
         ORDER BY n DESC
     """
@@ -1159,28 +1207,38 @@ _PLACE_DETAIL_COLUMNS = [
     ("socials", "socials", "socials"),
     ("sources", "sources", "sources"),
 ]
-_PLACE_DETAIL_RESULT_COLS = [alias for _, _, alias in _PLACE_DETAIL_COLUMNS] + ["lat", "lon"]
+_PLACE_DETAIL_RESULT_COLS = (
+    [alias for _, _, alias in _PLACE_DETAIL_COLUMNS]
+    + ["lat", "lon", recreation.MARKER_COLUMN]
+)
 
 
 def _place_details_sql(
-    from_source: str, filters: list[str], order_by: str, missing: set[str]
+    from_source: str, filters: list[str], order_by: str, missing: set[str],
+    has_recreation: bool = False, with_clause: str = "",
 ) -> str:
     """The shared place_details SELECT, sourced from from_source.
 
     Column list and result shape stay identical no matter which of
     place_details' several lookup strategies (cached-tile, hint-constrained,
     full-scan, or name+point) supplies from_source/filters — only the FROM
-    and WHERE differ between them.
+    and WHERE differ between them. The marker column is selected so the
+    caller can label a recreation-layer row's provenance (source_theme:
+    base) — and so gers.py can name the right theme for its id; it reads
+    FALSE whenever the union isn't active and the column doesn't exist.
     """
     select_list = ",\n            ".join(
         f'{"NULL" if col in missing else expr} AS {alias}'
         for col, expr, alias in _PLACE_DETAIL_COLUMNS
     )
+    marker_expr = recreation.MARKER_COLUMN if has_recreation else "FALSE"
     return f"""
+        {with_clause}
         SELECT
             {select_list},
             round(bbox.ymin, 6) AS lat,
-            round(bbox.xmin, 6) AS lon
+            round(bbox.xmin, 6) AS lon,
+            {marker_expr} AS {recreation.MARKER_COLUMN}
         FROM {from_source}
         WHERE {" AND ".join(filters)}
         ORDER BY {order_by}
@@ -1189,8 +1247,11 @@ def _place_details_sql(
 
 
 def _run_place_details_query(from_source: str, filters: list[str], order_by: str,
-                              params: dict, missing: set[str]) -> tuple | None:
-    sql = _place_details_sql(from_source, filters, order_by, missing)
+                              params: dict, missing: set[str],
+                              has_recreation: bool = False,
+                              with_clause: str = "") -> tuple | None:
+    sql = _place_details_sql(from_source, filters, order_by, missing,
+                             has_recreation, with_clause)
     try:
         with _conn_lock:
             return _conn().execute(sql, params).fetchone()
@@ -1219,14 +1280,22 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
     place_details' own contract is unchanged; gers.py opts in because it
     probes several themes and a hint-miss there would cost one unbounded
     scan per theme (see gers.py's module docstring).
+
+    The recreation layer joins steps 1 and 3 from local base-theme tiles or
+    a pinned dataset only (recreation._from_source): those steps have no
+    bbox, and a live base-theme glob with nothing to prune by would be a
+    planet-scale read per lookup. A base-theme id therefore resolves via
+    warm tiles or a near_lat/near_lon hint (step 2, bounded, which also
+    materializes the tiles that make the next lookup warm) — not by
+    unbounded scan.
     """
     if cache.enabled():
         tile_paths = cache.cached_tile_paths(release.resolve_release(), THEME, upstream)
         if tile_paths:
             joined = ", ".join(f"'{p}'" for p in tile_paths)
+            source, active = _with_recreation(f"read_parquet([{joined}])", None)
             row = _run_place_details_query(
-                _with_recreation(f"read_parquet([{joined}])", None)[0],
-                ["id = $id"], "1", {"id": id}, missing,
+                source, ["id = $id"], "1", {"id": id}, missing, active,
             )
             if row is not None:
                 return row
@@ -1235,8 +1304,9 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
         xmin, ymin, xmax, ymax = _bbox_around(near_lat, near_lon, ID_HINT_RADIUS_M)
         bbox_filter, bbox_params = _bbox_filter_sql(xmin, ymin, xmax, ymax)
         params = {"id": id, **bbox_params}
-        from_source = _from_source((xmin, ymin, xmax, ymax))
-        row = _run_place_details_query(from_source, ["id = $id", bbox_filter], "1", params, missing)
+        from_source, active = _places_source((xmin, ymin, xmax, ymax))
+        row = _run_place_details_query(from_source, ["id = $id", bbox_filter], "1",
+                                       params, missing, active)
         if row is not None:
             return row
         if bound_to_hint:
@@ -1250,10 +1320,8 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
         "place_details(id=%s) fell back to a full-dataset scan (no cache hit, "
         "no near_lat/near_lon hint given, or the hint missed) — issue #41", id,
     )
-    return _run_place_details_query(
-        _with_recreation(f"read_parquet('{upstream}', hive_partitioning=1)", None)[0],
-        ["id = $id"], "1", {"id": id}, missing,
-    )
+    source, active = _with_recreation(f"read_parquet('{upstream}', hive_partitioning=1)", None)
+    return _run_place_details_query(source, ["id = $id"], "1", {"id": id}, missing, active)
 
 
 def place_details(
@@ -1306,12 +1374,21 @@ def place_details(
         if "names" not in missing:
             filters.append("names.primary ILIKE $name ESCAPE '\\'")
             params["name"] = f"%{_like_escape(name)}%"
-        from_source = _from_source(bbox)
-        row = _run_place_details_query(from_source, filters, _DISTANCE_EXPR, params, missing)
+        from_source, has_recreation = _places_source(bbox)
+        # Deduped like find_places: when the same real-world place matched in
+        # both themes, details should come from the richer places row, not
+        # from whichever polygon centroid happened to sit closer.
+        with_clause, from_clause, filters = _dedup_rows_sql(from_source, filters, has_recreation)
+        row = _run_place_details_query(from_clause, filters, _DISTANCE_EXPR, params,
+                                       missing, has_recreation, with_clause)
 
     if row is None:
         return None
     result = dict(zip(_PLACE_DETAIL_RESULT_COLS, row))
+    if result.pop(recreation.MARKER_COLUMN):
+        # Truthful provenance for a recreation-layer row (docs/RECREATION.md);
+        # absent for ordinary places rows, whose theme is the tool's default.
+        result["source_theme"] = "base"
     result["operating_status"] = _label_operating_status(result["operating_status"])
     for field in _PLACE_DETAIL_LIST_FIELDS:
         kept, omitted = budget.truncate_list(result[field])
