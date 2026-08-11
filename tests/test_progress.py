@@ -92,6 +92,14 @@ def test_async_fallback_reports_the_direct_scan(captured, tmp_path, monkeypatch)
     )
     assert paths is None  # caller falls back to a direct scan
     assert any("direct scan" in m for m, _, _ in captured)
+    # Wait for the spawned background fetches to run their (stubbed) COPY
+    # before monkeypatch teardown restores the real ensure_tile and cache
+    # dir — a parked daemon thread resolving them late would otherwise
+    # write a real tile into the real user cache.
+    deadline = time.monotonic() + 10
+    while cache._inflight and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not cache._inflight, "background fetches still pending at teardown"
 
 
 # --- background fetches are bounded ------------------------------------------

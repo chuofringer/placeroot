@@ -1953,15 +1953,17 @@ async def _progress_middleware(ctx, call_next):
 
     def reporter(message: str, current: float | None, total: float | None) -> None:
         nonlocal seq
+        # Scheduling happens under the same lock as the increment so the
+        # wire order matches the sequence order even if two threads ever
+        # report concurrently — a later value must not reach the loop first.
         with seq_lock:
             seq += 1
-            value = seq
-        future = asyncio.run_coroutine_threadsafe(
-            session.send_progress_notification(
-                token, value, None, message, related_request_id=request_id,
-            ),
-            loop,
-        )
+            future = asyncio.run_coroutine_threadsafe(
+                session.send_progress_notification(
+                    token, seq, None, message, related_request_id=request_id,
+                ),
+                loop,
+            )
         # Consume the eventual result: a failed or cancelled send is already
         # best-effort (progress.py's contract) and must not surface as an
         # exception-was-never-retrieved warning at GC time.
