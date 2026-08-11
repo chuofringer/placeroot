@@ -1838,14 +1838,23 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
         )
         filters += [bbox_filter, distance_filter]
         params.update(geo_params)
-    # cache.source_sql resolves tiles-else-manifest-else-glob: an anchored
-    # search reads only the files/tiles its box touches instead of paying
-    # the per-file footer pass over the whole places theme (the cost the
-    # manifest layer exists to remove — and this is the path the anchored
-    # "Shibuya Crossing Tokyo" fix drives traffic into).
-    try:
-        base_source = cache.source_sql("places", glob, anchor_bbox)
-    except Exception:  # noqa: BLE001 - cache resolution is an optimization here
+    # Anchored: cache.source_sql resolves tiles-else-manifest-else-glob, so
+    # the search reads only the files/tiles its box touches instead of
+    # paying the per-file footer pass over the whole places theme (the cost
+    # the manifest layer exists to remove — and this is the path the
+    # anchored "Shibuya Crossing Tokyo" fix drives traffic into).
+    # Unanchored: the glob, deliberately. source_sql with no bbox serves
+    # cached tiles alone whenever any exist, which would silently narrow a
+    # worldwide name search to whatever areas this install happens to have
+    # touched — an empty answer for a place the dataset contains. The
+    # unanchored scan's cost is already governed by its own gate
+    # (_skip_unanchored_places_scan), not by the cache.
+    if anchor_bbox is not None:
+        try:
+            base_source = cache.source_sql("places", glob, anchor_bbox)
+        except Exception:  # noqa: BLE001 - cache resolution is an optimization here
+            base_source = f"read_parquet('{glob}', hive_partitioning=1)"
+    else:
         base_source = f"read_parquet('{glob}', hive_partitioning=1)"
     from_source, _ = overture._with_recreation(base_source, anchor_bbox)
     category_expr = "taxonomy.primary" if cols is not None and "taxonomy" in cols else "NULL"

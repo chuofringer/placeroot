@@ -155,29 +155,6 @@ def new_connection() -> duckdb.DuckDBPyConnection:
     return shared_conn().cursor()
 
 
-def warm_globs_async(globs: list[str]) -> None:
-    """Warm the shared instance's parquet metadata for globs, in the
-    background, off the query lock.
-
-    For tools that know at entry they are about to touch a cold theme
-    (gers_lookup spans three, geocode_address two): a cursor pays the
-    footer pass concurrently with whatever the tool is already doing on
-    the shared connection, so by the time the tool's own query reaches
-    that theme its metadata is warm. Best-effort — failures are the next
-    query's problem to surface properly.
-    """
-    def _warm():
-        for glob in globs:
-            try:
-                new_connection().execute(
-                    f"SELECT * FROM read_parquet('{glob}', hive_partitioning=1) LIMIT 0"
-                )
-            except duckdb.Error as e:
-                logger.debug("speculative metadata warm failed for %s: %s", glob, e)
-
-    threading.Thread(target=_warm, daemon=True).start()
-
-
 def ensure_spatial() -> None:
     """Load DuckDB's spatial extension on the shared connection, once.
 

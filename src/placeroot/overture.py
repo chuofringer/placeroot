@@ -231,7 +231,7 @@ def warm_metadata() -> None:
             )
         except duckdb.Error as e:
             logger.warning("Metadata pre-warm failed for %s (continuing): %s", upstream, e)
-            return
+            continue
 
 
 def missing_columns(glob: str, required: list[str] = REQUIRED_COLUMNS) -> list[str]:
