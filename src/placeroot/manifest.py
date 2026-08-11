@@ -38,9 +38,13 @@ from importlib import resources
 
 logger = logging.getLogger(__name__)
 
-# <base>/<release>/theme=<theme>/type=<type>/*  — base may be any s3/http(s)
-# root (a mirror in the standard layout benefits too; its files are the
-# same release's files).
+# <base>/<release>/theme=<theme>/type=<type>/* — only the public bucket
+# (_DEFAULT_BASE) is eligible: a mirror may be a partial copy, and an
+# explicit file list must never 404 where the glob would have succeeded.
+# Kept equal to overture.DEFAULT_UPSTREAM_BASE (asserted by a test);
+# defined locally so this module stays import-cycle-free.
+_DEFAULT_BASE = "s3://overturemaps-us-west-2/release"
+
 _GLOB_RE = re.compile(
     r"^(?P<base>(?:s3|https?)://.+)/(?P<release>[^/]+)/"
     r"theme=(?P<theme>[^/]+)/type=(?P<type>[^/]+)/\*$"
@@ -72,6 +76,12 @@ def pruned_source_sql(
         return None  # antimeridian: fall back rather than mis-prune
     m = _GLOB_RE.match(upstream_glob)
     if m is None:
+        return None
+    if m.group("base") != _DEFAULT_BASE:
+        # A mirror (PLACEROOT_UPSTREAM_BASE) may host only a regional
+        # subset of the release; an explicit file list would 404 on files
+        # the mirror lacks where the glob simply lists what exists. Only
+        # the public bucket is known-complete, so only it gets pruned.
         return None
     manifest = _load(m.group("release"), m.group("theme"), m.group("type"))
     if manifest is None:

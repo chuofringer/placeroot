@@ -46,17 +46,15 @@ def test_geocode_place_hits_flow_through_without_a_reference():
 
 
 def test_fallback_anchor_prefers_the_prominent_division(monkeypatch):
-    """The trailing-token anchor must pick the same division geocode would:
-    ranked with the real population map. With an empty map every same-named
-    division ties — live, "Shibuya Crossing Tokyo" anchored on a small
-    Papua New Guinea division named Tokyo and answered nothing."""
+    """The trailing-token anchor ranks candidates like geocode's main path:
+    _rank_key orders by each row's own population, so the 8M-person
+    namesake beats the 100-person one regardless of the region map."""
     small = {"id": "d-small", "name": "Springfield", "subtype": "locality",
              "country": "PG", "region": None, "lat": -5.0, "lon": 142.0,
              "admin_context": [], "population": 100}
     big = dict(small, id="d-big", country="JP", lat=35.0, lon=139.0,
                population=8_000_000)
     monkeypatch.setattr(geocode, "_query_divisions", lambda *a, **k: [small, big])
-    monkeypatch.setattr(geocode, "_region_population_lookup", lambda t: {})
     hit = geocode._fallback_anchor("Coffee Springfield", [], None, "unused")
     assert hit == (35.0, 139.0, "Coffee")
 

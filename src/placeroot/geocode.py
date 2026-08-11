@@ -1633,6 +1633,7 @@ def _fallback_anchor(
     region_code: str | None,
     local_table: str | None,
     alt_table: str | None = None,
+    region_population: dict[str, int] | None = None,
 ) -> tuple[float, float, str | None] | None:
     """(lat, lon, name_query) to bound/aim the places fallback (#83), or None
     if no location context can be derived from the query at all — the
@@ -1688,22 +1689,21 @@ def _fallback_anchor(
         if len(tokens) <= n:
             continue
         candidate = " ".join(tokens[-n:])
-        # alt_table included: the trailing token is a *city name as the
-        # user writes it*, and for many big cities that is an alternate
-        # spelling — Japan's Tokyo is primarily 東京都, and a
-        # primary-names-only lookup for "Tokyo" doesn't even contain it.
-        # Ranked with the real population map, exactly like geocode's main
-        # path: with an empty map every same-named division ties and the
-        # pick is effectively arbitrary. Measured failure of both together:
-        # "Shibuya Crossing Tokyo" anchored on a small Papua New Guinea
-        # division named Tokyo, aiming the bounded places search at the
-        # wrong hemisphere and answering a resolvable landmark query with
-        # nothing.
+        # alt_table is the load-bearing part of this lookup: the trailing
+        # token is a *city name as the user writes it*, and for many big
+        # cities that is an alternate spelling — Japan's Tokyo is primarily
+        # 東京都, so a primary-names-only lookup for "Tokyo" does not even
+        # contain the row every user means, and the measured failure was
+        # "Shibuya Crossing Tokyo" anchoring on a small Papua New Guinea
+        # division named Tokyo (the only primary-name match), aiming the
+        # bounded places search at the wrong hemisphere. Ranking itself is
+        # _rank_key, which orders by each row's own population first; the
+        # region_population map (passed down from geocode's main path
+        # rather than re-scanned here) only breaks region-level ties.
         rows = _query_divisions(candidate, region_code, local_table, alt_table=alt_table)
         if not rows:
             continue
-        population = _region_population_lookup(local_table)
-        best = min(rows, key=lambda r: _rank_key(r, candidate, population))
+        best = min(rows, key=lambda r: _rank_key(r, candidate, region_population or {}))
         base = " ".join(tokens[:-n]).strip()
         name_query = None if _nothing_but_stopwords(base) else base
         return best["lat"], best["lon"], name_query
@@ -1749,12 +1749,21 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
         )
         filters += [bbox_filter, distance_filter]
         params.update(geo_params)
-    from_source, _ = overture._with_recreation(
-        f"read_parquet('{glob}', hive_partitioning=1)", anchor_bbox
-    )
+    # cache.source_sql resolves tiles-else-manifest-else-glob: an anchored
+    # search reads only the files/tiles its box touches instead of paying
+    # the per-file footer pass over the whole places theme (the cost the
+    # manifest layer exists to remove — and this is the path the anchored
+    # "Shibuya Crossing Tokyo" fix drives traffic into).
+    try:
+        base_source = cache.source_sql("places", glob, anchor_bbox)
+    except Exception:  # noqa: BLE001 - cache resolution is an optimization here
+        base_source = f"read_parquet('{glob}', hive_partitioning=1)"
+    from_source, _ = overture._with_recreation(base_source, anchor_bbox)
+    category_expr = "taxonomy.primary" if cols is not None and "taxonomy" in cols else "NULL"
     sql = f"""
         SELECT id, names.primary AS name, bbox.ymin AS lat, bbox.xmin AS lon,
-               coalesce(confidence, 0) AS confidence
+               coalesce(confidence, 0) AS confidence,
+               {category_expr} AS category
         FROM {from_source}
         WHERE {' AND '.join(filters)}
         ORDER BY confidence DESC
@@ -1772,6 +1781,7 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
             "country": None, "region": None,
             "lat": round(r[2], 6), "lon": round(r[3], 6),
             "admin_context": [], "_confidence": r[4],
+            "_category": r[5],
         })
     return result
 
@@ -2394,7 +2404,8 @@ def geocode_detailed(
         # location word in the query) instead of an unconstrained
         # worldwide scan — see _fallback_anchor/_query_places_fallback.
         anchor_hit = _fallback_anchor(
-            search_query, divisions, region_code, local_table, alt_table=alt_table
+            search_query, divisions, region_code, local_table, alt_table=alt_table,
+            region_population=region_population,
         )
         anchor, name_query = (
             ((anchor_hit[0], anchor_hit[1]), anchor_hit[2]) if anchor_hit else (None, search_query)
@@ -2445,6 +2456,10 @@ def geocode_detailed(
         }
         if include_country:
             entry["country"] = row.get("country")
+        if row.get("_category") is not None:
+            # Places-fallback rows only: the place's Overture category, so
+            # resolve_place (and any caller) doesn't lose it in the merge.
+            entry["category"] = row["_category"]
         if row.get("_matched_name"):
             # #214: only present when the row was found through one of
             # Overture's alternate (names.common) spellings rather than its

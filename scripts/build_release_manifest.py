@@ -20,6 +20,7 @@ so a manifest generated once is correct forever for that release.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -57,20 +58,33 @@ def build_one(con, release: str, theme: str, type_: str) -> dict[str, list[float
                max(CASE WHEN path_in_schema = 'bbox, xmax'
                         THEN CAST(stats_max_value AS DOUBLE) END) AS xmax,
                max(CASE WHEN path_in_schema = 'bbox, ymax'
-                        THEN CAST(stats_max_value AS DOUBLE) END) AS ymax
+                        THEN CAST(stats_max_value AS DOUBLE) END) AS ymax,
+               count(*) FILTER (
+                   WHERE path_in_schema IN
+                         ('bbox, xmin', 'bbox, ymin', 'bbox, xmax', 'bbox, ymax')
+                     AND (stats_min_value IS NULL OR stats_max_value IS NULL)
+               ) AS missing_stats
         FROM parquet_metadata($glob)
         GROUP BY 1 ORDER BY 1
         """,
         {"glob": glob},
     ).fetchall()
     files: dict[str, list[float]] = {}
-    for file, xmin, ymin, xmax, ymax in rows:
-        if None in (xmin, ymin, xmax, ymax):
-            # A file without bbox stats can never be pruned; recording it
-            # with a world extent keeps it in every candidate list.
+    for file, xmin, ymin, xmax, ymax, missing_stats in rows:
+        if missing_stats or None in (xmin, ymin, xmax, ymax):
+            # ANY row group without bbox stats makes the file unprunable —
+            # an aggregate over only the stats-bearing groups would shrink
+            # the extent and silently drop rows. World extent keeps it in
+            # every candidate list.
             files[file] = [-180.0, -90.0, 180.0, 90.0]
         else:
-            files[file] = [round(xmin, 5), round(ymin, 5), round(xmax, 5), round(ymax, 5)]
+            # Floor mins / ceil maxes: plain round() can round an extent
+            # inward, and a feature in that sliver at a file edge would be
+            # wrongly pruned. The recorded extent must be a superset.
+            files[file] = [
+                math.floor(xmin * 1e5) / 1e5, math.floor(ymin * 1e5) / 1e5,
+                math.ceil(xmax * 1e5) / 1e5, math.ceil(ymax * 1e5) / 1e5,
+            ]
     return files
 
 

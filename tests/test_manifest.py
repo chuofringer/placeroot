@@ -61,6 +61,19 @@ def test_zero_intersections_fall_back_to_the_glob(monkeypatch):
     assert manifest.pruned_source_sql(GLOB, (60.0, -50.0, 61.0, -49.0)) is None
 
 
+def test_mirror_bases_are_never_pruned(synthetic):
+    """A mirror may be a partial copy of the release; an explicit file list
+    must never 404 where the glob would simply have listed what exists."""
+    mirror = GLOB.replace("s3://overturemaps-us-west-2/release", "s3://my-mirror/overture")
+    assert manifest.pruned_source_sql(mirror, BOX) is None
+
+
+def test_default_base_stays_in_sync_with_overture():
+    from placeroot import overture
+
+    assert manifest._DEFAULT_BASE == overture.DEFAULT_UPSTREAM_BASE
+
+
 def test_unknown_release_falls_back(monkeypatch):
     monkeypatch.setattr(manifest, "_load", lambda r, t, ty: None)
     assert manifest.pruned_source_sql(GLOB, BOX) is None
