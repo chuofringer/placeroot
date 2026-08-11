@@ -34,7 +34,7 @@ import json
 
 from mcp.server.mcpserver import MCPServer
 
-from placeroot import budget, categories, release
+from placeroot import budget, categories, recreation, release
 
 DATA_VERSION_URI = "placeroot://data-version"
 CATEGORIES_URI = "placeroot://categories"
@@ -88,6 +88,49 @@ def data_version_payload() -> dict:
             " This release is older than the staleness threshold — "
             "discovery may be failing in this deployment."
         )
+    layer = recreation_payload()
+    if layer is not None:
+        payload["recreation_layer"] = layer
+    return payload
+
+
+def recreation_payload() -> dict | None:
+    """The active recreation layer, or None when it isn't enabled.
+
+    An answer drawn partly from a second theme has to say so: a
+    `find_places` result whose provenance the caller can't see is exactly
+    the silently-partial answer CONTRIBUTING.md's honesty rule exists to
+    prevent. Everything reported here is derivable from the code and the
+    pinned release — there is no local build whose vintage could drift, so
+    there is nothing to read off disk.
+
+    `degraded_types` is the one field worth an agent's attention: a base
+    type listed there is not delivering full coverage. Either it is out of
+    the union entirely — schema drift, an unreadable dataset with nothing
+    cached (a mirror carrying only theme=places), or a pinned places
+    dataset with no matching base pin (see
+    recreation._reaches_past_a_pinned_deployment) — and results are
+    places-theme-only for its categories; or its upstream is unreadable
+    and it is serving from already-cached tiles only, so base rows still
+    arrive inside the tiles' coverage but queries outside it silently get
+    places-theme-only answers. A payload whose degraded_types covers every
+    type is a layer that is switched on but not delivering everything.
+    """
+    if not recreation.enabled():
+        return None
+    payload = {
+        "source": "Overture base theme (types: " + ", ".join(recreation.SOURCES) + ")",
+        "categories": recreation.CATEGORIES,
+        "note": (
+            "On by default; set " + recreation.ENV_VAR + "=0 to turn it off. "
+            "Adds OSM-derived recreation areas the listings-derived places theme "
+            "under-counts. These rows carry no confidence or operating_status, "
+            "and may have no name."
+        ),
+    }
+    degraded = recreation.degraded_types()
+    if degraded:
+        payload["degraded_types"] = degraded
     return payload
 
 

@@ -1706,6 +1706,17 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
     resolve_place already applies to its own places search. Without an
     anchor, this still runs (row-capped by the existing LIMIT, same as
     before #83) rather than dropping a genuine name-only query to nothing.
+
+    Reads through overture._with_recreation so the recreation layer
+    (docs/RECREATION.md) is in scope here too: a playground find_places
+    returns but geocode/resolve_place can't name is a surface-dependent
+    answer, which is worse than not having the layer. The anchor bbox —
+    when there is one — is passed through to the layer, so its reads are
+    bounded (and tile-cached) exactly like find_places' are; an unanchored
+    name search has no box to bound by, and there the layer serves only
+    from base-theme tiles already on disk (or a pinned local dataset)
+    rather than paying two unprunable scans of the live base theme per
+    lookup — see recreation._from_source.
     """
     glob = overture.upstream_glob(theme="places", type_="place")
     cols = overture.probe_schema(glob)
@@ -1713,17 +1724,21 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
         return []
     filters = ["names.primary ILIKE $pattern ESCAPE '\\'"]
     params: dict = {"pattern": f"%{overture._like_escape(query)}%"}
+    anchor_bbox = None
     if anchor is not None:
         lat, lon = anchor
-        bbox_filter, distance_filter, geo_params, _bbox, _radius_m = overture.area_geometry(
+        bbox_filter, distance_filter, geo_params, anchor_bbox, _radius_m = overture.area_geometry(
             lat, lon, _PLACES_FALLBACK_RADIUS_M
         )
         filters += [bbox_filter, distance_filter]
         params.update(geo_params)
+    from_source, _ = overture._with_recreation(
+        f"read_parquet('{glob}', hive_partitioning=1)", anchor_bbox
+    )
     sql = f"""
         SELECT id, names.primary AS name, bbox.ymin AS lat, bbox.xmin AS lon,
                coalesce(confidence, 0) AS confidence
-        FROM read_parquet('{glob}', hive_partitioning=1)
+        FROM {from_source}
         WHERE {' AND '.join(filters)}
         ORDER BY confidence DESC
         LIMIT {DIVISION_OVERFETCH}

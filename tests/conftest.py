@@ -15,7 +15,7 @@ os.environ.pop("PLACEROOT_TOOLS", None)
 import duckdb  # noqa: E402
 import pytest  # noqa: E402
 
-from placeroot import buildings, gers, overture, release, routing  # noqa: E402
+from placeroot import buildings, gers, overture, recreation, release, routing  # noqa: E402
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "places.parquet"
 # type=division_area (polygons; consumed by divisions.py's admin_lookup) and
@@ -41,6 +41,51 @@ def no_ambient_tool_selection(monkeypatch):
     body runs, so a test's own monkeypatch.setenv still wins.
     """
     monkeypatch.delenv("PLACEROOT_TOOLS", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_carried_probe_failures():
+    """Every test starts with an empty probe-failure memo.
+
+    db.probe_schema memoizes failures for PROBE_FAILURE_RETRY_S (60s —
+    longer than most of the suite takes), and the suite reuses fixture
+    globs across tests, so one test exercising a failure path would
+    otherwise blind schema probes in every later test touching the same
+    path.
+    """
+    from placeroot import db
+
+    db._probe_failed_at.clear()
+    yield
+    db._probe_failed_at.clear()
+
+
+@pytest.fixture(autouse=True)
+def recreation_layer_off(monkeypatch):
+    """Every test runs with the recreation layer off unless it opts in.
+
+    The layer is on by default in production, but the fixtures the suite
+    queries only cover theme=places: with the layer live, every existing
+    places test would try to read theme=base from real S3 (there is no
+    base-theme fixture to fall back to), and @live tests would pay for a
+    second live scan they never asked for. So the default is pinned off
+    here and test_recreation.py switches it back on against its own
+    base-theme fixtures — which is also what keeps every other module's
+    ground-truth counts stable.
+
+    Not folded into offline_data because that one returns early for @live
+    tests, which need this just as much.
+
+    A test that wants the layer on must call recreation.set_enabled(True)
+    (as test_recreation.py's layer_on fixture does): this fixture installs
+    the module-level override, which enabled() checks *before* the env
+    var, so monkeypatch.setenv alone cannot win. The override is reset
+    afterwards either way.
+    """
+    monkeypatch.delenv(recreation.ENV_VAR, raising=False)
+    recreation.set_enabled(False)
+    yield
+    recreation.set_enabled(None)
 
 
 @pytest.fixture(autouse=True)

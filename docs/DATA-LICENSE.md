@@ -24,6 +24,23 @@ releases.
 | `buildings` | `summarize_buildings`, `buildings_at`, `gers_lookup` | Mixed per-feature (OSM/ODbL, Esri/Microsoft ML footprints, others) | Check the `sources` array on results you redistribute |
 | `base` (land use, water, infrastructure) | `land_use_at`, `water_near`, `infrastructure_at` | Substantially OSM-derived: **ODbL 1.0** | Same as `divisions` |
 
+## The optional recreation layer
+
+`PLACEROOT_RECREATION_LAYER` (see [RECREATION.md](RECREATION.md)) makes the
+places tools additionally read Overture's `base` theme — `type=land_use` and
+`type=land` — for playgrounds, parks, dog parks, nature reserves and beaches.
+
+There is nothing new to accept here. It is the same Overture release, read
+the same way, under the terms already listed in the table above: the `base`
+theme is substantially OSM-derived, so **ODbL 1.0** applies to those rows
+exactly as it does to `land_use_at` and `infrastructure_at` results today.
+Rows carry Overture's own per-feature `sources` array and real GERS ids, so a
+mixed result set stays separable by license.
+
+Because nothing is extracted, copied or redistributed — the layer is a query,
+not a dataset — the ODbL share-alike question a locally built OSM extract
+would raise does not arise.
+
 ## What this means in practice
 
 - **Displaying results** (a map, a report, an app screen) built on

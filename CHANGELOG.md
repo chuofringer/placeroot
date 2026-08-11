@@ -9,6 +9,30 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- Recreation layer, **on by default**: the places tools additionally read
+  Overture's OSM-derived `base` theme (`type=land_use`, `type=land`) for
+  the recreation areas that listings-derived data under-counts —
+  playgrounds, parks, dog parks, nature reserves, beaches. ~2.5x the
+  playground coverage (1,552 vs 674 across New York City), live, with no
+  build step, no download and no hosting: it is one more scan of the
+  release PlaceRoot already queries. Costs a second dataset scan per
+  places query (tile-cached like every other read) and widens the failure
+  surface to the base theme; set `PLACEROOT_RECREATION_LAYER=0` to
+  restore the previous single-theme behavior exactly. A deployment that
+  pins places to its own dataset (`PLACEROOT_DATA_PATH`, a mirror) without
+  pinning `theme=base` skips the layer rather than reaching past that
+  configuration to live S3 — set `PLACEROOT_DATA_PATH_BASE` to include it. Rows carry real
+  GERS ids but no confidence or operating_status, and unnamed ones are
+  returned with `name: null` rather than dropped. A place present in both
+  themes is returned once (same category within 150 m — the richer places
+  row wins), `place_details` labels layer rows `source_theme: base` and
+  `gers_lookup` reports their real owning theme/type, an unreadable base
+  dataset (e.g. a places-only mirror) degrades that branch instead of
+  failing every places query, and unbounded lookups (`place_details` with
+  no location hint, name-only geocode fallback) serve the layer from
+  cached tiles or a pinned dataset rather than an unprunable live scan.
+  `data_version` reports every degraded or skipped base type.
+  See [docs/RECREATION.md](docs/RECREATION.md)
 - `geocode_address`: street-level forward search — "1600 Amphitheatre
   Parkway, Mountain View" → coordinates, city-bounded and deduplicated
   (#225, #229)

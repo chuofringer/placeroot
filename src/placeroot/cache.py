@@ -336,6 +336,70 @@ def ensure_tile(
     return path
 
 
+def claim_existing_paths(paths: list[Path]) -> list[Path]:
+    """Claim each path against eviction and return the ones that exist.
+
+    The one implementation of the #142 critical section. Whole-listing
+    readers get it via claimed_tile_paths; callers touching a subset
+    (recreation's single-tile schema probe) call it directly with just the
+    paths they will read. The claim is recorded *before* the existence check (os.utime
+    doubles as the check and as the recently-used mtime bump), so a path
+    that exists after being claimed cannot be evicted by this process
+    before the caller reads it. A path that vanished anyway — another
+    process's eviction; the claims table is per-process — is skipped and
+    its claim released, never raised on; a utime refused for any other
+    reason (a read-only cache mount) keeps the tile, which is still
+    perfectly readable. Claim only what will actually be read: a claim
+    shields a tile from eviction for _CLAIM_TTL_S and marks it hot, so
+    blanket-claiming a whole theme distorts eviction for everyone else.
+    """
+    existing = []
+    with _claims_lock:
+        now = time.monotonic()
+        _prune_expired_locked(now)
+        deadline = now + _CLAIM_TTL_S
+        for path in paths:
+            _claim_locked(str(path), deadline)
+            try:
+                os.utime(path, None)
+            except FileNotFoundError:
+                _claims.pop(str(path), None)  # vanished; don't shield a ghost
+                continue
+            except OSError:
+                if not path.exists():
+                    _claims.pop(str(path), None)
+                    continue
+            existing.append(path)
+    return existing
+
+
+def _claim_existing_tiles(
+    release: str, theme: str, fingerprint: str, tiles: list[tuple[int, int]]
+) -> tuple[list[Path], list[tuple[int, int]]]:
+    """(on-disk tile paths claimed against eviction, tiles not on disk).
+
+    Tile-id front-end over claim_existing_paths, for the callers that
+    also need to know which tiles to materialize.
+    """
+    by_path = {tile_path(release, theme, fingerprint, t): t for t in tiles}
+    cached = claim_existing_paths(list(by_path))
+    cached_set = set(cached)
+    missing = [t for p, t in by_path.items() if p not in cached_set]
+    return cached, missing
+
+
+def claimed_tile_paths(release: str, theme: str, upstream_glob: str) -> list[Path]:
+    """cached_tile_paths, with every returned path claimed against eviction.
+
+    The composition every *reader* of the theme-wide listing needs — the
+    #142 rule ("claim before you read") encoded once instead of by
+    convention at each call site. Callers that only need existence or a
+    single tile (recreation's schema probe) still use the unclaimed
+    listing and claim exactly what they touch.
+    """
+    return claim_existing_paths(cached_tile_paths(release, theme, upstream_glob))
+
+
 def cached_tile_paths(release: str, theme: str, upstream_glob: str) -> list[Path]:
     """Every tile parquet already materialized locally for release/theme's
     *currently resolved* schema fingerprint.
@@ -347,7 +411,10 @@ def cached_tile_paths(release: str, theme: str, upstream_glob: str) -> list[Path
     silently return stale-schema tiles. Returns [] if caching hasn't
     touched this release/theme/fingerprint yet, or if upstream is
     unreachable and no fingerprint directory exists to fall back to; never
-    raises.
+    raises. The listing takes no eviction claims — claiming shields tiles
+    and marks them hot, which a mere listing must not do. To *read* the
+    whole listing, call claimed_tile_paths instead; to read a subset,
+    claim exactly those paths via claim_existing_paths first.
     """
     fingerprint = resolve_fingerprint(release, theme, upstream_glob)
     if fingerprint is None:
@@ -356,6 +423,30 @@ def cached_tile_paths(release: str, theme: str, upstream_glob: str) -> list[Path
     if not d.exists():
         return []
     return sorted(d.glob("*.parquet"))
+
+
+def cached_tile_paths_for_bbox(
+    release: str, theme: str, upstream_glob: str,
+    bbox: tuple[float, float, float, float],
+) -> list[Path]:
+    """Tiles already on disk that intersect bbox — nothing materialized.
+
+    The bounded, cache-only counterpart to cached_tile_paths, for the
+    source_sql path where the upstream must not be touched: a query should
+    read the tiles its box covers, not every tile the theme has ever
+    cached. Tiles found are claimed against eviction for the query's
+    lifetime via the shared #142 critical section (_claim_existing_tiles).
+    An oversized bbox (> MAX_TILES_PER_QUERY tiles) returns [] — with no
+    upstream to fall back to, skipping is the only bounded answer.
+    """
+    fingerprint = resolve_fingerprint(release, theme, upstream_glob)
+    if fingerprint is None:
+        return []
+    tiles = tiles_for_bbox(*bbox)
+    if len(tiles) > MAX_TILES_PER_QUERY:
+        return []
+    found, _missing = _claim_existing_tiles(release, theme, fingerprint, tiles)
+    return sorted(found)
 
 
 
@@ -577,24 +668,7 @@ def local_paths_for_query(
         )
         return None
 
-    cached, missing = [], []
-    # Claim each hit in the same critical section that finds it on disk, so
-    # eviction can't delete a tile between this existence check and the
-    # claim that is supposed to protect it (#142). ensure_tile is called
-    # *outside* this block: it runs a DB COPY and its own eviction pass, and
-    # holding the claims lock across either would be asking for trouble.
-    with _claims_lock:
-        now = time.monotonic()
-        _prune_expired_locked(now)
-        deadline = now + _CLAIM_TTL_S
-        for t in tiles:
-            path = tile_path(release, theme, fingerprint, t)
-            if path.exists():
-                os.utime(path, None)  # bump mtime: this tile is recently used
-                _claim_locked(str(path), deadline)
-                cached.append(path)
-            else:
-                missing.append(t)
+    cached, missing = _claim_existing_tiles(release, theme, fingerprint, tiles)
 
     if not missing:
         return [str(p) for p in cached]
@@ -626,6 +700,58 @@ def local_paths_for_query(
     for t in missing:
         _materialize_in_background(release, theme, t, upstream_glob, fingerprint, new_connection)
     return None
+
+
+def source_sql(
+    theme: str,
+    upstream_glob: str,
+    bbox: tuple[float, float, float, float] | None,
+    *,
+    upstream_fallback: bool = True,
+) -> str | None:
+    """FROM-clause SQL for a theme: local cache tiles when available, upstream
+    otherwise. The one implementation of the "cached tiles else upstream glob"
+    resolution that overture.py and recreation.py previously each hand-copied
+    (and let diverge); the other theme modules can migrate here too.
+
+    With a bbox, missing tiles are materialized per local_paths_for_query's
+    contract (inline under PLACEROOT_CACHE_SYNC, in the background otherwise).
+    bbox None is the unbounded-lookup case (an id or name query with no
+    location to bound it): only tiles already on disk are used and nothing
+    new is materialized — an unbounded lookup must not trigger a world-sized
+    fetch.
+
+    upstream_fallback=False means the upstream glob must not be touched *at
+    all*: no fallback scan, and no tile materialization either (with or
+    without a bbox, only tiles already on disk serve) — returning None when
+    nothing local can. For callers where the glob is known-unusable (the
+    recreation layer's unreadable-upstream case, where a COPY from it would
+    fail the query it was meant to supplement) or where an unprunable scan
+    of it would be planet-scale (the layer's unbounded lookups).
+
+    Raises duckdb.Error on cache resolution failure; callers wrap it in their
+    own unavailable-upstream error the way they wrap the query itself.
+    """
+    if enabled():
+        from placeroot import release as release_mod
+
+        active_release = release_mod.resolve_release()
+        if bbox is None:
+            paths = claimed_tile_paths(active_release, theme, upstream_glob)
+        elif not upstream_fallback:
+            paths = cached_tile_paths_for_bbox(active_release, theme, upstream_glob, bbox)
+        else:
+            with db.conn_lock:
+                paths = local_paths_for_query(
+                    db.shared_conn(), active_release, theme, bbox, upstream_glob,
+                    db.new_connection,
+                )
+        if paths:
+            joined = ", ".join(f"'{p}'" for p in paths)
+            return f"read_parquet([{joined}])"
+    if not upstream_fallback:
+        return None
+    return f"read_parquet('{upstream_glob}', hive_partitioning=1)"
 
 
 def parse_warm_region(spec: str) -> tuple[float, float, float] | None:

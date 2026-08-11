@@ -17,6 +17,7 @@ external references — tests included — keep working unchanged.
 import logging
 import os
 import threading
+import time
 from functools import lru_cache
 
 import duckdb
@@ -159,17 +160,40 @@ def _probe_schema_cached(glob: str) -> frozenset:
     return frozenset(c[0] for c in cols)
 
 
+# A failed probe is not retried for this long. Without it, a deployment
+# whose upstream is down pays the probe's network timeout — and logs its
+# warning — on every call site that consults the schema, several times per
+# query (degraded_fields, the recreation layer, cache fingerprinting all
+# probe). Short enough that recovery is near-automatic, long enough that
+# the steady-state cost of a degraded upstream is one probe a minute.
+PROBE_FAILURE_RETRY_S = 60.0
+_probe_failed_at: dict[str, float] = {}
+
+
 def probe_schema(glob: str) -> frozenset | None:
     """Column names present in glob's dataset, or None if the probe itself failed.
 
     A failed probe (upstream down, glob unreadable) is treated as "unknown,
     assume nothing missing" — the actual query that follows hits the same
-    problem and surfaces it as UpstreamUnavailable instead. Failures are NOT
-    cached (see _probe_schema_cached): a later call retries, so a transient
-    blip can't permanently blind degraded_fields()/schema-drift detection.
+    problem and surfaces it as UpstreamUnavailable instead. Failures are
+    memoized for PROBE_FAILURE_RETRY_S — long enough to keep a degraded
+    deployment from paying a network timeout and a warning per call, short
+    enough that it heals within a minute of its upstream (#144's concern,
+    a transient blip permanently blinding schema-drift detection, stays
+    addressed: the memo expires). Successes stay cached indefinitely (see
+    _probe_schema_cached).
     """
+    failed_at = _probe_failed_at.get(glob)
+    if failed_at is not None:
+        if time.monotonic() - failed_at < PROBE_FAILURE_RETRY_S:
+            return None
+        _probe_failed_at.pop(glob, None)
     try:
-        return _probe_schema_cached(glob)
+        result = _probe_schema_cached(glob)
     except duckdb.Error as e:
-        logger.warning("Schema probe failed for %s: %s", glob, e)
+        _probe_failed_at[glob] = time.monotonic()
+        logger.warning("Schema probe failed for %s (not retried for %.0fs): %s",
+                       glob, PROBE_FAILURE_RETRY_S, e)
         return None
+    _probe_failed_at.pop(glob, None)
+    return result

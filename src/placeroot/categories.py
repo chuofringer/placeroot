@@ -71,6 +71,22 @@ def taxonomy_summary() -> dict:
     return {"total": len(rows), "top_level": top_level}
 
 
+def hierarchy_for(slug: str) -> list[str] | None:
+    """A slug's full taxonomy path, root first, e.g. playground ->
+    ["active_life", "sports_and_recreation_venue", "playground"]. None if
+    the slug isn't in the bundled taxonomy.
+
+    Used by recreation.py to fill `taxonomy.hierarchy` and `basic_category`
+    (its root segment) on the base-theme rows it projects into the places
+    shape, from the same pinned snapshot search_categories answers from
+    rather than a second hand-written table that could disagree with it.
+    """
+    for row in _load_categories():
+        if row["slug"] == slug:
+            return list(row["path"]) or None
+    return None
+
+
 def _match_rank(slug: str, query: str) -> int | None:
     """Lower is better; None means no match. query is already lowercased."""
     slug_l = slug.lower()
