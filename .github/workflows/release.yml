@@ -126,7 +126,18 @@ jobs:
           if npm view "placeroot@${VERSION}" version >/dev/null 2>&1; then
             echo "placeroot@${VERSION} is already on npm — nothing to publish."
           else
-            npm publish --access public --provenance
+            # Provenance attestation requires a PUBLIC source repository —
+            # npm rejects the sigstore bundle outright from a private one
+            # (E422, hit on v0.9.0 pre-flip). Trusted publishing itself
+            # works either way, so a private-repo release publishes without
+            # the attestation rather than not at all; once the repo is
+            # public, releases pick provenance back up with no edit here.
+            if [ "${{ github.event.repository.private }}" = "true" ]; then
+              echo "repo is private: publishing without --provenance"
+              npm publish --access public
+            else
+              npm publish --access public --provenance
+            fi
           fi
 
   # The Desktop Extension bundle (#233): rebuilt from the tagged tree and
