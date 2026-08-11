@@ -1287,17 +1287,43 @@ def _token_variants(token: str, leading: bool, street: bool = False) -> list[str
     `street` (#225) turns on the USPS suffix map and lifts the leading-token
     restriction on the cardinal directions: "N" is too ambiguous to expand in
     the middle of a division name, but a street name is exactly where "W 42nd
-    St" vs "West 42nd Street" happens, and the token is bounded by a street
-    field rather than by free text.
+    St" vs "W 42nd Street" happens, and the token is bounded by a street
+    field rather than by free text. Street tokens also fold ordinals both
+    ways ("5th" <-> "5"): city address datasets disagree on the form —
+    NYC's Overture rows spell Fifth Avenue "5 AVENUE" — and a query in
+    either spelling has to reach data in the other (task #23: "350 5th
+    Ave, New York" matched nothing while the doorway existed as
+    "350 5 AVENUE").
     """
     key = token.strip(".").lower()
     variants = list(_ABBR_VARIANTS.get(key, []))
     if street:
         variants += _STREET_SUFFIX_VARIANTS.get(key, [])
         variants += _STREET_QUADRANT_VARIANTS.get(key, [])
+        variants += _ordinal_variants(key)
     if leading or street:
         variants += _CARDINAL_VARIANTS.get(key, [])
     return variants
+
+
+# "5th" / "22ND" — a number wearing an English ordinal suffix.
+_ORDINAL_RE = re.compile(r"^(\d+)(st|nd|rd|th)$")
+
+
+def _ordinal_suffix(n: int) -> str:
+    if 10 <= n % 100 <= 13:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+
+
+def _ordinal_variants(key: str) -> list[str]:
+    """"5th" -> ["5"], "5" -> ["5th"], anything else -> []. key is lowercased."""
+    m = _ORDINAL_RE.match(key)
+    if m:
+        return [m.group(1)]
+    if key.isdigit():
+        return [key + _ordinal_suffix(int(key))]
+    return []
 
 
 def _abbreviation_variant_queries(query: str) -> list[str]:

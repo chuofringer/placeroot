@@ -607,3 +607,34 @@ def test_a_dataset_without_a_number_column_says_the_house_number_was_ignored(mon
 def test_the_dropped_number_note_stays_off_a_normal_answer():
     result = geocode.geocode_address("1600 Amphitheatre Parkway, Mountain View")
     assert "no `number` column" not in result.get("note", "")
+
+
+# --- ordinal folding (task #23) --------------------------------------------
+
+
+def test_street_variants_fold_ordinals_both_ways():
+    """City address datasets disagree on the form — NYC's Overture rows
+    spell Fifth Avenue "5 AVENUE" — so a query in either spelling must
+    reach data in the other."""
+    down = {v.lower() for v in geocode._street_variants("5th Ave")}
+    assert "5 avenue" in down
+    up = {v.lower() for v in geocode._street_variants("1 St")}
+    assert "1st street" in up
+
+
+@pytest.mark.parametrize("key,expected", [
+    ("5th", ["5"]), ("22nd", ["22"]), ("3rd", ["3"]), ("101st", ["101"]),
+    ("11th", ["11"]), ("13th", ["13"]),
+    ("5", ["5th"]), ("2", ["2nd"]), ("11", ["11th"]), ("112", ["112th"]),
+    ("21", ["21st"]), ("103", ["103rd"]),
+    ("main", []), ("5b", []), ("th", []),
+])
+def test_ordinal_variants_table(key, expected):
+    assert geocode._ordinal_variants(key) == expected
+
+
+def test_ordinals_fold_only_for_street_tokens():
+    """Division names keep the old behavior: "5th" in a place name is not
+    rewritten (the token is only bounded enough inside a street field)."""
+    assert "5" not in geocode._token_variants("5th", leading=False, street=False)
+    assert "5" in geocode._token_variants("5th", leading=False, street=True)
