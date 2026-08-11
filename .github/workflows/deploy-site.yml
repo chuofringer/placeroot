@@ -90,7 +90,11 @@ jobs:
           fi
           echo "Deploying ref $GITHUB_REF_NAME as branch $DEPLOY_BRANCH"
 
-          npx --yes wrangler@latest pages deploy site \
+          # Pinned, not @latest: wrangler 4.121.0 shipped depending on a
+          # miniflare alpha that was yanked from npm (ETARGET, broke the
+          # v0.9.1 site deploy). 4.120.0 installs cleanly; bump
+          # deliberately.
+          npx --yes wrangler@4.120.0 pages deploy site \
             --project-name="$PROJECT" \
             --branch="$DEPLOY_BRANCH" \
             --commit-dirty=true | tee wrangler-deploy.log
