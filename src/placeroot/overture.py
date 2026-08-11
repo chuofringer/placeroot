@@ -1290,12 +1290,7 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
     unbounded scan.
     """
     if cache.enabled():
-        # Claim before reading (#142): cached_tile_paths is an unclaimed
-        # listing, and an unclaimed tile can be evicted between the listing
-        # and the SELECT, turning a healthy cache hit into a hard failure.
-        tile_paths = cache.claim_existing_paths(
-            cache.cached_tile_paths(release.resolve_release(), THEME, upstream)
-        )
+        tile_paths = cache.claimed_tile_paths(release.resolve_release(), THEME, upstream)
         if tile_paths:
             joined = ", ".join(f"'{p}'" for p in tile_paths)
             source, active = _with_recreation(f"read_parquet([{joined}])", None)

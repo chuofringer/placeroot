@@ -476,9 +476,14 @@ def _branch_missing(type_: str) -> tuple[set[str] | None, bool]:
         tile_schema = None
         for tile in tiles:
             claimed = cache.claim_existing_paths([tile])
-            if claimed:
-                tile_schema = overture.probe_schema(str(claimed[0]))
+            if not claimed:
+                continue
+            tile_schema = overture.probe_schema(str(claimed[0]))
+            if tile_schema is not None:
                 break
+            # The probe itself failed — another process can evict a tile
+            # between our claim and the read (claims are per-process). The
+            # next tile may still serve; only give up when none does.
         missing = (
             {c for c in REQUIRED_COLUMNS if c not in tile_schema}
             if tile_schema is not None else set(REQUIRED_COLUMNS)

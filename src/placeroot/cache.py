@@ -339,10 +339,10 @@ def ensure_tile(
 def claim_existing_paths(paths: list[Path]) -> list[Path]:
     """Claim each path against eviction and return the ones that exist.
 
-    The one implementation of the #142 critical section, public because
-    every module that reads cached_tile_paths output must run its paths
-    through it first (overture's id lookup and recreation's schema probe
-    do). The claim is recorded *before* the existence check (os.utime
+    The one implementation of the #142 critical section. Whole-listing
+    readers get it via claimed_tile_paths; callers touching a subset
+    (recreation's single-tile schema probe) call it directly with just the
+    paths they will read. The claim is recorded *before* the existence check (os.utime
     doubles as the check and as the recently-used mtime bump), so a path
     that exists after being claimed cannot be evicted by this process
     before the caller reads it. A path that vanished anyway — another
@@ -386,6 +386,18 @@ def _claim_existing_tiles(
     cached_set = set(cached)
     missing = [t for p, t in by_path.items() if p not in cached_set]
     return cached, missing
+
+
+def claimed_tile_paths(release: str, theme: str, upstream_glob: str) -> list[Path]:
+    """cached_tile_paths, with every returned path claimed against eviction.
+
+    The composition every *reader* of the theme-wide listing needs — the
+    #142 rule ("claim before you read") encoded once instead of by
+    convention at each call site. Callers that only need existence or a
+    single tile (recreation's schema probe) still use the unclaimed
+    listing and claim exactly what they touch.
+    """
+    return claim_existing_paths(cached_tile_paths(release, theme, upstream_glob))
 
 
 def cached_tile_paths(release: str, theme: str, upstream_glob: str) -> list[Path]:
@@ -725,11 +737,7 @@ def source_sql(
 
         active_release = release_mod.resolve_release()
         if bbox is None:
-            # About to hand these paths to a scan: claim them so a
-            # concurrent eviction can't delete one before the read (#142).
-            paths = claim_existing_paths(
-                cached_tile_paths(active_release, theme, upstream_glob)
-            )
+            paths = claimed_tile_paths(active_release, theme, upstream_glob)
         elif not upstream_fallback:
             paths = cached_tile_paths_for_bbox(active_release, theme, upstream_glob, bbox)
         else:
