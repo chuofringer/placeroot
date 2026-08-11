@@ -96,12 +96,67 @@ def test_repo_facing_sections_are_dropped():
 
 
 def test_no_repo_relative_links():
-    """Relative links resolve on GitHub but 404 on npmjs.com."""
+    """Relative links resolve on GitHub but 404 on npmjs.com.
+
+    The rewrite in render() is what guarantees this; the test keeps it a
+    tested invariant rather than a convention, across markdown links and
+    raw HTML src/srcset/href alike.
+    """
     import re
 
     rendered = render(_root_readme())
     relative = re.findall(r"\]\((?!https?://|#)([^)]+)\)", rendered)
+    relative += re.findall(r'(?:src|srcset|href)="(?!https?://|#|mailto:)([^"]+)"', rendered)
     assert not relative, f"npm README has repo-relative links: {relative}"
+
+
+def test_no_github_only_alert_markup():
+    """GFM alerts ([!NOTE]) render as literal text on npmjs.com, so the
+    generator downgrades them to a plain bold blockquote lead-in."""
+    rendered = render(_root_readme())
+    assert "[!NOTE]" not in rendered
+    assert "> **Note:**" in rendered
+
+
+def test_links_pin_the_release_tag_not_main():
+    """Published package READMEs must point at the released version's docs,
+    not at whatever main has become since — see the GITHUB_BLOB comment."""
+    import json
+
+    from sync_npm_readme import GITHUB_BLOB, GITHUB_RAW
+
+    version = json.loads(
+        (ROOT / "npm" / "package.json").read_text(encoding="utf-8")
+    )["version"]
+    assert f"/blob/v{version}/" in GITHUB_BLOB
+    assert f"/v{version}/" in GITHUB_RAW
+    assert "/main/" not in GITHUB_BLOB and "/main/" not in GITHUB_RAW
+    assert f"/blob/v{version}/" in render(_root_readme())
+
+
+def test_rewrites_match_the_pypi_substitutions():
+    """pyproject.toml's fancy-pypi-readme substitutions are the PyPI copy of
+    the script's REWRITES; if either side is edited alone, PyPI and npm
+    render the same README differently. Patterns must be character-identical
+    and replacements identical up to the version token ($HFPR_VERSION on the
+    PyPI side, npm/package.json's version here)."""
+    import tomllib
+
+    from sync_npm_readme import _NPM_VERSION, REWRITES
+
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    substitutions = pyproject["tool"]["hatch"]["metadata"]["hooks"][
+        "fancy-pypi-readme"
+    ]["substitutions"]
+    pypi_pairs = [(s["pattern"], s["replacement"]) for s in substitutions]
+    script_pairs = [
+        (pattern, replacement.replace(f"v{_NPM_VERSION}", "v$HFPR_VERSION"))
+        for pattern, replacement in REWRITES
+    ]
+    assert script_pairs == pypi_pairs, (
+        "scripts/sync_npm_readme.py REWRITES and pyproject.toml's "
+        "fancy-pypi-readme substitutions have drifted apart"
+    )
 
 
 def test_generator_fails_loudly_on_a_renamed_section():
@@ -114,7 +169,7 @@ def test_generator_fails_loudly_on_a_renamed_section():
 def test_generator_fails_loudly_on_a_reworded_launcher_aside():
     """The aside this generator rewrites must still be findable."""
     mangled = _root_readme().replace(
-        "(`npx placeroot` also works", "(`npx placeroot` is also fine"
+        "Prefer npm? Use", "npm works too — use"
     )
     with pytest.raises(SyncError, match="npm-launcher aside"):
         render(mangled)
