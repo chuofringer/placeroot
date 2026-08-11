@@ -1287,7 +1287,7 @@ def _token_variants(token: str, leading: bool, street: bool = False) -> list[str
     `street` (#225) turns on the USPS suffix map and lifts the leading-token
     restriction on the cardinal directions: "N" is too ambiguous to expand in
     the middle of a division name, but a street name is exactly where "W 42nd
-    St" vs "W 42nd Street" happens, and the token is bounded by a street
+    St" vs "West 42nd Street" happens, and the token is bounded by a street
     field rather than by free text. Street tokens also fold ordinals both
     ways ("5th" <-> "5"): city address datasets disagree on the form —
     NYC's Overture rows spell Fifth Avenue "5 AVENUE" — and a query in
@@ -1309,6 +1309,19 @@ def _token_variants(token: str, leading: bool, street: bool = False) -> list[str
 # "5th" / "22ND" — a number wearing an English ordinal suffix.
 _ORDINAL_RE = re.compile(r"^(\d+)(st|nd|rd|th)$")
 
+# Spelled-out ordinals through twelfth: "350 Fifth Ave" has to reach NYC's
+# "5 AVENUE" too, and the famous streets are all low-numbered. Each maps to
+# both the digit-ordinal and bare-digit forms directly (variants of one
+# token are not themselves re-expanded, so "fifth" must produce "5" here
+# rather than relying on a second fold of "5th").
+_WORD_ORDINALS: dict[str, list[str]] = {
+    "first": ["1st", "1"], "second": ["2nd", "2"], "third": ["3rd", "3"],
+    "fourth": ["4th", "4"], "fifth": ["5th", "5"], "sixth": ["6th", "6"],
+    "seventh": ["7th", "7"], "eighth": ["8th", "8"], "ninth": ["9th", "9"],
+    "tenth": ["10th", "10"], "eleventh": ["11th", "11"],
+    "twelfth": ["12th", "12"],
+}
+
 
 def _ordinal_suffix(n: int) -> str:
     if 10 <= n % 100 <= 13:
@@ -1317,13 +1330,14 @@ def _ordinal_suffix(n: int) -> str:
 
 
 def _ordinal_variants(key: str) -> list[str]:
-    """"5th" -> ["5"], "5" -> ["5th"], anything else -> []. key is lowercased."""
+    """"5th" -> ["5"], "5" -> ["5th"], "fifth" -> ["5th", "5"], else [].
+    key is lowercased."""
     m = _ORDINAL_RE.match(key)
     if m:
         return [m.group(1)]
     if key.isdigit():
         return [key + _ordinal_suffix(int(key))]
-    return []
+    return list(_WORD_ORDINALS.get(key, []))
 
 
 def _abbreviation_variant_queries(query: str) -> list[str]:
@@ -3115,7 +3129,11 @@ ADDRESS_MAX_LIMIT = 10
 # expansion is a cartesian product over per-token alternates, so a street with
 # a directional *and* a suffix ("W 42nd St") legitimately needs four; the cap
 # only stops a pathological query from turning into an unbounded OR list.
-_STREET_VARIANT_CAP = 16
+# 24, not 16: the ordinal fold adds one alternate to numeric tokens, and at
+# 16 a cardinal+ordinal+suffix+quadrant street ("West 42nd Street
+# Northwest", 2x2x3x2 = 24 combos) truncated away its entire abbreviated
+# "W ..." branch — the very form Overture stores.
+_STREET_VARIANT_CAP = 24
 
 # A house-number token: digits, optionally with one trailing letter. Overture's
 # `number` is a string and real data carries "74B" and "12 bis"; "221B Baker
@@ -3216,6 +3234,15 @@ def _street_variants(street: str) -> list[str]:
         return []
     choices = [[tok, *_token_variants(tok, leading=(i == 0), street=True)]
                for i, tok in enumerate(tokens)]
+    if len(tokens) == 1:
+        # A lone token becomes the whole prefix pattern (street ILIKE
+        # '<variant>%'), and a bare-digit variant of "5th" would be
+        # ILIKE '5%' — every street starting with a 5. Ordinal folds only
+        # widen a single-token street toward more specific forms, never
+        # toward a bare digit the original didn't have.
+        choices[0] = [
+            o for o in choices[0] if not (o.isdigit() and not tokens[0].isdigit())
+        ]
     out: list[str] = []
     seen: set[str] = set()
     combos: list[list[str]] = [[]]

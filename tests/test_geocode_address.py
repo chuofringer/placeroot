@@ -638,3 +638,25 @@ def test_ordinals_fold_only_for_street_tokens():
     rewritten (the token is only bounded enough inside a street field)."""
     assert "5" not in geocode._token_variants("5th", leading=False, street=False)
     assert "5" in geocode._token_variants("5th", leading=False, street=True)
+
+
+def test_lone_ordinal_token_never_becomes_a_bare_digit_prefix():
+    """street="5th" would otherwise expand to "5" and match every street
+    ILIKE '5%' ("51 STREET", "52 AVENUE", ...)."""
+    variants = geocode._street_variants("5th")
+    assert "5" not in variants
+    # A street that *is* a bare digit keeps itself (and gains specificity).
+    assert "5" in geocode._street_variants("5")
+
+
+def test_word_ordinals_reach_the_digit_forms():
+    down = {v.lower() for v in geocode._street_variants("Fifth Ave")}
+    assert "5 avenue" in down and "5th avenue" in down
+
+
+def test_four_token_streets_keep_the_abbreviated_branch():
+    """The cap must not truncate the "W ... ST NW" branch — the form
+    Overture stores — now that ordinals add a combo dimension."""
+    variants = {v.lower() for v in geocode._street_variants("West 42nd Street Northwest")}
+    assert "w 42nd st nw" in variants
+    assert "w 42 st nw" in variants
