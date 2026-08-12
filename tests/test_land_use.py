@@ -305,7 +305,7 @@ def test_grid_absent_cell_means_no_land_cover_not_a_fallback_scan(tmp_path, monk
     assert result["land_cover"] is None
 
 
-def test_pinned_datasets_never_see_the_grid():
+def test_pinned_datasets_never_see_the_grid(land_use_fixture):
     """Fixture-pinned runs (this suite) take the exact path — the fixture's
     own land_cover rows answer, no approximation note appears."""
     result = land_use.land_use_at(CENTER_LAT, CENTER_LON)
