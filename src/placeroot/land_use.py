@@ -156,13 +156,11 @@ def _from_source(bbox: tuple[float, float, float, float], type_: str) -> str:
     """
     upstream = _upstream_glob(type_)
     try:
-        # schedule_missing=False: a point classification's answer is tiny
-        # and its manifest-pruned scan cheap, while a 1° land_cover tile
-        # COPY is enormous — racing the scan against its own background
-        # tile fetch measured ~3x slower cold. Existing tiles still serve.
-        return cache.source_sql(
-            _cache_theme(type_), upstream, bbox, schedule_missing=False
-        )
+        # Background materialization stays on (millisecond repeats and
+        # issue-#5 cache-as-fallback both depend on tiles landing); the
+        # fetches no longer race this query's own scan because every
+        # background fetch now starts after BACKGROUND_FETCH_DELAY_S.
+        return cache.source_sql(_cache_theme(type_), upstream, bbox)
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
 

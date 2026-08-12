@@ -870,7 +870,7 @@ _build_started: set[str] = set()
 _build_lock = threading.Lock()
 
 
-def _spawn_divisions_build(path: Path) -> None:
+def _spawn_divisions_build(path: Path, glob: str) -> None:
     """Build the full local table in the background (stage-0 index serving
     meanwhile). Delayed and gated on the fetch slots exactly like the
     stage-2 upgrade, and for the same measured reason: an undelayed
@@ -886,8 +886,11 @@ def _spawn_divisions_build(path: Path) -> None:
         try:
             time.sleep(_UPGRADE_DELAY_S)
             with cache._background_fetch_slots:
+                # glob was captured at spawn: re-resolving here, 20s later,
+                # could follow a background release rollover and materialize
+                # a NEWER release's rows into the pinned release's table
+                # path — wrong-vintage data served for the install's life.
                 if not path.exists():
-                    glob = overture.upstream_glob(theme="divisions", type_="division")
                     _materialize_divisions_table(path, glob)
                     logger.info("full divisions table built behind the bundled index -> %s", path)
         except Exception as e:  # noqa: BLE001 - background build must never surface
@@ -1169,7 +1172,9 @@ def _local_divisions_table() -> str | None:
     if not path.exists():
         bundled = _bundled_index_path(active_release)
         if bundled is not None and not divisions_pinned:
-            _spawn_divisions_build(path)
+            _spawn_divisions_build(
+                path, overture.upstream_glob(theme="divisions", type_="division")
+            )
             return str(bundled)
     if path.exists():
         _rebuild_once_for_bbox_columns(path)
@@ -2589,27 +2594,36 @@ def geocode_detailed(
     fuzzy_rows: list[dict] = []
     fuzzy_query = base_query
     if not divisions and local_table is not None and not _has_like_metacharacter(fuzzy_query):
-        fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query, suffix_region_code)
+        if _is_bundled_table(local_table):
+            # A >=0.92 near-miss against only the top-150k names is how
+            # "Berkeley Springs" becomes Berkeley: on the stage-0 index the
+            # fuzzy tier trades a recall gap for confidently wrong answers.
+            # Skip it; the long-tail fallback below (and the full table,
+            # once its background build lands) handle the real name.
+            fuzzy_rows = []
+        else:
+            fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query, suffix_region_code)
         if not fuzzy_rows and suffix_region_code:
             fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query)
         divisions = fuzzy_rows
 
-    if not divisions and _is_bundled_table(local_table):
+    _bundled_recall_pending = not divisions and _is_bundled_table(local_table)
+    if _bundled_recall_pending and _fallback_anchor(
+        search_query, [], region_code, local_table,
+        alt_table=_local_alt_names_table(local_table),
+    ) is None:
         # The stage-0 bundled index carries only populous divisions; a
         # long-tail name (an unpopulated hamlet) must not read as "no such
-        # place" while the full table builds in the background. But only
-        # when the query *could be* a division this index missed: a query
-        # whose trailing tokens anchor to a known place ("Shibuya Crossing
-        # Tokyo") is a place search, and the anchored places fallback below
-        # answers it — spending a direct upstream divisions scan on it
-        # first measured 55-70s for zero division rows. So the per-query
-        # upstream scan (the pre-#43 recall path) runs only when no anchor
-        # is derivable either.
-        if _fallback_anchor(
-            search_query, [], region_code, local_table,
-            alt_table=_local_alt_names_table(local_table),
-        ) is None:
-            divisions = _query_divisions(search_query, region_code, None)
+        # place" while the full table builds in the background. With no
+        # anchor derivable, the anchored-places path can't answer either,
+        # so run the upstream divisions scan (the pre-#43 recall path)
+        # now. When an anchor IS derivable the places search gets its
+        # chance first — "Shibuya Crossing Tokyo" measured 55-70s when a
+        # zero-row divisions scan ran ahead of it — and the same upstream
+        # scan runs after it instead, only if nothing at all was found
+        # (see the empty-candidates recall retry below).
+        divisions = _query_divisions(search_query, region_code, None)
+        _bundled_recall_pending = False
 
     region_population = _region_population_lookup(local_table)
     divisions.sort(key=lambda r: _rank_key(r, search_query, region_population))
@@ -2671,6 +2685,17 @@ def geocode_detailed(
                 key=lambda r: (-_match_tier(r["name"], name_query), -r["_confidence"], r["id"])
             )
             candidates = candidates + places
+
+    if not candidates and _bundled_recall_pending:
+        # Anchored-places had its chance and found nothing either; the
+        # query may be a real division below the bundled index's
+        # population cutoff. One upstream divisions scan preserves the
+        # recall the full local table used to guarantee — paid only when
+        # every faster path came up empty, and only until the background
+        # full build lands.
+        recalled = _query_divisions(search_query, region_code, None)
+        recalled.sort(key=lambda r: _rank_key(r, search_query, region_population))
+        candidates = recalled
 
     out = []
     for row in candidates[:limit]:

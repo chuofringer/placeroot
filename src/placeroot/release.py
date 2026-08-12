@@ -252,6 +252,13 @@ def resolve_release_info() -> dict:
             # release, the ordinary TTL machinery rolls the process over to
             # it exactly as it always did.
             _cached = {"release": PINNED_RELEASE, "source": "pinned-fallback"}
+            # Deliberate freshness-for-latency trade: the first queries of
+            # a fresh process may use the pinned release even when a newer
+            # one exists, until the background discovery lands (seconds).
+            # data_version reports source="pinned-fallback" for exactly
+            # this window, so the state is visible, and every bundled
+            # artifact (manifests, schemas, geocode index) targets the pin
+            # — the release those queries are fastest and most complete on.
             # Stamped now, like any resolution: if the background discovery
             # succeeds it overwrites both the answer and the stamp; if it
             # finds nothing, the pin serves for a normal TTL rather than
@@ -267,10 +274,23 @@ def resolve_release_info() -> dict:
                     discovered = _discover()
                 finally:
                     with _lock:
+                        if generation != _generation:
+                            # reset_cache() disowned this thread; a newer
+                            # resolution owns _refreshing and the done
+                            # event now — touching either would release
+                            # the new discovery's claim and wake waiters
+                            # on an answer that isn't theirs.
+                            return
                         _refreshing = False
-                        if discovered and generation == _generation:
+                        if discovered:
                             _cached = _resolved(discovered)
                             _cached_at = time.monotonic()
+                            _warn_if_stale(_cached)
+                        elif _cached is not None:
+                            # Discovery failed and the pin serves: the
+                            # stale-vintage warning the blocking path used
+                            # to emit must still fire — a silently ancient
+                            # pin is the least noticeable failure mode.
                             _warn_if_stale(_cached)
                     _first_discovery_done.set()
 

@@ -181,6 +181,11 @@ def _background_fetch_concurrency() -> int:
 # var; changing the variable mid-process does not resize it.
 _background_fetch_slots = threading.BoundedSemaphore(_background_fetch_concurrency())
 
+# Seconds a background tile fetch waits before touching the network — the
+# scheduling query's own scan finishes first (typically 2-8s cold), so the
+# fetch never competes with the answer it exists to speed up next time.
+BACKGROUND_FETCH_DELAY_S = 10.0
+
 # Background fetch threads are ephemeral (one per tile), but a fresh DuckDB
 # connection pays the whole per-file parquet-footer pass again for the
 # theme it COPYs from (~25-50s cold on the heavy themes) — so connections
@@ -715,6 +720,12 @@ def _materialize_in_background(
 
     def _run():
         try:
+            # Let the query that scheduled this fetch answer first: it is
+            # about to run (or is running) a direct scan on the same pipe,
+            # and racing it measured up to 3x slower cold. The tiles still
+            # arrive well before any plausible repeat query.
+            if BACKGROUND_FETCH_DELAY_S:
+                time.sleep(BACKGROUND_FETCH_DELAY_S)
             with _background_fetch_slots:
                 con = _acquire_fetcher_conn(new_connection)
                 try:
@@ -841,15 +852,27 @@ def local_paths_for_query(
             claim_paths(held)  # refresh mid-flight so no claim expires
             return path
 
-        if len(missing) == 1:
-            cached.append(ensure_tile(con, release, theme, missing[0], upstream_glob, fingerprint))
+        if len(missing) == 1 or new_connection is None:
+            # No factory for per-worker connections means no safe way to
+            # run two COPYs at once (a DuckDB connection is single-user;
+            # a caller's factory may also just return `con`, which the
+            # sequential loop tolerates and a pool would corrupt).
+            for t in missing:
+                cached.append(_fetch(t, con))
         else:
+            import contextvars
             from concurrent.futures import ThreadPoolExecutor
 
+            def _fetch_in_ctx(t):
+                # Each task gets its own cursor (never a shared connection)
+                # and its own copy of the calling context, so the per-tile
+                # progress reports — a ContextVar-installed reporter —
+                # survive the pool's threads instead of silently dropping.
+                ctx = contextvars.copy_context()
+                return ctx.run(_fetch, t, new_connection())
+
             with ThreadPoolExecutor(max_workers=2) as pool:
-                fetched = list(pool.map(
-                    lambda t: _fetch(t, new_connection() if new_connection else con), missing
-                ))
+                fetched = list(pool.map(_fetch_in_ctx, missing))
             cached.extend(fetched)
         progress.report(
             f"Map data for this area cached ({theme}) — running the query",
