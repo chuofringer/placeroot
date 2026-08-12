@@ -104,6 +104,9 @@ DEFAULT_STALE_DAYS = 60
 # refresh that started before a reset can never overwrite — and re-stamp the
 # TTL of — whatever resolved after that reset.
 _lock = threading.Lock()
+# Set when the process's first background discovery has finished (found
+# something or not) — a deterministic join point for tests and warm-starts.
+_first_discovery_done = threading.Event()
 _cached: dict | None = None
 _cached_at: float = 0.0
 _refreshing = False
@@ -239,12 +242,40 @@ def resolve_release_info() -> dict:
         if _cached is not None and (now - _cached_at < _ttl_s() or _refreshing):
             return _cached
         if _cached is None:
-            # First resolution of the process: there is no previous answer to
-            # serve, so block (concurrent first calls wait ≤ the 5s discovery
-            # timeout, once).
-            _cached = _resolved(_discover())
+            # First resolution of the process: answer with the pinned
+            # release *immediately* and let discovery refresh in the
+            # background. The pin is the release the wheel's bundled
+            # manifests/schemas/index were built for, releases are
+            # immutable, and blocking every cold first query on a network
+            # round-trip (up to the 5s discovery timeout on a bad day) buys
+            # nothing but latency — if discovery later finds a newer
+            # release, the ordinary TTL machinery rolls the process over to
+            # it exactly as it always did.
+            _cached = {"release": PINNED_RELEASE, "source": "pinned-fallback"}
+            # Stamped now, like any resolution: if the background discovery
+            # succeeds it overwrites both the answer and the stamp; if it
+            # finds nothing, the pin serves for a normal TTL rather than
+            # every subsequent resolve re-attempting discovery inline.
             _cached_at = time.monotonic()
-            _warn_if_stale(_cached)
+            _refreshing = True
+            generation = _generation
+
+            def _first_discovery():
+                global _cached, _cached_at, _refreshing
+                discovered = None
+                try:
+                    discovered = _discover()
+                finally:
+                    with _lock:
+                        _refreshing = False
+                        if discovered and generation == _generation:
+                            _cached = _resolved(discovered)
+                            _cached_at = time.monotonic()
+                            _warn_if_stale(_cached)
+                    _first_discovery_done.set()
+
+            _first_discovery_done.clear()
+            threading.Thread(target=_first_discovery, daemon=True).start()
             return _cached
         # Expired and nobody else is refreshing: this thread refreshes outside
         # the lock; everyone else keeps the previous answer.

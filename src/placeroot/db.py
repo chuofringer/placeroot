@@ -202,6 +202,10 @@ _probe_failed_at: dict[str, float] = {}
 def probe_schema(glob: str) -> frozenset | None:
     """Column names present in glob's dataset, or None if the probe itself failed.
 
+    Bundled-manifest fast path: for a default-base glob of a bundled
+    release the columns are a recorded fact (schemas are as immutable as
+    the files), answered with zero network. Everything else probes live.
+
     A failed probe (upstream down, glob unreadable) is treated as "unknown,
     assume nothing missing" — the actual query that follows hits the same
     problem and surfaces it as UpstreamUnavailable instead. Failures are
@@ -212,6 +216,11 @@ def probe_schema(glob: str) -> frozenset | None:
     addressed: the memo expires). Successes stay cached indefinitely (see
     _probe_schema_cached).
     """
+    from placeroot import manifest
+
+    bundled = manifest.bundled_columns(glob)
+    if bundled is not None:
+        return bundled
     failed_at = _probe_failed_at.get(glob)
     if failed_at is not None:
         if time.monotonic() - failed_at < PROBE_FAILURE_RETRY_S:

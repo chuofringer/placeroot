@@ -105,8 +105,13 @@ def test_resolve_release_falls_back_to_pin_on_discovery_error(monkeypatch):
 
 
 def test_resolve_release_uses_discovery_when_no_override(monkeypatch):
+    """Pin-first: the very first resolve answers with the pin immediately
+    (no network on the cold path); the background discovery's answer is
+    served from the next resolve on."""
     monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
     monkeypatch.setattr(release, "_discover", lambda: "2026-08-01.0")
+    assert release.resolve_release() == release.PINNED_RELEASE
+    assert release._first_discovery_done.wait(2)
     assert release.resolve_release() == "2026-08-01.0"
 
 
@@ -123,6 +128,8 @@ def test_resolve_release_info_env_override(monkeypatch):
 def test_resolve_release_info_discovered(monkeypatch):
     monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
     monkeypatch.setattr(release, "_discover", lambda: "2026-08-01.0")
+    release.resolve_release_info()  # pin-first; kicks background discovery
+    assert release._first_discovery_done.wait(2)
     assert release.resolve_release_info() == {
         "release": "2026-08-01.0", "source": "discovered",
     }
@@ -170,18 +177,22 @@ def test_resolve_is_cached_within_the_ttl(monkeypatch):
     monkeypatch.delenv("PLACEROOT_RELEASE_TTL_HOURS", raising=False)
     calls = []
     monkeypatch.setattr(release, "_discover", lambda: calls.append(1) or "2026-08-01.0")
+    release.resolve_release()  # pin-first; background discovery runs once
+    assert release._first_discovery_done.wait(2)
     assert release.resolve_release() == "2026-08-01.0"
     assert release.resolve_release() == "2026-08-01.0"
-    assert len(calls) == 1  # second resolve served from the TTL cache
+    assert len(calls) == 1  # later resolves served from the TTL cache
 
 
 def test_expired_ttl_rolls_over_to_the_new_release(monkeypatch):
     monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
     monkeypatch.setenv("PLACEROOT_RELEASE_TTL_HOURS", "0")
-    releases = iter(["2026-07-22.0", "2026-08-20.0"])
+    releases = iter(["2026-08-01.0", "2026-08-20.0"])
     monkeypatch.setattr(release, "_discover", lambda: next(releases))
-    assert release.resolve_release() == "2026-07-22.0"
-    assert release.resolve_release() == "2026-08-20.0"  # TTL 0: re-check every call
+    release.resolve_release()  # pin-first; background discovery -> 2026-08-01.0
+    assert release._first_discovery_done.wait(2)
+    # TTL 0: the next resolve re-checks and rolls straight to the newer one.
+    assert release.resolve_release() == "2026-08-20.0"
 
 
 def test_failed_recheck_keeps_the_previous_release_not_the_pin(monkeypatch):
@@ -189,6 +200,8 @@ def test_failed_recheck_keeps_the_previous_release_not_the_pin(monkeypatch):
     monkeypatch.setenv("PLACEROOT_RELEASE_TTL_HOURS", "0")
     answers = iter(["2026-08-01.0", None, None])
     monkeypatch.setattr(release, "_discover", lambda: next(answers))
+    release.resolve_release_info()  # pin-first
+    assert release._first_discovery_done.wait(2)
     assert release.resolve_release_info() == {
         "release": "2026-08-01.0", "source": "discovered",
     }
@@ -225,10 +238,16 @@ def test_non_positive_ttl_re_checks_every_call_and_warns_once(monkeypatch, caplo
 
 
 def _seed(monkeypatch, release_name):
-    """Put a resolved release in the TTL cache, with the TTL already expired."""
+    """Put a resolved release in the TTL cache, with the TTL already expired.
+
+    Pin-first: the process's first resolve answers the pin and discovers in
+    the background, so seeding waits for that discovery, then resolves once
+    more (TTL 0) to confirm the seeded answer is what the cache serves."""
     monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
     monkeypatch.setenv("PLACEROOT_RELEASE_TTL_HOURS", "0")
     monkeypatch.setattr(release, "_discover", lambda: release_name)
+    release.resolve_release()  # pin-first; kicks background discovery
+    assert release._first_discovery_done.wait(2)
     assert release.resolve_release() == release_name
 
 
@@ -288,6 +307,10 @@ def test_a_refresh_that_outlives_reset_cache_does_not_clobber_the_newer_answer(m
 
     release.reset_cache()
     monkeypatch.setattr(release, "_discover", lambda: "2026-09-09.0")
+    # Post-reset the cache is empty again, so this resolve is pin-first too;
+    # its background discovery finds 2026-09-09.0.
+    assert release.resolve_release() == release.PINNED_RELEASE
+    assert release._first_discovery_done.wait(2)
     assert release.resolve_release() == "2026-09-09.0"
 
     finish.set()

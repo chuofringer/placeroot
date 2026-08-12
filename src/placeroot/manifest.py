@@ -62,6 +62,26 @@ def _load(release: str, theme: str, type_: str) -> dict | None:
         return None
 
 
+def bundled_columns(upstream_glob: str) -> frozenset | None:
+    """The theme's column names from the bundled manifest, or None.
+
+    A release's schema is as immutable as its files, so the columns
+    recorded at manifest-build time answer db.probe_schema's question with
+    zero network for any default-base glob of a bundled release — the cold
+    probe otherwise costs a footer read (measured 0.5-1.5s per theme, paid
+    once per theme per process, several times over by multi-theme tools).
+    Same fallback contract as file pruning: mirrors, pinned local paths and
+    unbundled releases return None and probe live.
+    """
+    m = _GLOB_RE.match(upstream_glob)
+    if m is None or m.group("base") != _DEFAULT_BASE:
+        return None
+    manifest = _load(m.group("release"), m.group("theme"), m.group("type"))
+    if manifest is None or "columns" not in manifest:
+        return None
+    return frozenset(manifest["columns"])
+
+
 def pruned_source_sql(
     upstream_glob: str, bbox: tuple[float, float, float, float] | None
 ) -> str | None:

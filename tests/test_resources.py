@@ -122,6 +122,11 @@ def test_data_version_resource_tracks_every_resolution_source(
         monkeypatch.setenv("PLACEROOT_OVERTURE_RELEASE", env)
     monkeypatch.setattr(release, "_discover", lambda: discovered)
     release.reset_cache()
+    if not env:
+        # Pin-first: the first resolve answers the pin and discovers in the
+        # background; settle it so the payload reflects the tracked source.
+        release.resolve_release()
+        assert release._first_discovery_done.wait(2)
 
     payload = _read_json(resources.DATA_VERSION_URI)
 
@@ -142,6 +147,8 @@ def test_data_version_resource_reads_the_cache_without_hitting_the_network(monke
         return None
 
     monkeypatch.setattr(release, "_discover", counting_discover)
+    _read_json(resources.DATA_VERSION_URI)  # pin-first; one background discovery
+    assert release._first_discovery_done.wait(2)
     for _ in range(3):
         _read_json(resources.DATA_VERSION_URI)
     assert len(calls) == 1
