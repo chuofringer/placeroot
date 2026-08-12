@@ -568,22 +568,10 @@ def _parse_linestring_wkt(wkt: str) -> list[tuple[float, float]]:
 
 def _from_source(bbox: tuple[float, float, float, float]) -> str:
     upstream = _upstream_glob()
-    if cache.enabled():
-        try:
-            # db.new_connection as the background-fetch factory: the tile
-            # COPY only needs httpfs, already covered by db.py's shared
-            # connection-configuration site (issue #40).
-            with db.conn_lock:
-                paths = cache.local_paths_for_query(
-                    db.shared_conn(), release.resolve_release(), THEME, bbox, upstream,
-                    db.new_connection,
-                )
-        except duckdb.Error as e:
-            raise UpstreamUnavailable(str(e)) from e
-        if paths:
-            joined = ", ".join(f"'{p}'" for p in paths)
-            return f"read_parquet([{joined}])"
-    return f"read_parquet('{upstream}', hive_partitioning=1)"
+    try:
+        return cache.source_sql(THEME, upstream, bbox)
+    except duckdb.Error as e:
+        raise overture.UpstreamUnavailable(str(e)) from e
 
 
 class Graph:

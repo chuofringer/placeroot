@@ -109,6 +109,15 @@ HEAVY_THEME_TILE_DEG: dict[str, float] = {
     # tiles stay coarser; 0.125° (~14km) balances a seconds-scale COPY
     # against how many tiles a metro-area route touches.
     "transportation": 0.125,
+    # water and infrastructure answer point/short-radius questions with
+    # sparse rows: a 0.25° first-touch tile COPYs in ~2-5s (measured:
+    # water_near 45s cold direct -> 7.0s with tiles) and warms the area.
+    # The dense-geometry base types (land_use, land, land_cover) are
+    # deliberately NOT here: their Tokyo-class tiles carry tens of MB of
+    # polygons, and a sync COPY measured worse than the manifest-pruned
+    # direct scan it replaced.
+    "base_water": 0.25,
+    "base_infrastructure": 0.25,
 }
 
 # A wide query over a heavy theme (a long route corridor) would need too
@@ -797,17 +806,50 @@ def local_paths_for_query(
         # would expire mid-loop and leave the tile evictable again. Claiming
         # a not-yet-existing path is harmless: eviction only deletes files
         # that exist and skips claimed paths regardless.
-        held = [str(p) for p in cached]
-        for i, t in enumerate(missing):
+        held = [str(p) for p in cached] + [
+            str(tile_path(release, theme, fingerprint, t)) for t in missing
+        ]
+        claim_paths(held)
+        progress.report(
+            f"Fetching map data for this area ({len(missing)} {theme} "
+            f"tile(s)) — the first query over a new area is slow; results "
+            "are cached, repeat queries answer in milliseconds",
+            0, len(missing),
+        )
+        # Two fetches in flight, mirroring the background semaphore's
+        # rationale in reverse: here there is no foreground scan to starve
+        # (the query waits on these tiles), so a second stream roughly
+        # halves multi-tile waits (a route corridor, a two-tile radius)
+        # while staying gentle on the pipe. Each worker gets its own cursor
+        # of the shared instance — connections aren't safe for concurrent
+        # use, cursors are, and they share the warm metadata cache.
+        done_count = [0]
+        done_lock = threading.Lock()
+
+        def _fetch(t, fetch_con):
+            path = ensure_tile(fetch_con, release, theme, t, upstream_glob, fingerprint)
+            with done_lock:
+                done_count[0] += 1
+                n = done_count[0]
             progress.report(
-                f"Fetching map data for this area ({theme} tile {i + 1} of "
-                f"{len(missing)}) — the first query over a new area is slow; "
-                "results are cached, repeat queries answer in milliseconds",
-                i, len(missing),
+                f"Fetching map data for this area ({theme} tile {n} of "
+                f"{len(missing)}) — results are cached, repeat queries "
+                "answer in milliseconds",
+                n, len(missing),
             )
-            held.append(str(tile_path(release, theme, fingerprint, t)))
-            claim_paths(held)
-            cached.append(ensure_tile(con, release, theme, t, upstream_glob, fingerprint))
+            claim_paths(held)  # refresh mid-flight so no claim expires
+            return path
+
+        if len(missing) == 1:
+            cached.append(ensure_tile(con, release, theme, missing[0], upstream_glob, fingerprint))
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                fetched = list(pool.map(
+                    lambda t: _fetch(t, new_connection() if new_connection else con), missing
+                ))
+            cached.extend(fetched)
         progress.report(
             f"Map data for this area cached ({theme}) — running the query",
             len(missing), len(missing),

@@ -74,7 +74,7 @@ import logging
 
 import duckdb
 
-from placeroot import cache, db, geo, overture, release
+from placeroot import cache, db, geo, overture
 
 logger = logging.getLogger(__name__)
 
@@ -165,19 +165,10 @@ def _from_source(bbox: tuple[float, float, float, float]) -> str:
     types can never share a tile directory.
     """
     upstream = _upstream_glob()
-    if cache.enabled():
-        try:
-            with db.conn_lock:
-                paths = cache.local_paths_for_query(
-                    db.shared_conn(), release.resolve_release(), _cache_theme(), bbox,
-                    upstream, db.new_connection,
-                )
-        except duckdb.Error as e:
-            raise overture.UpstreamUnavailable(str(e)) from e
-        if paths:
-            joined = ", ".join(f"'{p}'" for p in paths)
-            return f"read_parquet([{joined}])"
-    return f"read_parquet('{upstream}', hive_partitioning=1)"
+    try:
+        return cache.source_sql(_cache_theme(), upstream, bbox)
+    except duckdb.Error as e:
+        raise overture.UpstreamUnavailable(str(e)) from e
 
 
 # Haversine distance in meters between the closest point on a row's

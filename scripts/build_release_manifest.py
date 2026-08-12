@@ -35,6 +35,7 @@ THEME_TYPES = [
     ("transportation", "segment"),
     ("transportation", "connector"),
     ("base", "land_use"),
+    ("base", "land_cover"),
     ("base", "land"),
     ("base", "water"),
     ("base", "infrastructure"),

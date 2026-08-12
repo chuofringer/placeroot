@@ -394,6 +394,7 @@ import re
 import threading
 import time
 import unicodedata
+from importlib import resources
 from pathlib import Path
 
 import duckdb
@@ -864,6 +865,38 @@ def _materialize_divisions_pass(path: Path, glob: str, with_hierarchies: bool) -
 # geocode retries.
 _UPGRADE_DELAY_S = 20.0
 
+# Full-table builds already started this process, keyed by table path.
+_build_started: set[str] = set()
+_build_lock = threading.Lock()
+
+
+def _spawn_divisions_build(path: Path) -> None:
+    """Build the full local table in the background (stage-0 index serving
+    meanwhile). Delayed and gated on the fetch slots exactly like the
+    stage-2 upgrade, and for the same measured reason: an undelayed
+    background read of hundreds of MB starves the request that spawned it.
+    """
+    key = str(path)
+    with _build_lock:
+        if key in _build_started:
+            return
+        _build_started.add(key)
+
+    def _run():
+        try:
+            time.sleep(_UPGRADE_DELAY_S)
+            with cache._background_fetch_slots:
+                if not path.exists():
+                    glob = overture.upstream_glob(theme="divisions", type_="division")
+                    _materialize_divisions_table(path, glob)
+                    logger.info("full divisions table built behind the bundled index -> %s", path)
+        except Exception as e:  # noqa: BLE001 - background build must never surface
+            logger.warning("background divisions build failed (next geocode retries): %s", e)
+            with _build_lock:
+                _build_started.discard(key)
+
+    threading.Thread(target=_run, daemon=True).start()
+
 _upgrade_started: set[str] = set()
 _upgrade_lock = threading.Lock()
 
@@ -1084,17 +1117,60 @@ def _rebuild_once_for_bbox_columns(path: Path) -> None:
     logger.info("divisions table rebuilt with bbox columns in %.1fs", time.time() - t0)
 
 
-def _local_divisions_table() -> str | None:
-    """Path to the materialized local divisions name table for the active
-    release, building it (blocking — see the module docstring's #43
-    section for why) on first use. Returns None if caching is off
-    (PLACEROOT_CACHE=off) or materialization fails, so callers fall back to
-    a direct upstream scan — the pre-#43 behavior.
+def _bundled_index_path(active_release: str) -> Path | None:
+    """The wheel-bundled stage-0 geocode index for active_release, or None.
+
+    ~150k most-populous divisions in the exact schema
+    _query_divisions_from_local reads (scripts/build_geocode_index.py) —
+    every city and town anyone geocodes or anchors on, locally, before
+    the full table has ever been built.
     """
-    if not cache.enabled():
+    try:
+        p = (resources.files("placeroot") / "data" / "geocode-index"
+             / active_release / "table.parquet")
+        return Path(str(p)) if p.is_file() else None
+    except (OSError, TypeError):
         return None
+
+
+def _is_bundled_table(table_path: str | None) -> bool:
+    return bool(table_path) and "geocode-index" in str(table_path)
+
+
+def _local_divisions_table() -> str | None:
+    """Path to the local divisions name table for the active release.
+
+    Resolution order, fastest first:
+    1. The materialized full table (built earlier this install).
+    2. The wheel-bundled stage-0 index for a bundled release: answers the
+       populous-division queries — which is nearly all of them — locally
+       and instantly, while the full build runs in the background (kicked
+       here, delayed and fetch-slot-gated like the stage-2 upgrade, so it
+       never starves the query that triggered it). Long-tail names absent
+       from the index fall back per-query to a direct upstream scan (see
+       geocode_detailed) until the full table lands.
+    3. Blocking build (unbundled release), the pre-index behavior.
+
+    Returns None if caching is off (PLACEROOT_CACHE=off) and no bundled
+    index applies, or materialization fails — callers fall back to direct
+    upstream scans, the pre-#43 behavior.
+    """
     active_release = release.resolve_release()
+    divisions_pinned = overture.dataset_is_pinned("divisions", "division")
+    if not cache.enabled():
+        # The bundled index is real-release data; a deployment that pinned
+        # divisions to its own dataset (fixtures, an extract) must never be
+        # answered from it.
+        if divisions_pinned:
+            return None
+        bundled = _bundled_index_path(active_release)
+        return str(bundled) if bundled else None
     path = _local_divisions_table_path(active_release)
+    if not path.exists():
+        bundled = _bundled_index_path(active_release)
+        if bundled is not None and not divisions_pinned:
+            _spawn_divisions_build(path)
+            return str(bundled)
     if path.exists():
         _rebuild_once_for_bbox_columns(path)
         if _stage1_sentinel(path).exists():
@@ -2517,6 +2593,23 @@ def geocode_detailed(
         if not fuzzy_rows and suffix_region_code:
             fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query)
         divisions = fuzzy_rows
+
+    if not divisions and _is_bundled_table(local_table):
+        # The stage-0 bundled index carries only populous divisions; a
+        # long-tail name (an unpopulated hamlet) must not read as "no such
+        # place" while the full table builds in the background. But only
+        # when the query *could be* a division this index missed: a query
+        # whose trailing tokens anchor to a known place ("Shibuya Crossing
+        # Tokyo") is a place search, and the anchored places fallback below
+        # answers it — spending a direct upstream divisions scan on it
+        # first measured 55-70s for zero division rows. So the per-query
+        # upstream scan (the pre-#43 recall path) runs only when no anchor
+        # is derivable either.
+        if _fallback_anchor(
+            search_query, [], region_code, local_table,
+            alt_table=_local_alt_names_table(local_table),
+        ) is None:
+            divisions = _query_divisions(search_query, region_code, None)
 
     region_population = _region_population_lookup(local_table)
     divisions.sort(key=lambda r: _rank_key(r, search_query, region_population))

@@ -57,7 +57,7 @@ import logging
 
 import duckdb
 
-from placeroot import cache, db, geo, overture, release
+from placeroot import cache, db, geo, overture
 
 logger = logging.getLogger(__name__)
 
@@ -155,19 +155,10 @@ def _from_source(bbox: tuple[float, float, float, float], type_: str) -> str:
     rather than a bare theme string — see the module docstring.
     """
     upstream = _upstream_glob(type_)
-    if cache.enabled():
-        try:
-            with db.conn_lock:
-                paths = cache.local_paths_for_query(
-                    db.shared_conn(), release.resolve_release(), _cache_theme(type_), bbox,
-                    upstream, db.new_connection,
-                )
-        except duckdb.Error as e:
-            raise overture.UpstreamUnavailable(str(e)) from e
-        if paths:
-            joined = ", ".join(f"'{p}'" for p in paths)
-            return f"read_parquet([{joined}])"
-    return f"read_parquet('{upstream}', hive_partitioning=1)"
+    try:
+        return cache.source_sql(_cache_theme(type_), upstream, bbox)
+    except duckdb.Error as e:
+        raise overture.UpstreamUnavailable(str(e)) from e
 
 
 def _classify(lat: float, lon: float, type_: str, include_name: bool) -> tuple[dict | None, bool]:
