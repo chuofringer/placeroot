@@ -101,10 +101,12 @@ LAND_COVER_REQUIRED_COLUMNS = ["id", "geometry", "bbox", "subtype"]
 # polygon is still found because its bbox necessarily overlaps this tile).
 POINT_QUERY_RADIUS_M = 75.0
 
-# How many containing candidates to pull back, smallest-area first. Only
+# How many containing candidates to pull back (ranked smallest-area first
+# client-side — see _classify for why the SQL must not ORDER BY area). Only
 # the first is ever returned; a second row existing is enough to know the
-# point was ambiguous and flag it via "note" — no need to fetch more.
-_CANDIDATE_LIMIT = 2
+# point was ambiguous and flag it via "note". Generous because it bounds
+# nesting depth at one point, which real data keeps in single digits.
+_CANDIDATE_LIMIT = 32
 
 
 def _ensure_spatial() -> None:
@@ -263,6 +265,13 @@ def _classify(
         "bbox.xmin <= $lon AND bbox.xmax >= $lon"
         " AND bbox.ymin <= $lat AND bbox.ymax >= $lat"
     )
+    # No ORDER BY area in the SQL, deliberately: a TopN on a sort key
+    # computed from geometry forces the parquet scan to produce geometry
+    # eagerly for every row group, defeating late materialization — the
+    # bbox prefilter stops pruning reads and a cold point query pays the
+    # full geometry column (measured 18.5s vs 1.6s on 4 remote files).
+    # Candidates at a single point are the polygon nesting depth (single
+    # digits), so fetch them unordered and rank by area client-side.
     sql = f"""
         SELECT
             {subtype_expr} AS subtype,
@@ -271,7 +280,6 @@ def _classify(
             ST_Area({geom_expr}) AS area
         FROM {_from_source((xmin, ymin, xmax, ymax), type_)}
         WHERE {bbox_prefilter} AND ST_Contains({geom_expr}, ST_Point($lon, $lat))
-        ORDER BY area ASC
         LIMIT {_CANDIDATE_LIMIT}
     """
     try:
@@ -292,6 +300,7 @@ def _classify(
     if not rows:
         return None, False
 
+    rows.sort(key=lambda r: r[3])
     subtype, class_, name, _area = rows[0]
     result = {"subtype": subtype, "class": class_}
     if include_name:

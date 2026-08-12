@@ -28,7 +28,7 @@ import logging
 
 import duckdb
 
-from placeroot import db, geo, overture
+from placeroot import db, geo, manifest, overture
 
 logger = logging.getLogger(__name__)
 
@@ -92,9 +92,15 @@ def admin_lookup(lat: float, lon: float, con=None) -> dict:
     else:
         id_expr = "NULL"
     geom_expr = _geom_expr(upstream)
-    # The bbox column prunes remote row groups before the (expensive) exact
-    # containment test — without it this is an ST_Contains over every
-    # division polygon on Earth (measured 10+ minutes live).
+    # Bundled-manifest file pruning first (a point query touches a handful
+    # of the theme's files; the footer pass on the rest is pure waste),
+    # then the bbox column prunes remote row groups before the (expensive)
+    # exact containment test — without that this is an ST_Contains over
+    # every division polygon on Earth (measured 10+ minutes live).
+    src = (
+        manifest.pruned_source_sql(upstream, geo.bbox_around(lat, lon, 100.0))
+        or f"read_parquet('{upstream}', hive_partitioning=1)"
+    )
     bbox_prefilter = (
         "bbox.xmin <= $lon AND bbox.xmax >= $lon"
         " AND bbox.ymin <= $lat AND bbox.ymax >= $lat AND "
@@ -108,9 +114,8 @@ def admin_lookup(lat: float, lon: float, con=None) -> dict:
             {name_expr} AS name,
             {subtype_expr} AS type,
             ST_Area({geom_expr}) AS area
-        FROM read_parquet('{upstream}', hive_partitioning=1)
+        FROM {src}
         WHERE {bbox_prefilter}ST_Contains({geom_expr}, ST_Point($lon, $lat))
-        ORDER BY area ASC
     """
     try:
         if con is not None:
@@ -124,6 +129,12 @@ def admin_lookup(lat: float, lon: float, con=None) -> dict:
                 rows = db.shared_conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
+    # Smallest-first ranking happens here, not in the SQL: an ORDER BY on a
+    # sort key computed from geometry forces the parquet scan to produce
+    # geometry eagerly for every row group, defeating late materialization
+    # (land_use.py measured that at 18.5s vs 1.6s cold). The containing
+    # rows are one per admin level — sorting them client-side is free.
+    rows.sort(key=lambda r: r[3])
     # division_area carries multiple polygon rows per division (e.g. land and
     # maritime variants) — keep the first (smallest-area) row per division.
     chain, seen = [], set()
