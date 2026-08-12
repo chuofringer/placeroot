@@ -737,6 +737,7 @@ def local_paths_for_query(
     bbox: tuple[float, float, float, float],
     upstream_glob: str,
     new_connection=None,
+    schedule_missing: bool = True,
 ) -> list[str] | None:
     """Local cached parquet paths covering bbox, or None to fall back to upstream.
 
@@ -860,6 +861,12 @@ def local_paths_for_query(
         claim_paths(paths)
         return paths
 
+    if not schedule_missing:
+        # The caller's own scan is about to read the same theme, and its
+        # answer is small (a point classification); racing it against a
+        # whole-tile COPY of the same data measured 3x slower cold. No
+        # tiles are scheduled — the scan serves, this time and next.
+        return None
     progress.report(
         f"First query over a new area: answering from a direct scan of Overture "
         f"on S3 while {len(missing)} {theme} tile(s) cache in the background — "
@@ -876,6 +883,7 @@ def source_sql(
     bbox: tuple[float, float, float, float] | None,
     *,
     upstream_fallback: bool = True,
+    schedule_missing: bool = True,
 ) -> str | None:
     """FROM-clause SQL for a theme: local cache tiles when available, upstream
     otherwise. The one implementation of the "cached tiles else upstream glob"
@@ -912,7 +920,7 @@ def source_sql(
             with db.conn_lock:
                 paths = local_paths_for_query(
                     db.shared_conn(), active_release, theme, bbox, upstream_glob,
-                    db.new_connection,
+                    db.new_connection, schedule_missing=schedule_missing,
                 )
         if paths:
             joined = ", ".join(f"'{p}'" for p in paths)

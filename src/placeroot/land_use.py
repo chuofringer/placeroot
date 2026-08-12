@@ -156,12 +156,21 @@ def _from_source(bbox: tuple[float, float, float, float], type_: str) -> str:
     """
     upstream = _upstream_glob(type_)
     try:
-        return cache.source_sql(_cache_theme(type_), upstream, bbox)
+        # schedule_missing=False: a point classification's answer is tiny
+        # and its manifest-pruned scan cheap, while a 1° land_cover tile
+        # COPY is enormous — racing the scan against its own background
+        # tile fetch measured ~3x slower cold. Existing tiles still serve.
+        return cache.source_sql(
+            _cache_theme(type_), upstream, bbox, schedule_missing=False
+        )
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
 
 
-def _classify(lat: float, lon: float, type_: str, include_name: bool) -> tuple[dict | None, bool]:
+def _classify(
+    lat: float, lon: float, type_: str, include_name: bool,
+    con=None,
+) -> tuple[dict | None, bool]:
     """Smallest-area polygon of type_ containing (lat, lon), and whether it was ambiguous.
 
     Returns (None, False) if no polygon contains the point — a valid
@@ -199,8 +208,17 @@ def _classify(lat: float, lon: float, type_: str, include_name: bool) -> tuple[d
         LIMIT {_CANDIDATE_LIMIT}
     """
     try:
-        with db.conn_lock:
-            rows = db.shared_conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
+        if con is not None:
+            # A caller-supplied cursor of the shared instance: safe for
+            # concurrent use without conn_lock (cursors are DuckDB's
+            # documented multithreading unit) and shares the warm metadata
+            # cache. land_use_at runs its two type lookups concurrently on
+            # two of these — the themes are different files, so the reads
+            # overlap instead of summing (~30s -> max of the two, cold).
+            rows = con.execute(sql, {"lat": lat, "lon": lon}).fetchall()
+        else:
+            with db.conn_lock:
+                rows = db.shared_conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
 
@@ -238,8 +256,21 @@ def land_use_at(lat: float, lon: float) -> dict:
     degraded_fields().
     """
     _ensure_spatial()
-    land_use, lu_ambiguous = _classify(lat, lon, TYPE_LAND_USE, include_name=True)
-    land_cover, lc_ambiguous = _classify(lat, lon, TYPE_LAND_COVER, include_name=False)
+    # The two types are different datasets; run them concurrently on
+    # cursors of the shared instance so a cold call costs the slower of
+    # the two reads, not their sum (land_cover carries continent-scale
+    # multipolygons and dominates).
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        lu_f = pool.submit(
+            _classify, lat, lon, TYPE_LAND_USE, True, db.new_connection()
+        )
+        lc_f = pool.submit(
+            _classify, lat, lon, TYPE_LAND_COVER, False, db.new_connection()
+        )
+        land_use, lu_ambiguous = lu_f.result()
+        land_cover, lc_ambiguous = lc_f.result()
 
     result = {"lat": lat, "lon": lon, "land_use": land_use, "land_cover": land_cover}
     notes = []
