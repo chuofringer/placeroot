@@ -570,6 +570,36 @@ def gers_lookup(
         logger.info("gers_lookup(%s): known-miss, skipping all theme scans", id)
         return None
 
+    # Speculative enrichment: on a hinted lookup, start both cross-theme
+    # joins at the hint coordinates BEFORE the probe — the hint is
+    # documented as "the lat/lon of the row the id came from", so for the
+    # common case (a places id straight out of find_places) the joins'
+    # anchor is already known and a cold lookup pays max(probe, joins)
+    # instead of probe + joins. If the resolved entity turns out to sit
+    # elsewhere (or in another theme), the speculative results are simply
+    # dropped and the exact path below runs as before.
+    spec_pool = spec_div = spec_bld = None
+    if hinted:
+        import contextvars
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _in_ctx(fn, *args):
+            ctx = contextvars.copy_context()
+            return lambda: ctx.run(fn, *args)
+
+        try:
+            db.ensure_spatial()
+            spec_pool = ThreadPoolExecutor(max_workers=2)
+            spec_div = spec_pool.submit(_in_ctx(
+                _related_division, near_lat, near_lon, id, "places", db.new_connection()
+            ))
+            spec_bld = spec_pool.submit(
+                _in_ctx(_related_building, near_lat, near_lon, db.new_connection())
+            )
+            spec_pool.shutdown(wait=False)
+        except Exception:  # noqa: BLE001 — speculation must never break the lookup
+            spec_pool = spec_div = spec_bld = None
+
     entity, degraded, failed = None, [], []
     for theme, probe in _PROBES:
         try:
@@ -615,6 +645,23 @@ def gers_lookup(
 
     lat, lon = entity["lat"], entity["lon"]
     if entity["theme"] == "places" and lat is not None and lon is not None:
+        # The hint must BE the entity's coordinates (float-repr tolerance
+        # only): the documented usage is "pass the lat/lon of the row the
+        # id came from", and then hint == entity and the speculative joins
+        # are the exact joins. Any real offset would change the answer —
+        # building_distance_m is measured from the anchor — so a merely
+        # nearby hint redoes the joins at the entity instead.
+        _SPEC_EPS = 1e-6
+        if (
+            spec_div is not None
+            and abs(lat - near_lat) <= _SPEC_EPS
+            and abs(lon - near_lon) <= _SPEC_EPS
+        ):
+            try:
+                related = _merge_related(spec_div.result(), spec_bld.result())
+                return {"id": id, **entity, "related": related}
+            except Exception:  # noqa: BLE001 — fall through to the exact path
+                logger.warning("gers_lookup(%s): speculative joins failed", id)
         # The two joins read different themes (division_area polygons;
         # buildings id+bbox) — run them concurrently on cursors of the
         # shared instance so a cold lookup pays the slower join, not the
