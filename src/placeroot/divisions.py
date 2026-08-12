@@ -61,7 +61,7 @@ def _geom_expr(upstream: str) -> str:
     return geo.geom_expr(upstream)
 
 
-def admin_lookup(lat: float, lon: float) -> dict:
+def admin_lookup(lat: float, lon: float, con=None) -> dict:
     """Containing admin hierarchy for a point, smallest division first.
 
     Returns {"chain": [{"name", "type", "id"}, ...]} ordered
@@ -113,8 +113,15 @@ def admin_lookup(lat: float, lon: float) -> dict:
         ORDER BY area ASC
     """
     try:
-        with db.conn_lock:
-            rows = db.shared_conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
+        if con is not None:
+            # Caller-supplied cursor of the shared instance: safe without
+            # conn_lock (cursors are DuckDB's multithreading unit) and
+            # shares the warm metadata cache — gers_lookup runs this join
+            # concurrently with its building join on two of these.
+            rows = con.execute(sql, {"lat": lat, "lon": lon}).fetchall()
+        else:
+            with db.conn_lock:
+                rows = db.shared_conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
     # division_area carries multiple polygon rows per division (e.g. land and

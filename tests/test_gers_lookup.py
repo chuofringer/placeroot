@@ -101,7 +101,7 @@ def test_division_absent_from_the_containment_chain_has_no_related_division():
 
 def test_top_of_the_chain_has_no_related_division(monkeypatch):
     """A country is the last chain entry; nothing contains it."""
-    monkeypatch.setattr(gers.divisions, "admin_lookup", lambda lat, lon: {
+    monkeypatch.setattr(gers.divisions, "admin_lookup", lambda lat, lon, con=None: {
         "chain": [{"id": DOWNTOWN_ID, "name": "Downtown", "type": "neighborhood"}]
     })
     assert gers.gers_lookup(DOWNTOWN_ID)["related"] == {}
@@ -259,7 +259,7 @@ def test_place_probe_runs_before_the_building_probe(monkeypatch):
 
 def test_related_joins_degrade_instead_of_failing_the_lookup(monkeypatch):
     """An outage in a related join costs the join, not the entity."""
-    def boom(lat, lon):
+    def boom(lat, lon, con=None):
         raise overture.UpstreamUnavailable("divisions theme down")
 
     monkeypatch.setattr(gers.divisions, "admin_lookup", boom)
@@ -274,10 +274,19 @@ def test_a_broken_related_join_is_distinguishable_from_no_containing_division():
 
 
 def test_a_broken_building_join_notes_itself_without_losing_the_division(monkeypatch):
-    def boom(lat, lon, radius_m=None, limit=None):
+    def boom(lat, lon, con=None):
         raise overture.UpstreamUnavailable("buildings theme down")
 
-    monkeypatch.setattr(gers.buildings, "buildings_at", boom)
+    # A place id takes the concurrent lean join; a non-place caller would
+    # take buildings_at — break both so the test pins the degradation
+    # contract rather than the routing.
+    monkeypatch.setattr(gers, "_lean_nearest_building", boom)
+    monkeypatch.setattr(
+        gers.buildings, "buildings_at",
+        lambda *a, **k: (_ for _ in ()).throw(
+            overture.UpstreamUnavailable("buildings theme down")
+        ),
+    )
     related = gers.gers_lookup(PLACE_ID)["related"]
     assert related["division_id"] == DOWNTOWN_ID
     assert related["note"] == gers.BUILDING_UNAVAILABLE_NOTE
