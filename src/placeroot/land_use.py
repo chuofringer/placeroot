@@ -54,14 +54,29 @@ mirrors divisions.admin_lookup's empty-chain stance.
 """
 
 import logging
+import math
+from importlib import resources
+from pathlib import Path
 
 import duckdb
 
-from placeroot import cache, db, geo, overture
+from placeroot import cache, db, geo, overture, release
 
 logger = logging.getLogger(__name__)
 
 THEME = "base"
+# The bundled coarse land-cover grid's cell size (must match
+# scripts/build_land_cover_grid.py). ~11km at the equator: land *cover* is
+# a coarse fact — forest, urban, grassland — and this is the resolution at
+# which a cold answer can be instant instead of bandwidth-bound.
+GRID_DEG = 0.1
+
+APPROXIMATE_LAND_COVER_NOTE = (
+    "land_cover is approximate on this first visit to the area (bundled "
+    "~11 km grid); once the area's map tiles are cached — they were just "
+    "scheduled — repeat queries answer from exact polygons."
+)
+
 TYPE_LAND_USE = "land_use"
 TYPE_LAND_COVER = "land_cover"
 
@@ -165,6 +180,60 @@ def _from_source(bbox: tuple[float, float, float, float], type_: str) -> str:
         raise overture.UpstreamUnavailable(str(e)) from e
 
 
+def _bundled_grid_path() -> Path | None:
+    """The wheel-bundled land-cover grid for the active release, or None."""
+    try:
+        p = (resources.files("placeroot") / "data" / "land-cover-grid"
+             / f"{release.resolve_release()}.parquet")
+        return Path(str(p)) if p.is_file() else None
+    except (OSError, TypeError):
+        return None
+
+
+def _grid_land_cover(lat: float, lon: float) -> dict | None:
+    """Land cover at (lat, lon) from the bundled coarse grid, or None.
+
+    None means "grid can't answer here" (unbundled release, pinned
+    dataset, or genuinely no coverage cell) — the caller falls through to
+    the exact polygon path. A hit is {"subtype": ..., "class": None},
+    matching the exact path's shape for a dataset without a class column,
+    plus the approximation the caller must note.
+    """
+    if overture.dataset_is_pinned("base", TYPE_LAND_COVER):
+        return None
+    grid = _bundled_grid_path()
+    if grid is None:
+        return None
+    gx, gy = math.floor(lon / GRID_DEG), math.floor(lat / GRID_DEG)
+    try:
+        row = db.new_connection().execute(
+            f"SELECT subtype FROM read_parquet('{grid}') WHERE gx = ? AND gy = ?",
+            [gx, gy],
+        ).fetchone()
+    except duckdb.Error as e:
+        logger.warning("bundled land-cover grid read failed (using exact path): %s", e)
+        return None
+    if row is None:
+        # Absent cell: the paint covers a superset of every polygon's
+        # extent, so no cell genuinely means no land_cover here.
+        return {}
+    return {"subtype": row[0], "class": None}
+
+
+def _land_cover_tiles_warm(lat: float, lon: float) -> bool:
+    """Whether cached tiles already cover this point for the exact path."""
+    if not cache.enabled():
+        return False
+    bbox = geo.bbox_around(lat, lon, POINT_QUERY_RADIUS_M)
+    try:
+        return bool(cache.cached_tile_paths_for_bbox(
+            release.resolve_release(), _cache_theme(TYPE_LAND_COVER),
+            _upstream_glob(TYPE_LAND_COVER), bbox,
+        ))
+    except duckdb.Error:
+        return False
+
+
 def _classify(
     lat: float, lon: float, type_: str, include_name: bool,
     con=None,
@@ -260,18 +329,43 @@ def land_use_at(lat: float, lon: float) -> dict:
     # multipolygons and dominates).
     from concurrent.futures import ThreadPoolExecutor
 
+    grid_cover = None
+    if not _land_cover_tiles_warm(lat, lon):
+        # Cold area: the exact land_cover path is bandwidth-bound
+        # (continent-scale multipolygons), so the bundled coarse grid
+        # answers instantly, flagged approximate below.
+        grid_cover = _grid_land_cover(lat, lon)
+        if grid_cover is not None:
+            # The grid short-circuits the exact scan, so schedule this
+            # area's land_cover tiles ourselves — that is what converges
+            # a repeat query from "approximate" to exact polygons.
+            try:
+                cache.source_sql(
+                    _cache_theme(TYPE_LAND_COVER), _upstream_glob(TYPE_LAND_COVER),
+                    geo.bbox_around(lat, lon, POINT_QUERY_RADIUS_M),
+                )
+            except duckdb.Error:
+                pass  # scheduling is an optimization; the grid already answered
+
     with ThreadPoolExecutor(max_workers=2) as pool:
         lu_f = pool.submit(
             _classify, lat, lon, TYPE_LAND_USE, True, db.new_connection()
         )
-        lc_f = pool.submit(
-            _classify, lat, lon, TYPE_LAND_COVER, False, db.new_connection()
-        )
+        if grid_cover is None:
+            lc_f = pool.submit(
+                _classify, lat, lon, TYPE_LAND_COVER, False, db.new_connection()
+            )
         land_use, lu_ambiguous = lu_f.result()
-        land_cover, lc_ambiguous = lc_f.result()
+        if grid_cover is None:
+            land_cover, lc_ambiguous = lc_f.result()
+        else:
+            land_cover = grid_cover or None
+            lc_ambiguous = False
 
     result = {"lat": lat, "lon": lon, "land_use": land_use, "land_cover": land_cover}
     notes = []
+    if grid_cover:
+        notes.append(APPROXIMATE_LAND_COVER_NOTE)
     if lu_ambiguous:
         notes.append(
             "multiple overlapping land_use polygons contain this point; "
