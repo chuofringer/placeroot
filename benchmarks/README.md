@@ -150,3 +150,19 @@ possible even before the background fetch resolves) rather than a
 systematic data gap, but it wasn't chased further here — flagged as a
 follow-up worth its own issue, not fixed in this one. The committed
 `results.md` reflects the rerun against a cleared cache.
+
+## The query corpus (accuracy + cold latency)
+
+`query_corpus.py` is 137 real user questions across every tool and 40+
+cities, each with a *correctness* check — name plus coordinates within a
+km tolerance — because a timing-only bench scores a fast wrong answer as
+a win (measured: "Casablanca" → Chile in 0.2s). `run_query_corpus.py`
+runs them cold (fresh process and empty cache per query, sequential,
+watchdog inside the worker); the weekly Query Corpus workflow gates on
+correctness only, since a hosted runner's bandwidth is not the
+residential connection the published numbers describe.
+
+```bash
+uv run python benchmarks/run_query_corpus.py --tool geocode   # one family
+uv run python benchmarks/run_query_corpus.py --fail-on wrong  # CI's gate
+```

@@ -80,6 +80,19 @@ in the repo, and there is no 2FA prompt for CI.
 If `verify` fails on a tag mismatch, don't hand-edit: run **Prepare Release**
 for the right version, merge, then delete and re-create the tag.
 
+## Regenerating the banner
+
+`site/og-image.png` / `site/og-image-dark.png` are **generated** — never
+hand-edit them. After changing the wording, palette or byline:
+
+```bash
+uv run --group browser python scripts/build_og_image.py
+```
+
+The npm README embeds the banner by release tag, so a banner change only
+reaches npmjs.com with the next published version (same rule as the README
+itself).
+
 ## Verify
 - `uvx placeroot` resolves and starts the server.
 - pypi.org/project/placeroot shows the new version, MIT license, and links.
