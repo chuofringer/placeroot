@@ -415,6 +415,12 @@ DIVISION_OVERFETCH = 50  # rows pulled per theme before Python-side ranking trim
 # geocode() needs it before that constant's #22 section further down.
 _PLACES_FALLBACK_RADIUS_M = 30_000
 
+# Longest query (in words) whose every leading word _fallback_anchor will try
+# as an anchor of its own. Each try is one local-table lookup, and a query
+# long enough to exceed this is prose rather than a "place name + city"
+# phrase, where the trailing-suffix reading is the only one worth paying for.
+_MAX_ANCHOR_TOKENS = 6
+
 # Subdirectory (under cache.cache_dir()/<release>/) for the #43 materialized
 # divisions name table — kept distinct from cache.py's own places/<theme>
 # tile layout so the two never collide on a filename, even though they
@@ -1895,32 +1901,67 @@ def _fallback_anchor(
         top = divisions[0]
         return top["lat"], top["lon"], search_query
     tokens = search_query.strip().split()
-    for n in (2, 1):
-        if len(tokens) <= n:
-            continue
-        candidate = " ".join(tokens[-n:])
-        # alt_table is the load-bearing part of this lookup: the trailing
-        # token is a *city name as the user writes it*, and for many big
-        # cities that is an alternate spelling — Japan's Tokyo is primarily
-        # 東京都, so a primary-names-only lookup for "Tokyo" does not even
-        # contain the row every user means, and the measured failure was
-        # "Shibuya Crossing Tokyo" anchoring on a small Papua New Guinea
-        # division named Tokyo (the only primary-name match), aiming the
-        # bounded places search at the wrong hemisphere. Ranking itself is
-        # _rank_key, which orders by each row's own population first; the
-        # region_population map (passed down from geocode's main path
-        # rather than re-scanned here) only breaks region-level ties.
+    pop = region_population or {}
+
+    # Splits to try, in precedence order. First the trailing one/two words —
+    # the "PLACE NAME + CITY" shape this heuristic was built for. Then, only
+    # against a local divisions table (where a lookup is a local parquet read
+    # rather than a remote scan we must not multiply), each *leading* word on
+    # its own.
+    #
+    # #268: "Stanford Shopping Center" has no city suffix at all. Its head is
+    # the location word and its tail is part of the mall's own name — and
+    # "Center" matches Center, Pennsylvania, which aimed a Palo Alto query at
+    # Pittsburgh and answered nothing after 61s. Generic tails (Center, Park,
+    # Plaza, Village, Springs) are common division names *and* common
+    # place-name endings, so trailing-first must not mean trailing-only.
+    # Leading candidates are gated to real words so a stopword head ("the
+    # Met") can never become an anchor of its own.
+    splits = [
+        (" ".join(tokens[-n:]), " ".join(tokens[:-n]).strip())
+        for n in (2, 1)
+        if len(tokens) > n
+    ]
+    if local_table is not None and len(tokens) <= _MAX_ANCHOR_TOKENS:
+        for i, token in enumerate(tokens[:-1]):
+            if len(token) >= 3 and not _nothing_but_stopwords(token):
+                splits.append((token, " ".join(tokens[:i] + tokens[i + 1:]).strip()))
+
+    # alt_table is the load-bearing part of these lookups: the location token
+    # is a *city name as the user writes it*, and for many big cities that is
+    # an alternate spelling — Japan's Tokyo is primarily 東京都, so a
+    # primary-names-only lookup for "Tokyo" does not even contain the row
+    # every user means, and the measured failure was "Shibuya Crossing Tokyo"
+    # anchoring on a small Papua New Guinea division named Tokyo (the only
+    # primary-name match), aiming the bounded places search at the wrong
+    # hemisphere. Ranking within one candidate's rows is _rank_key, which
+    # orders by each row's own population first; the region_population map
+    # (passed down from geocode's main path rather than re-scanned here) only
+    # breaks region-level ties.
+    best_key = best_row = best_base = None
+    for precedence, (candidate, base) in enumerate(splits):
         rows = _query_divisions(candidate, region_code, local_table, alt_table=alt_table)
         if not rows:
             continue
-        best = min(rows, key=lambda r: _rank_key(r, candidate, region_population or {}))
-        base = " ".join(tokens[:-n]).strip()
-        name_query = None if _nothing_but_stopwords(base) else base
-        return best["lat"], best["lon"], name_query
-    return None
+        row = min(rows, key=lambda r: _rank_key(r, candidate, pop))
+        # Across splits, the anchor to trust is the one whose division is the
+        # more prominent place: the query's real location word names somewhere
+        # people have heard of, while a coincidental match on a name fragment
+        # is typically a hamlet that happens to share the word. Ties keep
+        # split order, so the trailing-suffix reading still wins outright
+        # whenever nothing outranks it.
+        key = (-(row.get("population") or 0), precedence)
+        if best_key is None or key < best_key:
+            best_key, best_row, best_base = key, row, base
+    if best_row is None:
+        return None
+    name_query = None if _nothing_but_stopwords(best_base) else best_base
+    return best_row["lat"], best_row["lon"], name_query
 
 
-def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None) -> list[dict]:
+def _query_places_fallback(
+    query: str, anchor: tuple[float, float] | None = None, also: str | None = None
+) -> list[dict]:
     """Supplement divisions with named places when divisions alone don't fill limit.
 
     #83: an unconstrained ILIKE scan over the places theme — Overture's
@@ -1949,8 +1990,23 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
     cols = overture.probe_schema(glob)
     if cols is not None and "names" not in cols:
         return []
-    filters = ["names.primary ILIKE $pattern ESCAPE '\\'"]
-    params: dict = {"pattern": f"%{overture._like_escape(query)}%"}
+    # `also` (#268) is the *whole* user query, OR'd alongside the residual
+    # `query` the anchor split left behind. When the location word is part of
+    # the place's own name — "Stanford Shopping Center", where anchoring on
+    # Stanford leaves the residual "Shopping Center" — the residual alone
+    # matches every mall in the metro and ranks one of them first. Matching
+    # both patterns costs nothing (same scan, same box) and lets the caller
+    # rank a whole-query hit above a residual-only one.
+    if also and also != query:
+        filters = ["(names.primary ILIKE $pattern ESCAPE '\\'"
+                   " OR names.primary ILIKE $pattern_full ESCAPE '\\')"]
+        params: dict = {
+            "pattern": f"%{overture._like_escape(query)}%",
+            "pattern_full": f"%{overture._like_escape(also)}%",
+        }
+    else:
+        filters = ["names.primary ILIKE $pattern ESCAPE '\\'"]
+        params = {"pattern": f"%{overture._like_escape(query)}%"}
     anchor_bbox = None
     if anchor is not None:
         lat, lon = anchor
@@ -2679,10 +2735,18 @@ def geocode_detailed(
             note = _UNANCHORED_NAME_SEARCH_NOTE
         else:
             seen_names = {(c["name"].lower()) for c in candidates}
-            places = _query_places_fallback(name_query, anchor=anchor)
+            places = _query_places_fallback(name_query, anchor=anchor, also=search_query)
             places = [p for p in places if p["name"].lower() not in seen_names]
+            # Rank by the better of the two readings of the query: a row
+            # named for the whole query beats one that merely contains the
+            # residual the anchor split left (#268).
             places.sort(
-                key=lambda r: (-_match_tier(r["name"], name_query), -r["_confidence"], r["id"])
+                key=lambda r: (
+                    -max(_match_tier(r["name"], name_query),
+                         _match_tier(r["name"], search_query)),
+                    -r["_confidence"],
+                    r["id"],
+                )
             )
             candidates = candidates + places
 
