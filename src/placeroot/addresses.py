@@ -83,7 +83,7 @@ from typing import NamedTuple
 
 import duckdb
 
-from placeroot import cache, db, geo, overture
+from placeroot import cache, db, geo, manifest, overture
 
 logger = logging.getLogger(__name__)
 
@@ -367,10 +367,18 @@ def _country_by_containment(lat: float, lon: float) -> Country:
         if "bbox" not in missing
         else ""
     )
+    # Bundled-manifest file pruning: a point touches a handful of the
+    # theme's files, and the footer pass over the rest is pure waste --
+    # address_at at a London coordinate spent 13.1s here only to report that
+    # Overture has no address coverage for the country.
+    src = (
+        manifest.pruned_source_sql(glob, geo.bbox_around(lat, lon, 100.0))
+        or f"read_parquet('{glob}', hive_partitioning=1)"
+    )
     sql = f"""
         SELECT country, {name_expr} AS name, {subtype_expr} AS subtype,
                ST_Area({geom}) AS area
-        FROM read_parquet('{glob}', hive_partitioning=1)
+        FROM {src}
         WHERE {bbox_prefilter}country IS NOT NULL
           AND ST_Contains({geom}, ST_Point($lon, $lat))
         LIMIT {_CONTAINMENT_ROW_LIMIT}
