@@ -6,6 +6,74 @@ semver as it applies to an MCP server: removing a tool or changing a
 response shape is breaking, adding a tool is minor, loosening a filter or
 fixing behavior is patch.
 
+## [0.9.4] — 2026-08-13
+
+### Added
+- Slow calls explain themselves: every scan is recorded with whether it
+  was *bounded* (a bbox or id to prune on), `PLACEROOT_TRACE=1` logs the
+  per-phase breakdown, and a response slower than `PLACEROOT_TRACE_SLOW_S`
+  (default 10s) carries it as `timing` — the agent that waited gets the
+  why with the answer. Offline invariant tests assert the shape of each
+  tool's data access (a located query never scans unbounded), catching the
+  bug *class* that latency sampling only ever caught one instance of.
+- `resolve_place` takes `city`: the agent states the location it already
+  knows instead of the server guessing it from map data alone. A hint
+  bounds the search and never becomes the answer. Unresolvable-for-want-
+  of-location replies carry `need: "location"` plus a `retry_with` sketch,
+  and the server instructions state the division of labour.
+
+### Fixed
+- A dropped middle word no longer loses the place: "BASIS Silicon Valley
+  Lower School" now finds BASIS *Independent* Silicon Valley Lower School
+  (every-token matching in the places scan; 26.7s + empty → 5.5s + the
+  right school). "school", "academy", "gym" and friends joined the
+  feature-noun list, killing a 15.2s divisions scan that could only come
+  back empty.
+- "san jose airport" no longer anchors in Henan, nor "palo alto caltrain"
+  in Leyte: leading word *pairs* are anchor candidates, name-prefix words
+  (san, los, santa, new…) are refused as standalone anchors, and matching
+  more of the query outranks a bigger population.
+
+## [0.9.3] — 2026-08-13
+
+### Added
+- Release selection is artifact-aware: a newer Overture release is
+  reported, not adopted, while the wheel's bundled artifacts (manifests,
+  geocode index, land-cover grid) still match a current release — past
+  `PLACEROOT_STALE_RELEASE_DAYS` freshness wins, loudly. `data_version`
+  reports `artifacts: matched | unmatched`. Without this, every
+  acceleration silently turned itself off on Overture's next monthly
+  drop.
+- The 137-query real-user-question corpus lives in `benchmarks/` with a
+  cold runner and a weekly workflow gated on *correctness* — it exists
+  because a per-tool timing matrix scored "Casablanca → Chile in 0.2s"
+  as the best result in the suite.
+- The banner is generated (`scripts/build_og_image.py`), wider (2.37:1),
+  edge-to-edge, with the Vibe Mapper byline.
+
+## [0.9.2] — 2026-08-13
+
+### Added
+- Every tool cold in **under 10 seconds** (was under 30): wheel-bundled
+  stage-0 geocode index (+alternate names), a 0.1° land-cover grid built
+  from Overture's own low-zoom cartography band, pin-first release
+  resolution, manifest pruning everywhere, parallel + speculative
+  `gers_lookup` enrichment, batched city-extent lookups.
+
+### Fixed
+- No `ORDER BY` on geometry-computed sort keys: a TopN whose key is
+  `ST_Area(geometry)` defeats parquet late materialization (18.5s vs
+  1.6s measured). Containment candidates rank client-side.
+- Alternate-name matches keep their tier: "Casablanca" resolves to
+  Morocco, not Chile; Cairo, Kyoto, Moscow, Vienna, Prague, Copenhagen
+  and Beijing all settle correctly.
+- Feature nouns ("Tower", "Center") can no longer anchor a query to the
+  wrong hemisphere; cities outrank namesake states; anchored results
+  break ties by distance ("Millennium Park Chicago" stopped answering
+  from a suburb 31 km away).
+- "221B Baker Street, London": 116.3s → 3.7s (one batched extent scan
+  instead of one per candidate London).
+
 ## [0.9.1] — 2026-08-11
 
 ### Fixed

@@ -194,6 +194,7 @@ operator is most likely to reach for:
 | `PLACEROOT_UPSTREAM_BASE` | Overture's public bucket | Point every theme at a mirror in the standard release layout ([docs/MIRROR.md](MIRROR.md)) |
 | `PLACEROOT_S3_REGION` / `PLACEROOT_S3_ENDPOINT` | `us-west-2` / AWS | Mirror plumbing: region, custom S3-compatible endpoint (credentials via `PLACEROOT_S3_ACCESS_KEY_ID`/`SECRET_ACCESS_KEY`) |
 | `PLACEROOT_RELEASE_TTL_HOURS` / `PLACEROOT_STALE_RELEASE_DAYS` | `6` / `60` | Release re-discovery cadence and the staleness warning threshold |
+| `PLACEROOT_TRACE` / `PLACEROOT_TRACE_SLOW_S` | off / `10` | `PLACEROOT_TRACE=1` logs each call's per-phase breakdown; any call slower than the threshold carries the same breakdown in its response as `timing`, so a slow answer explains itself (`0` disables the response field) |
 
 Cold-query behavior worth knowing: the first query over a new area fetches
 that area's tiles (narrated via MCP progress when the client sends a
