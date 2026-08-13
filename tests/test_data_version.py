@@ -38,6 +38,7 @@ def test_data_version_env_override(monkeypatch):
 
 def test_data_version_discovered(monkeypatch):
     monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
+    monkeypatch.setattr(release, "bundled_artifact_release", lambda: "2000-01-01.0")
     monkeypatch.setattr(release, "_discover", lambda: "2030-05-20.2")
     release.reset_cache()
     release.resolve_release()  # pin-first; kicks the background discovery

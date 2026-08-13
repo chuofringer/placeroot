@@ -200,11 +200,70 @@ def _warn_if_stale_once(info: dict) -> None:
     _warn_if_stale(info)
 
 
+def bundled_artifact_release() -> str:
+    """The release this wheel's bundled artifacts were built for.
+
+    Read from the shipped manifests rather than assumed equal to
+    PINNED_RELEASE, so a half-done pin bump (pin moved, artifacts not
+    regenerated) is visible instead of silently claiming acceleration the
+    wheel cannot deliver. Falls back to the pin when the directory can't be
+    read at all — the pin is what the artifacts target by construction.
+    """
+    try:
+        from importlib import resources
+
+        root = resources.files("placeroot") / "data" / "manifests"
+        names = sorted(p.name for p in root.iterdir() if _RELEASE_RE.match(p.name))
+        if names:
+            return names[-1]
+    except (OSError, TypeError, ModuleNotFoundError):
+        pass
+    return PINNED_RELEASE
+
+
 def _resolved(discovered: str | None) -> dict:
-    """A resolution dict for a discovery result: the release, or the pin."""
-    if discovered:
-        return {"release": discovered, "source": "discovered"}
-    return {"release": PINNED_RELEASE, "source": "pinned-fallback"}
+    """A resolution dict for a discovery result: the release, or the pin.
+
+    #269: discovering a *newer* release than the wheel's artifacts is not a
+    reason to adopt it immediately. Every acceleration this package ships —
+    file manifests, the stage-0 geocode index, the coarse land-cover grid —
+    is keyed by release and simply misses on any other one, taking cold
+    queries from seconds back to the tens of seconds they used to cost. The
+    miss is fail-safe (a mismatched artifact is never read, so answers stay
+    correct) but it is silent, and it would land on every user roughly
+    monthly, days after a release they did not ask for.
+
+    So the artifact release wins while it is still current, and loses once
+    it is stale (PLACEROOT_STALE_RELEASE_DAYS, default 60 — two missed
+    Overture releases). That bounds the trade in both directions: nobody
+    silently gets slow because upstream shipped yesterday, and nobody
+    silently sits on a half-year-old vintage because they never upgraded
+    the package. Past the bound, freshness wins and the log says why.
+    """
+    if not discovered:
+        return {"release": PINNED_RELEASE, "source": "pinned-fallback"}
+    artifacts = bundled_artifact_release()
+    if discovered != artifacts and not is_stale(artifacts):
+        logger.info(
+            "Overture %s is available; staying on %s, which this build's "
+            "bundled artifacts target (upgrade placeroot to move up, or set "
+            "PLACEROOT_OVERTURE_RELEASE=%s to take the newer data now and "
+            "give up the bundled acceleration).",
+            discovered, artifacts, discovered,
+        )
+        return {
+            "release": artifacts,
+            "source": "artifact-pinned",
+            "newer_release": discovered,
+        }
+    if discovered != artifacts:
+        logger.warning(
+            "Adopting Overture %s: this build's bundled artifacts target %s, "
+            "which is now %s days old. Cold queries will be slower until "
+            "placeroot is upgraded to a build whose artifacts match.",
+            discovered, artifacts, age_days(artifacts),
+        )
+    return {"release": discovered, "source": "discovered"}
 
 
 def resolve_release_info() -> dict:

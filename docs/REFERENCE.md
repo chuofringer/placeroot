@@ -200,3 +200,21 @@ that area's tiles (narrated via MCP progress when the client sends a
 `progressToken`); repeat queries answer from the local cache in
 milliseconds. Wheel-bundled per-release manifests keep even the first
 query's scan to the few files its bounding box intersects.
+
+**Which Overture release you get.** Three bundled artifact sets — the file
+manifests, the stage-0 geocode index and the coarse land-cover grid — are
+keyed by release, and they are what makes a cold query cost seconds instead
+of tens of seconds. They apply to exactly one release and miss (harmlessly,
+never wrongly) on any other. So when discovery finds a release newer than
+the one this build ships artifacts for, PlaceRoot **reports it rather than
+adopting it**, and keeps answering from the release it can answer fast on.
+Once that release passes `PLACEROOT_STALE_RELEASE_DAYS` (default 60, two
+missed Overture releases) freshness wins instead: the newer release is
+adopted, the logs say why, and cold queries are slower until the package is
+upgraded to a build whose artifacts match.
+
+`data_version` reports this as `artifacts: matched | unmatched`, alongside
+`newer_release` when one is being deliberately passed over. To take the
+newest data immediately and give up the bundled acceleration, set
+`PLACEROOT_OVERTURE_RELEASE` to that release — an explicit override always
+wins.

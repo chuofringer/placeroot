@@ -113,11 +113,24 @@ def test_data_version_resource_matches_the_tool_exactly():
         ("2099-01-01.0", None, "2099-01-01.0", "env-override"),
         (None, "2030-05-20.2", "2030-05-20.2", "discovered"),
         (None, None, release.PINNED_RELEASE, "pinned-fallback"),
+        # #269: a newer release discovered while the bundled artifacts are
+        # still current is reported, not adopted.
+        (None, "2030-05-20.2", release.PINNED_RELEASE, "artifact-pinned"),
     ],
 )
 def test_data_version_resource_tracks_every_resolution_source(
     monkeypatch, env, discovered, expected_release, expected_source
 ):
+    if expected_source != "artifact-pinned":
+        # Every other case is about the resolution source itself; keep the
+        # artifact rule out of the way by making its release stale.
+        monkeypatch.setattr(
+            release, "bundled_artifact_release", lambda: "2000-01-01.0"
+        )
+    else:
+        monkeypatch.setattr(
+            release, "bundled_artifact_release", lambda: release.PINNED_RELEASE
+        )
     if env:
         monkeypatch.setenv("PLACEROOT_OVERTURE_RELEASE", env)
     monkeypatch.setattr(release, "_discover", lambda: discovered)

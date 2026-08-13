@@ -90,6 +90,23 @@ def main() -> int:
             f"`{newest}`. Bump the pin (src/placeroot/release.py), regenerate "
             f"fixtures, and sweep docs for the old string."
         )
+        # #269: the pin is not just a fallback string any more — three
+        # bundled artifact sets are keyed by it, and each one simply misses
+        # on any other release. Until they are regenerated and shipped, a
+        # deployment that rolls forward loses every acceleration this
+        # package has (cold queries go from seconds to tens of seconds), so
+        # the bump is a multi-step chore and the report has to say so.
+        findings.append(
+            "  Regenerate **all three** bundled artifact sets for the new "
+            "release and commit them in the same PR, or the release rollover "
+            "silently costs every user the cold-start work:\n"
+            "    - `uv run python scripts/build_release_manifest.py`\n"
+            "    - `uv run python scripts/build_geocode_index.py`\n"
+            "    - `uv run python scripts/build_land_cover_grid.py`\n"
+            "  Until then `data_version` reports `artifacts: unmatched`, and "
+            "deployments stay on the artifact release until it goes stale "
+            "(PLACEROOT_STALE_RELEASE_DAYS)."
+        )
 
     target = newest or release.PINNED_RELEASE
     # The runtime's own connection setup (db._configure): anonymous credentials

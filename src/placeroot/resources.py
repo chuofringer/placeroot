@@ -88,6 +88,28 @@ def data_version_payload() -> dict:
             " This release is older than the staleness threshold — "
             "discovery may be failing in this deployment."
         )
+    # #269: whether the wheel's bundled artifacts (file manifests, the
+    # stage-0 geocode index, the coarse land-cover grid) apply to the
+    # release actually being queried. They are keyed by release and miss
+    # on any other one — harmlessly, but a miss is the difference between
+    # a cold query costing seconds and costing tens of seconds, and an
+    # operator watching queries get slower deserves to see the reason
+    # without reading source.
+    artifacts = release.bundled_artifact_release()
+    payload["artifacts"] = "matched" if artifacts == release_str else "unmatched"
+    if artifacts != release_str:
+        payload["artifacts_release"] = artifacts
+        payload["note"] += (
+            f" Bundled acceleration targets {artifacts} and does not apply to "
+            "this release, so cold queries are slower; upgrading placeroot "
+            "restores it."
+        )
+    if info.get("newer_release"):
+        payload["newer_release"] = info["newer_release"]
+        payload["note"] += (
+            f" Overture {info['newer_release']} exists upstream; this build "
+            "stays on its artifact release until that one goes stale."
+        )
     layer = recreation_payload()
     if layer is not None:
         payload["recreation_layer"] = layer
