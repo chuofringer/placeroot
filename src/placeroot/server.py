@@ -18,6 +18,7 @@ import logging
 import math
 import os
 import threading
+import time
 from collections.abc import Callable
 
 from mcp.server.caching import CacheableMethod, CacheHint
@@ -47,6 +48,7 @@ from placeroot import (
     routing,
     simplify,
     tool_profiles,
+    trace,
     water,
 )
 from placeroot import geocode as geocoding
@@ -1976,6 +1978,51 @@ async def _progress_middleware(ctx, call_next):
         progress.reset(reset_token)
 
 
+async def _trace_middleware(ctx, call_next):
+    """Record where a tool call spent its time, and let a slow one say so.
+
+    Every latency investigation here has started with a user reporting "that
+    took a minute" and ended with a number the server already knew while it
+    was running — which phase, which scan, whether it was bounded. This
+    middleware records that for every tools/call (trace.py), logs it under
+    PLACEROOT_TRACE=1, and, when the call took longer than
+    PLACEROOT_TRACE_SLOW_S, attaches the breakdown to the response as
+    `timing` so the agent that waited gets the explanation with the answer.
+
+    Attached only to dict responses and only when slow: a fast call's
+    payload is unchanged, byte for byte, and a tool returning a list or a
+    scalar is left alone rather than being reshaped to carry telemetry.
+    """
+    if ctx.method != "tools/call":
+        return await call_next(ctx)
+
+    token = trace.start()
+    started = time.perf_counter()
+    try:
+        result = await call_next(ctx)
+    finally:
+        elapsed = time.perf_counter() - started
+        try:
+            trace.log_summary(getattr(ctx, "tool_name", None) or "tools/call", elapsed)
+        except Exception:  # noqa: BLE001 - telemetry must not fail the call
+            logger.debug("trace summary failed", exc_info=True)
+
+    threshold = trace.slow_threshold_s()
+    if threshold and elapsed >= threshold and isinstance(result, dict) and "timing" not in result:
+        rows = trace.summary()
+        if rows:
+            result["timing"] = {
+                "total_s": round(elapsed, 1),
+                "phases": rows[:8],
+                "note": (
+                    "This call was slow enough to explain itself. Scans marked "
+                    "bounded:false read everything they touch."
+                ),
+            }
+    trace.reset(token)
+    return result
+
+
 def build_server(spec=_UNSET) -> MCPServer:
     """An MCPServer with the PLACEROOT_TOOLS-selected subset registered.
 
@@ -1993,7 +2040,7 @@ def build_server(spec=_UNSET) -> MCPServer:
     # tests/test_caching.py).
     server = MCPServer(
         "placeroot", instructions=BASE_INSTRUCTIONS, cache_hints=CACHE_HINTS,
-        middleware=[_progress_middleware],
+        middleware=[_progress_middleware, _trace_middleware],
     )
     # One registry for the loop: `progressive` selects meta-tool names, every
     # other selection selects only real ones, so the two never mix in a

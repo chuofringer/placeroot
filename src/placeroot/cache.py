@@ -83,7 +83,7 @@ import threading
 import time
 from pathlib import Path
 
-from placeroot import db, manifest, progress
+from placeroot import db, manifest, progress, trace
 
 logger = logging.getLogger(__name__)
 
@@ -429,7 +429,10 @@ def ensure_tile(
               AND bbox.ymax >= {lat_min} AND bbox.ymin < {lat_max}
         ) TO '{tmp_path}' (FORMAT PARQUET)
     """
-    con.execute(sql)
+    # Bounded: a tile COPY is a bbox query by definition, manifest-pruned
+    # to the files that intersect it.
+    with trace.scan("tile copy", bounded=True, source=source, theme=theme):
+        con.execute(sql)
     tmp_path.replace(path)
     evict_if_needed()
     return path
