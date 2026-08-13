@@ -276,6 +276,9 @@ def test_grid_answers_cold_land_cover_with_an_approximation_note(tmp_path, monke
     monkeypatch.setattr(land_use, "_bundled_grid_path", lambda: grid)
     monkeypatch.setattr(land_use, "_land_cover_tiles_warm", lambda lat, lon: False)
     monkeypatch.setattr(ov, "dataset_is_pinned", lambda theme, type_=None: False)
+    # The suite runs cache-off; the grid is deliberately gated on caching
+    # (no tiles to converge to otherwise), so stub it on here.
+    monkeypatch.setattr(land_use.cache, "enabled", lambda: True)
     # The grid path schedules real land_cover tiles for convergence; that
     # side effect is live-network and not under test here. land_use's own
     # classify still needs the real source.
@@ -300,6 +303,9 @@ def test_grid_absent_cell_means_no_land_cover_not_a_fallback_scan(tmp_path, monk
     monkeypatch.setattr(land_use, "_bundled_grid_path", lambda: grid)
     monkeypatch.setattr(land_use, "_land_cover_tiles_warm", lambda lat, lon: False)
     monkeypatch.setattr(ov, "dataset_is_pinned", lambda theme, type_=None: False)
+    # The suite runs cache-off; the grid is deliberately gated on caching
+    # (no tiles to converge to otherwise), so stub it on here.
+    monkeypatch.setattr(land_use.cache, "enabled", lambda: True)
 
     result = land_use.land_use_at(CENTER_LAT, CENTER_LON)
     assert result["land_cover"] is None

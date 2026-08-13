@@ -339,7 +339,11 @@ def land_use_at(lat: float, lon: float) -> dict:
     from concurrent.futures import ThreadPoolExecutor
 
     grid_cover = None
-    if not _land_cover_tiles_warm(lat, lon):
+    # cache.enabled() gates the grid, not just the warm check: with caching
+    # off there are no tiles to converge to, so the grid would answer
+    # approximately *forever* while its note promised exact polygons on
+    # repeat — a cache-off operator keeps the old exact (slow) path instead.
+    if cache.enabled() and not _land_cover_tiles_warm(lat, lon):
         # Cold area: the exact land_cover path is bandwidth-bound
         # (continent-scale multipolygons), so the bundled coarse grid
         # answers instantly, flagged approximate below.
