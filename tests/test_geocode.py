@@ -2025,3 +2025,61 @@ def test_a_school_query_runs_no_upstream_divisions_scan(monkeypatch):
     assert geocode._names_a_feature("BASIS Silicon Valley Lower School Sunnyvale")
     for word in ("school", "academy", "clinic", "campus", "institute"):
         assert geocode._names_a_feature(f"Some {word.title()} Somewhere"), word
+
+
+# --- #272: ambiguous city names and comparably-prominent longer matches -----
+
+
+def test_a_longer_match_yields_to_a_vastly_more_prominent_city(monkeypatch):
+    """"notre dame paris": the two-word "Notre Dame" (an Indiana CDP) must
+    not outrank Paris on match length alone — a 2-token coincidence at 8k
+    people is not stronger evidence than a world city at 2.1M."""
+    _stub_divisions(monkeypatch, {
+        "notre dame": [{"name": "Notre Dame", "population": 8_000,
+                        "lat": 41.70, "lon": -86.24, "subtype": "locality"}],
+        "paris": [{"name": "Paris", "population": 2_100_000,
+                   "lat": 48.85, "lon": 2.35, "subtype": "locality"}],
+    })
+
+    anchor = geocode._fallback_anchor("notre dame paris", [], None, "/divisions.parquet")
+
+    assert anchor == (48.85, 2.35, "notre dame")
+
+
+def test_a_longer_match_beats_a_comparably_prominent_shorter_one(monkeypatch):
+    """The other side of the ratio: "palo alto caltrain" keeps Palo Alto over
+    Palo (Leyte) even though Leyte's Palo has slightly more people."""
+    _stub_divisions(monkeypatch, {
+        "palo alto": [{"name": "Palo Alto", "population": 68_000,
+                       "lat": 37.44, "lon": -122.16, "subtype": "locality"}],
+        "palo": [{"name": "Palo", "population": 70_000,
+                  "lat": 11.16, "lon": 124.99, "subtype": "locality"}],
+    })
+
+    anchor = geocode._fallback_anchor("palo alto caltrain", [], None, "/divisions.parquet")
+
+    assert anchor[:2] == (37.44, -122.16)
+
+
+def test_an_ambiguous_city_offers_its_namesakes_as_alternates(monkeypatch):
+    """"cambridge" is the UK's, Ontario's and Massachusetts's; the retry
+    path can only try cities that exist in the candidate list at all."""
+    _stub_divisions(monkeypatch, {
+        "cambridge": [
+            {"name": "Cambridge", "population": 145_000, "lat": 52.21, "lon": 0.12,
+             "country": "GB", "region": "GB-CAM", "subtype": "locality"},
+            {"name": "Cambridge", "population": 140_000, "lat": 43.36, "lon": -80.31,
+             "country": "CA", "region": "CA-ON", "subtype": "locality"},
+            {"name": "Cambridge", "population": 118_000, "lat": 42.37, "lon": -71.11,
+             "country": "US", "region": "US-MA", "subtype": "locality"},
+        ],
+    })
+
+    options = geocode._fallback_anchor_candidates(
+        "harvard square cambridge", [], None, "/divisions.parquet"
+    )
+
+    coords = [(round(o[0], 2), round(o[1], 2)) for o in options]
+    assert (52.21, 0.12) in coords
+    assert (43.36, -80.31) in coords
+    assert (42.37, -71.11) in coords, "the third namesake must be reachable"

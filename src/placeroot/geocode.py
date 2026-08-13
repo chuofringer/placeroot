@@ -399,7 +399,7 @@ from pathlib import Path
 
 import duckdb
 
-from placeroot import addresses, cache, geo, overture, progress, release, trace
+from placeroot import addresses, cache, geo, manifest, overture, progress, release, trace
 from placeroot.errors import AmbiguousArea
 
 logger = logging.getLogger(__name__)
@@ -456,7 +456,7 @@ _ANCHOR_SPECIFIC_SHARE = 0.1
 # else to go on — the rule is about not preferring a feature noun over a
 # genuine place name, not about banning the string.
 _GENERIC_PLACE_WORDS = frozenset("""
-    academy airport aquarium arena avenue basilica bay beach boulevard bridge
+    academy airport aquarium arena avenue basilica bay beach boulevard bridge dam falls
     building campus castle cathedral centre center chapel church cinema clinic
     club college crossing dock field fountain garden gardens gate gym harbor
     harbour hospital hotel institute island junction library mall market
@@ -1911,16 +1911,17 @@ def _fuzzy_correction_note(rows: list[dict], query: str) -> str:
     )
 
 
-def _fallback_anchor(
+def _fallback_anchor_candidates(
     search_query: str,
     divisions: list[dict],
     region_code: str | None,
     local_table: str | None,
     alt_table: str | None = None,
     region_population: dict[str, int] | None = None,
-) -> tuple[float, float, str | None] | None:
-    """(lat, lon, name_query) to bound/aim the places fallback (#83), or None
-    if no location context can be derived from the query at all — the
+) -> list[tuple[float, float, str | None]]:
+    """Ranked (lat, lon, name_query) candidates to bound/aim the places
+    fallback (#83) — best reading first, empty when no location context can
+    be derived from the query at all. In the empty case the
     caller (geocode()) then runs the fallback unbounded, same as before #83
     (row-capped via DIVISION_OVERFETCH's LIMIT, but not bbox-pruned) rather
     than dropping a genuine name-only query (e.g. "Blue Bottle Roastery",
@@ -1967,7 +1968,7 @@ def _fallback_anchor(
     """
     if divisions:
         top = divisions[0]
-        return top["lat"], top["lon"], search_query
+        return [(top["lat"], top["lon"], search_query)]
     tokens = search_query.strip().split()
     pop = region_population or {}
 
@@ -2017,7 +2018,7 @@ def _fallback_anchor(
     # orders by each row's own population first; the region_population map
     # (passed down from geocode's main path rather than re-scanned here) only
     # breaks region-level ties.
-    best_key = best_row = best_base = None
+    contenders: list[dict] = []
     for precedence, (candidate, base, is_leading) in enumerate(splits):
         if base and candidate.strip().lower().strip(".,") in _GENERIC_PLACE_WORDS:
             # A feature noun, with the rest of the query still unexplained:
@@ -2036,37 +2037,108 @@ def _fallback_anchor(
         if not rows:
             continue
         row = _pick_anchor_row(rows, candidate, pop)
-        # Across splits, prefer a city to a state or country first, and only
-        # then the more prominent place: the query's real location word names
-        # somewhere people have heard of, while a coincidental match on a name
-        # fragment is typically a hamlet that happens to share the word. Ties
-        # keep split order, so the trailing-suffix reading still wins outright
-        # whenever nothing outranks it.
-        #
-        # Specificity has to lead, not population: "Times Square New York"
-        # offers both "New York" (the city, 8.8M) and the fragment "York"
-        # (which substring-matches New York *State*, 20.2M), and ranking on
-        # population alone picked the state — anchoring 250 km up the Hudson
-        # from the square, and answering nothing.
-        broad = _SUBTYPE_WEIGHT.get(row.get("subtype"), 2) <= 1
-        # More of the query matched is stronger evidence than a bigger
-        # population: "palo alto caltrain station" offers both "Palo Alto"
-        # and the bare "Palo", and Palo in Leyte has enough people to
-        # outvote Palo Alto — anchoring a Caltrain query in the Philippines.
-        # Two words of a name being right is not a coincidence; one word
-        # often is.
-        key = (
-            1 if broad else 0,
-            -len(candidate.split()),
-            -(row.get("population") or 0),
-            precedence,
+        contenders.append({
+            "row": row, "candidate": candidate, "base": base,
+            "precedence": precedence,
+            "broad": _SUBTYPE_WEIGHT.get(row.get("subtype"), 2) <= 1,
+        })
+        # The same word's next two cities, as lower-precedence contenders:
+        # ambiguous city names lose coin flips — "cambridge" is the UK's,
+        # Ontario's and Massachusetts's, and the answer to "harvard square
+        # cambridge" sits in the THIRD of those — and the retry-on-empty
+        # path can only try cities that exist in this list at all. Distinct
+        # region each: a city's land/water polygon variants are not an
+        # alternate.
+        seen_regions = {(row.get("country"), row.get("region"))}
+        alt_rank = 0
+        for _ in range(2):
+            alt_rows = [
+                r for r in rows
+                if (r.get("country"), r.get("region")) not in seen_regions
+            ]
+            if not alt_rows:
+                break
+            alt = _pick_anchor_row(alt_rows, candidate, pop)
+            seen_regions.add((alt.get("country"), alt.get("region")))
+            alt_rank += 1
+            contenders.append({
+                "row": alt, "candidate": candidate, "base": base,
+                "precedence": precedence + 100 * alt_rank,
+                "broad": _SUBTYPE_WEIGHT.get(alt.get("subtype"), 2) <= 1,
+            })
+    ranked = _rank_anchor_contenders(contenders)
+    if not ranked:
+        return []
+    out = []
+    for c in ranked:
+        name_query = None if _nothing_but_stopwords(c["base"]) else c["base"]
+        out.append((c["row"]["lat"], c["row"]["lon"], name_query))
+    return out
+
+
+# When two splits disagree on which word is the location, more of the query
+# matching is stronger evidence — but only between comparably prominent
+# places. "palo alto caltrain" offers "Palo Alto" (68k) and "Palo" (Leyte,
+# ~70k): comparable, so the longer match wins. "notre dame paris" offers
+# "Notre Dame" (an Indiana CDP, ~8k) and "Paris" (2.1M): the shorter
+# candidate is ~260x more prominent, and a two-word coincidence does not
+# outrank a world city. The ratio is the boundary between those two cases —
+# generous, because the longer reading is usually right when it exists at
+# all.
+_ANCHOR_LONGER_MATCH_POP_RATIO = 50
+
+
+def _anchor_contender_better(challenger: dict, incumbent: dict) -> bool:
+    """Whether `challenger` should anchor instead of `incumbent`.
+
+    Specificity first (a city beats the state sharing its name — "Times
+    Square New York" must not anchor near Utica), then the longer-match rule
+    bounded by prominence, then population, then split order.
+    """
+    if challenger["broad"] != incumbent["broad"]:
+        return not challenger["broad"]
+    ch_len = len(challenger["candidate"].split())
+    in_len = len(incumbent["candidate"].split())
+    ch_pop = challenger["row"].get("population") or 0
+    in_pop = incumbent["row"].get("population") or 0
+    if ch_len != in_len:
+        longer, shorter = (
+            (challenger, incumbent) if ch_len > in_len else (incumbent, challenger)
         )
-        if best_key is None or key < best_key:
-            best_key, best_row, best_base = key, row, base
-    if best_row is None:
-        return None
-    name_query = None if _nothing_but_stopwords(best_base) else best_base
-    return best_row["lat"], best_row["lon"], name_query
+        longer_pop = longer["row"].get("population") or 0
+        shorter_pop = shorter["row"].get("population") or 0
+        longer_wins = shorter_pop <= max(longer_pop, 1) * _ANCHOR_LONGER_MATCH_POP_RATIO
+        return (challenger is longer) == longer_wins
+    if ch_pop != in_pop:
+        return ch_pop > in_pop
+    return challenger["precedence"] < incumbent["precedence"]
+
+
+def _rank_anchor_contenders(contenders: list[dict]) -> list[dict]:
+    """Best anchor first, by repeated selection with the pairwise rule —
+    the longer-vs-prominence comparison is not a total order, so this is a
+    tournament rather than a sort key. n is the split count (single digits).
+    """
+    remaining = list(contenders)
+    ranked = []
+    while remaining:
+        best = remaining[0]
+        for c in remaining[1:]:
+            if _anchor_contender_better(c, best):
+                best = c
+        ranked.append(best)
+        remaining.remove(best)
+    return ranked
+
+
+def _fallback_anchor(*args, **kwargs):
+    """The best anchor candidate, or None — the shape every existing caller
+    takes. _fallback_anchor_candidates carries the full ranked list for the
+    one caller that retries on an empty anchored result (#272: "harvard
+    square cambridge" anchored on Cambridge, UK, found nothing, and gave up
+    with Cambridge, Massachusetts sitting in second place)."""
+    candidates = _fallback_anchor_candidates(*args, **kwargs)
+    return candidates[0] if candidates else None
 
 
 def _names_a_feature(query: str) -> bool:
@@ -2110,6 +2182,100 @@ def _pick_anchor_row(rows: list[dict], query: str, region_population: dict[str, 
     if (specific.get("population") or 0) >= _ANCHOR_SPECIFIC_SHARE * (broad.get("population") or 0):
         return specific
     return broad
+
+
+def _query_places_multi_anchor(
+    query: str, anchors: list[tuple[float, float]], also: str | None = None
+) -> tuple[list[dict], tuple[float, float] | None]:
+    """The places fallback across several candidate cities in ONE statement.
+
+    #272: an ambiguous city name's candidates span continents — "cambridge"
+    is the UK's, Ontario's and Massachusetts's, and "harvard square
+    cambridge" anchored on the wrong two before running out of retries.
+
+    Shape matters more than it looks: the first draft OR-ed the per-city
+    (bbox AND distance) groups into one WHERE, and a disjunction of trig
+    predicates defeats parquet row-group pruning — the scan read three
+    places files nearly whole, 73.8s traced. UNION ALL branches keep each
+    city's predicate a simple prunable conjunction with its own
+    manifest-pruned file list, and DuckDB runs the branches in one go: the
+    cost of N small bounded scans sharing one statement, not one huge
+    unprunable one.
+
+    Returns (rows, winning_anchor) — the anchor nearest the top row, so the
+    caller can rank distances against the city that actually answered.
+    """
+    glob = overture.upstream_glob(theme="places", type_="place")
+    cols = overture.probe_schema(glob)
+    if cols is not None and "names" not in cols:
+        return [], None
+
+    name_filters = ["names.primary ILIKE $pattern ESCAPE '\\'"]
+    params: dict = {"pattern": f"%{overture._like_escape(query)}%"}
+    if also and also != query:
+        name_filters.append("names.primary ILIKE $pattern_full ESCAPE '\\'")
+        params["pattern_full"] = f"%{overture._like_escape(also)}%"
+    tokens = [t for t in _significant_tokens(query) if len(t) >= 3][:8]
+    if len(tokens) >= 2:
+        for i, token in enumerate(tokens):
+            params[f"tok{i}"] = f"%{overture._like_escape(token)}%"
+        name_filters.append(
+            "(" + " AND ".join(
+                f"names.primary ILIKE $tok{i} ESCAPE '\\'" for i in range(len(tokens))
+            ) + ")"
+        )
+    name_clause = "(" + " OR ".join(name_filters) + ")"
+    category_expr = "taxonomy.primary" if cols is not None and "taxonomy" in cols else "NULL"
+
+    branches = []
+    for n, (lat, lon) in enumerate(anchors[:4]):
+        bbox_f, dist_f, geo_params, bbox, _r = overture.area_geometry(
+            lat, lon, _PLACES_FALLBACK_RADIUS_M
+        )
+        # area_geometry's fragments use fixed param names; suffix them so N
+        # branches coexist in one statement.
+        for key, value in list(geo_params.items()):
+            bbox_f = bbox_f.replace(f"${key}", f"${key}_a{n}")
+            dist_f = dist_f.replace(f"${key}", f"${key}_a{n}")
+            params[f"{key}_a{n}"] = value
+        from_source = (
+            manifest.pruned_source_sql(glob, bbox)
+            or f"read_parquet('{glob}', hive_partitioning=1)"
+        )
+        branches.append(f"""
+            SELECT id, names.primary AS name, bbox.ymin AS lat, bbox.xmin AS lon,
+                   coalesce(confidence, 0) AS confidence,
+                   {category_expr} AS category
+            FROM {from_source}
+            WHERE {name_clause} AND {bbox_f} AND {dist_f}""")
+    sql = f"""
+        SELECT * FROM ({" UNION ALL ".join(branches)})
+        ORDER BY confidence DESC
+        LIMIT {DIVISION_OVERFETCH}
+    """
+    try:
+        with trace.scan(
+            "places name scan (multi-anchor)", bounded=True,
+            source=f"places/place x{len(branches)} cities", anchors=len(branches),
+        ), overture._conn_lock:
+            rows = overture.conn().execute(sql, params).fetchall()
+    except duckdb.Error as e:
+        raise overture.UpstreamUnavailable(str(e)) from e
+    result = [{
+        "id": r[0], "name": r[1], "subtype": "place",
+        "country": None, "region": None,
+        "lat": round(r[2], 6), "lon": round(r[3], 6),
+        "admin_context": [], "population": None,
+        "_confidence": r[4], "category": r[5],
+    } for r in rows]
+    if not result:
+        return [], None
+    best = max(result, key=lambda r: r["_confidence"])
+    winner = min(
+        anchors[:4],
+        key=lambda a: geo.haversine_m(a[0], a[1], best["lat"], best["lon"]),
+    )
+    return result, winner
 
 
 def _query_places_fallback(
@@ -2893,10 +3059,11 @@ def geocode_detailed(
         # can be derived (a division match already in hand, or a trailing
         # location word in the query) instead of an unconstrained
         # worldwide scan — see _fallback_anchor/_query_places_fallback.
-        anchor_hit = _fallback_anchor(
+        anchor_options = _fallback_anchor_candidates(
             search_query, divisions, region_code, local_table, alt_table=alt_table,
             region_population=region_population,
         )
+        anchor_hit = anchor_options[0] if anchor_options else None
         anchor, name_query = (
             ((anchor_hit[0], anchor_hit[1]), anchor_hit[2]) if anchor_hit else (None, search_query)
         )
@@ -2925,6 +3092,22 @@ def geocode_detailed(
         else:
             seen_names = {(c["name"].lower()) for c in candidates}
             places = _query_places_fallback(name_query, anchor=anchor, also=search_query)
+            if not places and len(anchor_options) > 1:
+                # The best reading of the query found nothing where it
+                # pointed. Ambiguous city names make that reading a coin
+                # flip — "harvard square cambridge" anchored on Cambridge,
+                # UK over Ontario's and Massachusetts's, and the answer sat
+                # in the third city of that name. Sequential retries lose
+                # that race one box at a time, so the second pass scans
+                # every candidate city's box at once: one bounded query,
+                # file-pruned per box, against answering nothing.
+                alternates = [(a[0], a[1]) for a in anchor_options[1:] if (a[0], a[1]) != anchor]
+                if alternates:
+                    places, winner = _query_places_multi_anchor(
+                        name_query, alternates, also=search_query,
+                    )
+                    if places and winner is not None:
+                        anchor = winner
             places = [p for p in places if p["name"].lower() not in seen_names]
             # Rank by the better of the two readings of the query: a row
             # named for the whole query beats one that merely contains the
@@ -3255,13 +3438,58 @@ def resolve_place(
     elif division_hits:
         reference = (division_hits[0]["lat"], division_hits[0]["lon"])
     else:
-        reference = None
+        # No division matched the whole query, but the anchor machinery can
+        # usually still say where the query means — "plaza mayor madrid"
+        # matches no division as a string, yet its anchor is Madrid's centre.
+        # Without this the merged ranking has no distance term for exactly
+        # the POI-shaped queries that need one, and answered that query with
+        # a Plaza Mayor 25 km out of town (#272). One local-index lookup.
+        local_table = _local_divisions_table()
+        options = _fallback_anchor_candidates(
+            query, [], None, local_table,
+            alt_table=_local_alt_names_table(local_table),
+        )
+        reference = (options[0][0], options[0][1]) if options else None
 
     place_rows: list[dict] = []
-    if reference is not None:
+    # geocode()'s own anchored fallback often already searched the places
+    # theme near this same reference with the whole query and its tokens —
+    # when it came back with enough place-kind rows, re-scanning per token
+    # here buys near-duplicates for the price of two more bounded scans
+    # ("notre dame paris" measured 11.9s with them, 5s without).
+    #
+    # "Near this same reference" is load-bearing, not decorative: geocode may
+    # have anchored somewhere else entirely — "hoover dam" anchors on Hoover,
+    # Alabama, whose %dam% scan returns Adam Cox and Damascus Baptist Church
+    # as place hits. Counting those as coverage skipped the one search that
+    # would have found the actual dam 200m from the caller's reference.
+    geocode_places = sum(
+        1 for r in geocode_hits
+        if r["type"] == "place"
+        and reference is not None
+        and geo.haversine_m(reference[0], reference[1], r["lat"], r["lon"])
+        <= _RESOLVE_PLACE_RADIUS_M
+    )
+    if reference is not None and geocode_places < limit:
         ref_lat, ref_lon = reference
         seen_place_ids: set[str] = set()
-        for token in _significant_tokens(query):
+        # Not every word deserves its own scan (#272). A feature noun
+        # ("square") matches half the businesses in any downtown, and the
+        # city word the reference was derived FROM ("cambridge") matches
+        # everything named after the city — both are pure noise that then
+        # outranked real answers, and each costs a bounded scan. Searching
+        # "harvard square cambridge" token-by-token means searching
+        # "harvard": the one word that distinguishes the place.
+        tokens = [
+            t for t in _significant_tokens(query)
+            if t.lower().strip(".,") not in _GENERIC_PLACE_WORDS
+        ]
+        if len(tokens) > 1:
+            folded_city = {t.lower() for t in tokens}
+            for div in division_hits[:1]:
+                folded_city &= {w.lower() for w in (div.get("name") or "").split()}
+            tokens = [t for t in tokens if t.lower() not in folded_city] or tokens
+        for token in tokens:
             for row in overture.find_places(
                 ref_lat, ref_lon, radius_m=_RESOLVE_PLACE_RADIUS_M,
                 name=token, limit=_RESOLVE_OVERFETCH,
@@ -3319,11 +3547,23 @@ def resolve_place(
             "_prominence": r.get("rank_score") or 0.0,
         })
 
-    candidates.sort(key=lambda c: (
-        -_MATCH_LABEL_RANK[c["match"]],
-        -c["_prominence"],
-        c["id"],
-    ))
+    # Distance to the reference before prominence (#272): the reference is
+    # the caller's own statement of where they mean (their near-hint, city
+    # hint, or the resolved anchor), and names repeat — "plaza mayor madrid"
+    # anchored dead-centre on Madrid and still answered with a Plaza Mayor
+    # 25 km out, because that row carried more confidence and this sort had
+    # no distance term. Same judgment _rank_place applies in geocode's own
+    # fallback, applied to the merged list. Km-rounded so GPS-grade jitter
+    # never reorders genuinely co-located candidates.
+    def _rank_candidate(c):
+        near_km = 0.0
+        if reference is not None:
+            near_km = round(
+                geo.haversine_m(reference[0], reference[1], c["lat"], c["lon"]) / 1000.0
+            )
+        return (-_MATCH_LABEL_RANK[c["match"]], near_km, -c["_prominence"], c["id"])
+
+    candidates.sort(key=_rank_candidate)
     for c in candidates:
         del c["_prominence"]
     return candidates[:limit]

@@ -566,3 +566,34 @@ def _route_between(from_place, to_place, mode="walk"):
 
 q("c15", "flow", "How far is it to walk from Shibuya Station to Yoyogi Park?",
   _route_between("Shibuya Station Tokyo", "Yoyogi Park Tokyo"))
+
+
+# --------------------------------------------------------------------------
+# Natural phrasings (#272) — lowercase, misspellings, filler words, partial
+# names: how people actually type. Round 2 of the sweep that caught the
+# Casablanca and Stanford bugs; these caught "notre dame paris" resolving to
+# Indiana and "harvard square cambridge" to the wrong Cambridge (of three).
+# --------------------------------------------------------------------------
+
+q("x01", "resolve_place", "coffe shops near pike place market seatle",
+  _resolve("pike place market seattle", None, (47.609, -122.342, 25)))
+q("x02", "resolve_place", "wheres the golden gate bridge",
+  _resolve("golden gate bridge san francisco", None, (37.82, -122.48, 25)))
+q("x03", "resolve_place", "notre dame paris (dropped-word landmark)",
+  _resolve("notre dame paris", None, (48.853, 2.35, 25)))
+q("x04", "resolve_place", "harvard square cambridge (third city of the name)",
+  _resolve("harvard square cambridge", "Harvard Square", (42.373, -71.119, 25)))
+q("x05", "resolve_place", "san jose airport (name-prefix city)",
+  _resolve("san jose airport", None, (37.36, -121.93, 30)))
+q("x06", "resolve_place", "palo alto caltrain station",
+  _resolve("palo alto caltrain station", None, (37.443, -122.164, 25)))
+q("x07", "flow", "stuff to eat near the space needle",
+  _flow("space needle seattle", "restaurant"))
+q("x08", "flow", "gas station near disneyland",
+  _flow("disneyland anaheim", "fuel_station", 4000))
+q("x09", "flow", "sushi near tsukiji market tokyo",
+  _flow("tsukiji market tokyo", "sushi_restaurant", 2000))
+q("x10", "flow", "dentist near the mission district sf",
+  _flow("mission district san francisco", "dentist"))
+q("x11", "flow", "hotels near niagara falls",
+  _flow("niagara falls", "hotel", 6000))

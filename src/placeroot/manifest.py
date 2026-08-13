@@ -122,3 +122,4 @@ def pruned_source_sql(
         upstream_glob, len(keep), len(manifest["files"]), bbox,
     )
     return f"read_parquet([{joined}], hive_partitioning=1)"
+
