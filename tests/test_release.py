@@ -108,6 +108,9 @@ def test_resolve_release_uses_discovery_when_no_override(monkeypatch):
     """Pin-first: the very first resolve answers with the pin immediately
     (no network on the cold path); the background discovery's answer is
     served from the next resolve on."""
+    # These exercise the TTL/caching machinery, not #269's artifact rule:
+    # stale artifacts mean discovery is adopted, which is what they assert.
+    monkeypatch.setattr(release, "bundled_artifact_release", lambda: "2000-01-01.0")
     monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
     monkeypatch.setattr(release, "_discover", lambda: "2026-08-01.0")
     assert release.resolve_release() == release.PINNED_RELEASE
@@ -126,6 +129,9 @@ def test_resolve_release_info_env_override(monkeypatch):
 
 
 def test_resolve_release_info_discovered(monkeypatch):
+    # These exercise the TTL/caching machinery, not #269's artifact rule:
+    # stale artifacts mean discovery is adopted, which is what they assert.
+    monkeypatch.setattr(release, "bundled_artifact_release", lambda: "2000-01-01.0")
     monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
     monkeypatch.setattr(release, "_discover", lambda: "2026-08-01.0")
     release.resolve_release_info()  # pin-first; kicks background discovery
@@ -173,6 +179,9 @@ def test_discover_compares_patch_numerically(monkeypatch):
 
 
 def test_resolve_is_cached_within_the_ttl(monkeypatch):
+    # These exercise the TTL/caching machinery, not #269's artifact rule:
+    # stale artifacts mean discovery is adopted, which is what they assert.
+    monkeypatch.setattr(release, "bundled_artifact_release", lambda: "2000-01-01.0")
     monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
     monkeypatch.delenv("PLACEROOT_RELEASE_TTL_HOURS", raising=False)
     calls = []
@@ -185,6 +194,9 @@ def test_resolve_is_cached_within_the_ttl(monkeypatch):
 
 
 def test_expired_ttl_rolls_over_to_the_new_release(monkeypatch):
+    # These exercise the TTL/caching machinery, not #269's artifact rule:
+    # stale artifacts mean discovery is adopted, which is what they assert.
+    monkeypatch.setattr(release, "bundled_artifact_release", lambda: "2000-01-01.0")
     monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
     monkeypatch.setenv("PLACEROOT_RELEASE_TTL_HOURS", "0")
     releases = iter(["2026-08-01.0", "2026-08-20.0"])
@@ -196,6 +208,9 @@ def test_expired_ttl_rolls_over_to_the_new_release(monkeypatch):
 
 
 def test_failed_recheck_keeps_the_previous_release_not_the_pin(monkeypatch):
+    # These exercise the TTL/caching machinery, not #269's artifact rule:
+    # stale artifacts mean discovery is adopted, which is what they assert.
+    monkeypatch.setattr(release, "bundled_artifact_release", lambda: "2000-01-01.0")
     monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
     monkeypatch.setenv("PLACEROOT_RELEASE_TTL_HOURS", "0")
     answers = iter(["2026-08-01.0", None, None])
@@ -400,3 +415,86 @@ def test_data_version_payload_carries_age_and_stale_flag(monkeypatch):
     payload = resources.data_version_payload()
     assert payload["age_days"] == 5
     assert "stale" not in payload
+
+
+# --- #269: the artifact release wins until it goes stale --------------------
+
+
+def test_a_newer_release_is_reported_not_adopted_while_artifacts_are_current(
+    monkeypatch,
+):
+    """Every acceleration this package ships is keyed by release and misses
+    on any other one, so adopting a release the wheel has no artifacts for
+    takes cold queries from seconds to tens of seconds — silently, and
+    roughly monthly. The newer release is surfaced instead of taken."""
+    monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
+    monkeypatch.setattr(release, "bundled_artifact_release", lambda: "2026-07-22.0")
+    monkeypatch.setattr(release, "age_days", lambda name: 3)
+    monkeypatch.setattr(release, "_discover", lambda: "2026-08-19.0")
+
+    release.resolve_release()  # pin-first; kicks the background discovery
+    assert release._first_discovery_done.wait(2)
+    info = release.resolve_release_info()
+
+    assert info["release"] == "2026-07-22.0"
+    assert info["source"] == "artifact-pinned"
+    assert info["newer_release"] == "2026-08-19.0"
+
+
+def test_a_stale_artifact_release_gives_way_to_fresher_data(monkeypatch):
+    """The trade is bounded in both directions: nobody sits on a half-year-old
+    vintage because they never upgraded the package."""
+    monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
+    monkeypatch.setattr(release, "bundled_artifact_release", lambda: "2020-01-01.0")
+    monkeypatch.setattr(release, "_discover", lambda: "2026-08-19.0")
+
+    release.resolve_release()
+    assert release._first_discovery_done.wait(2)
+    info = release.resolve_release_info()
+
+    assert info["release"] == "2026-08-19.0"
+    assert info["source"] == "discovered"
+    assert "newer_release" not in info
+
+
+def test_matching_discovery_is_plain_discovered(monkeypatch):
+    """No artifact wrinkle when upstream and the wheel agree."""
+    monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
+    monkeypatch.setattr(release, "bundled_artifact_release", lambda: "2026-08-19.0")
+    monkeypatch.setattr(release, "_discover", lambda: "2026-08-19.0")
+
+    release.resolve_release()
+    assert release._first_discovery_done.wait(2)
+    info = release.resolve_release_info()
+
+    assert info == {"release": "2026-08-19.0", "source": "discovered"}
+
+
+def test_bundled_artifact_release_is_read_from_the_shipped_files():
+    """Read, not assumed equal to the pin, so a half-done pin bump (pin moved,
+    artifacts not regenerated) is visible rather than silently claiming
+    acceleration the wheel cannot deliver."""
+    assert release.bundled_artifact_release() == release.PINNED_RELEASE
+
+
+def test_bundled_artifact_release_requires_every_set_to_agree(monkeypatch, tmp_path):
+    """A pin bump means running three separate generator scripts. Doing two of
+    them must not report the third's acceleration as present: the release
+    every set covers is the one the wheel can actually deliver."""
+    data = tmp_path / "data"
+    (data / "manifests" / "2026-09-24.0").mkdir(parents=True)
+    (data / "manifests" / "2026-07-22.0").mkdir(parents=True)
+    (data / "geocode-index" / "2026-07-22.0").mkdir(parents=True)
+    (data / "land-cover-grid").mkdir(parents=True)
+    (data / "land-cover-grid" / "2026-07-22.0.parquet").write_bytes(b"")
+    (data / "land-cover-grid" / "2026-09-24.0.parquet").write_bytes(b"")
+
+    from importlib import resources
+
+    monkeypatch.setattr(
+        resources, "files", lambda _pkg: tmp_path, raising=True
+    )
+
+    # manifests and the grid have the newer release; the geocode index does
+    # not — so the newer one is not claimed.
+    assert release.bundled_artifact_release() == "2026-07-22.0"

@@ -1,5 +1,14 @@
 # Token efficiency: what PlaceRoot costs an agent's context
 
+> **Latency lives elsewhere.** This page is about *tokens*. Cold-start
+> latency and answer correctness are measured by
+> `benchmarks/run_query_corpus.py` against 137 real user questions in 40+
+> cities, each in a fresh process with an empty cache — see
+> [the corpus](../benchmarks/query_corpus.py) and the weekly **Query Corpus** workflow.
+> It checks answers, not just clocks: the per-tool matrix it replaced
+> reported every tool under 10 s while one landmark query took 61 s and
+> returned nothing, and `geocode("Casablanca")` answered *Chile* in 0.2 s.
+
 "Compact answers" is PlaceRoot's core design claim. This page is the number
 behind it — and, just as deliberately, the number *against* it: the tool
 schemas an agent has to carry before it asks anything at all.

@@ -92,7 +92,7 @@ context, so you can pin them into a conversation without spending a tool call:
 
 | Resource | Contents |
 |---|---|
-| `placeroot://data-version` | The resolved Overture release, its date, and how it was resolved (discovery, env override, or the pinned fallback). Same values the `data_version` tool returns — one shared code path, so they cannot drift. |
+| `placeroot://data-version` | The resolved Overture release, its date, how it was resolved (discovery, env override, the pinned fallback, or held at the artifact release), its age, and whether the bundled acceleration applies to it. Same values the `data_version` tool returns — one shared code path, so they cannot drift. |
 | `placeroot://categories` | Summary of the place-category taxonomy: all 22 top-level categories with how many slugs sit under each, plus how to get an exact slug. ~530 tokens — a summary, not the 2,117-slug CSV, which stays behind `search_categories`. |
 
 In Claude Code they auto-complete as @-mentions:
@@ -200,3 +200,21 @@ that area's tiles (narrated via MCP progress when the client sends a
 `progressToken`); repeat queries answer from the local cache in
 milliseconds. Wheel-bundled per-release manifests keep even the first
 query's scan to the few files its bounding box intersects.
+
+**Which Overture release you get.** Three bundled artifact sets — the file
+manifests, the stage-0 geocode index and the coarse land-cover grid — are
+keyed by release, and they are what makes a cold query cost seconds instead
+of tens of seconds. They apply to exactly one release and miss (harmlessly,
+never wrongly) on any other. So when discovery finds a release newer than
+the one this build ships artifacts for, PlaceRoot **reports it rather than
+adopting it**, and keeps answering from the release it can answer fast on.
+Once that release passes `PLACEROOT_STALE_RELEASE_DAYS` (default 60, two
+missed Overture releases) freshness wins instead: the newer release is
+adopted, the logs say why, and cold queries are slower until the package is
+upgraded to a build whose artifacts match.
+
+`data_version` reports this as `artifacts: matched | unmatched`, alongside
+`newer_release` when one is being deliberately passed over. To take the
+newest data immediately and give up the bundled acceleration, set
+`PLACEROOT_OVERTURE_RELEASE` to that release — an explicit override always
+wins.
