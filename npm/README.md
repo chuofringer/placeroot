@@ -5,8 +5,8 @@
 <p align="center">
   <a href="https://placeroot.dev">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/chuofringer/placeroot/v0.9.2/site/og-image-dark.png">
-      <img src="https://raw.githubusercontent.com/chuofringer/placeroot/v0.9.2/site/og-image.png" width="720" alt="PlaceRoot — Ask about anywhere. Get a real answer. Open map data for your AI — free, no account, no API key.">
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/chuofringer/placeroot/v0.9.3/site/og-image-dark.png">
+      <img src="https://raw.githubusercontent.com/chuofringer/placeroot/v0.9.3/site/og-image.png" width="720" alt="PlaceRoot — Ask about anywhere. Get a real answer. Open map data for your AI — free, no account, no API key.">
     </picture>
   </a>
 </p>
@@ -16,9 +16,9 @@
   ·
   <a href="#what-it-can-do">Tools</a>
   ·
-  <a href="https://github.com/chuofringer/placeroot/blob/v0.9.2/docs/REFERENCE.md">Reference</a>
+  <a href="https://github.com/chuofringer/placeroot/blob/v0.9.3/docs/REFERENCE.md">Reference</a>
   ·
-  <a href="https://github.com/chuofringer/placeroot/blob/v0.9.2/docs/benchmarks.md">Benchmarks</a>
+  <a href="https://github.com/chuofringer/placeroot/blob/v0.9.3/docs/benchmarks.md">Benchmarks</a>
   ·
   <a href="https://placeroot.dev">Website</a>
 </p>
@@ -28,7 +28,7 @@
   <a href="https://pypi.org/project/placeroot/"><img src="https://img.shields.io/pypi/v/placeroot" alt="PyPI"></a>
   <a href="https://www.npmjs.com/package/placeroot"><img src="https://img.shields.io/npm/v/placeroot" alt="npm"></a>
   <a href="https://pypi.org/project/placeroot/"><img src="https://img.shields.io/pypi/pyversions/placeroot" alt="Python versions"></a>
-  <a href="https://github.com/chuofringer/placeroot/blob/v0.9.2/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://github.com/chuofringer/placeroot/blob/v0.9.3/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
 **PlaceRoot grounds AI agents in open map data.** It's an MCP server that answers spatial questions — what's nearby, what's in this neighborhood, how do I get there — from [Overture Maps](https://overturemaps.org) open data. No API key, no signup, no vendor platform.
@@ -119,16 +119,16 @@ If you already use Python tooling, `uvx placeroot` skips this launcher entirely 
 
 It also ships three **workflow prompts** (site selection, neighborhood comparison, errand planning) and two attachable **resources** — and a `PLACEROOT_TOOLS` setting to load only the tool profiles you need, cutting schema overhead by up to 96%.
 
-📚 **[Full tool catalog, prompts, resources & configuration → docs/REFERENCE.md](https://github.com/chuofringer/placeroot/blob/v0.9.2/docs/REFERENCE.md)**
+📚 **[Full tool catalog, prompts, resources & configuration → docs/REFERENCE.md](https://github.com/chuofringer/placeroot/blob/v0.9.3/docs/REFERENCE.md)**
 
 > **Note:**
-> Open data has honest limits: no live traffic, no opening hours, no ratings or photos — [what PlaceRoot deliberately doesn't do](https://github.com/chuofringer/placeroot/blob/v0.9.2/docs/REFERENCE.md#what-it-deliberately-does-not-do). For everything else about where things are and what's reachable from them, it answers without a key.
+> Open data has honest limits: no live traffic, no opening hours, no ratings or photos — [what PlaceRoot deliberately doesn't do](https://github.com/chuofringer/placeroot/blob/v0.9.3/docs/REFERENCE.md#what-it-deliberately-does-not-do). For everything else about where things are and what's reachable from them, it answers without a key.
 
 ## Why PlaceRoot
 
-It's the only keyless MCP server doing real graph routing over global open map data — with every tool declaring proper [MCP annotations](https://github.com/chuofringer/placeroot/blob/v0.9.2/docs/REFERENCE.md#tool-annotations-and-listing-cache-hints) so clients know which calls are read-only before prompting you. Stable [GERS ids](https://docs.overturemaps.org/gers/) let agents hold onto places across turns; local caching makes repeat queries answer in milliseconds and keeps working offline; and the whole thing is [self-hostable end to end](https://github.com/chuofringer/placeroot/blob/v0.9.2/docs/MIRROR.md).
+It's the only keyless MCP server doing real graph routing over global open map data — with every tool declaring proper [MCP annotations](https://github.com/chuofringer/placeroot/blob/v0.9.3/docs/REFERENCE.md#tool-annotations-and-listing-cache-hints) so clients know which calls are read-only before prompting you. Stable [GERS ids](https://docs.overturemaps.org/gers/) let agents hold onto places across turns; local caching makes repeat queries answer in milliseconds and keeps working offline; and the whole thing is [self-hostable end to end](https://github.com/chuofringer/placeroot/blob/v0.9.3/docs/MIRROR.md).
 
-How it stacks up against Mapbox MCP and Google Maps MCP: [head-to-head benchmarks](https://github.com/chuofringer/placeroot/blob/v0.9.2/docs/benchmarks-vs.md) · [token-efficiency numbers](https://github.com/chuofringer/placeroot/blob/v0.9.2/docs/benchmarks.md).
+How it stacks up against Mapbox MCP and Google Maps MCP: [head-to-head benchmarks](https://github.com/chuofringer/placeroot/blob/v0.9.3/docs/benchmarks-vs.md) · [token-efficiency numbers](https://github.com/chuofringer/placeroot/blob/v0.9.3/docs/benchmarks.md).
 
 ## Documentation
 

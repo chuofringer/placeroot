@@ -3,7 +3,7 @@
   "name": "io.github.chuofringer/placeroot",
   "title": "PlaceRoot",
   "description": "29 tools, no API key — grounds AI agents in Overture Maps open data.",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "websiteUrl": "https://placeroot.dev",
   "repository": {
     "url": "https://github.com/chuofringer/placeroot",
@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "placeroot",
-      "version": "0.9.2",
+      "version": "0.9.3",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -32,7 +32,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "placeroot",
-      "version": "0.9.2",
+      "version": "0.9.3",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
@@ -50,7 +50,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "placeroot",
-      "version": "0.9.2",
+      "version": "0.9.3",
       "runtimeHint": "uvx",
       "packageArguments": [
         {
