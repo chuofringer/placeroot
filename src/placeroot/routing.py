@@ -389,13 +389,22 @@ class SchemaDegraded(errors.SchemaDegraded):
 
 
 class NoGraphNearby(Exception):
-    def __init__(self, lat: float, lon: float, radius_m: float, label: str | None = None):
+    def __init__(
+        self, lat: float, lon: float, radius_m: float, label: str | None = None,
+        mode: str | None = None,
+    ):
         """`label` names which input point failed, when the caller has more
         than the two route() has — optimize_route passes "stops[3]" so the
         agent learns which stop is off-network instead of only its
-        coordinates."""
+        coordinates. `mode` keeps the message truthful: this used to say
+        "walkable" whatever the caller asked for, so a failed drive request
+        reported a walking problem and sent the reader looking in the wrong
+        place."""
+        segments = {
+            "walk": "walkable", "cycle": "cyclable", "drive": "drivable",
+        }.get(mode or "", "routable")
         detail = (
-            f"no walkable segments found within {radius_m:.0f}m of ({lat}, {lon})"
+            f"no {segments} segments found within {radius_m:.0f}m of ({lat}, {lon})"
         )
         if label:
             detail = f"{label}: {detail}"
@@ -1556,11 +1565,11 @@ def isochrone(
 
     graph = _get_or_build_graph(lat, lon, extraction_radius, mode, speed_m_s)
     if graph.node_count() == 0:
-        raise NoGraphNearby(lat, lon, extraction_radius)
+        raise NoGraphNearby(lat, lon, extraction_radius, mode=mode)
 
     source = snap_to_graph(graph, lat, lon)
     if source is None:
-        raise NoGraphNearby(lat, lon, extraction_radius)
+        raise NoGraphNearby(lat, lon, extraction_radius, mode=mode)
 
     dijkstra_speed = 1.0 if graph.weight_is_time else const_speed
     reached = dijkstra(graph, source, max_seconds, dijkstra_speed)
@@ -2001,18 +2010,18 @@ def _shortest_path(
         )
         if graph.node_count() == 0:
             if is_last and not snapped_both:
-                raise NoGraphNearby(center_lat, center_lon, radius_m)
+                raise NoGraphNearby(center_lat, center_lon, radius_m, mode=mode)
             continue
 
         source = snap_to_graph(graph, from_lat, from_lon)
         if source is None:
             if is_last and not snapped_both:
-                raise NoGraphNearby(from_lat, from_lon, radius_m)
+                raise NoGraphNearby(from_lat, from_lon, radius_m, mode=mode)
             continue
         target = snap_to_graph(graph, to_lat, to_lon)
         if target is None:
             if is_last and not snapped_both:
-                raise NoGraphNearby(to_lat, to_lon, radius_m)
+                raise NoGraphNearby(to_lat, to_lon, radius_m, mode=mode)
             continue
 
         snapped_both = True
@@ -2619,7 +2628,7 @@ def _snap_and_cost_stops(
         )
         if graph.node_count() == 0:
             if is_last and best is None:
-                raise NoGraphNearby(center_lat, center_lon, radius_m)
+                raise NoGraphNearby(center_lat, center_lon, radius_m, mode=mode)
             continue
         nodes: list[str] = []
         failed_idx = None
@@ -2632,7 +2641,9 @@ def _snap_and_cost_stops(
         if failed_idx is not None:
             if is_last and best is None:
                 flat, flon = points[failed_idx]
-                raise NoGraphNearby(flat, flon, radius_m, label=f"stops[{failed_idx}]")
+                raise NoGraphNearby(
+                    flat, flon, radius_m, label=f"stops[{failed_idx}]", mode=mode
+                )
             continue
         time_m, dist_m, estimated = _cost_matrices(graph, nodes, points, mode)
         if not estimated:

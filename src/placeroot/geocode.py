@@ -399,7 +399,7 @@ from pathlib import Path
 
 import duckdb
 
-from placeroot import addresses, cache, overture, progress, release
+from placeroot import addresses, cache, geo, overture, progress, release
 from placeroot.errors import AmbiguousArea
 
 logger = logging.getLogger(__name__)
@@ -420,6 +420,38 @@ _PLACES_FALLBACK_RADIUS_M = 30_000
 # long enough to exceed this is prose rather than a "place name + city"
 # phrase, where the trailing-suffix reading is the only one worth paying for.
 _MAX_ANCHOR_TOKENS = 6
+
+# How much population a specific division (a city) must carry, relative to the
+# broad one (its state/country) sharing the name, before it is preferred as a
+# search anchor. New York City is 43% of New York State and is what "New York"
+# means in "Times Square New York"; a hamlet named Tokyo is 0.04% of 東京都 and
+# must never displace it. See _pick_anchor_row.
+_ANCHOR_SPECIFIC_SHARE = 0.1
+
+# Words that say what a place *is*, never where it is. A one-word anchor
+# candidate drawn from this set is refused outright.
+#
+# #268: _query_divisions matches substrings, so every one of these finds a
+# division somewhere — "Center" found Center, Pennsylvania and sent a Palo
+# Alto query to Pittsburgh; "Tower" found Tower Grove in St. Louis and spent
+# 33s scanning Missouri for the Eiffel Tower. The result is not a weak
+# anchor, it is a confidently wrong one, and it is worse than no anchor:
+# without one the caller returns in under a second and tells the user to name
+# a city, which is an answer they can act on.
+#
+# Only single-word candidates are checked. A multi-word candidate carries its
+# own qualifier ("Park Ridge", "Union Square") and is a real name again, and
+# any of these words *is* allowed to anchor when the user supplies nothing
+# else to go on — the rule is about not preferring a feature noun over a
+# genuine place name, not about banning the string.
+_GENERIC_PLACE_WORDS = frozenset("""
+    airport aquarium arena avenue basilica bay beach boulevard bridge building
+    castle cathedral centre center chapel church college crossing dock
+    fountain garden gardens gate harbor harbour hospital hotel island junction
+    library mall market memorial monument mosque museum observatory palace
+    park pier plaza port quay road square stadium station street synagogue
+    temple terminal theater theatre tower university wharf zoo
+""".split())
 
 # Subdirectory (under cache.cache_dir()/<release>/) for the #43 materialized
 # divisions name table — kept distinct from cache.py's own places/<theme>
@@ -1658,8 +1690,28 @@ def _alt_rows_not_already_found(
             "primary names only", alt_table,
         )
         return []
-    seen = {r["id"] for r in found}
-    return [r for r in rows if r["id"] not in seen]
+    # A division already found literally keeps its literal row — but it must
+    # not keep a *worse tier* than the alternate hit actually achieved.
+    #
+    # #268: Overture's primary name for Casablanca is the three-script
+    # "Casablanca ⵜⴰⴷⴷⴰⵔⵜ ⵜⵓⵎⵍⵉⵍⵜ الدار البيضاء", so the literal pass matches
+    # "Casablanca" as a mere prefix of it (tier 2) while the alternate pass
+    # matches the alternate "casablanca" exactly (tier 3). Dropping the
+    # alternate row outright left the city ranked below Casablanca, Chile
+    # (pop 17,948) — tier outranks population by design, so an artifact of
+    # how the canonical name is spelled decided the answer, and geocode
+    # confidently pointed 10,000 km away. Carrying the better tier across
+    # costs nothing and is what _effective_tier exists to express.
+    by_id = {r["id"]: r for r in found}
+    fresh = []
+    for r in rows:
+        prior = by_id.get(r["id"])
+        if prior is None:
+            fresh.append(r)
+        elif (r.get("_tier") or 0) > _effective_tier(prior, query):
+            prior["_tier"] = r["_tier"]
+            prior.setdefault("_matched_name", r.get("_matched_name"))
+    return fresh
 
 
 def _query_divisions(
@@ -1918,14 +1970,14 @@ def _fallback_anchor(
     # Leading candidates are gated to real words so a stopword head ("the
     # Met") can never become an anchor of its own.
     splits = [
-        (" ".join(tokens[-n:]), " ".join(tokens[:-n]).strip())
+        (" ".join(tokens[-n:]), " ".join(tokens[:-n]).strip(), False)
         for n in (2, 1)
         if len(tokens) > n
     ]
     if local_table is not None and len(tokens) <= _MAX_ANCHOR_TOKENS:
         for i, token in enumerate(tokens[:-1]):
             if len(token) >= 3 and not _nothing_but_stopwords(token):
-                splits.append((token, " ".join(tokens[:i] + tokens[i + 1:]).strip()))
+                splits.append((token, " ".join(tokens[:i] + tokens[i + 1:]).strip(), True))
 
     # alt_table is the load-bearing part of these lookups: the location token
     # is a *city name as the user writes it*, and for many big cities that is
@@ -1939,24 +1991,87 @@ def _fallback_anchor(
     # (passed down from geocode's main path rather than re-scanned here) only
     # breaks region-level ties.
     best_key = best_row = best_base = None
-    for precedence, (candidate, base) in enumerate(splits):
+    for precedence, (candidate, base, is_leading) in enumerate(splits):
+        if base and candidate.strip().lower().strip(".,") in _GENERIC_PLACE_WORDS:
+            # A feature noun, with the rest of the query still unexplained:
+            # this word describes the place, it does not locate it (#268).
+            continue
         rows = _query_divisions(candidate, region_code, local_table, alt_table=alt_table)
+        if is_leading:
+            # A leading word is the *speculative* reading — the query shape it
+            # exists for ("Stanford Shopping Center") is the exception, not the
+            # rule — so it has to name a division outright to displace the
+            # trailing-suffix reading. Substrings need not apply: "Griffith
+            # Observatory Los Angeles" split on the fragment "Los", which
+            # substring-matched its way to Österreich, whose 8.9M population
+            # then beat the 4.0M of the Los Angeles the query actually named.
+            rows = [r for r in rows if _effective_tier(r, candidate) >= 3]
         if not rows:
             continue
-        row = min(rows, key=lambda r: _rank_key(r, candidate, pop))
-        # Across splits, the anchor to trust is the one whose division is the
-        # more prominent place: the query's real location word names somewhere
-        # people have heard of, while a coincidental match on a name fragment
-        # is typically a hamlet that happens to share the word. Ties keep
-        # split order, so the trailing-suffix reading still wins outright
+        row = _pick_anchor_row(rows, candidate, pop)
+        # Across splits, prefer a city to a state or country first, and only
+        # then the more prominent place: the query's real location word names
+        # somewhere people have heard of, while a coincidental match on a name
+        # fragment is typically a hamlet that happens to share the word. Ties
+        # keep split order, so the trailing-suffix reading still wins outright
         # whenever nothing outranks it.
-        key = (-(row.get("population") or 0), precedence)
+        #
+        # Specificity has to lead, not population: "Times Square New York"
+        # offers both "New York" (the city, 8.8M) and the fragment "York"
+        # (which substring-matches New York *State*, 20.2M), and ranking on
+        # population alone picked the state — anchoring 250 km up the Hudson
+        # from the square, and answering nothing.
+        broad = _SUBTYPE_WEIGHT.get(row.get("subtype"), 2) <= 1
+        key = (1 if broad else 0, -(row.get("population") or 0), precedence)
         if best_key is None or key < best_key:
             best_key, best_row, best_base = key, row, base
     if best_row is None:
         return None
     name_query = None if _nothing_but_stopwords(best_base) else best_base
     return best_row["lat"], best_row["lon"], name_query
+
+
+def _names_a_feature(query: str) -> bool:
+    """Whether the query names a *thing* — a tower, a terminal, a museum —
+    rather than a populated place. Divisions are never called these, so a
+    lookup against the divisions theme can only come back empty."""
+    words = {w.strip(".,").lower() for w in query.split()}
+    return bool(words & _GENERIC_PLACE_WORDS)
+
+
+def _pick_anchor_row(rows: list[dict], query: str, region_population: dict[str, int]) -> dict:
+    """The best of `rows` to use as a point to *search near*, rather than the
+    best one to return as an answer.
+
+    The difference is that a state or a country is a fine answer to "where is
+    Kansas" and a useless anchor for anything: the places fallback searches
+    _PLACES_FALLBACK_RADIUS_M around the point, and a region's centroid is
+    usually nowhere near the city that shares its name. #268 measured it —
+    "Times Square New York" anchored on New York *State* (pop 20.2M, centroid
+    near Utica) and searched 250 km from Manhattan, returning nothing.
+
+    So a substantially-populated city outranks the region it sits in. The
+    "substantially" matters: it must not let any namesake hamlet displace a
+    genuine region, which is the failure mode in the other direction (a
+    locality named Tokyo somewhere must never displace 東京都 as the anchor
+    for "Tokyo"). _ANCHOR_SPECIFIC_SHARE is what separates New York City's
+    43% of its state from a 0.04% coincidence.
+    """
+    def _best(group):
+        return min(group, key=lambda r: _rank_key(r, query, region_population), default=None)
+
+    def _is_broad(row):
+        return _SUBTYPE_WEIGHT.get(row.get("subtype"), 2) <= 1
+
+    broad = _best([r for r in rows if _is_broad(r)])
+    specific = _best([r for r in rows if not _is_broad(r)])
+    if specific is None:
+        return broad
+    if broad is None:
+        return specific
+    if (specific.get("population") or 0) >= _ANCHOR_SPECIFIC_SHARE * (broad.get("population") or 0):
+        return specific
+    return broad
 
 
 def _query_places_fallback(
@@ -2664,10 +2779,18 @@ def geocode_detailed(
         divisions = fuzzy_rows
 
     _bundled_recall_pending = not divisions and _is_bundled_table(local_table)
-    if _bundled_recall_pending and _fallback_anchor(
-        search_query, [], region_code, local_table,
-        alt_table=_local_alt_names_table(local_table),
-    ) is None:
+    if (
+        _bundled_recall_pending
+        # #268: no division is named "Eiffel Tower". This scan exists to
+        # find long-tail *populated places* the bundled index omits, and a
+        # query naming a feature is not one — it was 12.8s of a 13.1s call,
+        # spent proving a negative the query's own shape already implies.
+        and not _names_a_feature(search_query)
+        and _fallback_anchor(
+            search_query, [], region_code, local_table,
+            alt_table=_local_alt_names_table(local_table),
+        ) is None
+    ):
         # The stage-0 bundled index carries only populous divisions; a
         # long-tail name (an unpopulated hamlet) must not read as "no such
         # place" while the full table builds in the background. With no
@@ -2740,23 +2863,42 @@ def geocode_detailed(
             # Rank by the better of the two readings of the query: a row
             # named for the whole query beats one that merely contains the
             # residual the anchor split left (#268).
-            places.sort(
-                key=lambda r: (
+            #
+            # Distance to the anchor breaks ties before confidence does. Names
+            # repeat inside one metro area — "Millennium Park Chicago" anchored
+            # correctly on the Loop and still answered with a Millennium Park
+            # 31 km away in the suburbs, because that row happened to carry
+            # more confidence. The anchor is the caller's own statement about
+            # where they mean; among equally-good name matches, closer to it is
+            # closer to what they asked for.
+            def _rank_place(r):
+                near = 0.0
+                if anchor is not None:
+                    near = geo.haversine_m(anchor[0], anchor[1], r["lat"], r["lon"])
+                return (
                     -max(_match_tier(r["name"], name_query),
                          _match_tier(r["name"], search_query)),
+                    round(near / 1000.0),
                     -r["_confidence"],
                     r["id"],
                 )
-            )
+
+            places.sort(key=_rank_place)
             candidates = candidates + places
 
-    if not candidates and _bundled_recall_pending:
+    if not candidates and _bundled_recall_pending and not _names_a_feature(search_query):
         # Anchored-places had its chance and found nothing either; the
         # query may be a real division below the bundled index's
         # population cutoff. One upstream divisions scan preserves the
         # recall the full local table used to guarantee — paid only when
         # every faster path came up empty, and only until the background
         # full build lands.
+        #
+        # Not for a query naming a feature, though (#268): no division is
+        # called "Eiffel Tower" or "Grand Central Terminal", so the scan can
+        # only come back empty, and it was the entire cost of doing so —
+        # 11.0s of a fresh install's first landmark query, spent proving a
+        # negative that the query's own shape already implies.
         recalled = _query_divisions(search_query, region_code, None)
         recalled.sort(key=lambda r: _rank_key(r, search_query, region_population))
         candidates = recalled

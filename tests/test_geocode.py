@@ -1963,9 +1963,32 @@ def test_a_stopword_head_is_never_tried_as_an_anchor(monkeypatch):
 
 def test_remote_divisions_never_pay_for_leading_word_lookups(monkeypatch):
     """Without a local table every candidate is a remote scan, so the extra
-    readings are not worth their cost — trailing-only, exactly as before."""
+    readings are not worth their cost — trailing-only, exactly as before.
+    ("Center" alone is refused outright as a feature noun, so the only
+    lookup left to pay for here is the two-word tail.)"""
     asked = _stub_divisions(monkeypatch, {})
 
     geocode._fallback_anchor("Stanford Shopping Center", [], None, None)
 
-    assert asked == ["Shopping Center", "Center"]
+    assert asked == ["Shopping Center"]
+
+
+@pytest.mark.parametrize("query, refused", [
+    ("Eiffel Tower", "Tower"),
+    ("Times Square", "Square"),
+    ("Heathrow Airport", "Airport"),
+    ("Griffith Observatory", "Observatory"),
+])
+def test_a_feature_noun_is_never_the_anchor(monkeypatch, query, refused):
+    """#268: _query_divisions matches substrings, so every feature noun finds
+    a division somewhere — "Tower" found Tower Grove in St. Louis and sent a
+    Paris query 7,000 km away to scan Missouri for 33s. These words say what
+    a place is, not where it is."""
+    asked = _stub_divisions(monkeypatch, {
+        refused: [{"name": f"{refused} Grove", "population": 15_000, "lat": 38.6, "lon": -90.2}],
+    })
+
+    anchor = geocode._fallback_anchor(query, [], None, "/divisions.parquet")
+
+    assert refused not in asked
+    assert anchor is None, "no anchor at all beats a confidently wrong one"
