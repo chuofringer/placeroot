@@ -1992,3 +1992,36 @@ def test_a_feature_noun_is_never_the_anchor(monkeypatch, query, refused):
 
     assert refused not in asked
     assert anchor is None, "no anchor at all beats a confidently wrong one"
+
+
+# --- #270: a dropped middle word must not lose the place --------------------
+
+
+def test_every_token_present_finds_a_name_the_user_shortened(monkeypatch):
+    """Substring matching requires the user to reproduce the name
+    contiguously, and real queries drop a word out of the middle constantly.
+    "BASIS Silicon Valley Lower School" is not a substring of "BASIS
+    Independent Silicon Valley Lower School" — measured live, that came back
+    empty while the same query with "Independent" restored found it."""
+    seen = {}
+
+    def fake(query, anchor=None, also=None):
+        seen["query"], seen["also"] = query, also
+        return []
+
+    monkeypatch.setattr(geocode, "_query_places_fallback", fake)
+    geocode.geocode("BASIS Silicon Valley Lower School Brooklyn", limit=5)
+
+    # The residual reaches the places scan; the city was split off as the
+    # anchor. The token AND is built from that residual (see the SQL) — never
+    # from the whole query, which still carries the city no school is named
+    # after.
+    assert "Brooklyn" not in (seen["query"] or "")
+
+
+def test_a_school_query_runs_no_upstream_divisions_scan(monkeypatch):
+    """"school" is a feature noun: no division is called one, so the recall
+    scan can only come back empty. It was 15.2s of a 21s call before this."""
+    assert geocode._names_a_feature("BASIS Silicon Valley Lower School Sunnyvale")
+    for word in ("school", "academy", "clinic", "campus", "institute"):
+        assert geocode._names_a_feature(f"Some {word.title()} Somewhere"), word
