@@ -28,7 +28,7 @@ import logging
 
 import duckdb
 
-from placeroot import db, geo, manifest, overture
+from placeroot import db, geo, manifest, overture, trace
 
 logger = logging.getLogger(__name__)
 
@@ -118,15 +118,17 @@ def admin_lookup(lat: float, lon: float, con=None) -> dict:
         WHERE {bbox_prefilter}ST_Contains({geom_expr}, ST_Point($lon, $lat))
     """
     try:
-        if con is not None:
-            # Caller-supplied cursor of the shared instance: safe without
-            # conn_lock (cursors are DuckDB's multithreading unit) and
-            # shares the warm metadata cache — gers_lookup runs this join
-            # concurrently with its building join on two of these.
-            rows = con.execute(sql, {"lat": lat, "lon": lon}).fetchall()
-        else:
-            with db.conn_lock:
-                rows = db.shared_conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
+        # Bounded: a point, with the bbox prefilter and manifest pruning above.
+        with trace.scan("admin containment", bounded=True, source=src):
+            if con is not None:
+                # Caller-supplied cursor of the shared instance: safe without
+                # conn_lock (cursors are DuckDB's multithreading unit) and
+                # shares the warm metadata cache — gers_lookup runs this join
+                # concurrently with its building join on two of these.
+                rows = con.execute(sql, {"lat": lat, "lon": lon}).fetchall()
+            else:
+                with db.conn_lock:
+                    rows = db.shared_conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
     # Smallest-first ranking happens here, not in the SQL: an ORDER BY on a

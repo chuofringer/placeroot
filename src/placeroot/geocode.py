@@ -399,7 +399,7 @@ from pathlib import Path
 
 import duckdb
 
-from placeroot import addresses, cache, geo, overture, progress, release
+from placeroot import addresses, cache, geo, overture, progress, release, trace
 from placeroot.errors import AmbiguousArea
 
 logger = logging.getLogger(__name__)
@@ -1575,7 +1575,10 @@ def _query_divisions_from_upstream(
         LIMIT {DIVISION_OVERFETCH}
     """
     try:
-        with overture._conn_lock:
+        # Unbounded by construction: a name search over the divisions theme
+        # has no bbox to prune by. That is exactly why the callers gate it.
+        with trace.scan("divisions name scan (upstream)", bounded=False, source=glob), \
+                overture._conn_lock:
             rows = overture.conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
@@ -2185,7 +2188,12 @@ def _query_places_fallback(
         LIMIT {DIVISION_OVERFETCH}
     """
     try:
-        with overture._conn_lock:
+        # Bounded exactly when an anchor gave us a box to search inside; the
+        # unanchored case is the planet-wide name scan #105 gates against.
+        with trace.scan(
+            "places name scan", bounded=anchor_bbox is not None, source=from_source,
+            anchored=anchor is not None,
+        ), overture._conn_lock:
             rows = overture.conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e

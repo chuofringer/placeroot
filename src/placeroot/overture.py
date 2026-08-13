@@ -29,7 +29,7 @@ import threading
 
 import duckdb
 
-from placeroot import budget, cache, db, geo, recreation, release
+from placeroot import budget, cache, db, geo, recreation, release, trace
 from placeroot.errors import (  # noqa: F401 - re-exported; see below
     SchemaDegraded,
     UpstreamUnavailable,
@@ -709,7 +709,9 @@ def find_places(
         LIMIT {limit}
     """
     try:
-        with _conn_lock:
+        # Always bounded: find_places is a radius query, so the bbox filter
+        # and the distance predicate are both in `filters` above.
+        with trace.scan("places radius scan", bounded=True, source=from_clause), _conn_lock:
             rows = _conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
