@@ -421,6 +421,17 @@ _PLACES_FALLBACK_RADIUS_M = 30_000
 # phrase, where the trailing-suffix reading is the only one worth paying for.
 _MAX_ANCHOR_TOKENS = 6
 
+# Words that *begin* place names and never locate one by themselves. "san
+# jose airport" split on the leading "san", which exact-matched a division in
+# Henan and anchored a South Bay query at 36.2N 115.7E — the residual "jose
+# airport" then found nothing, 7.7s later. Distinct from
+# _GENERIC_PLACE_WORDS: those say what a place is, these are the first half
+# of its name, and both are useless as an anchor on their own.
+_NAME_PREFIX_WORDS = frozenset("""
+    big cape east el fort grand la las little los lower monte mount new north
+    old port saint san santa santo sao são sierra south st ste upper villa west
+""".split())
+
 # How much population a specific division (a city) must carry, relative to the
 # broad one (its state/country) sharing the name, before it is preferred as a
 # search anchor. New York City is 43% of New York State and is what "New York"
@@ -1981,8 +1992,19 @@ def _fallback_anchor(
     ]
     if local_table is not None and len(tokens) <= _MAX_ANCHOR_TOKENS:
         for i, token in enumerate(tokens[:-1]):
-            if len(token) >= 3 and not _nothing_but_stopwords(token):
+            if (
+                len(token) >= 3
+                and not _nothing_but_stopwords(token)
+                and token.lower().strip(".,") not in _NAME_PREFIX_WORDS
+            ):
                 splits.append((token, " ".join(tokens[:i] + tokens[i + 1:]).strip(), True))
+            # ...and the pair starting here, because a place name's location
+            # half is usually two words ("San Jose", "New York", "Santa
+            # Clara") and neither word locates anything alone. Only leading
+            # pairs: the trailing ones are already covered above.
+            if i + 2 <= len(tokens) - 1:
+                pair = " ".join(tokens[i:i + 2])
+                splits.append((pair, " ".join(tokens[:i] + tokens[i + 2:]).strip(), True))
 
     # alt_table is the load-bearing part of these lookups: the location token
     # is a *city name as the user writes it*, and for many big cities that is
@@ -2027,7 +2049,18 @@ def _fallback_anchor(
         # population alone picked the state — anchoring 250 km up the Hudson
         # from the square, and answering nothing.
         broad = _SUBTYPE_WEIGHT.get(row.get("subtype"), 2) <= 1
-        key = (1 if broad else 0, -(row.get("population") or 0), precedence)
+        # More of the query matched is stronger evidence than a bigger
+        # population: "palo alto caltrain station" offers both "Palo Alto"
+        # and the bare "Palo", and Palo in Leyte has enough people to
+        # outvote Palo Alto — anchoring a Caltrain query in the Philippines.
+        # Two words of a name being right is not a coincidence; one word
+        # often is.
+        key = (
+            1 if broad else 0,
+            -len(candidate.split()),
+            -(row.get("population") or 0),
+            precedence,
+        )
         if best_key is None or key < best_key:
             best_key, best_row, best_base = key, row, base
     if best_row is None:
@@ -3158,6 +3191,7 @@ def resolve_place(
     near_lat: float | None = None,
     near_lon: float | None = None,
     limit: int = 3,
+    city: str | None = None,
 ) -> list[dict]:
     """Free-text place reference -> ranked, typed GERS ids an agent can hold onto.
 
@@ -3196,6 +3230,22 @@ def resolve_place(
     limit = max(1, min(limit, MAX_LIMIT))
     if not query:
         return []
+
+    # #271: a caller-supplied city is the location half of the query, stated
+    # rather than guessed at. Resolving it first and using its coordinates as
+    # the reference skips _fallback_anchor's whole "which of these words is
+    # the place" problem — the problem behind every wrong-hemisphere answer
+    # this module has had. It is a hint, never an answer: it bounds where the
+    # search looks, and every row returned still comes from the data.
+    if city and near_lat is None and near_lon is None:
+        try:
+            hits = geocode(city, limit=1)
+        except (overture.UpstreamUnavailable, overture.SchemaDegraded):
+            hits = []
+        if hits:
+            near_lat, near_lon = hits[0]["lat"], hits[0]["lon"]
+        else:
+            logger.info("resolve_place: city hint %r did not resolve; ignoring it", city)
 
     geocode_hits = geocode(query, limit=_RESOLVE_OVERFETCH)
     division_hits = [r for r in geocode_hits if r["type"] != "place"]

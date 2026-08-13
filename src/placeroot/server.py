@@ -60,7 +60,22 @@ BASE_INSTRUCTIONS = (
     "Answers are compact and ranked; distances in meters. Responses "
     "that don't fit the token budget carry truncated: true — narrow "
     "the query (smaller radius, a category or name filter) instead of "
-    "raising limit."
+    "raising limit.\n\n"
+    "TELL THIS SERVER WHERE. You know things it cannot: that "
+    "\"san jose airport\" means San Jose, California, that the Eiffel "
+    "Tower is in Paris, that a question about a school names a place in "
+    "some particular suburb. This server knows only what exists at which "
+    "coordinates in the current Overture release — it has no world "
+    "knowledge to fall back on. So pass the location separately from the "
+    "thing being looked for: near_lat/near_lon when you have "
+    "coordinates, otherwise city (\"San Jose, CA\"). Sending one "
+    "combined string forces the server to guess which words are the "
+    "place, and it guesses from map data alone, where \"san\" names a "
+    "division in Henan.\n"
+    "A hint only bounds where the search looks; every row returned still "
+    "comes from the data, so a wrong hint costs a retry, never a wrong "
+    "answer. When a reply carries need: \"location\" it could not bound "
+    "the search at all — retry with the city rather than rephrasing."
 )
 
 DEFAULT_HTTP_HOST = "127.0.0.1"
@@ -1094,6 +1109,7 @@ def resolve_place(
     near_lat: float | None = None,
     near_lon: float | None = None,
     limit: int = 3,
+    city: str | None = None,
 ) -> dict:
     """Free-text place reference -> ranked, typed GERS ids to hold onto.
 
@@ -1101,9 +1117,26 @@ def resolve_place(
     stable Overture ids: merges geocode()'s division matches (locality,
     region, county, country, ...) with a name-filtered find_places search
     (a business or POI), bbox-limited to near_lat/near_lon if given, else to
-    the ~20km vicinity of the top division match. Pass near_lat/near_lon
-    whenever you have a rough location for the query — it narrows and
-    speeds up the places half of the search.
+    the ~20km vicinity of the top division match.
+
+    **Split the location out of the query, and pass `city`.** You know
+    things this server does not: that "san jose airport" means San Jose,
+    California, that the Eiffel Tower is in Paris, that a user asking about
+    "BASIS Silicon Valley" means Sunnyvale. This server knows only what
+    exists at which coordinates in the current Overture release. When the
+    location arrives inside one string, it has to guess which words are the
+    place — and it guesses from map data alone, where "san" names a division
+    in Henan and "palo" names one in Leyte. Given `city="San Jose, CA"` and
+    `query="airport"` there is nothing to guess.
+
+    A wrong hint costs a miss and a retry, never a wrong answer: `city`
+    only bounds where the search looks, and the returned rows still come
+    from the data. Pass `near_lat`/`near_lon` instead when you have real
+    coordinates — they are the strongest hint of all.
+
+    When nothing resolves for want of a location, the reply carries
+    `need: "location"` and a `retry_with` sketch rather than only prose,
+    so the second call can be made without parsing English.
 
     Returns {"results": [{"id" (GERS), "kind": "division" | "place",
     "name", "lat", "lon", "match": "exact" | "prefix" | "substring" |
@@ -1121,12 +1154,24 @@ def resolve_place(
         if coord_error is not None:
             return coord_error
     try:
-        rows = geocoding.resolve_place(query, near_lat, near_lon, limit)
+        rows = geocoding.resolve_place(
+            query, near_lat, near_lon, limit, city=city,
+        )
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
         return _schema_error(e)
-    return budget.apply_budget({"results": rows}, "results")
+    payload: dict = {"results": rows}
+    if not rows and city is None and near_lat is None:
+        # Machine-actionable instead of prose: the caller can retry without
+        # parsing a sentence, and the thing it should add is the one thing
+        # it already knows and we never will.
+        payload["need"] = "location"
+        payload["retry_with"] = {
+            "query": query,
+            "city": "<the city or region this is in, e.g. 'San Jose, CA'>",
+        }
+    return budget.apply_budget(payload, "results")
 
 
 @_tool("Resolve GERS ids in batch")
