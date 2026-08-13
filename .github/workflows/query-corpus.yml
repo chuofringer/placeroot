@@ -1,0 +1,57 @@
+name: Query Corpus
+# Weekly cold run of benchmarks/query_corpus.py against live Overture data
+# (#269): 137 real user questions across every tool and 40+ cities, each in a
+# fresh process with an empty cache, each checked for a *correct answer*.
+#
+# This exists because the per-tool cold matrix it replaces reported every tool
+# under 10s while resolve_place("Stanford Shopping Center") took 61s and
+# returned nothing, and geocode("Casablanca") answered Chile in 0.2s — which a
+# timing-only bench scores as the best result in the suite.
+#
+# Gated on correctness only. Latency is reported, never failed on: a hosted
+# runner's bandwidth to S3 is not the residential connection the published
+# numbers describe, and a flapping weekly job is one nobody reads.
+on:
+  schedule:
+    - cron: '41 5 * * 2'   # Tuesdays 05:41 UTC, a day off the Overture canary
+  workflow_dispatch:
+    inputs:
+      tool:
+        description: 'Only this tool family (blank = all 137 queries)'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  corpus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39  # v3
+        with:
+          enable-cache: true
+
+      - name: Run the corpus
+        run: |
+          set -o pipefail
+          uv run python benchmarks/run_query_corpus.py \
+            --fail-on wrong \
+            --json corpus-results.jsonl \
+            ${{ inputs.tool && format('--tool {0}', inputs.tool) || '' }} \
+            | tee corpus-report.txt
+
+      # Uploaded whichever way the run went: the timings are the point even
+      # when every answer is right, and they are what a release claiming
+      # anything about cold start should be read against.
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: query-corpus-results
+          path: |
+            corpus-results.jsonl
+            corpus-report.txt
