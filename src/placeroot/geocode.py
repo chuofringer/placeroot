@@ -3719,6 +3719,56 @@ def _division_area_bbox(division_id: str) -> tuple[float, float, float, float] |
     return result
 
 
+def _warm_division_area_bboxes(division_ids: list[str]) -> None:
+    """Fill _AREA_BBOX_CACHE for every id in one scan instead of one each.
+
+    #268: the address path tries the top candidate's extent and then each
+    same-country runner-up's, and every miss is its own ~10s division_area
+    scan. "221B Baker Street, London" has a whole column of Londons in GB to
+    walk, and measured 116.3s — nearly all of it the same scan run over and
+    over for different ids. The predicate is the only thing that differed, so
+    fold them into one IN-list and pay the scan once.
+
+    Best-effort: a failure here leaves the cache empty and the per-id path
+    runs exactly as before, including its deliberate no-memo-on-error rule.
+    """
+    release_id = release.resolve_release()
+    wanted = [i for i in division_ids if i and (release_id, i) not in _AREA_BBOX_CACHE]
+    if len(wanted) < 2:
+        return
+    glob = overture.upstream_glob(theme="divisions", type_="division_area")
+    if set(overture.missing_columns(glob, ["bbox", "division_id"])):
+        return
+    # DuckDB positional parameters are 1-based; $0 is not a parameter.
+    placeholders = ", ".join(f"${i}" for i in range(1, len(wanted) + 1))
+    sql = f"""
+        SELECT division_id,
+               min(bbox.xmin), min(bbox.ymin), max(bbox.xmax), max(bbox.ymax)
+        FROM read_parquet('{glob}', hive_partitioning=1)
+        WHERE division_id IN ({placeholders})
+        GROUP BY division_id
+    """
+    try:
+        with overture._conn_lock:
+            rows = overture.conn().execute(
+                sql, {str(i): v for i, v in enumerate(wanted, start=1)}
+            ).fetchall()
+    except duckdb.Error as e:
+        logger.warning("batched division_area extent lookup failed: %s", e)
+        return
+    found = {}
+    for division_id, xmin, ymin, xmax, ymax in rows:
+        if any(v is None for v in (xmin, ymin, xmax, ymax)):
+            continue
+        xmin, ymin, xmax, ymax = (float(v) for v in (xmin, ymin, xmax, ymax))
+        if (xmax - xmin) >= _DEGENERATE_BBOX_SPAN_DEG or (
+            ymax - ymin
+        ) >= _DEGENERATE_BBOX_SPAN_DEG:
+            found[division_id] = (xmin, ymin, xmax, ymax)
+    for division_id in wanted:
+        _AREA_BBOX_CACHE[(release_id, division_id)] = found.get(division_id)
+
+
 def _anchor_bbox(anchor_id: str | None, local_table: str | None):
     """The city extent to bound an address scan by, or None.
 
@@ -4098,6 +4148,14 @@ def geocode_address(
     candidates = [r for r in geocode_detailed(city, limit=3, include_country=True)["results"]
                   if r["id"]]
     top = candidates[0] if candidates else None
+    # One scan for every extent this call could possibly need, before the
+    # first one is asked for: the loop below walks the same-country
+    # runners-up, and each uncached miss would otherwise be its own ~10s
+    # division_area scan (#268 measured 116.3s for a column of Londons).
+    if top is not None:
+        _warm_division_area_bboxes(
+            [top["id"]] + [r["id"] for r in candidates[1:] if _same_country(r, top)]
+        )
     anchor = top
     bbox = _anchor_bbox(anchor["id"], local_table) if anchor else None
     notes: list[str] = []
