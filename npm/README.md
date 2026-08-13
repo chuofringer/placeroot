@@ -6,7 +6,7 @@
   <a href="https://placeroot.dev">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/chuofringer/placeroot/v0.9.3/site/og-image-dark.png">
-      <img src="https://raw.githubusercontent.com/chuofringer/placeroot/v0.9.3/site/og-image.png" width="720" alt="PlaceRoot — Ask about anywhere. Get a real answer. Open map data for your AI — free, no account, no API key.">
+      <img src="https://raw.githubusercontent.com/chuofringer/placeroot/v0.9.3/site/og-image.png" width="100%" alt="PlaceRoot — Ask about anywhere. Get a real answer. Open map data for your AI — free, no account, no API key.">
     </picture>
   </a>
 </p>
