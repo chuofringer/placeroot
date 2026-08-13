@@ -439,7 +439,9 @@ def _containing_entry(chain: list[dict], self_id: str, theme: str) -> dict | Non
     return None
 
 
-def _related_division(lat: float | None, lon: float | None, self_id: str, theme: str) -> dict:
+def _related_division(
+    lat: float | None, lon: float | None, self_id: str, theme: str, con=None
+) -> dict:
     """The division containing the entity's point, as {division_id, ...}.
 
     Degrades rather than failing the whole lookup: the entity itself
@@ -451,8 +453,8 @@ def _related_division(lat: float | None, lon: float | None, self_id: str, theme:
     if lat is None or lon is None:
         return {}
     try:
-        chain = divisions.admin_lookup(lat, lon)["chain"]
-    except (overture.UpstreamUnavailable, overture.SchemaDegraded) as e:
+        chain = divisions.admin_lookup(lat, lon, con=con)["chain"]
+    except (overture.UpstreamUnavailable, overture.SchemaDegraded, duckdb.Error) as e:
         logger.warning("gers_lookup: containing-division join unavailable: %s", e)
         return {"note": RELATED_UNAVAILABLE_NOTE}
     entry = _containing_entry(chain, self_id, theme)
@@ -465,7 +467,38 @@ def _related_division(lat: float | None, lon: float | None, self_id: str, theme:
     }
 
 
-def _related_building(lat: float | None, lon: float | None) -> dict:
+def _lean_nearest_building(lat: float, lon: float, con) -> list[tuple]:
+    """(id, distance_m) of the nearest building within the default radius,
+    via a bbox-columns-only scan on a caller-supplied cursor.
+
+    buildings.buildings_at reads footprologically through the tile cache —
+    correct for its own tool, but as a *related join* it only needs an id
+    and a distance, and the tile path serializes on the shared connection
+    lock. This lean read touches id+bbox alone (no geometry), through the
+    bundled manifest's pruned file list, on a cursor — cheap enough to run
+    concurrently with the division join.
+    """
+    from placeroot import geo, manifest
+
+    upstream = overture.upstream_glob(theme="buildings", type_="building")
+    bbox = geo.bbox_around(lat, lon, buildings.DEFAULT_NEAREST_RADIUS_M)
+    source = (
+        manifest.pruned_source_sql(upstream, bbox)
+        or f"read_parquet('{upstream}', hive_partitioning=1)"
+    )
+    bbox_filter, params = geo.bbox_filter_sql(*bbox)
+    params.update({"lat": lat, "lon": lon})
+    sql = f"""
+        SELECT id, round({overture.DISTANCE_EXPR}, 0) AS distance_m
+        FROM {source}
+        WHERE {bbox_filter}
+        ORDER BY distance_m
+        LIMIT 1
+    """
+    return con.execute(sql, params).fetchall()
+
+
+def _related_building(lat: float | None, lon: float | None, con=None) -> dict:
     """Nearest building footprint to a place's point, as {building_id, ...}.
 
     Only meaningful for places (a building's related building is itself; a
@@ -478,10 +511,15 @@ def _related_building(lat: float | None, lon: float | None) -> dict:
     if lat is None or lon is None:
         return {}
     try:
+        if con is not None:
+            lean = _lean_nearest_building(lat, lon, con)
+            if not lean or lean[0][0] is None:
+                return {}
+            return {"building_id": lean[0][0], "building_distance_m": lean[0][1]}
         rows = buildings.buildings_at(
             lat, lon, radius_m=buildings.DEFAULT_NEAREST_RADIUS_M, limit=1
         )
-    except (overture.UpstreamUnavailable, overture.SchemaDegraded) as e:
+    except (overture.UpstreamUnavailable, overture.SchemaDegraded, duckdb.Error) as e:
         logger.warning("gers_lookup: building-at-point join unavailable: %s", e)
         return {"note": BUILDING_UNAVAILABLE_NOTE}
     if not rows or rows[0].get("id") is None:
@@ -532,6 +570,36 @@ def gers_lookup(
         logger.info("gers_lookup(%s): known-miss, skipping all theme scans", id)
         return None
 
+    # Speculative enrichment: on a hinted lookup, start both cross-theme
+    # joins at the hint coordinates BEFORE the probe — the hint is
+    # documented as "the lat/lon of the row the id came from", so for the
+    # common case (a places id straight out of find_places) the joins'
+    # anchor is already known and a cold lookup pays max(probe, joins)
+    # instead of probe + joins. If the resolved entity turns out to sit
+    # elsewhere (or in another theme), the speculative results are simply
+    # dropped and the exact path below runs as before.
+    spec_pool = spec_div = spec_bld = None
+    if hinted:
+        import contextvars
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _in_ctx(fn, *args):
+            ctx = contextvars.copy_context()
+            return lambda: ctx.run(fn, *args)
+
+        try:
+            db.ensure_spatial()
+            spec_pool = ThreadPoolExecutor(max_workers=2)
+            spec_div = spec_pool.submit(_in_ctx(
+                _related_division, near_lat, near_lon, id, "places", db.new_connection()
+            ))
+            spec_bld = spec_pool.submit(
+                _in_ctx(_related_building, near_lat, near_lon, db.new_connection())
+            )
+            spec_pool.shutdown(wait=False)
+        except Exception:  # noqa: BLE001 — speculation must never break the lookup
+            spec_pool = spec_div = spec_bld = None
+
     entity, degraded, failed = None, [], []
     for theme, probe in _PROBES:
         try:
@@ -576,7 +644,46 @@ def gers_lookup(
         return None
 
     lat, lon = entity["lat"], entity["lon"]
-    related = _related_division(lat, lon, id, entity["theme"])
-    if entity["theme"] == "places":
-        related = _merge_related(related, _related_building(lat, lon))
+    if entity["theme"] == "places" and lat is not None and lon is not None:
+        # The hint must BE the entity's coordinates (float-repr tolerance
+        # only): the documented usage is "pass the lat/lon of the row the
+        # id came from", and then hint == entity and the speculative joins
+        # are the exact joins. Any real offset would change the answer —
+        # building_distance_m is measured from the anchor — so a merely
+        # nearby hint redoes the joins at the entity instead.
+        _SPEC_EPS = 1e-6
+        if (
+            spec_div is not None
+            and abs(lat - near_lat) <= _SPEC_EPS
+            and abs(lon - near_lon) <= _SPEC_EPS
+        ):
+            try:
+                related = _merge_related(spec_div.result(), spec_bld.result())
+                return {"id": id, **entity, "related": related}
+            except Exception:  # noqa: BLE001 — fall through to the exact path
+                logger.warning("gers_lookup(%s): speculative joins failed", id)
+        # The two joins read different themes (division_area polygons;
+        # buildings id+bbox) — run them concurrently on cursors of the
+        # shared instance so a cold lookup pays the slower join, not the
+        # sum. Contexts are copied per task so progress reports survive
+        # the pool's threads; db.ensure_spatial() runs first because the
+        # division join's ST_Contains must not race the one-time
+        # extension load.
+        import contextvars
+        from concurrent.futures import ThreadPoolExecutor
+
+        db.ensure_spatial()
+
+        def _in_ctx(fn, *args):
+            ctx = contextvars.copy_context()
+            return lambda: ctx.run(fn, *args)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            div_f = pool.submit(_in_ctx(
+                _related_division, lat, lon, id, entity["theme"], db.new_connection()
+            ))
+            bld_f = pool.submit(_in_ctx(_related_building, lat, lon, db.new_connection()))
+            related = _merge_related(div_f.result(), bld_f.result())
+    else:
+        related = _related_division(lat, lon, id, entity["theme"])
     return {"id": id, **entity, "related": related}

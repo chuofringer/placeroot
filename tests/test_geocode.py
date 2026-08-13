@@ -139,9 +139,9 @@ def _count_places_fallback(monkeypatch):
     calls = []
     real = geocode._query_places_fallback
 
-    def counted(query, anchor=None):
+    def counted(query, anchor=None, also=None):
         calls.append((query, anchor))
-        return real(query, anchor=anchor)
+        return real(query, anchor=anchor, also=also)
 
     monkeypatch.setattr(geocode, "_query_places_fallback", counted)
     return calls
@@ -1428,7 +1428,7 @@ def test_anchored_query_still_searches_places_when_upstream_is_remote(monkeypatc
     # stand-in for S3 and isn't readable from a test.
     monkeypatch.setattr(
         geocode, "_query_places_fallback",
-        lambda q, anchor=None: called.append(anchor) or [],
+        lambda q, anchor=None, also=None: called.append(anchor) or [],
     )
     # "Brooklyn" matches a division, so an anchor is derivable.
     geocode.geocode_detailed("Blue Bottle Roastery Brooklyn", limit=5)
@@ -1899,3 +1899,96 @@ def test_a_stranded_stage1_sentinel_resumes_the_upgrade(geocode_cache, monkeypat
                         lambda path, glob: resumed.append(path))
     assert geocode._local_divisions_table() == table
     assert len(resumed) == 1
+
+
+# --- #268: which word in the query is the location word ---------------------
+
+
+def _stub_divisions(monkeypatch, by_query):
+    """_query_divisions answering from a dict, with ranking within one
+    candidate's rows flattened — these tests are about which *candidate*
+    wins across splits, which is the population comparison alone."""
+    asked = []
+
+    def fake(query, region_code, local_table, fold_diacritics=False, alt_table=None):
+        asked.append(query)
+        return by_query.get(query, [])
+
+    monkeypatch.setattr(geocode, "_query_divisions", fake)
+    monkeypatch.setattr(geocode, "_rank_key", lambda row, query, region_population: 0)
+    return asked
+
+
+def test_a_leading_word_can_anchor_when_the_tail_belongs_to_the_name(monkeypatch):
+    """"Stanford Shopping Center" has no city suffix at all: its tail is part
+    of the mall's own name. Anchoring on "Center" found Center, Pennsylvania
+    and aimed a Palo Alto query at Pittsburgh — 61s to answer nothing."""
+    _stub_divisions(monkeypatch, {
+        "Center": [{"name": "Center", "population": 11795, "lat": 40.66, "lon": -80.29}],
+        "Stanford": [{"name": "Stanford", "population": 13809, "lat": 37.43, "lon": -122.17}],
+    })
+
+    anchor = geocode._fallback_anchor(
+        "Stanford Shopping Center", [], None, "/divisions.parquet"
+    )
+
+    assert anchor == (37.43, -122.17, "Shopping Center")
+
+
+def test_a_trailing_city_still_beats_a_leading_namesake(monkeypatch):
+    """The trailing-suffix reading stays the default. It loses only to a
+    genuinely more prominent division, never merely to a leading-word hit."""
+    _stub_divisions(monkeypatch, {
+        "Brooklyn": [{"name": "Brooklyn", "population": 2_700_000, "lat": 40.68, "lon": -73.94}],
+        "Blue": [{"name": "Blue", "population": 900, "lat": 44.0, "lon": -117.0}],
+    })
+
+    anchor = geocode._fallback_anchor("Blue Bottle Brooklyn", [], None, "/divisions.parquet")
+
+    assert anchor == (40.68, -73.94, "Blue Bottle")
+
+
+def test_a_stopword_head_is_never_tried_as_an_anchor(monkeypatch):
+    """"the Met" must keep resolving through its trailing token; "the" is not
+    a location word however many divisions happen to contain the letters."""
+    asked = _stub_divisions(monkeypatch, {
+        "Met": [{"name": "Metropolis", "population": 90_000, "lat": 40.7, "lon": -73.9}],
+    })
+
+    anchor = geocode._fallback_anchor("the Met", [], None, "/divisions.parquet")
+
+    assert "the" not in asked
+    assert anchor == (40.7, -73.9, None), "residual is a stopword, so no name search"
+
+
+def test_remote_divisions_never_pay_for_leading_word_lookups(monkeypatch):
+    """Without a local table every candidate is a remote scan, so the extra
+    readings are not worth their cost — trailing-only, exactly as before.
+    ("Center" alone is refused outright as a feature noun, so the only
+    lookup left to pay for here is the two-word tail.)"""
+    asked = _stub_divisions(monkeypatch, {})
+
+    geocode._fallback_anchor("Stanford Shopping Center", [], None, None)
+
+    assert asked == ["Shopping Center"]
+
+
+@pytest.mark.parametrize("query, refused", [
+    ("Eiffel Tower", "Tower"),
+    ("Times Square", "Square"),
+    ("Heathrow Airport", "Airport"),
+    ("Griffith Observatory", "Observatory"),
+])
+def test_a_feature_noun_is_never_the_anchor(monkeypatch, query, refused):
+    """#268: _query_divisions matches substrings, so every feature noun finds
+    a division somewhere — "Tower" found Tower Grove in St. Louis and sent a
+    Paris query 7,000 km away to scan Missouri for 33s. These words say what
+    a place is, not where it is."""
+    asked = _stub_divisions(monkeypatch, {
+        refused: [{"name": f"{refused} Grove", "population": 15_000, "lat": 38.6, "lon": -90.2}],
+    })
+
+    anchor = geocode._fallback_anchor(query, [], None, "/divisions.parquet")
+
+    assert refused not in asked
+    assert anchor is None, "no anchor at all beats a confidently wrong one"

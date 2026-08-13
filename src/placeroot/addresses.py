@@ -83,7 +83,7 @@ from typing import NamedTuple
 
 import duckdb
 
-from placeroot import cache, db, geo, overture
+from placeroot import cache, db, geo, manifest, overture
 
 logger = logging.getLogger(__name__)
 
@@ -330,9 +330,10 @@ _COUNTRY_SUBTYPES = ("country", "dependency")
 # areas nest — country > region > county > locality — and a point sits inside
 # one polygon per level, so a handful of rows is the real shape of this result;
 # the limit only stops a pathological dataset from streaming an unbounded
-# result set into memory for a note nobody reads more than one line of. It is
-# applied with ORDER BY area ASC, which keeps the *most specific* rows — the
-# ones _country_by_containment actually chooses between.
+# result set into memory for a note nobody reads more than one line of. The
+# rows are ranked smallest-area-first client-side (see below for why not in
+# the SQL), which keeps the *most specific* rows — the ones
+# _country_by_containment actually chooses between.
 _CONTAINMENT_ROW_LIMIT = 32
 
 
@@ -366,13 +367,20 @@ def _country_by_containment(lat: float, lon: float) -> Country:
         if "bbox" not in missing
         else ""
     )
+    # Bundled-manifest file pruning: a point touches a handful of the
+    # theme's files, and the footer pass over the rest is pure waste --
+    # address_at at a London coordinate spent 13.1s here only to report that
+    # Overture has no address coverage for the country.
+    src = (
+        manifest.pruned_source_sql(glob, geo.bbox_around(lat, lon, 100.0))
+        or f"read_parquet('{glob}', hive_partitioning=1)"
+    )
     sql = f"""
         SELECT country, {name_expr} AS name, {subtype_expr} AS subtype,
                ST_Area({geom}) AS area
-        FROM read_parquet('{glob}', hive_partitioning=1)
+        FROM {src}
         WHERE {bbox_prefilter}country IS NOT NULL
           AND ST_Contains({geom}, ST_Point($lon, $lat))
-        ORDER BY area ASC
         LIMIT {_CONTAINMENT_ROW_LIMIT}
     """
     try:
@@ -383,6 +391,12 @@ def _country_by_containment(lat: float, lon: float) -> Country:
         return Country(LOOKUP_FAILED)
     if not rows:
         return Country(NOT_FOUND)
+    # Smallest-first ranking happens here, not in the SQL: an ORDER BY on a
+    # sort key computed from geometry forces the parquet scan to produce
+    # geometry eagerly for every row group, defeating late materialization
+    # (land_use.py measured that at 18.5s vs 1.6s cold). The containing
+    # rows nest one per admin level, so sorting them client-side is free.
+    rows.sort(key=lambda r: r[3])
     # Code and name must come off the SAME row. Division areas nest, and a
     # dependency sits inside its parent country's polygon: taking the code
     # from the smallest containing row (AX) and the name from the largest

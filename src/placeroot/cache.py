@@ -109,6 +109,15 @@ HEAVY_THEME_TILE_DEG: dict[str, float] = {
     # tiles stay coarser; 0.125° (~14km) balances a seconds-scale COPY
     # against how many tiles a metro-area route touches.
     "transportation": 0.125,
+    # water and infrastructure answer point/short-radius questions with
+    # sparse rows: a 0.25° first-touch tile COPYs in ~2-5s (measured:
+    # water_near 45s cold direct -> 7.0s with tiles) and warms the area.
+    # The dense-geometry base types (land_use, land, land_cover) are
+    # deliberately NOT here: their Tokyo-class tiles carry tens of MB of
+    # polygons, and a sync COPY measured worse than the manifest-pruned
+    # direct scan it replaced.
+    "base_water": 0.25,
+    "base_infrastructure": 0.25,
 }
 
 # A wide query over a heavy theme (a long route corridor) would need too
@@ -171,6 +180,11 @@ def _background_fetch_concurrency() -> int:
 # bound protects is shared process-wide too. Sized at import from the env
 # var; changing the variable mid-process does not resize it.
 _background_fetch_slots = threading.BoundedSemaphore(_background_fetch_concurrency())
+
+# Seconds a background tile fetch waits before touching the network — the
+# scheduling query's own scan finishes first (typically 2-8s cold), so the
+# fetch never competes with the answer it exists to speed up next time.
+BACKGROUND_FETCH_DELAY_S = 10.0
 
 # Background fetch threads are ephemeral (one per tile), but a fresh DuckDB
 # connection pays the whole per-file parquet-footer pass again for the
@@ -706,6 +720,12 @@ def _materialize_in_background(
 
     def _run():
         try:
+            # Let the query that scheduled this fetch answer first: it is
+            # about to run (or is running) a direct scan on the same pipe,
+            # and racing it measured up to 3x slower cold. The tiles still
+            # arrive well before any plausible repeat query.
+            if BACKGROUND_FETCH_DELAY_S:
+                time.sleep(BACKGROUND_FETCH_DELAY_S)
             with _background_fetch_slots:
                 con = _acquire_fetcher_conn(new_connection)
                 try:
@@ -728,6 +748,7 @@ def local_paths_for_query(
     bbox: tuple[float, float, float, float],
     upstream_glob: str,
     new_connection=None,
+    schedule_missing: bool = True,
 ) -> list[str] | None:
     """Local cached parquet paths covering bbox, or None to fall back to upstream.
 
@@ -797,17 +818,62 @@ def local_paths_for_query(
         # would expire mid-loop and leave the tile evictable again. Claiming
         # a not-yet-existing path is harmless: eviction only deletes files
         # that exist and skips claimed paths regardless.
-        held = [str(p) for p in cached]
-        for i, t in enumerate(missing):
+        held = [str(p) for p in cached] + [
+            str(tile_path(release, theme, fingerprint, t)) for t in missing
+        ]
+        claim_paths(held)
+        progress.report(
+            f"Fetching map data for this area ({len(missing)} {theme} "
+            f"tile(s)) — the first query over a new area is slow; results "
+            "are cached, repeat queries answer in milliseconds",
+            0, len(missing),
+        )
+        # Two fetches in flight, mirroring the background semaphore's
+        # rationale in reverse: here there is no foreground scan to starve
+        # (the query waits on these tiles), so a second stream roughly
+        # halves multi-tile waits (a route corridor, a two-tile radius)
+        # while staying gentle on the pipe. Each worker gets its own cursor
+        # of the shared instance — connections aren't safe for concurrent
+        # use, cursors are, and they share the warm metadata cache.
+        done_count = [0]
+        done_lock = threading.Lock()
+
+        def _fetch(t, fetch_con):
+            path = ensure_tile(fetch_con, release, theme, t, upstream_glob, fingerprint)
+            with done_lock:
+                done_count[0] += 1
+                n = done_count[0]
             progress.report(
-                f"Fetching map data for this area ({theme} tile {i + 1} of "
-                f"{len(missing)}) — the first query over a new area is slow; "
-                "results are cached, repeat queries answer in milliseconds",
-                i, len(missing),
+                f"Fetching map data for this area ({theme} tile {n} of "
+                f"{len(missing)}) — results are cached, repeat queries "
+                "answer in milliseconds",
+                n, len(missing),
             )
-            held.append(str(tile_path(release, theme, fingerprint, t)))
-            claim_paths(held)
-            cached.append(ensure_tile(con, release, theme, t, upstream_glob, fingerprint))
+            claim_paths(held)  # refresh mid-flight so no claim expires
+            return path
+
+        if len(missing) == 1 or new_connection is None:
+            # No factory for per-worker connections means no safe way to
+            # run two COPYs at once (a DuckDB connection is single-user;
+            # a caller's factory may also just return `con`, which the
+            # sequential loop tolerates and a pool would corrupt).
+            for t in missing:
+                cached.append(_fetch(t, con))
+        else:
+            import contextvars
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _fetch_in_ctx(t):
+                # Each task gets its own cursor (never a shared connection)
+                # and its own copy of the calling context, so the per-tile
+                # progress reports — a ContextVar-installed reporter —
+                # survive the pool's threads instead of silently dropping.
+                ctx = contextvars.copy_context()
+                return ctx.run(_fetch, t, new_connection())
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                fetched = list(pool.map(_fetch_in_ctx, missing))
+            cached.extend(fetched)
         progress.report(
             f"Map data for this area cached ({theme}) — running the query",
             len(missing), len(missing),
@@ -818,6 +884,12 @@ def local_paths_for_query(
         claim_paths(paths)
         return paths
 
+    if not schedule_missing:
+        # The caller's own scan is about to read the same theme, and its
+        # answer is small (a point classification); racing it against a
+        # whole-tile COPY of the same data measured 3x slower cold. No
+        # tiles are scheduled — the scan serves, this time and next.
+        return None
     progress.report(
         f"First query over a new area: answering from a direct scan of Overture "
         f"on S3 while {len(missing)} {theme} tile(s) cache in the background — "
@@ -834,6 +906,7 @@ def source_sql(
     bbox: tuple[float, float, float, float] | None,
     *,
     upstream_fallback: bool = True,
+    schedule_missing: bool = True,
 ) -> str | None:
     """FROM-clause SQL for a theme: local cache tiles when available, upstream
     otherwise. The one implementation of the "cached tiles else upstream glob"
@@ -870,7 +943,7 @@ def source_sql(
             with db.conn_lock:
                 paths = local_paths_for_query(
                     db.shared_conn(), active_release, theme, bbox, upstream_glob,
-                    db.new_connection,
+                    db.new_connection, schedule_missing=schedule_missing,
                 )
         if paths:
             joined = ", ".join(f"'{p}'" for p in paths)

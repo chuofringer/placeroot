@@ -63,7 +63,7 @@ from collections import Counter
 
 import duckdb
 
-from placeroot import cache, db, geo, overture, release, simplify
+from placeroot import cache, db, geo, overture, simplify
 from placeroot.simplify import METERS_PER_DEGREE_LAT
 
 logger = logging.getLogger(__name__)
@@ -148,19 +148,10 @@ def _from_source(bbox: tuple[float, float, float, float]) -> str:
     overture._from_source directly (it hardcodes type_="place").
     """
     upstream = _upstream_glob()
-    if cache.enabled():
-        try:
-            with db.conn_lock:
-                paths = cache.local_paths_for_query(
-                    db.shared_conn(), release.resolve_release(), THEME, bbox, upstream,
-                    db.new_connection,
-                )
-        except duckdb.Error as e:
-            raise overture.UpstreamUnavailable(str(e)) from e
-        if paths:
-            joined = ", ".join(f"'{p}'" for p in paths)
-            return f"read_parquet([{joined}])"
-    return f"read_parquet('{upstream}', hive_partitioning=1)"
+    try:
+        return cache.source_sql(THEME, upstream, bbox)
+    except duckdb.Error as e:
+        raise overture.UpstreamUnavailable(str(e)) from e
 
 
 def _bbox_filter(lat: float, lon: float, radius_m: float) -> tuple[str, dict]:

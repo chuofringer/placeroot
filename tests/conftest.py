@@ -44,6 +44,18 @@ def no_ambient_tool_selection(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_background_fetch_delay(monkeypatch):
+    """Background tile fetches start immediately in tests.
+
+    Production delays them (cache.BACKGROUND_FETCH_DELAY_S) so a fetch
+    never races the query that scheduled it; tests asserting fetch
+    behavior shouldn't spend wall-clock seconds waiting for that."""
+    from placeroot import cache
+
+    monkeypatch.setattr(cache, "BACKGROUND_FETCH_DELAY_S", 0.0)
+
+
+@pytest.fixture(autouse=True)
 def no_carried_probe_failures():
     """Every test starts with an empty probe-failure memo.
 

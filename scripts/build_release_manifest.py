@@ -35,6 +35,7 @@ THEME_TYPES = [
     ("transportation", "segment"),
     ("transportation", "connector"),
     ("base", "land_use"),
+    ("base", "land_cover"),
     ("base", "land"),
     ("base", "water"),
     ("base", "infrastructure"),
@@ -46,8 +47,15 @@ THEME_TYPES = [
 UPSTREAM_BASE = "s3://overturemaps-us-west-2/release"
 
 
-def build_one(con, release: str, theme: str, type_: str) -> dict[str, list[float]]:
+def build_one(
+    con, release: str, theme: str, type_: str
+) -> tuple[dict[str, list[float]], list[str]]:
     glob = f"{UPSTREAM_BASE}/{release}/theme={theme}/type={type_}/*"
+    columns = [
+        r[0] for r in con.execute(
+            f"DESCRIBE SELECT * FROM read_parquet('{glob}', hive_partitioning=1) LIMIT 0"
+        ).fetchall()
+    ]
     rows = con.execute(
         """
         SELECT parse_filename(file_name) AS file,
@@ -85,7 +93,7 @@ def build_one(con, release: str, theme: str, type_: str) -> dict[str, list[float
                 math.floor(xmin * 1e5) / 1e5, math.floor(ymin * 1e5) / 1e5,
                 math.ceil(xmax * 1e5) / 1e5, math.ceil(ymax * 1e5) / 1e5,
             ]
-    return files
+    return files, columns
 
 
 def main() -> int:
@@ -102,13 +110,15 @@ def main() -> int:
     out_dir = OUT_ROOT / release
     out_dir.mkdir(parents=True, exist_ok=True)
     for theme, type_ in THEME_TYPES:
-        files = build_one(con, release, theme, type_)
+        files, columns = build_one(con, release, theme, type_)
         out = out_dir / f"{theme}__{type_}.json"
         out.write_text(json.dumps(
-            {"release": release, "theme": theme, "type": type_, "files": files},
+            {"release": release, "theme": theme, "type": type_,
+             "columns": columns, "files": files},
             separators=(",", ":"),
         ))
-        print(f"{theme}/{type_}: {len(files)} files -> {out.relative_to(ROOT)}")
+        print(f"{theme}/{type_}: {len(files)} files, {len(columns)} columns "
+              f"-> {out.relative_to(ROOT)}")
     return 0
 
 

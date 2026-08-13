@@ -247,3 +247,83 @@ def test_server_structured_error_on_unreachable_upstream(tmp_path):
     finally:
         land_use.set_data_path(None, type_=land_use.TYPE_LAND_USE)
         land_use.set_data_path(None, type_=land_use.TYPE_LAND_COVER)
+
+
+# --- the bundled coarse land-cover grid (cold-path answer) ------------------
+
+
+def _write_grid(tmp_path, cells):
+    import duckdb as _duckdb
+
+    p = tmp_path / "grid.parquet"
+    con = _duckdb.connect()
+    con.execute("CREATE TABLE g (gx SMALLINT, gy SMALLINT, subtype VARCHAR)")
+    for gx, gy, st in cells:
+        con.execute("INSERT INTO g VALUES (?, ?, ?)", [gx, gy, st])
+    con.execute(f"COPY g TO '{p}' (FORMAT PARQUET)")
+    con.close()
+    return p
+
+
+def test_grid_answers_cold_land_cover_with_an_approximation_note(tmp_path, monkeypatch):
+    import math
+
+    from placeroot import overture as ov
+
+    gx = math.floor(CENTER_LON / land_use.GRID_DEG)
+    gy = math.floor(CENTER_LAT / land_use.GRID_DEG)
+    grid = _write_grid(tmp_path, [(gx, gy, "forest")])
+    monkeypatch.setattr(land_use, "_bundled_grid_path", lambda: grid)
+    monkeypatch.setattr(land_use, "_land_cover_tiles_warm", lambda lat, lon: False)
+    monkeypatch.setattr(ov, "dataset_is_pinned", lambda theme, type_=None: False)
+    # The suite runs cache-off; the grid is deliberately gated on caching
+    # (no tiles to converge to otherwise), so stub it on here.
+    monkeypatch.setattr(land_use.cache, "enabled", lambda: True)
+    # The grid path schedules real land_cover tiles for convergence; that
+    # side effect is live-network and not under test here. land_use's own
+    # classify still needs the real source.
+    real_source_sql = land_use.cache.source_sql
+
+    def _no_land_cover_scheduling(theme, *a, **k):
+        if "land_cover" in theme:
+            return None
+        return real_source_sql(theme, *a, **k)
+
+    monkeypatch.setattr(land_use.cache, "source_sql", _no_land_cover_scheduling)
+
+    result = land_use.land_use_at(CENTER_LAT, CENTER_LON)
+    assert result["land_cover"] == {"subtype": "forest", "class": None}
+    assert land_use.APPROXIMATE_LAND_COVER_NOTE in result.get("note", "")
+
+
+def test_grid_absent_cell_means_no_land_cover_not_a_fallback_scan(tmp_path, monkeypatch):
+    from placeroot import overture as ov
+
+    grid = _write_grid(tmp_path, [(1000, 1000, "forest")])  # nowhere near CENTER
+    monkeypatch.setattr(land_use, "_bundled_grid_path", lambda: grid)
+    monkeypatch.setattr(land_use, "_land_cover_tiles_warm", lambda lat, lon: False)
+    monkeypatch.setattr(ov, "dataset_is_pinned", lambda theme, type_=None: False)
+    # The suite runs cache-off; the grid is deliberately gated on caching
+    # (no tiles to converge to otherwise), so stub it on here.
+    monkeypatch.setattr(land_use.cache, "enabled", lambda: True)
+
+    result = land_use.land_use_at(CENTER_LAT, CENTER_LON)
+    assert result["land_cover"] is None
+
+
+def test_pinned_datasets_never_see_the_grid(land_use_fixture):
+    """Fixture-pinned runs (this suite) take the exact path — the fixture's
+    own land_cover rows answer, no approximation note appears."""
+    result = land_use.land_use_at(CENTER_LAT, CENTER_LON)
+    assert land_use.APPROXIMATE_LAND_COVER_NOTE not in result.get("note", "")
+
+
+def test_warm_tiles_prefer_the_exact_path(tmp_path, monkeypatch):
+    called = []
+    monkeypatch.setattr(land_use, "_land_cover_tiles_warm", lambda lat, lon: True)
+    monkeypatch.setattr(
+        land_use, "_grid_land_cover",
+        lambda lat, lon: called.append(1) or {"subtype": "x", "class": None},
+    )
+    land_use.land_use_at(CENTER_LAT, CENTER_LON)
+    assert called == []

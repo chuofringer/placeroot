@@ -394,11 +394,12 @@ import re
 import threading
 import time
 import unicodedata
+from importlib import resources
 from pathlib import Path
 
 import duckdb
 
-from placeroot import addresses, cache, overture, progress, release
+from placeroot import addresses, cache, geo, overture, progress, release
 from placeroot.errors import AmbiguousArea
 
 logger = logging.getLogger(__name__)
@@ -413,6 +414,44 @@ DIVISION_OVERFETCH = 50  # rows pulled per theme before Python-side ranking trim
 # resolve_place's own _RESOLVE_PLACE_RADIUS_M, just defined here too since
 # geocode() needs it before that constant's #22 section further down.
 _PLACES_FALLBACK_RADIUS_M = 30_000
+
+# Longest query (in words) whose every leading word _fallback_anchor will try
+# as an anchor of its own. Each try is one local-table lookup, and a query
+# long enough to exceed this is prose rather than a "place name + city"
+# phrase, where the trailing-suffix reading is the only one worth paying for.
+_MAX_ANCHOR_TOKENS = 6
+
+# How much population a specific division (a city) must carry, relative to the
+# broad one (its state/country) sharing the name, before it is preferred as a
+# search anchor. New York City is 43% of New York State and is what "New York"
+# means in "Times Square New York"; a hamlet named Tokyo is 0.04% of 東京都 and
+# must never displace it. See _pick_anchor_row.
+_ANCHOR_SPECIFIC_SHARE = 0.1
+
+# Words that say what a place *is*, never where it is. A one-word anchor
+# candidate drawn from this set is refused outright.
+#
+# #268: _query_divisions matches substrings, so every one of these finds a
+# division somewhere — "Center" found Center, Pennsylvania and sent a Palo
+# Alto query to Pittsburgh; "Tower" found Tower Grove in St. Louis and spent
+# 33s scanning Missouri for the Eiffel Tower. The result is not a weak
+# anchor, it is a confidently wrong one, and it is worse than no anchor:
+# without one the caller returns in under a second and tells the user to name
+# a city, which is an answer they can act on.
+#
+# Only single-word candidates are checked. A multi-word candidate carries its
+# own qualifier ("Park Ridge", "Union Square") and is a real name again, and
+# any of these words *is* allowed to anchor when the user supplies nothing
+# else to go on — the rule is about not preferring a feature noun over a
+# genuine place name, not about banning the string.
+_GENERIC_PLACE_WORDS = frozenset("""
+    airport aquarium arena avenue basilica bay beach boulevard bridge building
+    castle cathedral centre center chapel church college crossing dock
+    fountain garden gardens gate harbor harbour hospital hotel island junction
+    library mall market memorial monument mosque museum observatory palace
+    park pier plaza port quay road square stadium station street synagogue
+    temple terminal theater theatre tower university wharf zoo
+""".split())
 
 # Subdirectory (under cache.cache_dir()/<release>/) for the #43 materialized
 # divisions name table — kept distinct from cache.py's own places/<theme>
@@ -864,6 +903,41 @@ def _materialize_divisions_pass(path: Path, glob: str, with_hierarchies: bool) -
 # geocode retries.
 _UPGRADE_DELAY_S = 20.0
 
+# Full-table builds already started this process, keyed by table path.
+_build_started: set[str] = set()
+_build_lock = threading.Lock()
+
+
+def _spawn_divisions_build(path: Path, glob: str) -> None:
+    """Build the full local table in the background (stage-0 index serving
+    meanwhile). Delayed and gated on the fetch slots exactly like the
+    stage-2 upgrade, and for the same measured reason: an undelayed
+    background read of hundreds of MB starves the request that spawned it.
+    """
+    key = str(path)
+    with _build_lock:
+        if key in _build_started:
+            return
+        _build_started.add(key)
+
+    def _run():
+        try:
+            time.sleep(_UPGRADE_DELAY_S)
+            with cache._background_fetch_slots:
+                # glob was captured at spawn: re-resolving here, 20s later,
+                # could follow a background release rollover and materialize
+                # a NEWER release's rows into the pinned release's table
+                # path — wrong-vintage data served for the install's life.
+                if not path.exists():
+                    _materialize_divisions_table(path, glob)
+                    logger.info("full divisions table built behind the bundled index -> %s", path)
+        except Exception as e:  # noqa: BLE001 - background build must never surface
+            logger.warning("background divisions build failed (next geocode retries): %s", e)
+            with _build_lock:
+                _build_started.discard(key)
+
+    threading.Thread(target=_run, daemon=True).start()
+
 _upgrade_started: set[str] = set()
 _upgrade_lock = threading.Lock()
 
@@ -1084,17 +1158,62 @@ def _rebuild_once_for_bbox_columns(path: Path) -> None:
     logger.info("divisions table rebuilt with bbox columns in %.1fs", time.time() - t0)
 
 
-def _local_divisions_table() -> str | None:
-    """Path to the materialized local divisions name table for the active
-    release, building it (blocking — see the module docstring's #43
-    section for why) on first use. Returns None if caching is off
-    (PLACEROOT_CACHE=off) or materialization fails, so callers fall back to
-    a direct upstream scan — the pre-#43 behavior.
+def _bundled_index_path(active_release: str) -> Path | None:
+    """The wheel-bundled stage-0 geocode index for active_release, or None.
+
+    ~150k most-populous divisions in the exact schema
+    _query_divisions_from_local reads (scripts/build_geocode_index.py) —
+    every city and town anyone geocodes or anchors on, locally, before
+    the full table has ever been built.
     """
-    if not cache.enabled():
+    try:
+        p = (resources.files("placeroot") / "data" / "geocode-index"
+             / active_release / "table.parquet")
+        return Path(str(p)) if p.is_file() else None
+    except (OSError, TypeError):
         return None
+
+
+def _is_bundled_table(table_path: str | None) -> bool:
+    return bool(table_path) and "geocode-index" in str(table_path)
+
+
+def _local_divisions_table() -> str | None:
+    """Path to the local divisions name table for the active release.
+
+    Resolution order, fastest first:
+    1. The materialized full table (built earlier this install).
+    2. The wheel-bundled stage-0 index for a bundled release: answers the
+       populous-division queries — which is nearly all of them — locally
+       and instantly, while the full build runs in the background (kicked
+       here, delayed and fetch-slot-gated like the stage-2 upgrade, so it
+       never starves the query that triggered it). Long-tail names absent
+       from the index fall back per-query to a direct upstream scan (see
+       geocode_detailed) until the full table lands.
+    3. Blocking build (unbundled release), the pre-index behavior.
+
+    Returns None if caching is off (PLACEROOT_CACHE=off) and no bundled
+    index applies, or materialization fails — callers fall back to direct
+    upstream scans, the pre-#43 behavior.
+    """
     active_release = release.resolve_release()
+    divisions_pinned = overture.dataset_is_pinned("divisions", "division")
+    if not cache.enabled():
+        # The bundled index is real-release data; a deployment that pinned
+        # divisions to its own dataset (fixtures, an extract) must never be
+        # answered from it.
+        if divisions_pinned:
+            return None
+        bundled = _bundled_index_path(active_release)
+        return str(bundled) if bundled else None
     path = _local_divisions_table_path(active_release)
+    if not path.exists():
+        bundled = _bundled_index_path(active_release)
+        if bundled is not None and not divisions_pinned:
+            _spawn_divisions_build(
+                path, overture.upstream_glob(theme="divisions", type_="division")
+            )
+            return str(bundled)
     if path.exists():
         _rebuild_once_for_bbox_columns(path)
         if _stage1_sentinel(path).exists():
@@ -1571,8 +1690,28 @@ def _alt_rows_not_already_found(
             "primary names only", alt_table,
         )
         return []
-    seen = {r["id"] for r in found}
-    return [r for r in rows if r["id"] not in seen]
+    # A division already found literally keeps its literal row — but it must
+    # not keep a *worse tier* than the alternate hit actually achieved.
+    #
+    # #268: Overture's primary name for Casablanca is the three-script
+    # "Casablanca ⵜⴰⴷⴷⴰⵔⵜ ⵜⵓⵎⵍⵉⵍⵜ الدار البيضاء", so the literal pass matches
+    # "Casablanca" as a mere prefix of it (tier 2) while the alternate pass
+    # matches the alternate "casablanca" exactly (tier 3). Dropping the
+    # alternate row outright left the city ranked below Casablanca, Chile
+    # (pop 17,948) — tier outranks population by design, so an artifact of
+    # how the canonical name is spelled decided the answer, and geocode
+    # confidently pointed 10,000 km away. Carrying the better tier across
+    # costs nothing and is what _effective_tier exists to express.
+    by_id = {r["id"]: r for r in found}
+    fresh = []
+    for r in rows:
+        prior = by_id.get(r["id"])
+        if prior is None:
+            fresh.append(r)
+        elif (r.get("_tier") or 0) > _effective_tier(prior, query):
+            prior["_tier"] = r["_tier"]
+            prior.setdefault("_matched_name", r.get("_matched_name"))
+    return fresh
 
 
 def _query_divisions(
@@ -1814,32 +1953,130 @@ def _fallback_anchor(
         top = divisions[0]
         return top["lat"], top["lon"], search_query
     tokens = search_query.strip().split()
-    for n in (2, 1):
-        if len(tokens) <= n:
+    pop = region_population or {}
+
+    # Splits to try, in precedence order. First the trailing one/two words —
+    # the "PLACE NAME + CITY" shape this heuristic was built for. Then, only
+    # against a local divisions table (where a lookup is a local parquet read
+    # rather than a remote scan we must not multiply), each *leading* word on
+    # its own.
+    #
+    # #268: "Stanford Shopping Center" has no city suffix at all. Its head is
+    # the location word and its tail is part of the mall's own name — and
+    # "Center" matches Center, Pennsylvania, which aimed a Palo Alto query at
+    # Pittsburgh and answered nothing after 61s. Generic tails (Center, Park,
+    # Plaza, Village, Springs) are common division names *and* common
+    # place-name endings, so trailing-first must not mean trailing-only.
+    # Leading candidates are gated to real words so a stopword head ("the
+    # Met") can never become an anchor of its own.
+    splits = [
+        (" ".join(tokens[-n:]), " ".join(tokens[:-n]).strip(), False)
+        for n in (2, 1)
+        if len(tokens) > n
+    ]
+    if local_table is not None and len(tokens) <= _MAX_ANCHOR_TOKENS:
+        for i, token in enumerate(tokens[:-1]):
+            if len(token) >= 3 and not _nothing_but_stopwords(token):
+                splits.append((token, " ".join(tokens[:i] + tokens[i + 1:]).strip(), True))
+
+    # alt_table is the load-bearing part of these lookups: the location token
+    # is a *city name as the user writes it*, and for many big cities that is
+    # an alternate spelling — Japan's Tokyo is primarily 東京都, so a
+    # primary-names-only lookup for "Tokyo" does not even contain the row
+    # every user means, and the measured failure was "Shibuya Crossing Tokyo"
+    # anchoring on a small Papua New Guinea division named Tokyo (the only
+    # primary-name match), aiming the bounded places search at the wrong
+    # hemisphere. Ranking within one candidate's rows is _rank_key, which
+    # orders by each row's own population first; the region_population map
+    # (passed down from geocode's main path rather than re-scanned here) only
+    # breaks region-level ties.
+    best_key = best_row = best_base = None
+    for precedence, (candidate, base, is_leading) in enumerate(splits):
+        if base and candidate.strip().lower().strip(".,") in _GENERIC_PLACE_WORDS:
+            # A feature noun, with the rest of the query still unexplained:
+            # this word describes the place, it does not locate it (#268).
             continue
-        candidate = " ".join(tokens[-n:])
-        # alt_table is the load-bearing part of this lookup: the trailing
-        # token is a *city name as the user writes it*, and for many big
-        # cities that is an alternate spelling — Japan's Tokyo is primarily
-        # 東京都, so a primary-names-only lookup for "Tokyo" does not even
-        # contain the row every user means, and the measured failure was
-        # "Shibuya Crossing Tokyo" anchoring on a small Papua New Guinea
-        # division named Tokyo (the only primary-name match), aiming the
-        # bounded places search at the wrong hemisphere. Ranking itself is
-        # _rank_key, which orders by each row's own population first; the
-        # region_population map (passed down from geocode's main path
-        # rather than re-scanned here) only breaks region-level ties.
         rows = _query_divisions(candidate, region_code, local_table, alt_table=alt_table)
+        if is_leading:
+            # A leading word is the *speculative* reading — the query shape it
+            # exists for ("Stanford Shopping Center") is the exception, not the
+            # rule — so it has to name a division outright to displace the
+            # trailing-suffix reading. Substrings need not apply: "Griffith
+            # Observatory Los Angeles" split on the fragment "Los", which
+            # substring-matched its way to Österreich, whose 8.9M population
+            # then beat the 4.0M of the Los Angeles the query actually named.
+            rows = [r for r in rows if _effective_tier(r, candidate) >= 3]
         if not rows:
             continue
-        best = min(rows, key=lambda r: _rank_key(r, candidate, region_population or {}))
-        base = " ".join(tokens[:-n]).strip()
-        name_query = None if _nothing_but_stopwords(base) else base
-        return best["lat"], best["lon"], name_query
-    return None
+        row = _pick_anchor_row(rows, candidate, pop)
+        # Across splits, prefer a city to a state or country first, and only
+        # then the more prominent place: the query's real location word names
+        # somewhere people have heard of, while a coincidental match on a name
+        # fragment is typically a hamlet that happens to share the word. Ties
+        # keep split order, so the trailing-suffix reading still wins outright
+        # whenever nothing outranks it.
+        #
+        # Specificity has to lead, not population: "Times Square New York"
+        # offers both "New York" (the city, 8.8M) and the fragment "York"
+        # (which substring-matches New York *State*, 20.2M), and ranking on
+        # population alone picked the state — anchoring 250 km up the Hudson
+        # from the square, and answering nothing.
+        broad = _SUBTYPE_WEIGHT.get(row.get("subtype"), 2) <= 1
+        key = (1 if broad else 0, -(row.get("population") or 0), precedence)
+        if best_key is None or key < best_key:
+            best_key, best_row, best_base = key, row, base
+    if best_row is None:
+        return None
+    name_query = None if _nothing_but_stopwords(best_base) else best_base
+    return best_row["lat"], best_row["lon"], name_query
 
 
-def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None) -> list[dict]:
+def _names_a_feature(query: str) -> bool:
+    """Whether the query names a *thing* — a tower, a terminal, a museum —
+    rather than a populated place. Divisions are never called these, so a
+    lookup against the divisions theme can only come back empty."""
+    words = {w.strip(".,").lower() for w in query.split()}
+    return bool(words & _GENERIC_PLACE_WORDS)
+
+
+def _pick_anchor_row(rows: list[dict], query: str, region_population: dict[str, int]) -> dict:
+    """The best of `rows` to use as a point to *search near*, rather than the
+    best one to return as an answer.
+
+    The difference is that a state or a country is a fine answer to "where is
+    Kansas" and a useless anchor for anything: the places fallback searches
+    _PLACES_FALLBACK_RADIUS_M around the point, and a region's centroid is
+    usually nowhere near the city that shares its name. #268 measured it —
+    "Times Square New York" anchored on New York *State* (pop 20.2M, centroid
+    near Utica) and searched 250 km from Manhattan, returning nothing.
+
+    So a substantially-populated city outranks the region it sits in. The
+    "substantially" matters: it must not let any namesake hamlet displace a
+    genuine region, which is the failure mode in the other direction (a
+    locality named Tokyo somewhere must never displace 東京都 as the anchor
+    for "Tokyo"). _ANCHOR_SPECIFIC_SHARE is what separates New York City's
+    43% of its state from a 0.04% coincidence.
+    """
+    def _best(group):
+        return min(group, key=lambda r: _rank_key(r, query, region_population), default=None)
+
+    def _is_broad(row):
+        return _SUBTYPE_WEIGHT.get(row.get("subtype"), 2) <= 1
+
+    broad = _best([r for r in rows if _is_broad(r)])
+    specific = _best([r for r in rows if not _is_broad(r)])
+    if specific is None:
+        return broad
+    if broad is None:
+        return specific
+    if (specific.get("population") or 0) >= _ANCHOR_SPECIFIC_SHARE * (broad.get("population") or 0):
+        return specific
+    return broad
+
+
+def _query_places_fallback(
+    query: str, anchor: tuple[float, float] | None = None, also: str | None = None
+) -> list[dict]:
     """Supplement divisions with named places when divisions alone don't fill limit.
 
     #83: an unconstrained ILIKE scan over the places theme — Overture's
@@ -1868,8 +2105,23 @@ def _query_places_fallback(query: str, anchor: tuple[float, float] | None = None
     cols = overture.probe_schema(glob)
     if cols is not None and "names" not in cols:
         return []
-    filters = ["names.primary ILIKE $pattern ESCAPE '\\'"]
-    params: dict = {"pattern": f"%{overture._like_escape(query)}%"}
+    # `also` (#268) is the *whole* user query, OR'd alongside the residual
+    # `query` the anchor split left behind. When the location word is part of
+    # the place's own name — "Stanford Shopping Center", where anchoring on
+    # Stanford leaves the residual "Shopping Center" — the residual alone
+    # matches every mall in the metro and ranks one of them first. Matching
+    # both patterns costs nothing (same scan, same box) and lets the caller
+    # rank a whole-query hit above a residual-only one.
+    if also and also != query:
+        filters = ["(names.primary ILIKE $pattern ESCAPE '\\'"
+                   " OR names.primary ILIKE $pattern_full ESCAPE '\\')"]
+        params: dict = {
+            "pattern": f"%{overture._like_escape(query)}%",
+            "pattern_full": f"%{overture._like_escape(also)}%",
+        }
+    else:
+        filters = ["names.primary ILIKE $pattern ESCAPE '\\'"]
+        params = {"pattern": f"%{overture._like_escape(query)}%"}
     anchor_bbox = None
     if anchor is not None:
         lat, lon = anchor
@@ -2513,10 +2765,44 @@ def geocode_detailed(
     fuzzy_rows: list[dict] = []
     fuzzy_query = base_query
     if not divisions and local_table is not None and not _has_like_metacharacter(fuzzy_query):
-        fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query, suffix_region_code)
+        if _is_bundled_table(local_table):
+            # A >=0.92 near-miss against only the top-150k names is how
+            # "Berkeley Springs" becomes Berkeley: on the stage-0 index the
+            # fuzzy tier trades a recall gap for confidently wrong answers.
+            # Skip it; the long-tail fallback below (and the full table,
+            # once its background build lands) handle the real name.
+            fuzzy_rows = []
+        else:
+            fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query, suffix_region_code)
         if not fuzzy_rows and suffix_region_code:
             fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query)
         divisions = fuzzy_rows
+
+    _bundled_recall_pending = not divisions and _is_bundled_table(local_table)
+    if (
+        _bundled_recall_pending
+        # #268: no division is named "Eiffel Tower". This scan exists to
+        # find long-tail *populated places* the bundled index omits, and a
+        # query naming a feature is not one — it was 12.8s of a 13.1s call,
+        # spent proving a negative the query's own shape already implies.
+        and not _names_a_feature(search_query)
+        and _fallback_anchor(
+            search_query, [], region_code, local_table,
+            alt_table=_local_alt_names_table(local_table),
+        ) is None
+    ):
+        # The stage-0 bundled index carries only populous divisions; a
+        # long-tail name (an unpopulated hamlet) must not read as "no such
+        # place" while the full table builds in the background. With no
+        # anchor derivable, the anchored-places path can't answer either,
+        # so run the upstream divisions scan (the pre-#43 recall path)
+        # now. When an anchor IS derivable the places search gets its
+        # chance first — "Shibuya Crossing Tokyo" measured 55-70s when a
+        # zero-row divisions scan ran ahead of it — and the same upstream
+        # scan runs after it instead, only if nothing at all was found
+        # (see the empty-candidates recall retry below).
+        divisions = _query_divisions(search_query, region_code, None)
+        _bundled_recall_pending = False
 
     region_population = _region_population_lookup(local_table)
     divisions.sort(key=lambda r: _rank_key(r, search_query, region_population))
@@ -2572,12 +2858,50 @@ def geocode_detailed(
             note = _UNANCHORED_NAME_SEARCH_NOTE
         else:
             seen_names = {(c["name"].lower()) for c in candidates}
-            places = _query_places_fallback(name_query, anchor=anchor)
+            places = _query_places_fallback(name_query, anchor=anchor, also=search_query)
             places = [p for p in places if p["name"].lower() not in seen_names]
-            places.sort(
-                key=lambda r: (-_match_tier(r["name"], name_query), -r["_confidence"], r["id"])
-            )
+            # Rank by the better of the two readings of the query: a row
+            # named for the whole query beats one that merely contains the
+            # residual the anchor split left (#268).
+            #
+            # Distance to the anchor breaks ties before confidence does. Names
+            # repeat inside one metro area — "Millennium Park Chicago" anchored
+            # correctly on the Loop and still answered with a Millennium Park
+            # 31 km away in the suburbs, because that row happened to carry
+            # more confidence. The anchor is the caller's own statement about
+            # where they mean; among equally-good name matches, closer to it is
+            # closer to what they asked for.
+            def _rank_place(r):
+                near = 0.0
+                if anchor is not None:
+                    near = geo.haversine_m(anchor[0], anchor[1], r["lat"], r["lon"])
+                return (
+                    -max(_match_tier(r["name"], name_query),
+                         _match_tier(r["name"], search_query)),
+                    round(near / 1000.0),
+                    -r["_confidence"],
+                    r["id"],
+                )
+
+            places.sort(key=_rank_place)
             candidates = candidates + places
+
+    if not candidates and _bundled_recall_pending and not _names_a_feature(search_query):
+        # Anchored-places had its chance and found nothing either; the
+        # query may be a real division below the bundled index's
+        # population cutoff. One upstream divisions scan preserves the
+        # recall the full local table used to guarantee — paid only when
+        # every faster path came up empty, and only until the background
+        # full build lands.
+        #
+        # Not for a query naming a feature, though (#268): no division is
+        # called "Eiffel Tower" or "Grand Central Terminal", so the scan can
+        # only come back empty, and it was the entire cost of doing so —
+        # 11.0s of a fresh install's first landmark query, spent proving a
+        # negative that the query's own shape already implies.
+        recalled = _query_divisions(search_query, region_code, None)
+        recalled.sort(key=lambda r: _rank_key(r, search_query, region_population))
+        candidates = recalled
 
     out = []
     for row in candidates[:limit]:
@@ -3395,6 +3719,56 @@ def _division_area_bbox(division_id: str) -> tuple[float, float, float, float] |
     return result
 
 
+def _warm_division_area_bboxes(division_ids: list[str]) -> None:
+    """Fill _AREA_BBOX_CACHE for every id in one scan instead of one each.
+
+    #268: the address path tries the top candidate's extent and then each
+    same-country runner-up's, and every miss is its own ~10s division_area
+    scan. "221B Baker Street, London" has a whole column of Londons in GB to
+    walk, and measured 116.3s — nearly all of it the same scan run over and
+    over for different ids. The predicate is the only thing that differed, so
+    fold them into one IN-list and pay the scan once.
+
+    Best-effort: a failure here leaves the cache empty and the per-id path
+    runs exactly as before, including its deliberate no-memo-on-error rule.
+    """
+    release_id = release.resolve_release()
+    wanted = [i for i in division_ids if i and (release_id, i) not in _AREA_BBOX_CACHE]
+    if len(wanted) < 2:
+        return
+    glob = overture.upstream_glob(theme="divisions", type_="division_area")
+    if set(overture.missing_columns(glob, ["bbox", "division_id"])):
+        return
+    # DuckDB positional parameters are 1-based; $0 is not a parameter.
+    placeholders = ", ".join(f"${i}" for i in range(1, len(wanted) + 1))
+    sql = f"""
+        SELECT division_id,
+               min(bbox.xmin), min(bbox.ymin), max(bbox.xmax), max(bbox.ymax)
+        FROM read_parquet('{glob}', hive_partitioning=1)
+        WHERE division_id IN ({placeholders})
+        GROUP BY division_id
+    """
+    try:
+        with overture._conn_lock:
+            rows = overture.conn().execute(
+                sql, {str(i): v for i, v in enumerate(wanted, start=1)}
+            ).fetchall()
+    except duckdb.Error as e:
+        logger.warning("batched division_area extent lookup failed: %s", e)
+        return
+    found = {}
+    for division_id, xmin, ymin, xmax, ymax in rows:
+        if any(v is None for v in (xmin, ymin, xmax, ymax)):
+            continue
+        xmin, ymin, xmax, ymax = (float(v) for v in (xmin, ymin, xmax, ymax))
+        if (xmax - xmin) >= _DEGENERATE_BBOX_SPAN_DEG or (
+            ymax - ymin
+        ) >= _DEGENERATE_BBOX_SPAN_DEG:
+            found[division_id] = (xmin, ymin, xmax, ymax)
+    for division_id in wanted:
+        _AREA_BBOX_CACHE[(release_id, division_id)] = found.get(division_id)
+
+
 def _anchor_bbox(anchor_id: str | None, local_table: str | None):
     """The city extent to bound an address scan by, or None.
 
@@ -3774,6 +4148,14 @@ def geocode_address(
     candidates = [r for r in geocode_detailed(city, limit=3, include_country=True)["results"]
                   if r["id"]]
     top = candidates[0] if candidates else None
+    # One scan for every extent this call could possibly need, before the
+    # first one is asked for: the loop below walks the same-country
+    # runners-up, and each uncached miss would otherwise be its own ~10s
+    # division_area scan (#268 measured 116.3s for a column of Londons).
+    if top is not None:
+        _warm_division_area_bboxes(
+            [top["id"]] + [r["id"] for r in candidates[1:] if _same_country(r, top)]
+        )
     anchor = top
     bbox = _anchor_bbox(anchor["id"], local_table) if anchor else None
     notes: list[str] = []

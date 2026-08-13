@@ -54,6 +54,9 @@ mirrors divisions.admin_lookup's empty-chain stance.
 """
 
 import logging
+import math
+from importlib import resources
+from pathlib import Path
 
 import duckdb
 
@@ -62,6 +65,18 @@ from placeroot import cache, db, geo, overture, release
 logger = logging.getLogger(__name__)
 
 THEME = "base"
+# The bundled coarse land-cover grid's cell size (must match
+# scripts/build_land_cover_grid.py). ~11km at the equator: land *cover* is
+# a coarse fact — forest, urban, grassland — and this is the resolution at
+# which a cold answer can be instant instead of bandwidth-bound.
+GRID_DEG = 0.1
+
+APPROXIMATE_LAND_COVER_NOTE = (
+    "land_cover is approximate on this first visit to the area (bundled "
+    "~11 km grid); once the area's map tiles are cached — they were just "
+    "scheduled — repeat queries answer from exact polygons."
+)
+
 TYPE_LAND_USE = "land_use"
 TYPE_LAND_COVER = "land_cover"
 
@@ -86,10 +101,12 @@ LAND_COVER_REQUIRED_COLUMNS = ["id", "geometry", "bbox", "subtype"]
 # polygon is still found because its bbox necessarily overlaps this tile).
 POINT_QUERY_RADIUS_M = 75.0
 
-# How many containing candidates to pull back, smallest-area first. Only
+# How many containing candidates to pull back (ranked smallest-area first
+# client-side — see _classify for why the SQL must not ORDER BY area). Only
 # the first is ever returned; a second row existing is enough to know the
-# point was ambiguous and flag it via "note" — no need to fetch more.
-_CANDIDATE_LIMIT = 2
+# point was ambiguous and flag it via "note". Generous because it bounds
+# nesting depth at one point, which real data keeps in single digits.
+_CANDIDATE_LIMIT = 32
 
 
 def _ensure_spatial() -> None:
@@ -155,22 +172,74 @@ def _from_source(bbox: tuple[float, float, float, float], type_: str) -> str:
     rather than a bare theme string — see the module docstring.
     """
     upstream = _upstream_glob(type_)
-    if cache.enabled():
-        try:
-            with db.conn_lock:
-                paths = cache.local_paths_for_query(
-                    db.shared_conn(), release.resolve_release(), _cache_theme(type_), bbox,
-                    upstream, db.new_connection,
-                )
-        except duckdb.Error as e:
-            raise overture.UpstreamUnavailable(str(e)) from e
-        if paths:
-            joined = ", ".join(f"'{p}'" for p in paths)
-            return f"read_parquet([{joined}])"
-    return f"read_parquet('{upstream}', hive_partitioning=1)"
+    try:
+        # Background materialization stays on (millisecond repeats and
+        # issue-#5 cache-as-fallback both depend on tiles landing); the
+        # fetches no longer race this query's own scan because every
+        # background fetch now starts after BACKGROUND_FETCH_DELAY_S.
+        return cache.source_sql(_cache_theme(type_), upstream, bbox)
+    except duckdb.Error as e:
+        raise overture.UpstreamUnavailable(str(e)) from e
 
 
-def _classify(lat: float, lon: float, type_: str, include_name: bool) -> tuple[dict | None, bool]:
+def _bundled_grid_path() -> Path | None:
+    """The wheel-bundled land-cover grid for the active release, or None."""
+    try:
+        p = (resources.files("placeroot") / "data" / "land-cover-grid"
+             / f"{release.resolve_release()}.parquet")
+        return Path(str(p)) if p.is_file() else None
+    except (OSError, TypeError):
+        return None
+
+
+def _grid_land_cover(lat: float, lon: float) -> dict | None:
+    """Land cover at (lat, lon) from the bundled coarse grid, or None.
+
+    None means "grid can't answer here" (unbundled release, pinned
+    dataset, or genuinely no coverage cell) — the caller falls through to
+    the exact polygon path. A hit is {"subtype": ..., "class": None},
+    matching the exact path's shape for a dataset without a class column,
+    plus the approximation the caller must note.
+    """
+    if overture.dataset_is_pinned("base", TYPE_LAND_COVER):
+        return None
+    grid = _bundled_grid_path()
+    if grid is None:
+        return None
+    gx, gy = math.floor(lon / GRID_DEG), math.floor(lat / GRID_DEG)
+    try:
+        row = db.new_connection().execute(
+            f"SELECT subtype FROM read_parquet('{grid}') WHERE gx = ? AND gy = ?",
+            [gx, gy],
+        ).fetchone()
+    except duckdb.Error as e:
+        logger.warning("bundled land-cover grid read failed (using exact path): %s", e)
+        return None
+    if row is None:
+        # Absent cell: the paint covers a superset of every polygon's
+        # extent, so no cell genuinely means no land_cover here.
+        return {}
+    return {"subtype": row[0], "class": None}
+
+
+def _land_cover_tiles_warm(lat: float, lon: float) -> bool:
+    """Whether cached tiles already cover this point for the exact path."""
+    if not cache.enabled():
+        return False
+    bbox = geo.bbox_around(lat, lon, POINT_QUERY_RADIUS_M)
+    try:
+        return bool(cache.cached_tile_paths_for_bbox(
+            release.resolve_release(), _cache_theme(TYPE_LAND_COVER),
+            _upstream_glob(TYPE_LAND_COVER), bbox,
+        ))
+    except duckdb.Error:
+        return False
+
+
+def _classify(
+    lat: float, lon: float, type_: str, include_name: bool,
+    con=None,
+) -> tuple[dict | None, bool]:
     """Smallest-area polygon of type_ containing (lat, lon), and whether it was ambiguous.
 
     Returns (None, False) if no polygon contains the point — a valid
@@ -196,6 +265,13 @@ def _classify(lat: float, lon: float, type_: str, include_name: bool) -> tuple[d
         "bbox.xmin <= $lon AND bbox.xmax >= $lon"
         " AND bbox.ymin <= $lat AND bbox.ymax >= $lat"
     )
+    # No ORDER BY area in the SQL, deliberately: a TopN on a sort key
+    # computed from geometry forces the parquet scan to produce geometry
+    # eagerly for every row group, defeating late materialization — the
+    # bbox prefilter stops pruning reads and a cold point query pays the
+    # full geometry column (measured 18.5s vs 1.6s on 4 remote files).
+    # Candidates at a single point are the polygon nesting depth (single
+    # digits), so fetch them unordered and rank by area client-side.
     sql = f"""
         SELECT
             {subtype_expr} AS subtype,
@@ -204,18 +280,27 @@ def _classify(lat: float, lon: float, type_: str, include_name: bool) -> tuple[d
             ST_Area({geom_expr}) AS area
         FROM {_from_source((xmin, ymin, xmax, ymax), type_)}
         WHERE {bbox_prefilter} AND ST_Contains({geom_expr}, ST_Point($lon, $lat))
-        ORDER BY area ASC
         LIMIT {_CANDIDATE_LIMIT}
     """
     try:
-        with db.conn_lock:
-            rows = db.shared_conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
+        if con is not None:
+            # A caller-supplied cursor of the shared instance: safe for
+            # concurrent use without conn_lock (cursors are DuckDB's
+            # documented multithreading unit) and shares the warm metadata
+            # cache. land_use_at runs its two type lookups concurrently on
+            # two of these — the themes are different files, so the reads
+            # overlap instead of summing (~30s -> max of the two, cold).
+            rows = con.execute(sql, {"lat": lat, "lon": lon}).fetchall()
+        else:
+            with db.conn_lock:
+                rows = db.shared_conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
 
     if not rows:
         return None, False
 
+    rows.sort(key=lambda r: r[3])
     subtype, class_, name, _area = rows[0]
     result = {"subtype": subtype, "class": class_}
     if include_name:
@@ -247,11 +332,53 @@ def land_use_at(lat: float, lon: float) -> dict:
     degraded_fields().
     """
     _ensure_spatial()
-    land_use, lu_ambiguous = _classify(lat, lon, TYPE_LAND_USE, include_name=True)
-    land_cover, lc_ambiguous = _classify(lat, lon, TYPE_LAND_COVER, include_name=False)
+    # The two types are different datasets; run them concurrently on
+    # cursors of the shared instance so a cold call costs the slower of
+    # the two reads, not their sum (land_cover carries continent-scale
+    # multipolygons and dominates).
+    from concurrent.futures import ThreadPoolExecutor
+
+    grid_cover = None
+    # cache.enabled() gates the grid, not just the warm check: with caching
+    # off there are no tiles to converge to, so the grid would answer
+    # approximately *forever* while its note promised exact polygons on
+    # repeat — a cache-off operator keeps the old exact (slow) path instead.
+    if cache.enabled() and not _land_cover_tiles_warm(lat, lon):
+        # Cold area: the exact land_cover path is bandwidth-bound
+        # (continent-scale multipolygons), so the bundled coarse grid
+        # answers instantly, flagged approximate below.
+        grid_cover = _grid_land_cover(lat, lon)
+        if grid_cover is not None:
+            # The grid short-circuits the exact scan, so schedule this
+            # area's land_cover tiles ourselves — that is what converges
+            # a repeat query from "approximate" to exact polygons.
+            try:
+                cache.source_sql(
+                    _cache_theme(TYPE_LAND_COVER), _upstream_glob(TYPE_LAND_COVER),
+                    geo.bbox_around(lat, lon, POINT_QUERY_RADIUS_M),
+                )
+            except duckdb.Error:
+                pass  # scheduling is an optimization; the grid already answered
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        lu_f = pool.submit(
+            _classify, lat, lon, TYPE_LAND_USE, True, db.new_connection()
+        )
+        if grid_cover is None:
+            lc_f = pool.submit(
+                _classify, lat, lon, TYPE_LAND_COVER, False, db.new_connection()
+            )
+        land_use, lu_ambiguous = lu_f.result()
+        if grid_cover is None:
+            land_cover, lc_ambiguous = lc_f.result()
+        else:
+            land_cover = grid_cover or None
+            lc_ambiguous = False
 
     result = {"lat": lat, "lon": lon, "land_use": land_use, "land_cover": land_cover}
     notes = []
+    if grid_cover:
+        notes.append(APPROXIMATE_LAND_COVER_NOTE)
     if lu_ambiguous:
         notes.append(
             "multiple overlapping land_use polygons contain this point; "
