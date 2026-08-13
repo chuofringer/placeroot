@@ -470,8 +470,31 @@ def test_matching_discovery_is_plain_discovered(monkeypatch):
     assert info == {"release": "2026-08-19.0", "source": "discovered"}
 
 
-def test_bundled_artifact_release_is_read_from_the_shipped_manifests():
+def test_bundled_artifact_release_is_read_from_the_shipped_files():
     """Read, not assumed equal to the pin, so a half-done pin bump (pin moved,
     artifacts not regenerated) is visible rather than silently claiming
     acceleration the wheel cannot deliver."""
     assert release.bundled_artifact_release() == release.PINNED_RELEASE
+
+
+def test_bundled_artifact_release_requires_every_set_to_agree(monkeypatch, tmp_path):
+    """A pin bump means running three separate generator scripts. Doing two of
+    them must not report the third's acceleration as present: the release
+    every set covers is the one the wheel can actually deliver."""
+    data = tmp_path / "data"
+    (data / "manifests" / "2026-09-24.0").mkdir(parents=True)
+    (data / "manifests" / "2026-07-22.0").mkdir(parents=True)
+    (data / "geocode-index" / "2026-07-22.0").mkdir(parents=True)
+    (data / "land-cover-grid").mkdir(parents=True)
+    (data / "land-cover-grid" / "2026-07-22.0.parquet").write_bytes(b"")
+    (data / "land-cover-grid" / "2026-09-24.0.parquet").write_bytes(b"")
+
+    from importlib import resources
+
+    monkeypatch.setattr(
+        resources, "files", lambda _pkg: tmp_path, raising=True
+    )
+
+    # manifests and the grid have the newer release; the geocode index does
+    # not — so the newer one is not claimed.
+    assert release.bundled_artifact_release() == "2026-07-22.0"

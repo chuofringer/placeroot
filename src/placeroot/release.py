@@ -201,21 +201,46 @@ def _warn_if_stale_once(info: dict) -> None:
 
 
 def bundled_artifact_release() -> str:
-    """The release this wheel's bundled artifacts were built for.
+    """The release *every* bundled artifact set was built for.
 
-    Read from the shipped manifests rather than assumed equal to
-    PINNED_RELEASE, so a half-done pin bump (pin moved, artifacts not
-    regenerated) is visible instead of silently claiming acceleration the
-    wheel cannot deliver. Falls back to the pin when the directory can't be
-    read at all — the pin is what the artifacts target by construction.
+    Read from the shipped files rather than assumed equal to PINNED_RELEASE,
+    so a half-done pin bump (pin moved, artifacts not regenerated) is visible
+    instead of silently claiming acceleration the wheel cannot deliver.
+
+    All three sets have to agree. They are keyed by release independently —
+    data/manifests/<release>/, data/geocode-index/<release>/,
+    data/land-cover-grid/<release>.parquet — and regenerating only some of
+    them is exactly the mistake a pin bump invites (three separate generator
+    scripts, one release). Reporting the manifests' release alone would then
+    tell an operator `artifacts: matched` while the geocode index silently
+    missed, which is the specific lie this function exists to prevent. When
+    they disagree, the oldest wins: that is the release the wheel can
+    actually deliver every acceleration on.
+
+    Falls back to the pin when the files can't be read at all — the pin is
+    what the artifacts target by construction.
     """
     try:
         from importlib import resources
 
-        root = resources.files("placeroot") / "data" / "manifests"
-        names = sorted(p.name for p in root.iterdir() if _RELEASE_RE.match(p.name))
-        if names:
-            return names[-1]
+        data = resources.files("placeroot") / "data"
+        per_set = [
+            {p.name for p in (data / "manifests").iterdir() if _RELEASE_RE.match(p.name)},
+            {p.name for p in (data / "geocode-index").iterdir() if _RELEASE_RE.match(p.name)},
+            {
+                p.name[: -len(".parquet")]
+                for p in (data / "land-cover-grid").iterdir()
+                if p.name.endswith(".parquet") and _RELEASE_RE.match(p.name[: -len(".parquet")])
+            },
+        ]
+        complete = set.intersection(*per_set)
+        if complete:
+            return max(complete)
+        logger.warning(
+            "bundled artifacts disagree on release (%s); no release has all "
+            "three sets, so cold queries lose some acceleration.",
+            " vs ".join(",".join(sorted(s)) or "none" for s in per_set),
+        )
     except (OSError, TypeError, ModuleNotFoundError):
         pass
     return PINNED_RELEASE
