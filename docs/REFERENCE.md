@@ -92,7 +92,7 @@ context, so you can pin them into a conversation without spending a tool call:
 
 | Resource | Contents |
 |---|---|
-| `placeroot://data-version` | The resolved Overture release, its date, and how it was resolved (discovery, env override, or the pinned fallback). Same values the `data_version` tool returns — one shared code path, so they cannot drift. |
+| `placeroot://data-version` | The resolved Overture release, its date, how it was resolved (discovery, env override, the pinned fallback, or held at the artifact release), its age, and whether the bundled acceleration applies to it. Same values the `data_version` tool returns — one shared code path, so they cannot drift. |
 | `placeroot://categories` | Summary of the place-category taxonomy: all 22 top-level categories with how many slugs sit under each, plus how to get an exact slug. ~530 tokens — a summary, not the 2,117-slug CSV, which stays behind `search_categories`. |
 
 In Claude Code they auto-complete as @-mentions:
