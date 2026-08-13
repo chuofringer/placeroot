@@ -445,12 +445,14 @@ _ANCHOR_SPECIFIC_SHARE = 0.1
 # else to go on — the rule is about not preferring a feature noun over a
 # genuine place name, not about banning the string.
 _GENERIC_PLACE_WORDS = frozenset("""
-    airport aquarium arena avenue basilica bay beach boulevard bridge building
-    castle cathedral centre center chapel church college crossing dock
-    fountain garden gardens gate harbor harbour hospital hotel island junction
-    library mall market memorial monument mosque museum observatory palace
-    park pier plaza port quay road square stadium station street synagogue
-    temple terminal theater theatre tower university wharf zoo
+    academy airport aquarium arena avenue basilica bay beach boulevard bridge
+    building campus castle cathedral centre center chapel church cinema clinic
+    club college crossing dock field fountain garden gardens gate gym harbor
+    harbour hospital hotel institute island junction library mall market
+    memorial monument mosque museum observatory palace park pharmacy pier
+    plaza port preschool quay resort restaurant road school square stadium
+    station store street studio synagogue temple terminal theater theatre
+    tower university wharf zoo
 """.split())
 
 # Subdirectory (under cache.cache_dir()/<release>/) for the #43 materialized
@@ -2112,16 +2114,39 @@ def _query_places_fallback(
     # matches every mall in the metro and ranks one of them first. Matching
     # both patterns costs nothing (same scan, same box) and lets the caller
     # rank a whole-query hit above a residual-only one.
+    alternatives = ["names.primary ILIKE $pattern ESCAPE '\\'"]
+    params: dict = {"pattern": f"%{overture._like_escape(query)}%"}
     if also and also != query:
-        filters = ["(names.primary ILIKE $pattern ESCAPE '\\'"
-                   " OR names.primary ILIKE $pattern_full ESCAPE '\\')"]
-        params: dict = {
-            "pattern": f"%{overture._like_escape(query)}%",
-            "pattern_full": f"%{overture._like_escape(also)}%",
-        }
-    else:
-        filters = ["names.primary ILIKE $pattern ESCAPE '\\'"]
-        params = {"pattern": f"%{overture._like_escape(query)}%"}
+        alternatives.append("names.primary ILIKE $pattern_full ESCAPE '\\'")
+        params["pattern_full"] = f"%{overture._like_escape(also)}%"
+
+    # #270: every-token-present, as a last alternative. A substring match
+    # requires the user to reproduce the name contiguously, and real queries
+    # drop a word out of the middle constantly: "BASIS Silicon Valley Lower
+    # School" is not a substring of "BASIS Independent Silicon Valley Lower
+    # School", so the place the user was plainly asking for came back empty
+    # while the same query with "Independent" restored found it instantly.
+    # Requiring each significant word *somewhere* in the name survives that,
+    # and costs nothing extra: it is more predicates on the one scan that was
+    # already running, over the same box.
+    #
+    # Two or more tokens only. A single-token AND is just the substring match
+    # again, and a common single word ("school") would match a large fraction
+    # of the places in the anchor's box and rank noise above nothing.
+    # From the residual, never the whole query: the whole query still carries
+    # the city the anchor was split off from ("... Lower School Sunnyvale"),
+    # and no school's name contains the city it sits in — ANDing that token in
+    # rejects every real match.
+    tokens = [t for t in _significant_tokens(query) if len(t) >= 3][:8]
+    if len(tokens) >= 2:
+        for i, token in enumerate(tokens):
+            params[f"tok{i}"] = f"%{overture._like_escape(token)}%"
+        alternatives.append(
+            "(" + " AND ".join(
+                f"names.primary ILIKE $tok{i} ESCAPE '\\'" for i in range(len(tokens))
+            ) + ")"
+        )
+    filters = ["(" + " OR ".join(alternatives) + ")"]
     anchor_bbox = None
     if anchor is not None:
         lat, lon = anchor
