@@ -30,7 +30,12 @@ def _load_categories() -> list[dict]:
     if _CATEGORIES is not None:
         return _CATEGORIES
 
-    csv_path = importlib.resources.files("placeroot.data").joinpath("overture_categories.csv")
+    # Traversal from the package root, never a dotted "placeroot.data"
+    # anchor: the dotted form imports the data directory as a module, which
+    # is the one resolution step a polluted sys.path can break. Matches
+    # every other data reader in the package (geocode.py, manifest.py,
+    # land_use.py, release.py); guarded by tests/test_import_hardening.py.
+    csv_path = importlib.resources.files("placeroot") / "data" / "overture_categories.csv"
     rows = []
     with csv_path.open("r", encoding="utf-8-sig") as f:
         for i, line in enumerate(f):
