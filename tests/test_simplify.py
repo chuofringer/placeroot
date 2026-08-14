@@ -87,6 +87,17 @@ def test_malformed_geometry_raises_invalid_geometry(geojson):
         simplify.simplify_geometry(geojson, max_tokens=500)
 
 
+def test_unsupported_type_message_lists_supported_types():
+    with pytest.raises(simplify.InvalidGeometry) as excinfo:
+        simplify.simplify_geometry(
+            {"type": "NotAType", "coordinates": [[0, 0]]}, max_tokens=500
+        )
+    detail = excinfo.value.detail
+    assert repr("NotAType") in detail
+    for gtype in simplify.SUPPORTED_TYPES:
+        assert gtype in detail
+
+
 def test_multipolygon_simplifies_each_ring():
     ring_a = _noisy_circle(n=300, cx=-73.9, cy=40.7)
     ring_b = _noisy_circle(n=300, cx=-73.8, cy=40.8, seed=2)

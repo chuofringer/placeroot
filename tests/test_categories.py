@@ -38,15 +38,13 @@ def test_empty_query_returns_empty_results_via_server_tool():
     assert server.search_categories(query="   ") == {"results": []}
 
 
-def test_limit_out_of_range_is_a_bad_request():
-    assert server.search_categories(query="coffee", limit=0) == {
-        "error": "bad_request",
-        "detail": "limit must be between 1 and 50",
-    }
-    assert server.search_categories(query="coffee", limit=51) == {
-        "error": "bad_request",
-        "detail": "limit must be between 1 and 50",
-    }
+def test_limit_out_of_range_is_clamped_not_an_error():
+    # Convention (#283): out-of-range limit clamps into [0, 50], matching
+    # every other tool's limit handling, rather than returning an error.
+    assert server.search_categories(query="coffee", limit=0) == {"results": []}
+    results = server.search_categories(query="coffee", limit=999)
+    assert "error" not in results
+    assert len(results["results"]) <= 50
 
 
 def test_returned_slug_is_directly_usable_from_bundled_csv():

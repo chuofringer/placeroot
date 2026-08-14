@@ -1106,11 +1106,10 @@ def search_categories(query: str, limit: int = 8) -> dict:
     {"results": [{"slug", "path"}, ...]} — path is the root-to-leaf
     taxonomy (e.g. ["eat_and_drink", "cafe", "coffee_shop"]), budgeted like
     every other tool. An empty/whitespace query returns {"results": []}.
-    limit must be 1-50; out of range returns a structured
-    {"error": "bad_request", ...}.
+    limit is clamped to 0-50, matching every other tool's limit handling
+    (out-of-range values are not an error).
     """
-    if limit < 1 or limit > 50:
-        return {"error": "bad_request", "detail": "limit must be between 1 and 50"}
+    limit = max(0, min(int(limit), 50))
     rows = categories.search_categories(query, limit)
     return budget.apply_budget({"results": rows}, "results")
 
