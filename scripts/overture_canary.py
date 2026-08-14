@@ -87,8 +87,9 @@ def main() -> int:
         findings.append(
             f"- **Pinned fallback is stale**: `PINNED_RELEASE = "
             f"\"{release.PINNED_RELEASE}\"` but upstream's newest release is "
-            f"`{newest}`. Bump the pin (src/placeroot/release.py), regenerate "
-            f"fixtures, and sweep docs for the old string."
+            f"`{newest}`. Bump it with `uv run python scripts/bump_pin.py "
+            f"{newest}` — see docs/PIN.md for the full runbook (what else "
+            f"moves, and what deliberately doesn't)."
         )
         # #269: the pin is not just a fallback string any more — three
         # bundled artifact sets are keyed by it, and each one simply misses
