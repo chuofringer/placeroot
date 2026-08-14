@@ -76,12 +76,13 @@ normal suite, no network required.
 ## The other half of the cost: the schema surface
 
 This benchmark measures the tokens an *answer* costs. The tool schemas cost
-tokens too — ~13.2k estimated tokens across all 29 tools, paid once per
+tokens too — ~13.4k estimated tokens across all 29 tools, paid once per
 conversation before the agent asks anything, which is dozens of median
 answers' worth. That side isn't reduced by better answers; it's reduced by
-registering fewer tools. See `PLACEROOT_TOOLS` in the top-level README
-(issue #182) for the profiles and their measured per-profile surface —
-`core` is ~50% smaller, `routing` ~76%.
+registering fewer tools. See `PLACEROOT_TOOLS` in
+[docs/REFERENCE.md](../docs/REFERENCE.md#loading-fewer-tools-placeroot_tools)
+for the profiles and their measured per-profile surface — `core` is ~59%
+smaller, `routing` ~78%.
 
 ## Task categories and what "raw" means per category
 
@@ -153,7 +154,7 @@ follow-up worth its own issue, not fixed in this one. The committed
 
 ## The query corpus (accuracy + cold latency)
 
-`query_corpus.py` is 137 real user questions across every tool and 40+
+`query_corpus.py` is 148 real user questions across every tool and 40+
 cities, each with a *correctness* check — name plus coordinates within a
 km tolerance — because a timing-only bench scores a fast wrong answer as
 a win (measured: "Casablanca" → Chile in 0.2s). `run_query_corpus.py`

@@ -80,9 +80,13 @@ Open a tool-request issue before writing code. Include: the question the
 tool answers, why existing tools can't answer it, which Overture theme(s)
 it reads, and a sketch of the response shape with a token estimate. Tools
 also need: MCP annotations (`readOnlyHint`, title), registration in the
-appropriate `PLACEROOT_TOOLS` profiles, a row in the README tool table and
-the site tool grid (the sync tests will remind you), and offline tests
-against fixtures.
+appropriate `PLACEROOT_TOOLS` profiles, a row in the tool catalog in
+[docs/REFERENCE.md](docs/REFERENCE.md#all-29-tools) and the site tool grid
+in `site/index.html`, and offline tests against fixtures. `tests/test_site_tools_sync.py`
+only guards the site side — it asserts every registered tool is shown on
+the marketing site's tool grid (and vice versa) and that the site's
+headline tool-count copy matches; it does not check `docs/REFERENCE.md`,
+so a new tool's catalog row is on you to add and keep accurate.
 
 ## Commits and pull requests
 

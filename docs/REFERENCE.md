@@ -52,7 +52,7 @@ PlaceRoot also speaks the MCP 2026-07-28 revision's listing cache hints:
 `tools/list` (and the prompt and resource listings) come back with
 `ttlMs: 86400000` and `cacheScope: "public"`. The listings are frozen at build
 time — nothing at runtime can change them — so a client is free to reuse them
-for a day instead of re-reading a ~12k-token schema surface every session.
+for a day instead of re-reading a ~13.4k-token schema surface every session.
 Clients that speak an older revision are unaffected: those fields did not exist
 before 2026-07-28, and the response they get is byte-identical to what it was.
 
@@ -111,8 +111,8 @@ without them registered.
 
 ## Loading fewer tools (`PLACEROOT_TOOLS`)
 
-All 29 tool schemas cost roughly **13.2k tokens** of every conversation's
-context, paid before the agent asks anything — about the cost of 100 median
+All 29 tool schemas cost roughly **13.4k tokens** of every conversation's
+context, paid before the agent asks anything — about the cost of 103 median
 answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS`
 selects which tools get registered. Unselected tools are never registered and
 never appear in `tools/list`.
@@ -134,20 +134,20 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 29 | ~13,160 | — |
-| `search` | 13 | ~6,170 | 53% |
-| `core` | 10 | ~5,280 | 60% |
-| `routing` | 6 | ~2,890 | 78% |
-| `analysis` | 9 | ~3,240 | 75% |
-| `geometry` | 3 | ~850 | 94% |
-| `progressive` | 3 (all 29 reachable) | ~550 | 96% |
+| unset / `all` (default) | 29 | ~13,438 | — |
+| `search` | 13 | ~6,440 | 52% |
+| `core` | 10 | ~5,558 | 59% |
+| `routing` | 6 | ~2,894 | 78% |
+| `analysis` | 9 | ~3,241 | 76% |
+| `geometry` | 3 | ~853 | 94% |
+| `progressive` | 3 (all 29 reachable) | ~554 | 96% |
 
 - **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `places_along_route`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
 - **`search`** — the find/name/identify family: `find_places`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, `address_at`, `geocode_address`, `search_categories`, and `gers_lookup`.
 - **`routing`** — `route`, `isochrone`, `distance_matrix`, `within_distance`, `optimize_route`.
 - **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`.
 - **`geometry`** — `simplify_geometry`, `render_map`.
-- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 29 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 13.2k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
+- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 29 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 13.4k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 
 `data_version` is registered under every profile: it is ~230 tokens and the
 only way an agent can tell which Overture release backs its answers.
@@ -176,15 +176,18 @@ them, PlaceRoot answers without a key.
 
 ## Configuration
 
-Every setting is an environment variable; none is required. The ones an
-operator is most likely to reach for:
+Nearly every setting is an environment variable; none is required. (The
+transport itself is the exception — `--host`/`--port` are CLI flags, not
+env vars; see below.) The ones an operator is most likely to reach for:
 
 | Variable | Default | What it does |
 |---|---|---|
 | `PLACEROOT_TOOLS` | all 29 | Tool profile/subset — see the section above |
+| `PLACEROOT_TOKEN_BUDGET` | `2000` | Soft per-response token budget (chars/4 heuristic); rows are dropped lowest-ranked first, then optional fields, until a response fits |
 | `PLACEROOT_RECREATION_LAYER` | on | `0`/`false`/`no`/`off` disables the base-theme recreation layer ([docs/RECREATION.md](RECREATION.md)) |
 | `PLACEROOT_CACHE` | on | `off` disables the local tile cache entirely |
 | `PLACEROOT_CACHE_DIR` | `~/.cache/placeroot` | Where tiles, the geocode name index, and support tables live |
+| `PLACEROOT_ARTIFACT_DIR` | sibling of `PLACEROOT_CACHE_DIR` (`.../artifacts`) | Where `render_map` writes its self-contained HTML files |
 | `PLACEROOT_CACHE_MAX_MB` | `500` | LRU size cap for the cache directory |
 | `PLACEROOT_CACHE_SYNC` | off | Materialize missing tiles inline instead of in the background (tests, warm-starts) |
 | `PLACEROOT_CACHE_FETCH_CONCURRENCY` | `2` | Concurrent background tile fetches — bounded so a cold query's own scan isn't starved by its cache warmers |
