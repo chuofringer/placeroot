@@ -13,6 +13,7 @@ stays safe under that concurrency.
 import argparse
 import asyncio
 import functools
+import importlib.metadata
 import inspect
 import logging
 import math
@@ -2110,8 +2111,15 @@ def build_server(spec=_UNSET) -> MCPServer:
     # out again for pre-2026-07-28 clients, so an older client's tools/list is
     # byte-identical to what it got before this existed (asserted in
     # tests/test_caching.py).
+    try:
+        version = importlib.metadata.version("placeroot")
+    except importlib.metadata.PackageNotFoundError:
+        # Running from a source tree that was never installed (no dist-info);
+        # an empty version is what clients saw before this was wired at all.
+        version = ""
     server = MCPServer(
-        "placeroot", instructions=BASE_INSTRUCTIONS, cache_hints=CACHE_HINTS,
+        "placeroot", version=version,
+        instructions=BASE_INSTRUCTIONS, cache_hints=CACHE_HINTS,
         middleware=[_progress_middleware, _trace_middleware],
     )
     # One registry for the loop: `progressive` selects meta-tool names, every
