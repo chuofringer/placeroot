@@ -18,6 +18,12 @@ Usage:
     uv run python scripts/mirror_theme.py --target s3://my-bucket/overture --verify
     uv run python scripts/mirror_theme.py --target /local/mirror   # local dir works too
 
+    # Freshness (#219): does the mirror hold the newest upstream release?
+    uv run python scripts/mirror_theme.py --target s3://my-bucket/overture --check-current
+    # Drop mirrored releases older than the newest one the mirror holds.
+    uv run python scripts/mirror_theme.py --target s3://my-bucket/overture --prune-releases
+    uv run python scripts/mirror_theme.py --target s3://my-bucket/overture --prune-releases --yes
+
 Design (see docs/MIRROR.md for the full rationale):
 
 - Source enumeration reuses the same anonymous S3 ListObjectsV2 HTTPS
@@ -46,6 +52,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -66,6 +73,13 @@ DEFAULT_SOURCE_BASE = "s3://overturemaps-us-west-2/release"
 DEFAULT_SOURCE_REGION = "us-west-2"
 MANIFEST_NAME = ".mirror_manifest.json"
 _S3_NS = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+
+# Same shape as placeroot.release._RELEASE_RE (YYYY-MM-DD.N) — kept as its
+# own copy rather than imported, since this script's release-name matching
+# is about mirror directory names, not upstream discovery, and the two
+# should be free to diverge without coupling this script to a private
+# attribute of the release module.
+_RELEASE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.\d+$")
 
 
 @dataclass(frozen=True)
@@ -163,6 +177,81 @@ def list_source_files(
         bucket, prefix = parse_s3(root)
         return _list_s3(bucket, prefix, region)
     return _list_local(root)
+
+
+# --- Mirror freshness (#219) --------------------------------------------
+#
+# check-current/--prune-releases answer "what release(s) does the mirror at
+# --target hold" — a different question from list_source_files above, which
+# asks the same thing about --source. A mirror target is commonly private
+# (see docs/MIRROR.md's R2 walkthrough), so listing it can't reuse the
+# anonymous ListObjectsV2 HTTPS call _list_s3 makes for the public Overture
+# bucket. DuckDB's glob() table function is used instead: it runs over the
+# same connection copy_one already writes through (configure_connection has
+# already set s3_access_key_id/secret from PLACEROOT_S3_*), so a private
+# target's credentials are reused rather than re-implemented as a second,
+# hand-rolled signed-request path.
+
+
+def _release_sort_key(release: str) -> tuple[str, int]:
+    """Same numeric-patch comparison release.py's discovery uses: plain
+    string/max() would sort "2026-07-22.9" above "2026-07-22.10"."""
+    date_part, _, patch_part = release.rpartition(".")
+    return (date_part, int(patch_part))
+
+
+def newest_release(releases: list[str]) -> str | None:
+    """The newest of a list of release names, or None if the list is empty."""
+    if not releases:
+        return None
+    return max(releases, key=_release_sort_key)
+
+
+def releases_to_prune(mirrored: list[str]) -> list[str]:
+    """Every mirrored release older than the newest one held — what
+    --prune-releases would delete. Never includes the newest release, even
+    when it's the only one mirrored (nothing to prune against)."""
+    newest = newest_release(mirrored)
+    if newest is None:
+        return []
+    return sorted(r for r in mirrored if r != newest)
+
+
+def _glob_s3(con: duckdb.DuckDBPyConnection, pattern: str) -> list[str]:
+    """Every S3 key matching pattern, via DuckDB's own glob() table
+    function against the caller's already-configured connection. Returns []
+    (rather than raising) on a listing failure — an empty/nonexistent
+    target is a normal "mirror not populated yet" state, not an error the
+    caller should crash on."""
+    try:
+        rows = con.execute(f"SELECT file FROM glob({_sql_str(pattern)})").fetchall()
+    except duckdb.Error as e:
+        logger.debug("glob(%s) failed: %s", pattern, e)
+        return []
+    return [r[0] for r in rows]
+
+
+def list_mirror_releases(con: duckdb.DuckDBPyConnection, target: str) -> list[str]:
+    """Every release name found directly under --target (Overture's own
+    layout: <target>/<release>/theme=.../type=.../*.parquet). Local target:
+    a plain directory listing. S3 target: DuckDB's glob(), one level deep,
+    filtered to names that look like a release — a target bucket can
+    reasonably hold other prefixes too, and this only cares about the ones
+    this script itself would have written to.
+    """
+    target = target.rstrip("/")
+    if is_s3(target):
+        names = set()
+        for path in _glob_s3(con, f"{target}/*"):
+            rest = path[len(target) + 1 :]
+            name = rest.split("/")[0]
+            if _RELEASE_RE.match(name):
+                names.add(name)
+        return sorted(names)
+    root = Path(target)
+    if not root.exists():
+        return []
+    return sorted(p.name for p in root.iterdir() if p.is_dir() and _RELEASE_RE.match(p.name))
 
 
 # --- Connection ---------------------------------------------------------
@@ -412,6 +501,100 @@ def cmd_verify(
     return 0
 
 
+def cmd_check_current(mirrored: list[str], upstream_release: str) -> int:
+    """Compares the newest release the mirror holds against upstream.
+
+    Exits 0 (and logs one line) when the mirror is at or ahead of upstream
+    discovery — "ahead" happens if an operator manually seeded a release
+    discovery hasn't caught up to yet, which isn't a problem worth failing
+    on. Exits 1 with "mirror holds X, upstream is at Y" when the mirror's
+    newest release is older, and 1 when the mirror holds nothing at all
+    (never mirrored, or --target/--s3-* point at the wrong place).
+    """
+    newest_mirrored = newest_release(mirrored)
+    if newest_mirrored is None:
+        logger.error(
+            "mirror holds no releases yet (has it been mirrored? "
+            "check --target/--s3-endpoint/--s3-region)"
+        )
+        return 1
+    if _release_sort_key(newest_mirrored) >= _release_sort_key(upstream_release):
+        logger.info(
+            "mirror is current: holds %s (upstream: %s)", newest_mirrored, upstream_release
+        )
+        return 0
+    logger.error(
+        "mirror is behind: mirror holds %s, upstream is at %s", newest_mirrored, upstream_release
+    )
+    return 1
+
+
+def cmd_prune_releases(
+    con: duckdb.DuckDBPyConnection, target: str, mirrored: list[str], yes: bool
+) -> int:
+    """Deletes every mirrored release older than the newest one held.
+
+    Dry-run by default (prints what WOULD be deleted, deletes nothing,
+    exits 0) — deleting mirrored data must never happen on a bare flag.
+    --yes is required to act. A local --target is deleted directly
+    (shutil.rmtree); DuckDB has no S3 delete primitive (httpfs is
+    read/glob/write-only — see copy_one), so an S3 --target is never
+    deleted in-process even with --yes: this prints the exact prefix to
+    remove with the operator's own tooling (aws s3 rm --recursive, rclone,
+    the provider console, ...) and returns 2 to signal nothing was done.
+    """
+    to_prune = releases_to_prune(mirrored)
+    if not to_prune:
+        logger.info(
+            "nothing to prune: mirror holds %s",
+            ", ".join(mirrored) if mirrored else "no releases",
+        )
+        return 0
+
+    target = target.rstrip("/")
+    newest = newest_release(mirrored)
+    logger.info(
+        "keeping %s; %d release(s) eligible for pruning: %s",
+        newest, len(to_prune), ", ".join(to_prune),
+    )
+
+    if is_s3(target):
+        for release in to_prune:
+            release_root = f"{target}/{release}"
+            n_files = len(_glob_s3(con, f"{release_root}/**/*.parquet"))
+            logger.warning(
+                "%s: would delete %d file(s) under %s — DuckDB can't delete S3 "
+                "objects, so this script never does either; remove it with your "
+                "own tooling, e.g. `aws s3 rm --recursive %s`",
+                release, n_files, release_root, release_root,
+            )
+        if yes:
+            logger.error(
+                "--yes has no effect for an S3 --target: nothing was deleted, "
+                "see the per-release commands logged above"
+            )
+            return 2
+        return 0
+
+    for release in to_prune:
+        release_root = Path(target) / release
+        n_files = sum(1 for _ in release_root.rglob("*.parquet")) if release_root.exists() else 0
+        if not yes:
+            logger.info(
+                "%s: would delete %s (%d file(s)) — pass --yes to delete",
+                release, release_root, n_files,
+            )
+            continue
+        if release_root.exists():
+            shutil.rmtree(release_root)
+            logger.info("%s: deleted %s (%d file(s))", release, release_root, n_files)
+        else:
+            logger.info("%s: %s already gone", release, release_root)
+    if not yes:
+        logger.info("dry run: pass --yes to actually delete the release(s) listed above")
+    return 0
+
+
 # --- CLI -------------------------------------------------------------
 
 
@@ -442,6 +625,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="List source files and total size; copies nothing, needs no --target",
     )
     p.add_argument(
+        "--check-current", action="store_true",
+        help="Report whether --target holds the newest upstream release (#219); "
+        "exits non-zero if behind. Doesn't touch --source or copy anything.",
+    )
+    p.add_argument(
+        "--prune-releases", action="store_true",
+        help="Delete releases under --target older than the newest one it holds "
+        "(#219). Dry run by default (prints what WOULD be deleted); pass --yes to "
+        "actually delete. S3 targets are listed but never deleted in-process — "
+        "see docs/MIRROR.md.",
+    )
+    p.add_argument(
+        "--yes", action="store_true",
+        help="Actually perform the deletion for --prune-releases (default: dry run)",
+    )
+    p.add_argument(
         "--manifest", default=None,
         help="Manifest path (default: <target>/.mirror_manifest.json, or a "
         "~/.cache/placeroot path keyed by target for S3)",
@@ -462,6 +661,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     logging.basicConfig(level=args.log_level, format="%(asctime)s %(levelname)s %(message)s")
+
+    if args.check_current or args.prune_releases:
+        if not args.target:
+            logger.error("--target is required for --check-current/--prune-releases")
+            return 2
+        con = configure_connection(args.s3_endpoint, args.s3_region)
+        mirrored = list_mirror_releases(con, args.target)
+        if args.check_current:
+            upstream = args.release or release_mod.resolve_release()
+            return cmd_check_current(mirrored, upstream)
+        return cmd_prune_releases(con, args.target, mirrored, yes=args.yes)
 
     release = args.release or release_mod.resolve_release()
     logger.info(
