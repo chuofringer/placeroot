@@ -43,6 +43,10 @@ on your PR, run the named script rather than editing the generated file:
   registry manifests (`server.json`, `mcpb/manifest.json`) are kept in step
   with the package version.
 
+Bumping `release.PINNED_RELEASE` (the fallback Overture release, watched by
+the weekly canary) is its own multi-step runbook, not a single sync guard —
+see [docs/PIN.md](docs/PIN.md) and `scripts/bump_pin.py`.
+
 ## Design rules
 
 These are the constraints that shape every tool; a PR that fights them will
