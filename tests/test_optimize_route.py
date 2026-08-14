@@ -427,6 +427,7 @@ def test_unsupported_mode_is_structured():
     result = server.optimize_route(_as_dicts(LINE_STOPS), mode="teleport")
     assert result["error"] == "unsupported_mode"
     assert "walk" in result["supported"]
+    assert result["detail"] == "unsupported mode 'teleport'; supported: ['cycle', 'drive', 'walk']"
 
 
 def test_stops_beyond_the_mode_cap_raise_route_too_long():

@@ -83,6 +83,15 @@ def test_server_unresolvable_area_is_not_found_not_empty_results():
     result = server.find_places(area="Definitely Not A Real Place XYZ")
     assert result["error"] == "not_found"
     assert "results" not in result
+    assert result["detail"] == "no division matched area 'Definitely Not A Real Place XYZ'"
+
+
+def test_server_unknown_division_id_echoes_the_offending_value():
+    """Issue #278: the division_id sibling of the area not_found error must
+    also echo the value that failed to match, not a generic message."""
+    result = server.find_places(division_id="gers-div-does-not-exist")
+    assert result["error"] == "not_found"
+    assert result["detail"] == "no division matched division_id 'gers-div-does-not-exist'"
 
 
 def test_server_rejects_area_combined_with_point():
