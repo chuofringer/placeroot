@@ -156,3 +156,5 @@ Per-theme obligations: [docs/DATA-LICENSE.md](docs/DATA-LICENSE.md).
 <p align="center">
   <img src="https://placeroot.dev/logo-mark.svg" width="48" alt="PlaceRoot logo mark">
 </p>
+
+<sub>mcp-name: io.github.chuofringer/placeroot</sub>
