@@ -208,7 +208,9 @@ def _walk(gtype: str, coords, epsilon_m: float, mpd_lon: float, mpd_lat: float, 
             kept += sum(len(r[0]) for r in results)
             dev = max(dev, max((r[1] for r in results), default=0.0))
         return new_polys, orig, kept, dev
-    raise InvalidGeometry(f"unsupported geometry type: {gtype}")
+    raise InvalidGeometry(
+        f"unsupported geometry type: {gtype!r}; supported: {sorted(SUPPORTED_TYPES)}"
+    )
 
 
 def _count_points(gtype: str, coords) -> int:
@@ -224,7 +226,9 @@ def _count_points(gtype: str, coords) -> int:
         return sum(len(ring) for ring in coords)
     if gtype == "MultiPolygon":
         return sum(len(ring) for poly in coords for ring in poly)
-    raise InvalidGeometry(f"unsupported geometry type: {gtype}")
+    raise InvalidGeometry(
+        f"unsupported geometry type: {gtype!r}; supported: {sorted(SUPPORTED_TYPES)}"
+    )
 
 
 def _all_ordinates(gtype: str, coords, axis: int) -> list:
@@ -241,7 +245,9 @@ def _all_ordinates(gtype: str, coords, axis: int) -> list:
         return [c[axis] for ring in coords for c in ring]
     if gtype == "MultiPolygon":
         return [c[axis] for poly in coords for ring in poly for c in ring]
-    raise InvalidGeometry(f"unsupported geometry type: {gtype}")
+    raise InvalidGeometry(
+        f"unsupported geometry type: {gtype!r}; supported: {sorted(SUPPORTED_TYPES)}"
+    )
 
 
 def _all_latitudes(gtype: str, coords) -> list[float]:
@@ -253,7 +259,9 @@ def _validate(geojson) -> tuple[str, object]:
         raise InvalidGeometry("geometry must be a GeoJSON object")
     gtype = geojson.get("type")
     if gtype not in SUPPORTED_TYPES:
-        raise InvalidGeometry(f"unsupported or missing 'type': {gtype!r}")
+        raise InvalidGeometry(
+            f"unsupported or missing 'type': {gtype!r}; supported: {sorted(SUPPORTED_TYPES)}"
+        )
     coords = geojson.get("coordinates")
     if coords is None or not isinstance(coords, list):
         raise InvalidGeometry("missing or malformed 'coordinates'")
