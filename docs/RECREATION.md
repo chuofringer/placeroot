@@ -23,7 +23,7 @@ an agent asked "what is there to do with kids near here" gets restaurants.
 They are not missing from Overture, though — they are in a **different
 theme**. Overture's `base` theme is a direct conflation of OpenStreetMap, not
 of listings, and it carries these features as polygons. PlaceRoot already
-queries that theme for `land_use_at` and `infrastructure_near` — keylessly,
+queries that theme for `land_use_at` and `infrastructure_at` — keylessly,
 over the same DuckDB + S3 GeoParquet path as everything else. This layer
 points the places tools at it too.
 

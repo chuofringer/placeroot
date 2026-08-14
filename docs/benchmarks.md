@@ -2,7 +2,7 @@
 
 > **Latency lives elsewhere.** This page is about *tokens*. Cold-start
 > latency and answer correctness are measured by
-> `benchmarks/run_query_corpus.py` against 137 real user questions in 40+
+> `benchmarks/run_query_corpus.py` against 148 real user questions in 40+
 > cities, each in a fresh process with an empty cache — see
 > [the corpus](../benchmarks/query_corpus.py) and the weekly **Query Corpus** workflow.
 > It checks answers, not just clocks: the per-tool matrix it replaced
@@ -72,15 +72,15 @@ ceiling.
 
 <!-- BEGIN GENERATED: benchmarks/token_efficiency.py -->
 
-Generated 2026-08-08 by `uv run python benchmarks/token_efficiency.py --write`.
+Generated 2026-08-13 by `uv run python benchmarks/token_efficiency.py --write`.
 
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-07-22.0`
 - Tools registered: **29**
-- Total schema surface: **13164 tokens** (52703 chars, 52851 bytes)
+- Total schema surface: **13438 tokens** (53799 chars, 53949 bytes)
 - Schema cost per tool: min 158, median 373, max 1316 tokens
 - Median scenario response: **131 tokens** (range 41-702)
-- Break-even: the schema surface costs about as much as **100 median answers**
+- Break-even: the schema surface costs about as much as **103 median answers**
 
 ### Schema surface (paid once per conversation)
 
@@ -88,6 +88,7 @@ Generated 2026-08-08 by `uv run python benchmarks/token_efficiency.py --write`.
 |---|---:|---:|---:|---:|
 | `find_places` | 946 | 296 | **1316** | 5267 |
 | `route` | 595 | 106 | **769** | 3076 |
+| `resolve_place` | 550 | 112 | **733** | 2935 |
 | `water_near` | 530 | 116 | **713** | 2855 |
 | `places_along_route` | 473 | 167 | **703** | 2813 |
 | `optimize_route` | 536 | 93 | **702** | 2811 |
@@ -98,7 +99,6 @@ Generated 2026-08-08 by `uv run python benchmarks/token_efficiency.py --write`.
 | `address_at` | 427 | 54 | **541** | 2164 |
 | `gers_lookup` | 385 | 74 | **519** | 2079 |
 | `place_details` | 259 | 158 | **469** | 1879 |
-| `resolve_place` | 304 | 91 | **459** | 1839 |
 | `render_map` | 243 | 85 | **381** | 1526 |
 | `land_use_at` | 274 | 41 | **373** | 1493 |
 | `distance_matrix` | 224 | 78 | **358** | 1434 |
@@ -115,7 +115,7 @@ Generated 2026-08-08 by `uv run python benchmarks/token_efficiency.py --write`.
 | `data_version` | 166 | 16 | **231** | 926 |
 | `reverse_geocode` | 111 | 42 | **205** | 820 |
 | `summarize_area` | 53 | 57 | **158** | 635 |
-| **all 29 tools** | 8997 | 2466 | **13164** | 52703 |
+| **all 29 tools** | 9243 | 2487 | **13438** | 53799 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 
@@ -166,13 +166,13 @@ exclusive modes. It also means the surface is *editable*: prose can be
 tightened without changing the API. `find_places` alone is over a sixth of
 the whole surface.
 
-**Where this goes next.** The fix for schema surface is not shorter tools, it
-is fewer *loaded* tools: a subset profile (e.g. a `PLACEROOT_TOOLS=core`
-filter) so an install that only needs geocoding and place search does not pay
-for building footprints, isochrones, and map rendering. That is deliberately
-out of scope here — this page exists to establish whether the problem is real
-before anyone builds for it — and is tracked as issue #182. Rerun the
-benchmark after any such change; the break-even line is the metric to move.
+**The fix for schema surface is not shorter tools, it is fewer *loaded*
+tools**, and that has shipped: `PLACEROOT_TOOLS` selects a subset profile
+(e.g. `core`) so an install that only needs geocoding and place search does
+not pay for building footprints, isochrones, and map rendering. See
+[docs/REFERENCE.md](REFERENCE.md#loading-fewer-tools-placeroot_tools) for the
+profiles and their measured per-profile surface. Rerun this benchmark after
+any change to the tool set; the break-even line is the metric to move.
 
 ## Comparison to other servers
 

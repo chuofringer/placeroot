@@ -119,7 +119,7 @@ How it stacks up against Mapbox MCP and Google Maps MCP: [head-to-head benchmark
 
 ## Recreation places
 
-Overture's places theme is derived from business listings, which makes it strong on businesses and thin on the places a family goes on a Saturday — playgrounds, neighbourhood parks, dog parks, beaches. Those features aren't missing from Overture, though; they're in a different theme. Overture's `base` theme is a direct conflation of OpenStreetMap, and PlaceRoot already queries it for `land_use_at` and `infrastructure_near`. The places tools read it too, by default.
+Overture's places theme is derived from business listings, which makes it strong on businesses and thin on the places a family goes on a Saturday — playgrounds, neighbourhood parks, dog parks, beaches. Those features aren't missing from Overture, though; they're in a different theme. Overture's `base` theme is a direct conflation of OpenStreetMap, and PlaceRoot already queries it for `land_use_at` and `infrastructure_at`. The places tools read it too, by default.
 
 Nothing is downloaded, built, or hosted — it's one more live scan of the same public Overture release, and it roughly **2.5x**es playground coverage (1,552 vs 674 across New York City in release `2026-07-22.0`, with 1,013 of them more than 150 m from any places-theme playground). Every places tool answers from both at once, with no other change: same tools, same response shape, same category filters.
 
