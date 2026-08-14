@@ -1,6 +1,6 @@
 {
   "name": "placeroot",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "Ground AI agents in open map data. MCP server for Overture Maps \u2014 compact answers, no API key. This launcher runs the Python server via `uvx placeroot` under the hood, so `npx placeroot` works out of the box.",
   "bin": {
     "placeroot": "index.js"
