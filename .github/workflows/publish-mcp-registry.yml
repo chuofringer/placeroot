@@ -1,0 +1,53 @@
+name: Publish to MCP Registry
+
+# Lists the server in the official MCP registry (registry.modelcontextprotocol.io)
+# whenever a release publishes, after the PyPI/npm jobs have shipped the
+# packages the server.json points at. The io.github.chuofringer/* namespace is
+# verified by the GitHub OIDC token — no stored credential.
+#
+# Runs on release published (delayed until the packages resolve) and on manual
+# dispatch for re-publishing the current server.json.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write  # OIDC namespace verification
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/').tar.gz" \
+            | tar xz mcp-publisher
+          ./mcp-publisher --version
+
+      - name: Wait for the packages to resolve
+        # The registry validates that the exact versions in server.json exist on
+        # PyPI and npm; on a release event those uploads are minutes old, so
+        # poll both registries before publishing rather than racing them.
+        run: |
+          set -euo pipefail
+          VERSION=$(python3 -c "import json; print(json.load(open('server.json'))['version'])")
+          for i in $(seq 1 30); do
+            PYPI=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/placeroot/${VERSION}/json")
+            NPM=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/placeroot/${VERSION}")
+            echo "attempt $i: pypi=$PYPI npm=$NPM"
+            [ "$PYPI" = "200" ] && [ "$NPM" = "200" ] && exit 0
+            sleep 30
+          done
+          echo "::error::placeroot ${VERSION} did not appear on both registries in time" >&2
+          exit 1
+
+      - name: Publish
+        run: |
+          set -euo pipefail
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
