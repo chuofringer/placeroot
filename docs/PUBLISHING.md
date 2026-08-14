@@ -20,14 +20,20 @@ in the repo, and there is no 2FA prompt for CI.
 
 ### npm (trusted publishing)
 1. npmjs.com → the `placeroot` package → **Settings → Trusted Publisher** →
-   add GitHub Actions: repo `chuofringer/placeroot`, workflow `release.yml`.
-   (See <https://docs.npmjs.com/trusted-publishers>.)
-2. No `NPM_TOKEN` secret is needed. The npm job already has `id-token: write`,
+   add GitHub Actions: repo `chuofringer/placeroot`, workflow `release.yml`,
+   environment `npm`. (See <https://docs.npmjs.com/trusted-publishers>.)
+   The environment is part of the publisher key — if the npmjs.com config
+   omits it while the workflow's npm job declares `environment: npm`, the
+   OIDC exchange fails and the publish is rejected.
+2. GitHub repo → **Settings → Environments** → create an environment named
+   exactly **`npm`** (same shape as `pypi`; required reviewers optional but
+   recommended so a publish needs a human approval).
+3. No `NPM_TOKEN` secret is needed. The npm job already has `id-token: write`,
    upgrades npm to ≥ 11.5.1, and publishes with `--provenance`.
    - History note: the earlier automation-token approach failed with `EOTP`
      (the account requires an OTP on publish, which CI can't supply). Trusted
      publishing removes tokens and OTP from the path entirely.
-3. The npm job publishes from `npm/`, so the package's README must live there —
+4. The npm job publishes from `npm/`, so the package's README must live there —
    npm ignores a README one directory up, and a package without one renders as
    `ERROR: No README data found!` on npmjs.com (issue #203). `npm/README.md` is
    **generated** from the root `README.md`:
@@ -100,9 +106,9 @@ itself).
   points users to `uvx placeroot`).
 
 ## Then
-Registry listings and the launch post (`docs/launch/`) are safe to submit
-**only after** the package resolves on PyPI — entries pointing at a 404 get
-rejected.
+Registry listings and the launch post (drafts live outside the repo; see
+issue #254) are safe to submit **only after** the package resolves on PyPI —
+entries pointing at a 404 get rejected.
 
 ## Desktop Extension bundle (.mcpb, issue #233)
 

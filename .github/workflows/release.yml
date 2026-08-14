@@ -90,6 +90,7 @@ jobs:
   npm:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    environment: npm
     needs: pypi
     # Run whenever pypi didn't hard-fail — including when it was skipped or
     # a no-op — so npm can publish independently of a fresh PyPI upload.
