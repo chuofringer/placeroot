@@ -167,6 +167,130 @@ ships (`overture.resolve_release()` / the server's own release discovery
 will pick it up the same way it picks up new upstream releases today); old
 releases already mirrored are untouched unless you clean them up yourself.
 
+### `--check-current`: is the mirror behind upstream?
+
+```bash
+uv run python scripts/mirror_theme.py --target s3://my-bucket/overture --check-current
+```
+
+Compares the newest release found under `--target` (a plain listing of
+`<target>/<release>/...` — local directory listing, or DuckDB's `glob()`
+against the same credentialed connection the mirror was written through,
+so a private target needs no separate auth path) against
+`placeroot.release.resolve_release()` — the same discovery the server and
+this script's own default `--release` use. Exits `0` and logs one line when
+the mirror is current (or ahead — a manually seeded release upstream
+discovery hasn't caught up to isn't treated as a problem); exits `1` with
+`mirror holds X, upstream is at Y` when it's behind, or when the mirror
+holds no releases at all (never mirrored, or `--target`/`--s3-*` point at
+the wrong place). Pass `--release` to compare against a specific release
+instead of upstream's newest. No files are copied or listed from
+`--source` — this only touches `--target`.
+
+### `--prune-releases`: drop superseded releases
+
+```bash
+# Dry run (default): prints what WOULD be deleted, deletes nothing.
+uv run python scripts/mirror_theme.py --target s3://my-bucket/overture --prune-releases
+
+# Actually delete.
+uv run python scripts/mirror_theme.py --target s3://my-bucket/overture --prune-releases --yes
+```
+
+Deletes every mirrored release **older than the newest one the mirror
+holds** — a whole release directory (every theme/type mirrored under it),
+not just the theme/type `--theme`/`--type` would otherwise default to,
+since a superseded release is superseded across every theme at once.
+Dry-run by default; deleting mirrored data never happens on a bare flag,
+only with an explicit `--yes`.
+
+For a **local** `--target`, `--yes` deletes the release directories
+directly. For an **S3** `--target`, `--prune-releases` always lists what it
+found and would delete, but never deletes in-process, even with
+`--yes` — DuckDB's `httpfs` has no S3 delete primitive (it's how every
+other command here reads and writes objects, but object deletion isn't
+part of that surface), and this script deliberately doesn't hand-roll
+signed S3 delete requests to work around that. With `--yes` against an S3
+target it logs the exact prefix to remove and exits `2`; run the printed
+command with your own tooling, e.g.:
+
+```bash
+aws s3 rm --recursive s3://my-bucket/overture/2026-06-22.0/
+# or, for R2 / other S3-compatible endpoints:
+rclone purge r2:my-bucket/overture/2026-06-22.0/
+```
+
+### Scheduled refresh
+
+Neither flag runs anything on a schedule by itself — that's the operator's
+infra, not this repo's (mirroring writes to a bucket you own; this repo has
+no standing credentials to run anything against it). Wire the three steps
+(mirror the current release, verify, prune old ones) into whatever
+scheduler you already run.
+
+**cron**, roughly monthly (Overture's own cadence), on a host with the
+target's S3 write credentials exported:
+
+```cron
+# Refresh the places mirror every Monday at 03:00; --release defaults to
+# the currently-resolved upstream release, so this always pulls forward.
+0 3 * * 1 cd /path/to/placeroot && \
+  uv run python scripts/mirror_theme.py --target s3://my-bucket/overture && \
+  uv run python scripts/mirror_theme.py --target s3://my-bucket/overture --verify && \
+  uv run python scripts/mirror_theme.py --target s3://my-bucket/overture --prune-releases --yes \
+  >> /var/log/placeroot-mirror.log 2>&1
+```
+
+**GitHub Actions**, for an operator who wants this to run in their own
+repo/infra (this is documentation only — it is *not* a workflow committed
+to this repo, since a mirror belongs to whoever owns the target bucket, not
+to PlaceRoot's own CI):
+
+```yaml
+name: refresh-overture-mirror
+on:
+  schedule:
+    - cron: "0 3 * * 1"  # weekly; Overture ships roughly monthly
+  workflow_dispatch: {}
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: chuofringer/placeroot
+      - uses: astral-sh/setup-uv@v3
+      - name: Mirror the current release
+        env:
+          PLACEROOT_S3_ACCESS_KEY_ID: ${{ secrets.MIRROR_S3_ACCESS_KEY_ID }}
+          PLACEROOT_S3_SECRET_ACCESS_KEY: ${{ secrets.MIRROR_S3_SECRET_ACCESS_KEY }}
+          PLACEROOT_S3_ENDPOINT: ${{ secrets.MIRROR_S3_ENDPOINT }}
+          PLACEROOT_S3_REGION: auto
+        run: |
+          uv run python scripts/mirror_theme.py --target s3://my-bucket/overture
+          uv run python scripts/mirror_theme.py --target s3://my-bucket/overture --verify
+      - name: Prune superseded releases
+        env:
+          PLACEROOT_S3_ACCESS_KEY_ID: ${{ secrets.MIRROR_S3_ACCESS_KEY_ID }}
+          PLACEROOT_S3_SECRET_ACCESS_KEY: ${{ secrets.MIRROR_S3_SECRET_ACCESS_KEY }}
+          PLACEROOT_S3_ENDPOINT: ${{ secrets.MIRROR_S3_ENDPOINT }}
+          PLACEROOT_S3_REGION: auto
+        run: |
+          # --prune-releases never deletes an S3 target in-process (see
+          # above) — this step only reports what to remove; wire in your
+          # own `aws s3 rm` / `rclone purge` step if you want it automated.
+          uv run python scripts/mirror_theme.py --target s3://my-bucket/overture --prune-releases --yes
+      - name: Fail if the mirror ended up behind
+        env:
+          PLACEROOT_S3_ACCESS_KEY_ID: ${{ secrets.MIRROR_S3_ACCESS_KEY_ID }}
+          PLACEROOT_S3_SECRET_ACCESS_KEY: ${{ secrets.MIRROR_S3_SECRET_ACCESS_KEY }}
+          PLACEROOT_S3_ENDPOINT: ${{ secrets.MIRROR_S3_ENDPOINT }}
+          PLACEROOT_S3_REGION: auto
+        run: |
+          uv run python scripts/mirror_theme.py --target s3://my-bucket/overture --check-current
+```
+
 ## What this doesn't do
 
 - It doesn't make the mirror the source of truth — Overture is, always.
