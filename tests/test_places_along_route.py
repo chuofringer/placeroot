@@ -536,6 +536,7 @@ def test_server_tool_unsupported_mode(corridor_places):
     )
     assert result["error"] == "unsupported_mode"
     assert "walk" in result["supported"]
+    assert result["detail"] == "unsupported mode 'teleport'; supported: ['cycle', 'drive', 'walk']"
 
 
 def test_server_tool_no_graph_nearby(corridor_places):

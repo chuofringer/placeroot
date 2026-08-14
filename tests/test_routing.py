@@ -176,7 +176,11 @@ def test_server_isochrone_tool_happy_path():
 
 def test_server_isochrone_unsupported_mode():
     result = server.isochrone(ORIGIN_LAT, ORIGIN_LON, minutes=15, mode="teleport")
-    assert result == {"error": "unsupported_mode", "supported": ["cycle", "drive", "walk"]}
+    assert result == {
+        "error": "unsupported_mode",
+        "detail": "unsupported mode 'teleport'; supported: ['cycle', 'drive', 'walk']",
+        "supported": ["cycle", "drive", "walk"],
+    }
 
 
 def test_server_isochrone_drive_mode_now_works():

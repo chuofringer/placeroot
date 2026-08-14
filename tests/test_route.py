@@ -300,6 +300,7 @@ def test_server_route_tool_happy_path():
 def test_server_route_unsupported_mode():
     result = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="teleport")
     assert result["error"] == "unsupported_mode"
+    assert result["detail"] == "unsupported mode 'teleport'; supported: ['cycle', 'drive', 'walk']"
 
 
 def test_server_route_too_long():

@@ -46,6 +46,7 @@ def test_distance_matrix_over_cap_origins():
     result = server.distance_matrix(origins=origins, destinations=[{"lat": 0.0, "lon": 0.0}])
     assert result["error"] == "bad_request"
     assert "elements" not in result
+    assert result["detail"] == "origins accepts at most 10 points, got 11"
 
 
 def test_distance_matrix_over_cap_destinations():
@@ -53,6 +54,19 @@ def test_distance_matrix_over_cap_destinations():
     result = server.distance_matrix(origins=[{"lat": 0.0, "lon": 0.0}], destinations=destinations)
     assert result["error"] == "bad_request"
     assert "elements" not in result
+    assert result["detail"] == "destinations accepts at most 10 points, got 11"
+
+
+def test_distance_matrix_over_cap_both():
+    origins = [{"lat": 0.0, "lon": 0.0}] * 12
+    destinations = [{"lat": 0.0, "lon": 0.0}] * 15
+    result = server.distance_matrix(origins=origins, destinations=destinations)
+    assert result["error"] == "bad_request"
+    assert "elements" not in result
+    assert result["detail"] == (
+        "origins and destinations each accept at most 10 points, "
+        "got 12 origins and 15 destinations"
+    )
 
 
 def test_distance_matrix_malformed_point():

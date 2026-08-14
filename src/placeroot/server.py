@@ -394,7 +394,10 @@ def find_places(
         except overture.SchemaDegraded as e:
             return _schema_error(e)
         if rows is None:
-            return {"error": "not_found", "detail": "no division matched division_id"}
+            return {
+                "error": "not_found",
+                "detail": f"no division matched division_id {division_id!r}",
+            }
         payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
         if resolved_area is not None:
             # Which division the name landed on — an agent that asked for
@@ -538,9 +541,18 @@ def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
     points or a point is missing/non-numeric lat or lon.
     """
     if len(origins) > 10 or len(destinations) > 10:
+        if len(origins) > 10 and len(destinations) > 10:
+            detail = (
+                "origins and destinations each accept at most 10 points, "
+                f"got {len(origins)} origins and {len(destinations)} destinations"
+            )
+        elif len(origins) > 10:
+            detail = f"origins accepts at most 10 points, got {len(origins)}"
+        else:
+            detail = f"destinations accepts at most 10 points, got {len(destinations)}"
         return {
             "error": "bad_request",
-            "detail": "at most 10 origins and 10 destinations are allowed",
+            "detail": detail,
         }
     if not origins or not destinations:
         return {"elements": []}
@@ -1509,8 +1521,12 @@ def isochrone(
         return routing.isochrone(
             lat, lon, minutes=minutes, mode=mode, speed_m_s=speed_m_s, radius_m=radius_m
         )
-    except routing.UnsupportedMode:
-        return {"error": "unsupported_mode", "supported": sorted(routing.MODE_CONFIG)}
+    except routing.UnsupportedMode as e:
+        return {
+            "error": "unsupported_mode",
+            "detail": e.detail,
+            "supported": sorted(routing.MODE_CONFIG),
+        }
     except routing.UpstreamUnavailable as e:
         return _upstream_error(e)
     except routing.SchemaDegraded as e:
@@ -1582,8 +1598,12 @@ def route(
         return routing.route(
             from_lat, from_lon, to_lat, to_lon, mode=mode, include_path=include_path
         )
-    except routing.UnsupportedMode:
-        return {"error": "unsupported_mode", "supported": sorted(routing.MODE_CONFIG)}
+    except routing.UnsupportedMode as e:
+        return {
+            "error": "unsupported_mode",
+            "detail": e.detail,
+            "supported": sorted(routing.MODE_CONFIG),
+        }
     except routing.UpstreamUnavailable as e:
         return _upstream_error(e)
     except routing.SchemaDegraded as e:
@@ -1655,8 +1675,12 @@ def places_along_route(
             mode=mode, category=category, name=name,
             max_detour_m=max_detour_m, limit=limit,
         )
-    except routing.UnsupportedMode:
-        return {"error": "unsupported_mode", "supported": sorted(routing.MODE_CONFIG)}
+    except routing.UnsupportedMode as e:
+        return {
+            "error": "unsupported_mode",
+            "detail": e.detail,
+            "supported": sorted(routing.MODE_CONFIG),
+        }
     except routing.UpstreamUnavailable as e:
         return _upstream_error(e)
     except (routing.SchemaDegraded, overture.SchemaDegraded) as e:
@@ -1756,8 +1780,12 @@ def optimize_route(
         return routing.optimize_route(
             points, mode=mode, roundtrip=bool(roundtrip), start_index=start_index
         )
-    except routing.UnsupportedMode:
-        return {"error": "unsupported_mode", "supported": sorted(routing.MODE_CONFIG)}
+    except routing.UnsupportedMode as e:
+        return {
+            "error": "unsupported_mode",
+            "detail": e.detail,
+            "supported": sorted(routing.MODE_CONFIG),
+        }
     except routing.UpstreamUnavailable as e:
         return _upstream_error(e)
     except routing.SchemaDegraded as e:
