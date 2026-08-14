@@ -13,7 +13,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 SITE_DIR = Path(__file__).parent.parent / "site"
-PAGES = ["index.html", "how-it-works.html", "add-to-your-ai.html"]
+PAGES = ["index.html", "how-it-works.html", "add-to-your-ai.html", "agents-and-maps.html"]
 
 # External hosts the design legitimately references: Google Fonts for the
 # typefaces, and documentation/repo links. Anything else fetched over the
@@ -129,7 +129,7 @@ def test_pages_cross_link_and_point_at_the_package():
         doc = (SITE_DIR / name).read_text(encoding="utf-8")
         assert "pypi.org/project/placeroot" in doc, f"{name}: no package link"
         assert "github.com/chuofringer/placeroot" in doc, f"{name}: no source link"
-    for name in ("how-it-works.html", "add-to-your-ai.html"):
+    for name in ("how-it-works.html", "add-to-your-ai.html", "agents-and-maps.html"):
         doc = (SITE_DIR / name).read_text(encoding="utf-8")
         assert 'href="index.html"' in doc, f"{name}: no link back to landing"
 
@@ -146,6 +146,7 @@ def test_pages_have_canonical_urls():
         "index.html": 'href="https://placeroot.dev/"',
         "how-it-works.html": 'href="https://placeroot.dev/how-it-works.html"',
         "add-to-your-ai.html": 'href="https://placeroot.dev/add-to-your-ai.html"',
+        "agents-and-maps.html": 'href="https://placeroot.dev/agents-and-maps.html"',
     }
     for name, href in canon.items():
         doc = (SITE_DIR / name).read_text(encoding="utf-8")
@@ -157,5 +158,6 @@ def test_robots_and_sitemap_present():
     sm = SITE_DIR / "sitemap.xml"
     assert sm.is_file()
     doc = sm.read_text(encoding="utf-8")
-    for page in ("placeroot.dev/", "how-it-works.html", "add-to-your-ai.html"):
+    pages = ("placeroot.dev/", "how-it-works.html", "add-to-your-ai.html", "agents-and-maps.html")
+    for page in pages:
         assert page in doc, f"sitemap missing {page}"
