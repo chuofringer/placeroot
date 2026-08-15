@@ -1,9 +1,10 @@
 <p align="center">
   <a href="https://placeroot.dev">
     <picture>
-      <!-- Absolute URLs on purpose: directories like mcpservers.org render this
-           README off-GitHub, where repo-relative srcs 404. The PyPI/npm
-           packaging rewrites re-pin these main URLs to the release tag. -->
+      <!-- The banner and the header links below are absolute on purpose:
+           directories like mcpservers.org render this README off-GitHub,
+           where repo-relative srcs and hrefs 404. The PyPI/npm packaging
+           rewrites re-pin these main URLs to the release tag. -->
       <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/chuofringer/placeroot/main/site/og-image-dark.png">
       <img src="https://raw.githubusercontent.com/chuofringer/placeroot/main/site/og-image.png" width="100%" alt="PlaceRoot — Ask about anywhere. Get a real answer. Open map data for your AI — free, no account, no API key.">
     </picture>
@@ -15,9 +16,9 @@
   ·
   <a href="#what-it-can-do">Tools</a>
   ·
-  <a href="docs/REFERENCE.md">Reference</a>
+  <a href="https://github.com/chuofringer/placeroot/blob/main/docs/REFERENCE.md">Reference</a>
   ·
-  <a href="docs/benchmarks.md">Benchmarks</a>
+  <a href="https://github.com/chuofringer/placeroot/blob/main/docs/benchmarks.md">Benchmarks</a>
   ·
   <a href="https://placeroot.dev">Website</a>
 </p>
@@ -27,7 +28,7 @@
   <a href="https://pypi.org/project/placeroot/"><img src="https://img.shields.io/pypi/v/placeroot" alt="PyPI"></a>
   <a href="https://www.npmjs.com/package/placeroot"><img src="https://img.shields.io/npm/v/placeroot" alt="npm"></a>
   <a href="https://pypi.org/project/placeroot/"><img src="https://img.shields.io/pypi/pyversions/placeroot" alt="Python versions"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://github.com/chuofringer/placeroot/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://mcpservers.org/servers/chuofringer/placeroot"><img src="https://img.shields.io/badge/listed%20on-mcpservers.org-5c8a63" alt="Listed on mcpservers.org"></a>
 </p>
 

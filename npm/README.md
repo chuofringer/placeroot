@@ -5,9 +5,10 @@
 <p align="center">
   <a href="https://placeroot.dev">
     <picture>
-      <!-- Absolute URLs on purpose: directories like mcpservers.org render this
-           README off-GitHub, where repo-relative srcs 404. The PyPI/npm
-           packaging rewrites re-pin these main URLs to the release tag. -->
+      <!-- The banner and the header links below are absolute on purpose:
+           directories like mcpservers.org render this README off-GitHub,
+           where repo-relative srcs and hrefs 404. The PyPI/npm packaging
+           rewrites re-pin these main URLs to the release tag. -->
       <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/chuofringer/placeroot/v0.9.7/site/og-image-dark.png">
       <img src="https://raw.githubusercontent.com/chuofringer/placeroot/v0.9.7/site/og-image.png" width="100%" alt="PlaceRoot — Ask about anywhere. Get a real answer. Open map data for your AI — free, no account, no API key.">
     </picture>
