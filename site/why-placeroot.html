@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Why we built PlaceRoot</title>
+<meta name="description" content="LLMs fabricate spatial facts with total confidence, and the payloads meant to fix that overflow a context window before an agent reads a single answer. What the fix actually requires, with evidence from a 148-question corpus and a token-surface comparison.">
+<link rel="canonical" href="https://placeroot.dev/why-placeroot.html">
+<link rel="icon" type="image/svg+xml" href="logo-mark.svg">
+<meta property="og:site_name" content="PlaceRoot">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Why we built PlaceRoot">
+<meta property="og:description" content="An LLM has no ground truth for what exists where today. The traditional fix — a geocoding API — solves that by fighting the agent with keys, accounts and payloads that drown a context window. What the real fix looks like, with evidence.">
+<meta property="og:url" content="https://placeroot.dev/why-placeroot.html">
+<meta property="og:image" content="https://placeroot.dev/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Why we built PlaceRoot">
+<meta name="twitter:description" content="An LLM has no ground truth for what exists where today. What actually fixes that, with evidence from a 148-question corpus.">
+<meta name="twitter:image" content="https://placeroot.dev/og-image.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  body{margin:0;background:#fbfaf5;font-family:Sora,system-ui,sans-serif}
+  a{color:#5c8a63;text-decoration:none}a:hover{color:#4c7a54}
+  article p, article li{font-size:16px;line-height:1.75;color:#3f4a3e}
+  article h2{font-size:24px;font-weight:800;letter-spacing:-.02em;color:#2a332b;margin:44px 0 16px}
+  article code{font:500 13.5px 'Fira Code',monospace;background:#eef3ea;color:#3f4a3e;padding:2px 6px;border-radius:5px}
+  article blockquote{margin:22px 0;padding:4px 22px;border-left:3px solid #5c8a63;color:#55604f;font-size:15px;line-height:1.7}
+  article ul{padding-left:22px}
+  article li{margin:8px 0}
+  @media (max-width:980px){
+    .pr-wrap{padding-left:24px!important;padding-right:24px!important}
+  }
+  @media (max-width:720px){
+    .pr-nav{flex-wrap:wrap!important;gap:12px!important;justify-content:center!important}
+    .pr-navlinks{gap:14px!important;font-size:13px!important;flex-wrap:wrap!important;justify-content:center!important}
+    .pr-wrap{padding-left:18px!important;padding-right:18px!important}
+    .pr-contactrow{flex-direction:column!important;border-radius:20px!important;padding:20px!important;gap:14px!important}
+  }
+</style>
+</head>
+<body>
+<div style="min-height:100vh">
+  <div class="pr-nav pr-wrap" style="display:flex;align-items:center;justify-content:space-between;padding:20px 48px;max-width:1240px;margin:0 auto;width:100%;box-sizing:border-box">
+    <a href="index.html" style="display:flex;align-items:center;gap:7px"><svg width="32" height="30" viewBox="0 0 96 92"><rect x="8" y="8" width="80" height="58" rx="18" fill="#5c8a63"></rect><path d="M28 66 L28 86 L48 66 Z" fill="#5c8a63"></path><circle cx="48" cy="33" r="10" fill="#fbfaf5"></circle><circle cx="48" cy="33" r="4" fill="#e8b04b"></circle><path d="M48 43 L48 52" stroke="#fbfaf5" stroke-width="4" stroke-linecap="round"></path></svg><span style="font-weight:800;font-size:18px;letter-spacing:-.02em;color:#2a332b">placeroot</span></a>
+    <div class="pr-navlinks" style="display:flex;gap:26px;align-items:center;font-size:14px;font-weight:600">
+      <a href="how-it-works.html" style="color:#55604f">How it works</a>
+      <a href="why-placeroot.html" style="color:#2a332b">Why PlaceRoot</a>
+      <a href="https://github.com/chuofringer/placeroot" style="color:#55604f">GitHub ↗</a>
+      <a href="https://pypi.org/project/placeroot/" style="color:#55604f">PyPI ↗</a>
+      <a href="add-to-your-ai.html" style="color:#fbfaf5;background:#5c8a63;padding:10px 20px;border-radius:99px;white-space:nowrap">Add to your AI — free</a>
+      <a href="#contact" style="color:#55604f">Contact</a>
+    </div>
+  </div>
+
+  <div style="max-width:720px;margin:0 auto;padding:48px 24px 0">
+    <div style="font:600 12px 'Fira Code',monospace;color:#b98a2e;margin-bottom:12px">WHY WE BUILT THIS</div>
+    <h1 style="margin:0;font-size:38px;font-weight:800;letter-spacing:-.03em;line-height:1.15;color:#2a332b">Why we built PlaceRoot</h1>
+    <p style="margin:16px 0 0;font-size:16.5px;line-height:1.6;color:#55604f">Agents are bad at maps: an LLM has no ground truth for what exists where today. That gap doesn't get fixed by giving the agent a bigger map API — most of what's on offer either locks the answer behind a key and a bill, or hands back so much raw data that the agent can't afford to read it.</p>
+  </div>
+
+  <article style="max-width:720px;margin:34px auto 0;padding:0 24px 64px">
+
+    <p>An agent asks a simple spatial question — "what's within 500 meters of this point?" — and, with a typical map API, the answer comes back as a GeoJSON <code>FeatureCollection</code>. Every feature carries a full geometry, a nested <code>sources</code> array with per-property provenance and confidence, a <code>names</code> struct, a <code>categories</code> struct, contact fields, and more. Multiply that by a few hundred features, a normal count for a dense downtown block, and the response no longer fits in a reasonable slice of a context window. The agent either truncates blindly, burns most of its budget on one tool call, or the integration just doesn't ship.</p>
+
+    <p>That's the payload half of the problem, and it's well enough known now to have a name in public, from a company that ships production geospatial infrastructure: Mapbox's "GeoAI in 2026" post calls large geospatial payloads the biggest challenge for MCP-based mapping integrations. A Geoawesome essay from June 2026 puts a number on the shape of it: a real-world GeoJSON payload of roughly 45,000 tokens collapses to about 25 tokens once you return a reference instead of the geometry itself. That gap is most map tooling's original sin — it was built for GIS software and browsers, which have no token budget, not for a model that does.</p>
+
+    <p>The other half is quieter and, for an agent, more dangerous: it isn't a data problem so much as a confidence problem. Ask a model where the nearest coffee shop to a given address is, or which of three cities named Cambridge a landmark sits in, and it will answer — fluently, specifically, and with no signal to the caller that it's guessing. A language model's spatial knowledge is frozen at training time and was never grounded in a coordinate system to begin with; it knows the Eiffel Tower is a famous landmark in Paris because that sentence appeared enough times in its training data, not because it consulted a map. Ask it something that wasn't in the training data — which businesses are open on this block right now — and it will still answer, just as fluently, and just as wrong.</p>
+
+    <h2>Two structural camps</h2>
+
+    <p>Look at what's available today for grounding an agent in map data, and it splits into two camps, each solving a different half of the problem and ignoring the other.</p>
+
+    <p>The first camp is vendor-keyed APIs. You get an API key, you get billing, and in exchange you get curated, often well-ranked place data — sometimes even AI-generated summaries. This solves the payload problem reasonably well, because the vendor controls the response shape. What it doesn't solve is the dependency: your agent's map grounding now lives behind a signup flow, a metered price per call, and someone else's terms of service on caching and training. One current example: Google's Maps Grounding Lite is priced at $14–25 per 1,000 prompts, with no-caching and no-training terms attached — a cost structure built for a per-seat SaaS product, not for an agent that might fire off a hundred spatial lookups planning a single trip.</p>
+
+    <p>The second camp is open-data wrappers, most commonly built on OpenStreetMap via Nominatim or Overpass. These are keyless, which solves the dependency problem — but most of them are thin passthroughs: you get raw OSM tags or raw GeoJSON back, at whatever size the underlying query produces. The payload problem is unsolved, just moved from a paid API to a free one. You've traded a metered key for a token budget that blows up on any moderately dense area.</p>
+
+    <p>Neither camp treats "fits in an agent's context window" as a first-class design constraint, and neither treats "what the model already knows" as an input worth asking for. A vendor API takes a query string and returns whatever it returns; it has no field for "the agent already knows this is near the Space Needle, it just needs to know what's there." An open-data wrapper takes the same query string and returns even more of it, unfiltered. Both leave the actual division of labor — the model knows the world, the map knows the data — unaddressed, and the caller pays for that omission in tokens, in dollars, or in a wrong answer stated as fact.</p>
+
+    <h2>The seam</h2>
+
+    <p>PlaceRoot queries Overture Maps' public GeoParquet release directly with DuckDB — no API key, no signup, no intermediate database, no ETL job. Row-group pushdown on the bbox columns means a query only reads the tiles it needs. That gets the <i>right</i> data quickly. It doesn't, by itself, make the data small — a raw Overture Places record still serializes to a few hundred tokens per feature once you include the nested <code>sources</code>, <code>categories</code>, <code>names</code>, and address structs. Making the payload problem disappear is a separate design rule, applied to every tool: return an answer, not a data dump. Every response is built to a token budget of roughly 2,000 tokens, and when a result would exceed it, rows are dropped nearest-first-preserved and optional fields stripped, with <code>truncated: true</code> and an explicit <code>omitted_count</code> rather than a silent cut.
+
+    Measured against the committed benchmark fixtures: <code>summarize_area</code> answers a "what's in this area" question in 113 tokens; <code>find_places</code> returning ten ranked, deduplicated coffee shops within a kilometer comes back at 702 tokens. Registering all 29 tools costs 13,438 tokens of schema surface before a single question is asked — that's the other cost, paid once per conversation whether or not the agent ever calls anything, and it's roughly 103 median answers' worth. An install that only needs geocoding and place search can load a narrower tool profile instead and cut that same surface by more than half.</p>
+
+    <p>The confidence problem gets its own fix, and it's a narrower one than it sounds: separate what the model knows from what needs to be looked up, and say so in the tool's own instructions. PlaceRoot's server instructions put this plainly — <i>"You know things it cannot: that 'san jose airport' means San Jose, California, that the Eiffel Tower is in Paris. This server knows only what exists at which coordinates in the current Overture release."</i> A caller that sends one combined string — "coffee near the space needle" as a single search term — forces the server to guess which words are the place and which are the thing being looked for, guessing from map data alone, where a fragment like "san" names a division in Henan as readily as a city in California. Passing the location separately (a city name, or coordinates when the agent already has them) means a wrong hint costs a retry, never a wrong answer — every row still comes from the data, not from a guess about what the query string meant.</p>
+
+    <h2>Surviving how people actually type</h2>
+
+    <p>None of this is theoretical, because none of it stays fixed on its own. A 148-question corpus, run cold — fresh process, empty cache, every query — across 40-plus cities is what actually exercises it, and a second sweep of 24 fresh phrasings the way people actually type ("coffe," "seatle," "farmacy," "stuff to eat near the space needle," "the bean chicago") turned up five failures with four distinct causes, each now a fix and a regression test:</p>
+
+    <ul>
+      <li><b>"notre dame paris" landed in Indiana.</b> A length-preference rule favored the two-token candidate unconditionally, and an 8,000-person Indiana CDP beat Paris's 2.1 million. Length now only wins between comparably prominent places — no small town outranks a world city on word count alone.</li>
+      <li><b>"harvard square cambridge" lost to the wrong Cambridge — twice over.</b> The right answer sits in the <i>third</i> city named Cambridge (UK, then Ontario, then Massachusetts), so sequential retries never reached it. Ambiguous names now search their next namesakes too, all at once, in a query shaped to keep each city's row-group pruning intact — an early draft that OR-ed the per-city filters together took 73.8 seconds; keeping the branches separate brought it to 8.9.</li>
+      <li><b>"hoover dam" came back empty, with the actual dam 200 meters from the search hint.</b> A gate meant to skip redundant scans was counting hits from anywhere as coverage — and "hoover dam" anchors on Hoover, Alabama, where a wildcard scan for "dam" turns up a person named Adam Cox and a church called Damascus Baptist. The gate now only counts hits near the reference point.</li>
+      <li><b>"plaza mayor madrid" matched a plaza 25 kilometers out.</b> The ranking had no distance term to fall back on when no administrative division matched the query outright. It does now.</li>
+    </ul>
+
+    <p>The corpus methodology has one rule behind all of it: a fast wrong answer scores as a win unless something actually checks the answer. The clearest example on record is a plain geocode lookup — asking for "Casablanca" once returned coordinates in Chile, in 0.2 seconds, faster and more confident-looking than the correct answer would have been. Cold latency without a correctness check would have called that a success. With the fix and the regression test in place, the corpus runs 24 of 24 correct — up from 19 — with every single tool call answering cold, from an empty cache, in 4.6 to 9.8 seconds.</p>
+
+    <h2>What it doesn't do</h2>
+
+    <p>Some honest limits, not smoothed over:</p>
+
+    <ul>
+      <li><b>The data has a vintage.</b> Every answer comes from one pinned Overture Maps release, not a live feed. There's no traffic model, no live opening hours, no ratings or reviews, and <code>distance_matrix</code> is straight-line haversine, not road-network travel time. Anyone who needs those specifically should reach for a live vendor API instead — that comparison is the honest framing, not a reason to pretend the gap isn't there.</li>
+      <li><b>Overture's places data leans toward businesses.</b> It's derived largely from business listings, which makes it strong on shops, restaurants and clinics and thin on the places a family actually goes on a Saturday — playgrounds, neighborhood parks, dog parks. Those aren't missing from Overture, they're in a different theme (<code>base</code>, the OpenStreetMap conflation), and PlaceRoot's places tools query it too by default — it roughly 2.5x's playground coverage in one measured city — but the fix is a second dataset scan, not a fully solved bias.</li>
+      <li><b>No hosted tier yet.</b> PlaceRoot runs as a local or self-hosted process. <code>--http</code> mode exists and works, but it's your process, your TLS termination, your reverse proxy — nothing here is a managed no-setup endpoint you point a client at today.</li>
+      <li><b>Routing is walking-first.</b> The routing stack builds its own graph from Overture's transportation theme rather than depending on a hosted routing service. Drive and cycle modes exist and pass the same regression tests, but pedestrian routing and isochrones are where the stack has been exercised hardest.</li>
+      <li><b>The corpus is real but not exhaustive.</b> 148 questions across 40-plus cities and a 24-question adversarial sweep catch real failure modes, and each fix ships with a regression test so it can't silently regress — but a corpus this size cannot claim to have found every ambiguous name or every malformed query a person will actually type. The next honest step is a harder set, not a victory lap.</li>
+    </ul>
+
+    <h2>Try it</h2>
+
+    <p>The whole install is one block of JSON and no account:</p>
+
+    <div style="background:#171c17;border-radius:14px;overflow:hidden;margin:22px 0">
+      <div style="padding:11px 18px;border-bottom:1px solid rgba(251,250,245,.08);font:500 11px 'Fira Code',monospace;color:#8a9482">mcp_config.json</div>
+      <pre style="margin:0;padding:18px 20px;font:400 13px/1.7 'Fira Code',monospace;color:#e8ead9;overflow-x:auto">{
+  "mcpServers": {
+    "placeroot": {
+      "command": "uvx",
+      "args": ["placeroot"]
+    }
+  }
+}</pre>
+    </div>
+
+    <p>Or run it directly with <code>uvx placeroot</code>. Source, the full tool catalog, and the design rules behind them: <a href="https://github.com/chuofringer/placeroot">github.com/chuofringer/placeroot</a>. The numbers in this piece come from <a href="https://github.com/chuofringer/placeroot/blob/main/docs/benchmarks.md">docs/benchmarks.md</a> and the query corpus in <a href="https://github.com/chuofringer/placeroot/blob/main/benchmarks/README.md">benchmarks/</a> — regenerated from the code, never hand-edited.</p>
+
+    <div style="text-align:center;margin-top:44px">
+      <a href="add-to-your-ai.html" style="display:inline-block;background:#5c8a63;color:#fbfaf5;border-radius:99px;padding:15px 30px;font-weight:700;font-size:15.5px;box-shadow:0 10px 24px rgba(92,138,99,.28)">Add to your AI — free</a>
+    </div>
+
+  </article>
+
+  <div id="contact" style="background:#eef3ea;margin-top:20px">
+    <div class="pr-wrap" style="max-width:1240px;margin:0 auto;padding:60px 48px;box-sizing:border-box;text-align:center">
+      <h2 style="margin:0;font-size:30px;font-weight:800;letter-spacing:-.025em;color:#2a332b">Contact</h2>
+      <div class="pr-contactrow" style="margin-top:22px;display:inline-flex;align-items:center;gap:16px;max-width:100%;box-sizing:border-box;background:#fff;border:1px solid rgba(42,51,43,.1);border-radius:99px;padding:12px 12px 12px 28px;box-shadow:0 12px 28px rgba(42,51,43,.1)">
+        <a href="mailto:hello@placeroot.dev" style="font:600 clamp(17px,4.4vw,26px) 'Fira Code',monospace;color:#2a332b;letter-spacing:-.01em;word-break:break-all">hello@placeroot.dev</a>
+        <button id="contactCopyBtn" type="button" style="cursor:pointer;flex:none;font:600 13px 'Fira Code',monospace;color:#fbfaf5;background:#5c8a63;padding:11px 20px;border-radius:99px;border:none">copy</button>
+      </div>
+    </div>
+  </div>
+  <div style="text-align:center;padding:32px 48px 72px;font-size:12.5px;color:#8a9482">Developed by <a href="https://vibemapper.dev" rel="noopener" style="font-weight:700">vibemapper</a></div>
+</div>
+<script>
+  (function () {
+    var btn = document.getElementById("contactCopyBtn");
+    var t;
+    // "copied ✓" only once the write resolves — a denied clipboard permission
+    // must not report success over an address the user never got.
+    btn.addEventListener("click", function () {
+      if (!navigator.clipboard) return;
+      navigator.clipboard.writeText("hello@placeroot.dev").then(function () {
+        btn.textContent = "copied ✓";
+        clearTimeout(t);
+        t = setTimeout(function () { btn.textContent = "copy"; }, 1500);
+      }).catch(function () {});
+    });
+  })();
+</script>
+</body>
+</html>
