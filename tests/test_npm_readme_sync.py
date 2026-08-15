@@ -120,7 +120,10 @@ def test_no_github_only_alert_markup():
 
 def test_links_pin_the_release_tag_not_main():
     """Published package READMEs must point at the released version's docs,
-    not at whatever main has become since — see the GITHUB_BLOB comment."""
+    not at whatever main has become since — see the GITHUB_BLOB comment.
+    The root README's hero banner is deliberately absolute-to-main (so
+    mcpservers.org can render it); the rendered-output scan proves the
+    re-pin rewrite catches it and anything like it added later."""
     import json
 
     from sync_npm_readme import GITHUB_BLOB, GITHUB_RAW
@@ -131,7 +134,11 @@ def test_links_pin_the_release_tag_not_main():
     assert f"/blob/v{version}/" in GITHUB_BLOB
     assert f"/v{version}/" in GITHUB_RAW
     assert "/main/" not in GITHUB_BLOB and "/main/" not in GITHUB_RAW
-    assert f"/blob/v{version}/" in render(_root_readme())
+    rendered = render(_root_readme())
+    assert f"/blob/v{version}/" in rendered
+    assert "chuofringer/placeroot/main/" not in rendered, (
+        "an unpinned main-branch URL survived into the rendered npm README"
+    )
 
 
 def test_rewrites_match_the_pypi_substitutions():
