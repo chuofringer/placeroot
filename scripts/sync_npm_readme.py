@@ -83,6 +83,10 @@ REWRITES: tuple[tuple[str, str], ...] = (
     (r'src="(?!https?://)([^"]+)"', 'src="' + GITHUB_RAW + r'\1"'),
     (r'srcset="(?!https?://)([^"]+)"', 'srcset="' + GITHUB_RAW + r'\1"'),
     (r'href="(?!https?://|#|mailto:)([^"]+)"', 'href="' + GITHUB_BLOB + r'\1"'),
+    # The hero banner is absolute-to-main in the root README so off-GitHub
+    # renderers (mcpservers.org shows the README on its own domain) can load
+    # it; re-pin it here so published packages keep the tag invariant.
+    (r"https://raw\.githubusercontent\.com/chuofringer/placeroot/main/", GITHUB_RAW),
 )
 
 # Placeholder held across the uvx -> npx rewrite so deliberately-uv text

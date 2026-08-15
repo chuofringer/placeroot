@@ -30,6 +30,7 @@ _ALLOWED_EXTERNAL_HOSTS = (
     "www.npmjs.com",
     "docs.astral.sh",
     "overturemaps.org",  # privacy.html: link to the data source it queries
+    "mcpservers.org",  # index.html: the directory PlaceRoot is listed in
     "placeroot.dev",  # og:image / canonical absolute URLs in meta tags
     # Developer-credit links (footer): the maintainer's site and siblings.
     "vibemapper.dev",
