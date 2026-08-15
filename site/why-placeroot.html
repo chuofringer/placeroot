@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Why agents are bad at maps — PlaceRoot</title>
+<title>Why we built PlaceRoot</title>
 <meta name="description" content="LLMs fabricate spatial facts with total confidence, and the payloads meant to fix that overflow a context window before an agent reads a single answer. What the fix actually requires, with evidence from a 148-question corpus and a token-surface comparison.">
-<link rel="canonical" href="https://placeroot.dev/agents-and-maps.html">
+<link rel="canonical" href="https://placeroot.dev/why-placeroot.html">
 <link rel="icon" type="image/svg+xml" href="logo-mark.svg">
 <meta property="og:site_name" content="PlaceRoot">
 <meta property="og:type" content="article">
-<meta property="og:title" content="Why agents are bad at maps">
+<meta property="og:title" content="Why we built PlaceRoot">
 <meta property="og:description" content="An LLM has no ground truth for what exists where today. The traditional fix — a geocoding API — solves that by fighting the agent with keys, accounts and payloads that drown a context window. What the real fix looks like, with evidence.">
-<meta property="og:url" content="https://placeroot.dev/agents-and-maps.html">
+<meta property="og:url" content="https://placeroot.dev/why-placeroot.html">
 <meta property="og:image" content="https://placeroot.dev/og-image.png">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Why agents are bad at maps">
+<meta name="twitter:title" content="Why we built PlaceRoot">
 <meta name="twitter:description" content="An LLM has no ground truth for what exists where today. What actually fixes that, with evidence from a 148-question corpus.">
 <meta name="twitter:image" content="https://placeroot.dev/og-image.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -46,7 +46,7 @@
     <a href="index.html" style="display:flex;align-items:center;gap:7px"><svg width="32" height="30" viewBox="0 0 96 92"><rect x="8" y="8" width="80" height="58" rx="18" fill="#5c8a63"></rect><path d="M28 66 L28 86 L48 66 Z" fill="#5c8a63"></path><circle cx="48" cy="33" r="10" fill="#fbfaf5"></circle><circle cx="48" cy="33" r="4" fill="#e8b04b"></circle><path d="M48 43 L48 52" stroke="#fbfaf5" stroke-width="4" stroke-linecap="round"></path></svg><span style="font-weight:800;font-size:18px;letter-spacing:-.02em;color:#2a332b">placeroot</span></a>
     <div class="pr-navlinks" style="display:flex;gap:26px;align-items:center;font-size:14px;font-weight:600">
       <a href="how-it-works.html" style="color:#55604f">How it works</a>
-      <a href="agents-and-maps.html" style="color:#2a332b">Essay</a>
+      <a href="why-placeroot.html" style="color:#2a332b">Why PlaceRoot</a>
       <a href="https://github.com/chuofringer/placeroot" style="color:#55604f">GitHub ↗</a>
       <a href="https://pypi.org/project/placeroot/" style="color:#55604f">PyPI ↗</a>
       <a href="add-to-your-ai.html" style="color:#fbfaf5;background:#5c8a63;padding:10px 20px;border-radius:99px;white-space:nowrap">Add to your AI — free</a>
@@ -55,9 +55,9 @@
   </div>
 
   <div style="max-width:720px;margin:0 auto;padding:48px 24px 0">
-    <div style="font:600 12px 'Fira Code',monospace;color:#b98a2e;margin-bottom:12px">ESSAY</div>
-    <h1 style="margin:0;font-size:38px;font-weight:800;letter-spacing:-.03em;line-height:1.15;color:#2a332b">Why agents are bad at maps</h1>
-    <p style="margin:16px 0 0;font-size:16.5px;line-height:1.6;color:#55604f">An LLM has no ground truth for what exists where today. That gap doesn't get fixed by giving the agent a bigger map API — most of what's on offer either locks the answer behind a key and a bill, or hands back so much raw data that the agent can't afford to read it.</p>
+    <div style="font:600 12px 'Fira Code',monospace;color:#b98a2e;margin-bottom:12px">WHY WE BUILT THIS</div>
+    <h1 style="margin:0;font-size:38px;font-weight:800;letter-spacing:-.03em;line-height:1.15;color:#2a332b">Why we built PlaceRoot</h1>
+    <p style="margin:16px 0 0;font-size:16.5px;line-height:1.6;color:#55604f">Agents are bad at maps: an LLM has no ground truth for what exists where today. That gap doesn't get fixed by giving the agent a bigger map API — most of what's on offer either locks the answer behind a key and a bill, or hands back so much raw data that the agent can't afford to read it.</p>
   </div>
 
   <article style="max-width:720px;margin:34px auto 0;padding:0 24px 64px">
