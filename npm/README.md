@@ -5,8 +5,12 @@
 <p align="center">
   <a href="https://placeroot.dev">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/chuofringer/placeroot/v0.9.7/site/og-image-dark.png">
-      <img src="https://raw.githubusercontent.com/chuofringer/placeroot/v0.9.7/site/og-image.png" width="100%" alt="PlaceRoot — Ask about anywhere. Get a real answer. Open map data for your AI — free, no account, no API key.">
+      <!-- Absolute URLs on purpose: directories like mcpservers.org render this
+           README off-GitHub, where repo-relative srcs 404. The PyPI/npm rewrites
+           skip absolute URLs, so these pass through unpinned — fine for branding
+           images that aren't version-specific. -->
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/chuofringer/placeroot/main/site/og-image-dark.png">
+      <img src="https://raw.githubusercontent.com/chuofringer/placeroot/main/site/og-image.png" width="100%" alt="PlaceRoot — Ask about anywhere. Get a real answer. Open map data for your AI — free, no account, no API key.">
     </picture>
   </a>
 </p>
@@ -29,7 +33,7 @@
   <a href="https://www.npmjs.com/package/placeroot"><img src="https://img.shields.io/npm/v/placeroot" alt="npm"></a>
   <a href="https://pypi.org/project/placeroot/"><img src="https://img.shields.io/pypi/pyversions/placeroot" alt="Python versions"></a>
   <a href="https://github.com/chuofringer/placeroot/blob/v0.9.7/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
-  <a href="https://mcpservers.org"><img src="https://img.shields.io/badge/listed%20on-mcpservers.org-5c8a63" alt="Listed on mcpservers.org"></a>
+  <a href="https://mcpservers.org/servers/chuofringer/placeroot"><img src="https://img.shields.io/badge/listed%20on-mcpservers.org-5c8a63" alt="Listed on mcpservers.org"></a>
 </p>
 
 **PlaceRoot grounds AI agents in open map data.** It's an MCP server that answers spatial questions — what's nearby, what's in this neighborhood, how do I get there — from [Overture Maps](https://overturemaps.org) open data. No API key, no signup, no vendor platform.
