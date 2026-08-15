@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy policy — PlaceRoot</title>
+<meta name="description" content="PlaceRoot's privacy policy: no accounts, no API keys, no telemetry. Queries run on your machine and go straight to Overture Maps' public data. Here's exactly what stays local and what leaves it.">
+<link rel="canonical" href="https://placeroot.dev/privacy.html">
+<link rel="icon" type="image/svg+xml" href="logo-mark.svg">
+<meta property="og:site_name" content="PlaceRoot">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Privacy policy — PlaceRoot">
+<meta property="og:description" content="No accounts, no API keys, no telemetry. Queries run on your machine and go straight to Overture Maps' public data.">
+<meta property="og:url" content="https://placeroot.dev/privacy.html">
+<meta property="og:image" content="https://placeroot.dev/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Privacy policy — PlaceRoot">
+<meta name="twitter:description" content="No accounts, no API keys, no telemetry. Queries run on your machine and go straight to Overture Maps' public data.">
+<meta name="twitter:image" content="https://placeroot.dev/og-image.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  body{margin:0;background:#fbfaf5;font-family:Sora,system-ui,sans-serif}
+  a{color:#5c8a63;text-decoration:none}a:hover{color:#4c7a54}
+  h2{font-size:20px;font-weight:800;letter-spacing:-.02em;color:#2a332b;margin:0 0 12px}
+  p,li{font-size:15px;line-height:1.65;color:#3f4a3e}
+  code{font:500 13.5px 'Fira Code',monospace;background:#eef3ea;color:#2a332b;padding:1px 6px;border-radius:5px}
+  section{margin-bottom:36px}
+  ul{margin:0;padding-left:20px}
+  li{margin-bottom:6px}
+  @media (max-width:720px){
+    .pr-nav{flex-wrap:wrap!important;gap:12px!important;justify-content:center!important}
+    .pr-navlinks{gap:14px!important;font-size:13px!important;flex-wrap:wrap!important;justify-content:center!important}
+    .pr-wrap{padding-left:18px!important;padding-right:18px!important}
+  }
+</style>
+</head>
+<body>
+<div style="min-height:100vh">
+  <div class="pr-nav pr-wrap" style="display:flex;align-items:center;justify-content:space-between;padding:20px 48px;max-width:1240px;margin:0 auto;width:100%;box-sizing:border-box">
+    <a href="index.html" style="display:flex;align-items:center;gap:7px"><svg width="32" height="30" viewBox="0 0 96 92"><rect x="8" y="8" width="80" height="58" rx="18" fill="#5c8a63"></rect><path d="M28 66 L28 86 L48 66 Z" fill="#5c8a63"></path><circle cx="48" cy="33" r="10" fill="#fbfaf5"></circle><circle cx="48" cy="33" r="4" fill="#e8b04b"></circle><path d="M48 43 L48 52" stroke="#fbfaf5" stroke-width="4" stroke-linecap="round"></path></svg><span style="font-weight:800;font-size:18px;letter-spacing:-.02em;color:#2a332b">placeroot</span></a>
+    <div class="pr-navlinks" style="display:flex;gap:26px;align-items:center;font-size:14px;font-weight:600">
+      <a href="how-it-works.html" style="color:#55604f">How it works</a>
+      <a href="https://github.com/chuofringer/placeroot" style="color:#55604f">GitHub ↗</a>
+      <a href="https://pypi.org/project/placeroot/" style="color:#55604f">PyPI ↗</a>
+      <a href="https://www.npmjs.com/package/placeroot" style="color:#55604f">npm ↗</a>
+      <a href="add-to-your-ai.html" style="color:#fbfaf5;background:#5c8a63;padding:10px 20px;border-radius:99px;white-space:nowrap">Add to your AI — free</a>
+      <a href="#contact" style="color:#55604f">Contact</a>
+    </div>
+  </div>
+  <div style="max-width:760px;margin:0 auto;padding:48px 48px 0;box-sizing:border-box">
+    <h1 style="margin:0;font-size:38px;font-weight:800;letter-spacing:-.03em;color:#2a332b">Privacy policy</h1>
+    <p style="margin:14px 0 0;font-size:15.5px;color:#55604f">Effective 2026-08-15. Plain language, no boilerplate — this is the whole thing.</p>
+  </div>
+  <div style="max-width:760px;margin:40px auto 0;padding:0 48px 8px;box-sizing:border-box">
+
+    <section>
+      <h2>The short version</h2>
+      <p>PlaceRoot is an MCP server you run on your own machine. There's no PlaceRoot account, no sign-up, and no API key. We don't operate a backend, and nothing about your queries — what you searched for, where, or when — is sent to us. There is no "us" in the data path: PlaceRoot's own code sends nothing anywhere.</p>
+    </section>
+
+    <section>
+      <h2>Data collection practices</h2>
+      <p>PlaceRoot the software collects nothing and phones home to nothing. It has no telemetry, no analytics, no crash reporting, and no update-check pinging a server we control. We only learn PlaceRoot exists on your machine if you tell us — an email, a GitHub issue, a support request.</p>
+    </section>
+
+    <section>
+      <h2>Usage and storage — what actually leaves your machine</h2>
+      <p>PlaceRoot's tools answer by querying <a href="https://overturemaps.org" rel="noopener">Overture Maps</a>' public data release directly from your machine, over DuckDB's HTTPS reads against Overture's Amazon S3 bucket (<code>overturemaps-us-west-2</code>, part of AWS's Registry of Open Data — anonymous, no key). That means:</p>
+      <ul>
+        <li>Your query's bounding box and the parquet files it needs to read are visible to AWS (or your configured mirror), the same way any file download is visible to the host serving it — your IP address, the URL requested, standard HTTP request metadata.</li>
+        <li>If you set <code>PLACEROOT_UPSTREAM_BASE</code> to point at a mirror instead (your own bucket, or someone else's), that operator sees the same thing in AWS's place. PlaceRoot itself doesn't choose or contact a mirror unless you configure one.</li>
+        <li>We (PlaceRoot / Vibe Mapper) are not a party to any of these requests. We don't run the Overture bucket, we don't run a mirror by default, and we don't see this traffic.</li>
+      </ul>
+      <p>Nothing else leaves your machine. There's no second request to a PlaceRoot-operated server, no shadow API, no usage ping.</p>
+    </section>
+
+    <section>
+      <h2>Local storage</h2>
+      <p>PlaceRoot keeps an on-disk cache of the map tiles it downloads, so repeat queries over the same area answer from disk in milliseconds instead of re-fetching. By default it lives at <code>~/.cache/placeroot</code> (override with <code>PLACEROOT_CACHE_DIR</code>), is capped at 500&nbsp;MB by default (<code>PLACEROOT_CACHE_MAX_MB</code>) with the oldest tiles evicted once it's full, and can be turned off entirely with <code>PLACEROOT_CACHE=off</code>. It's a plain directory of parquet files on your disk — delete it any time, nothing is uploaded from it, and nothing depends on it persisting. Full detail: <a href="https://github.com/chuofringer/placeroot/blob/main/docs/REFERENCE.md#configuration">docs/REFERENCE.md</a>.</p>
+      <p>PlaceRoot's <code>render_map</code> tool can also write self-contained HTML map files to a local artifact directory (a sibling of the cache directory). Those stay on your disk too, under your control, and are never uploaded anywhere.</p>
+    </section>
+
+    <section>
+      <h2>Third-party sharing</h2>
+      <p>We don't share data with third parties because we don't collect any to share. The only parties who see anything are the ones your own machine talks to directly to answer a query — Overture's AWS-hosted public dataset, or a mirror you explicitly configured — exactly as described above. That's between you and them, on the same terms as downloading any public file over HTTPS; PlaceRoot introduces no additional party into that exchange.</p>
+    </section>
+
+    <section>
+      <h2>Data retention</h2>
+      <p>There's nothing server-side to retain — we don't operate a server that sees your queries. On your machine, the tile cache persists until it's evicted by the size cap, disabled, or you delete the directory yourself. That's the entire retention story.</p>
+    </section>
+
+    <section>
+      <h2>The placeroot.dev website</h2>
+      <p>This site is static HTML — no accounts, no cookies, no forms, no analytics script. It's hosted on Cloudflare Pages, so Cloudflare serves the pages and, like any web host, may log basic request data (IP address, requested path, timestamp, user agent) for operating and securing the service. We don't add anything to that; there's no PlaceRoot-side tracking layered on top.</p>
+    </section>
+
+    <section>
+      <h2>Changes to this policy</h2>
+      <p>If this changes — a new optional feature that talks to a new host, for instance — we'll update this page and its effective date. This page lives in the project's git repository, so the honest way to check what changed is the file's history on GitHub.</p>
+    </section>
+
+  </div>
+  <div id="contact" style="background:#eef3ea;margin-top:36px">
+    <div class="pr-wrap" style="max-width:1240px;margin:0 auto;padding:60px 48px;box-sizing:border-box;text-align:center">
+      <h2 style="margin:0;font-size:30px;font-weight:800;letter-spacing:-.025em;color:#2a332b;text-align:center">Contact</h2>
+      <p style="margin:14px 0 0;font-size:15px;color:#55604f">Questions about this policy, or anything else: <a href="mailto:hello@placeroot.dev" style="font-weight:700">hello@placeroot.dev</a></p>
+    </div>
+  </div>
+  <div style="text-align:center;padding:32px 48px 72px;font-size:12.5px;color:#8a9482">Developed by <a href="https://vibemapper.dev" rel="noopener" style="font-weight:700">vibemapper</a></div>
+</div>
+</body>
+</html>

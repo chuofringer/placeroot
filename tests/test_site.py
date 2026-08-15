@@ -13,7 +13,10 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 SITE_DIR = Path(__file__).parent.parent / "site"
-PAGES = ["index.html", "how-it-works.html", "add-to-your-ai.html", "why-placeroot.html"]
+PAGES = [
+    "index.html", "how-it-works.html", "add-to-your-ai.html", "why-placeroot.html",
+    "privacy.html",
+]
 
 # External hosts the design legitimately references: Google Fonts for the
 # typefaces, and documentation/repo links. Anything else fetched over the
@@ -26,6 +29,7 @@ _ALLOWED_EXTERNAL_HOSTS = (
     "pypi.org",
     "www.npmjs.com",
     "docs.astral.sh",
+    "overturemaps.org",  # privacy.html: link to the data source it queries
     "placeroot.dev",  # og:image / canonical absolute URLs in meta tags
     # Developer-credit links (footer): the maintainer's site and siblings.
     "vibemapper.dev",
@@ -147,6 +151,7 @@ def test_pages_have_canonical_urls():
         "how-it-works.html": 'href="https://placeroot.dev/how-it-works.html"',
         "add-to-your-ai.html": 'href="https://placeroot.dev/add-to-your-ai.html"',
         "why-placeroot.html": 'href="https://placeroot.dev/why-placeroot.html"',
+        "privacy.html": 'href="https://placeroot.dev/privacy.html"',
     }
     for name, href in canon.items():
         doc = (SITE_DIR / name).read_text(encoding="utf-8")
@@ -158,6 +163,9 @@ def test_robots_and_sitemap_present():
     sm = SITE_DIR / "sitemap.xml"
     assert sm.is_file()
     doc = sm.read_text(encoding="utf-8")
-    pages = ("placeroot.dev/", "how-it-works.html", "add-to-your-ai.html", "why-placeroot.html")
+    pages = (
+        "placeroot.dev/", "how-it-works.html", "add-to-your-ai.html",
+        "why-placeroot.html", "privacy.html",
+    )
     for page in pages:
         assert page in doc, f"sitemap missing {page}"
