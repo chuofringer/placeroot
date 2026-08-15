@@ -145,6 +145,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, design rules, and how to p
 
 `hello@placeroot.dev`
 
+## Privacy Policy
+
+PlaceRoot runs on your machine — no account, no API key, no sign-up. It has no telemetry and sends nothing to us; the only network traffic is your own queries going straight to Overture Maps' public data on AWS S3 (or a mirror you configure). Full details: [placeroot.dev/privacy.html](https://placeroot.dev/privacy.html).
+
 ## License and attribution
 
 The code is [MIT](LICENSE). The data it queries is the Overture Maps public release, licensed per theme — places under CDLA-Permissive-2.0; the OSM-derived themes (divisions, transportation, base) under ODbL, which asks for attribution on anything user-facing you build from them:

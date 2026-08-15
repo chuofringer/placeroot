@@ -12,6 +12,9 @@
   "icon": "icon.png",
   "homepage": "https://placeroot.dev",
   "documentation": "https://placeroot.dev/how-it-works.html",
+  "privacy_policies": [
+    "https://placeroot.dev/privacy.html"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/chuofringer/placeroot"
