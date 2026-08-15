@@ -13,7 +13,10 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 SITE_DIR = Path(__file__).parent.parent / "site"
-PAGES = ["index.html", "how-it-works.html", "add-to-your-ai.html", "why-placeroot.html", "privacy.html"]
+PAGES = [
+    "index.html", "how-it-works.html", "add-to-your-ai.html", "why-placeroot.html",
+    "privacy.html",
+]
 
 # External hosts the design legitimately references: Google Fonts for the
 # typefaces, and documentation/repo links. Anything else fetched over the
@@ -160,6 +163,9 @@ def test_robots_and_sitemap_present():
     sm = SITE_DIR / "sitemap.xml"
     assert sm.is_file()
     doc = sm.read_text(encoding="utf-8")
-    pages = ("placeroot.dev/", "how-it-works.html", "add-to-your-ai.html", "why-placeroot.html", "privacy.html")
+    pages = (
+        "placeroot.dev/", "how-it-works.html", "add-to-your-ai.html",
+        "why-placeroot.html", "privacy.html",
+    )
     for page in pages:
         assert page in doc, f"sitemap missing {page}"
