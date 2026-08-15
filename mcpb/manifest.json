@@ -7,7 +7,8 @@
   "long_description": "PlaceRoot answers spatial questions from the Overture Maps public data release — nearby places, geocoding, admin hierarchy, buildings, land use, isochrones and routing — with no API key, no signup and no vendor platform. Every tool returns a compact, ranked answer sized for an agent's context window instead of a raw GeoJSON dump, and every place carries its Overture GERS id so an agent can hold onto it across turns.",
   "author": {
     "name": "Vibe Mapper",
-    "email": "hello@placeroot.dev"
+    "email": "hello@placeroot.dev",
+    "url": "https://github.com/chuofringer"
   },
   "icon": "icon.png",
   "homepage": "https://placeroot.dev",
