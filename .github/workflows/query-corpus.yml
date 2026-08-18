@@ -31,8 +31,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39  # v3
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d  # v10.0.0
         with:
+          # v10 still installs uv if cache is off. schedule/workflow_dispatch
+          # are not in the auto-disable list; keep true anyway.
           enable-cache: true
 
       - name: Run the corpus
@@ -47,11 +49,16 @@ jobs:
       # Uploaded whichever way the run went: the timings are the point even
       # when every answer is right, and they are what a release claiming
       # anything about cold start should be read against.
+      #
+      # upload-artifact v7 runs on Node 24 (ubuntu-latest is fine). Keep
+      # archive: true — v7's archive:false path is single-file only and
+      # ignores `name`. We upload two files, so they must stay zipped.
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: query-corpus-results
+          archive: true
           path: |
             corpus-results.jsonl
             corpus-report.txt

@@ -776,6 +776,35 @@ def _local_divisions_table_path(active_release: str) -> Path:
     return cache.cache_dir() / active_release / _DIVISIONS_TABLE_SUBDIR / _DIVISIONS_TABLE_FILENAME
 
 
+def _publish_copied_parquet(con: duckdb.DuckDBPyConnection, tmp_path: Path, path: Path) -> None:
+    """Close the COPY writer, publish `tmp_path` as `path`, drop stale cache.
+
+    `_new_connection()` is a cursor of the shared DuckDB instance.
+    COPY (FORMAT PARQUET, COMPRESSION ZSTD) can leave that cursor's
+    output handle open until close, so we close and fsync before the
+    rename. That is not enough on its own: DuckDB 1.5's external file
+    cache (``enable_object_cache`` is a no-op placeholder) keys pages
+    by path, and a same-path replace after a prior ``read_parquet`` —
+    the #214 rebuild, or a stage-2 upgrade — can leave VALIDATE_ALL
+    serving old zstd frames. The next ``read_parquet`` on
+    ``overture.conn()`` then fails with ZSTD Decompression failure
+    even though a fresh connection can read the new file. Toggling
+    ``enable_external_file_cache`` empties the cache; DuckDB's own
+    tests use the same toggle.
+    """
+    con.close()
+    fd = os.open(tmp_path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    tmp_path.replace(path)
+    with overture._conn_lock:
+        shared = overture.conn()
+        shared.execute("SET enable_external_file_cache=false")
+        shared.execute("SET enable_external_file_cache=true")
+
+
 def _materialize_alt_names_table(path: Path, glob: str) -> None:
     """COPY the #214 alternate-name table — one row per (division id, folded
     `names.common` spelling) — into a local parquet at `path`.
@@ -827,7 +856,7 @@ def _materialize_alt_names_table(path: Path, glob: str) -> None:
         ) TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)
     """
     con.execute(sql)
-    tmp_path.replace(path)
+    _publish_copied_parquet(con, tmp_path, path)
 
 
 def _is_remote_glob(glob: str) -> bool:
@@ -908,7 +937,7 @@ def _materialize_divisions_pass(path: Path, glob: str, with_hierarchies: bool) -
         ) TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)
     """
     con.execute(sql)
-    tmp_path.replace(path)
+    _publish_copied_parquet(con, tmp_path, path)
 
 
 # Upgrade threads already started this process, keyed by table path — one

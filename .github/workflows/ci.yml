@@ -21,8 +21,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39  # v3
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d  # v10.0.0
         with:
+          # v10 still installs uv when cache is off. enable-cache: true keeps
+          # the cache on pull_request/push (auto would also be on for those).
           enable-cache: true
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -45,8 +47,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39  # v3
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d  # v10.0.0
         with:
+          # v10 still installs uv when cache is off. enable-cache: true keeps
+          # the cache on pull_request/push (auto would also be on for those).
           enable-cache: true
 
       - name: Set up Python

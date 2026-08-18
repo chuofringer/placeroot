@@ -25,8 +25,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39  # v3
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d  # v10.0.0
         with:
+          # v10 auto-disables cache on `release` when enable-cache is auto.
+          # Keep true so uv still installs *and* the uv cache is used.
           enable-cache: true
 
       - name: Package versions agree with the release tag
@@ -71,8 +73,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39  # v3
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d  # v10.0.0
         with:
+          # v10 auto-disables cache on `release` when enable-cache is auto.
+          # Keep true so uv still installs *and* the uv cache is used.
           enable-cache: true
 
       - name: Build
@@ -156,8 +160,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39  # v3
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d  # v10.0.0
         with:
+          # v10 auto-disables cache on `release` when enable-cache is auto.
+          # Keep true so uv still installs *and* the uv cache is used.
           enable-cache: true
 
       - name: Build and attach the bundle
