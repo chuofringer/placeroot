@@ -22,6 +22,8 @@ LOW_CONFIDENCE = 0.50
 
 _PERMANENTLY_CLOSED = frozenset({"permanently closed", "closed", "closed_permanently"})
 _TEMPORARILY_CLOSED = frozenset({"temporarily closed", "closed_temporarily"})
+# Present on a place lookup; absent on optimize_route's normal {lat, lon} stops.
+_PLACE_FIELDS = ("confidence", "operating_status", "sources")
 
 
 def _as_float(value) -> float | None:
@@ -82,9 +84,8 @@ def _flag_reason(place: Mapping) -> str | None:
         return "listed as temporarily closed"
     band = _confidence_band(_as_float(place.get("confidence")))
     if band == "high":
-        # A high-confidence row with an explicit empty sources list is the
-        # one high-band case that still deserves a call-ahead: we cannot
-        # point at a listing.
+        # Only an explicit empty `sources` list is "unnamed source".
+        # Missing `sources` (compact find_places) is not a claim.
         if _named_source(place) is False:
             return "unnamed source"
         return None
@@ -97,10 +98,13 @@ def trust_note(place: Mapping) -> str:
     """One short before-you-go clause for a place row.
 
     Closed statuses win: a high-confidence permanently-closed listing is
-    still a shuttered café. Otherwise the clause is a confidence band plus
-    a compact source hint, matching the issue's examples — "High confidence,
-    recently confirmed in listings" vs "Low confidence, unnamed source —
-    call ahead."
+    still a shuttered café. Otherwise the clause is a confidence band,
+    plus a source hint only when the row actually carries `sources`.
+
+    Compact find_places rows omit that field — they get the band (and
+    call-ahead on non-high), never "recently confirmed in listings" or
+    "unnamed source". Those phrases require an explicit sources list:
+    named dataset vs present-but-empty.
     """
     status = _status(place)
     if status in _PERMANENTLY_CLOSED:
@@ -114,14 +118,16 @@ def trust_note(place: Mapping) -> str:
     if band == "high":
         if named is False:
             return "High confidence, unnamed source — call ahead."
-        return "High confidence, recently confirmed in listings"
+        if named is True:
+            return "High confidence, recently confirmed in listings"
+        return "High confidence"
     if band == "moderate":
         if named is False:
             return "Moderate confidence, unnamed source — call ahead."
         return "Moderate confidence — call ahead."
-    if named is True:
-        return "Low confidence — call ahead."
-    return "Low confidence, unnamed source — call ahead."
+    if named is False:
+        return "Low confidence, unnamed source — call ahead."
+    return "Low confidence — call ahead."
 
 
 def attach_trust_note(place: dict) -> dict:
@@ -162,17 +168,27 @@ def _weakness(place: Mapping) -> float:
     return 2.0 - confidence
 
 
+def _has_place_fields(place: Mapping) -> bool:
+    """True when the row is a place lookup, not a bare {lat, lon} stop."""
+    return any(field in place for field in _PLACE_FIELDS)
+
+
 def verify_before_going(places: Sequence[Mapping] | None, *, limit: int = 2) -> str | None:
     """One line naming the 1–2 weakest-confidence stops on a plan.
 
-    Returns None when there is nothing worth flagging — empty input, or
-    every stop is high-confidence and in business (or status-unknown) with
-    a named-or-implied listing. Always at most `limit` names.
+    Returns None when there is nothing worth flagging — empty input,
+    bare coordinate stops with no place fields, or every stop is
+    high-confidence and in business (or status-unknown) with a
+    named-or-implied listing. Always at most `limit` names. Stop
+    indexes stay on the original list so a mixed bare+enriched input
+    still says "stop 2", not "stop 1".
     """
     if not places:
         return None
     ranked = []
     for i, place in enumerate(places):
+        if not _has_place_fields(place):
+            continue
         score = _weakness(place)
         if score <= 0:
             continue

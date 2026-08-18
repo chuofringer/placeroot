@@ -1706,8 +1706,12 @@ def places_along_route(
         return {"error": "bad_request", "detail": str(e)}
     if "error" in result:
         return result
+    # Compute the verify line from pre-truncation rows. apply_budget may
+    # strip confidence first, after which every survivor reads as low.
+    # Attaching first also puts the line in the envelope so its tokens
+    # are accounted for.
+    honesty.attach_verify_line(result)
     payload = _with_degraded_fields(budget.apply_budget(result, "results"))
-    honesty.attach_verify_line(payload)
     return _with_category_hint(payload, category, widen_hint="widen max_detour_m")
 
 
@@ -1814,6 +1818,8 @@ def optimize_route(
         return {"error": "bad_request", "detail": str(e)}
     # Caller-supplied stop fields (name/confidence/operating_status) are
     # already in hand — no extra lookup. routing.py is untouched (#312).
+    # verify_before_going skips bare {lat, lon} stops — those are not
+    # place lookups and must not become "low confidence" warnings.
     if "error" not in result:
         line = honesty.verify_before_going(stops)
         if line:
