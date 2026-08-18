@@ -51,6 +51,9 @@ fixing behavior is patch.
 - `search_categories` clamps its limit like every sibling instead of
   erroring (#286).
 
+### Changed
+- Docs caught up with what shipped (#287).
+
 ## [0.9.5] — 2026-08-14
 
 ### Fixed
