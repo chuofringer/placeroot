@@ -1,6 +1,7 @@
 import os
 import threading
 import time
+from pathlib import Path
 
 import duckdb
 import pytest
@@ -736,3 +737,41 @@ def test_eviction_blocked_while_a_query_is_resolving_its_tiles(con, cache_dir, s
     assert paths
     missing = [p for p in paths if not os.path.exists(p)]
     assert not missing, f"eviction deleted {len(missing)} tile(s) mid-resolve: {missing}"
+
+
+
+def test_force_sync_materializes_without_cache_sync_env(con, cache_dir, monkeypatch):
+    """warmup_city / _warm_start must not depend on PLACEROOT_CACHE_SYNC."""
+    monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
+    bbox = (-74.0, 40.0, -73.0, 41.0)
+    paths = cache.local_paths_for_query(
+        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), duckdb.connect,
+        force_sync=True,
+    )
+    assert paths
+    assert all(Path(p).exists() for p in paths)
+
+
+def test_prewarm_bbox_reuses_the_tile_cache(con, cache_dir, monkeypatch):
+    monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
+    bbox = (-74.0, 40.0, -73.0, 41.0)
+    first = cache.prewarm_bbox(
+        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), duckdb.connect,
+    )
+    assert first["status"] == "warmed"
+    assert first["fetched"] >= 1
+    assert first["cached"] >= 1
+    second = cache.prewarm_bbox(
+        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), duckdb.connect,
+    )
+    assert second["status"] == "already_warm"
+    assert second["fetched"] == 0
+
+
+def test_prewarm_bbox_is_noop_when_cache_disabled(con, monkeypatch):
+    monkeypatch.setenv("PLACEROOT_CACHE", "off")
+    result = cache.prewarm_bbox(
+        con, RELEASE, THEME, (-74.0, 40.0, -73.0, 41.0), str(FIXTURE_PATH),
+    )
+    assert result["status"] == "cache_disabled"
+    assert result["cached"] == 0

@@ -36,6 +36,10 @@ SAMPLES: dict[str, list[dict[str, str]]] = {
         {"location": "Greenpoint, Brooklyn", "context": "no car, one toddler"},
         {"location": "Greenpoint, Brooklyn"},
     ],
+    "get_to_know_my_city": [
+        {"city": "Palo Alto"},
+        {"city": ""},
+    ],
 }
 
 
@@ -85,6 +89,7 @@ def test_each_prompt_has_a_description(name):
         ("compare_neighborhoods", {"area_a": True, "area_b": True}),
         ("plan_errands", {"stops": True, "start": False}),
         ("should_i_live_here", {"location": True, "context": False}),
+        ("get_to_know_my_city", {"city": False}),
     ],
 )
 def test_argument_schemas(name, expected):

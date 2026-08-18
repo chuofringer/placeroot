@@ -892,7 +892,8 @@ def build_graph(
     progress.report(
         "Building the street graph for this area from Overture's road "
         "network — the first routing query here is slow; the graph is "
-        "cached, repeat routing over this area answers in milliseconds"
+        "cached, repeat routing over this area answers in milliseconds",
+        eta_s=progress.GRAPH_BUILD_S,
     )
     if mode not in MODE_CONFIG:
         raise UnsupportedMode(mode)

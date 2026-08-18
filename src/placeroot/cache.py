@@ -752,6 +752,7 @@ def local_paths_for_query(
     upstream_glob: str,
     new_connection=None,
     schedule_missing: bool = True,
+    force_sync: bool = False,
 ) -> list[str] | None:
     """Local cached parquet paths covering bbox, or None to fall back to upstream.
 
@@ -776,6 +777,11 @@ def local_paths_for_query(
     whenever caching is enabled, since the background thread must not share
     `con`) and returns None so the caller queries upstream directly for
     this one query instead of waiting.
+
+    force_sync=True is the city-warmup / operator-prewarm path: materialize
+    missing tiles inline even when PLACEROOT_CACHE_SYNC is unset, so the
+    area is warm when this returns. Same tiles, same files — not a second
+    cache.
     """
     if not enabled():
         return None
@@ -808,7 +814,7 @@ def local_paths_for_query(
         theme in HEAVY_THEME_TILE_DEG and len(missing) <= HEAVY_SYNC_MAX_TILES
     )
 
-    if sync_mode() or heavy_sync:
+    if sync_mode() or heavy_sync or force_sync:
         # Claim every tile this query holds BEFORE each fetch (#158):
         # ensure_tile runs its own evict_if_needed() right after writing, so
         # a query spanning several missing tiles would otherwise evict the
@@ -825,11 +831,13 @@ def local_paths_for_query(
             str(tile_path(release, theme, fingerprint, t)) for t in missing
         ]
         claim_paths(held)
+        remaining = progress.tile_eta(theme, len(missing))
         progress.report(
             f"Fetching map data for this area ({len(missing)} {theme} "
             f"tile(s)) — the first query over a new area is slow; results "
             "are cached, repeat queries answer in milliseconds",
             0, len(missing),
+            eta_s=remaining,
         )
         # Two fetches in flight, mirroring the background semaphore's
         # rationale in reverse: here there is no foreground scan to starve
@@ -846,11 +854,13 @@ def local_paths_for_query(
             with done_lock:
                 done_count[0] += 1
                 n = done_count[0]
+            left = progress.tile_eta(theme, max(0, len(missing) - n))
             progress.report(
                 f"Fetching map data for this area ({theme} tile {n} of "
                 f"{len(missing)}) — results are cached, repeat queries "
                 "answer in milliseconds",
                 n, len(missing),
+                eta_s=left if n < len(missing) else None,
             )
             claim_paths(held)  # refresh mid-flight so no claim expires
             return path
@@ -896,7 +906,8 @@ def local_paths_for_query(
     progress.report(
         f"First query over a new area: answering from a direct scan of Overture "
         f"on S3 while {len(missing)} {theme} tile(s) cache in the background — "
-        "this query is slow, repeat queries over this area answer in milliseconds"
+        "this query is slow, repeat queries over this area answer in milliseconds",
+        eta_s=progress.scan_eta(theme),
     )
     for t in missing:
         _materialize_in_background(release, theme, t, upstream_glob, fingerprint, new_connection)
@@ -971,3 +982,59 @@ def parse_warm_region(spec: str) -> tuple[float, float, float] | None:
         return float(parts[0]), float(parts[1]), float(parts[2])
     except ValueError:
         return None
+
+
+def prewarm_bbox(
+    con,
+    release: str,
+    theme: str,
+    bbox: tuple[float, float, float, float],
+    upstream_glob: str,
+    new_connection=None,
+) -> dict:
+    """Synchronously materialize existing-cache tiles covering bbox.
+
+    Same files, same fingerprint dirs as a later query — this is not a
+    second cache. force_sync so the area is warm when this returns (the
+    warmup tool and the PLACEROOT_WARM_REGION startup path).
+    """
+    if not enabled():
+        return {"theme": theme, "status": "cache_disabled", "tiles": 0, "cached": 0}
+    tiles = tiles_for_bbox(*bbox, tile_deg=tile_deg_for(theme))
+    if len(tiles) > MAX_TILES_PER_QUERY:
+        return {
+            "theme": theme,
+            "status": "too_large",
+            "tiles": len(tiles),
+            "cached": 0,
+            "note": "bbox touches too many tiles; narrow radius_m",
+        }
+    fingerprint = resolve_fingerprint(release, theme, upstream_glob)
+    if fingerprint is None:
+        return {
+            "theme": theme,
+            "status": "upstream_unavailable",
+            "tiles": len(tiles),
+            "cached": 0,
+        }
+    already, missing = _claim_existing_tiles(release, theme, fingerprint, tiles)
+    if not missing:
+        return {
+            "theme": theme,
+            "status": "already_warm",
+            "tiles": len(already),
+            "cached": len(already),
+            "fetched": 0,
+        }
+    paths = local_paths_for_query(
+        con, release, theme, bbox, upstream_glob, new_connection,
+        force_sync=True,
+    )
+    cached_n = len(paths) if paths else len(already)
+    return {
+        "theme": theme,
+        "status": "warmed" if paths else "partial",
+        "tiles": len(tiles),
+        "cached": cached_n,
+        "fetched": len(missing),
+    }

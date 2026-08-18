@@ -30,6 +30,11 @@ fixing behavior is patch.
   once. Exposed as `placeroot://preferences` and a small `preferences`
   tool. Routing tools use the stored mode when you omit theirs; an
   explicit argument always wins. Nothing leaves the machine (#315).
+- Optional `warmup_city` — a "get to know my city" first-session step that
+  pre-caches a metro through the existing tile cache so the first real
+  question is fast. Cold scans now carry an honest ETA on MCP progress
+  notifications. A `get_to_know_my_city` prompt walks the same path
+  (#314).
 
 ## [0.9.7] — 2026-08-15
 
