@@ -82,6 +82,7 @@ SITE_SELECTION_TOOLS = (
     "find_places",
     "compare_areas",
     "within_distance",
+    "render_map",
 )
 
 
@@ -113,6 +114,8 @@ competitor count and distance, complementary category mix, and overall
 density. Name the runner-up and the single fact that separates them, and be
 explicit about what the data cannot tell you (foot traffic, rents, zoning,
 demographics are all outside Overture).
+Finally `render_map()` the recommended places with that verdict as
+`summary` so the user has a one-pager they can send as a local file.
 
 {_COMPACT}"""
 
@@ -124,6 +127,7 @@ COMPARE_NEIGHBORHOODS_TOOLS = (
     "summarize_area",
     "compare_areas",
     "summarize_buildings",
+    "render_map",
 )
 
 
@@ -152,6 +156,8 @@ neighborhood — followed by two or three sentences on what kind of place each
 one is and who each suits. Use the same radius everywhere and say what it
 was. Overture has no rent, crime, school, or demographic data; if the user's
 question implies those, say what you could not check.
+Then `render_map()` the comparison with that verdict as `summary` so the
+user has a one-pager they can send as a local file.
 
 {_COMPACT}"""
 
@@ -161,6 +167,7 @@ PLAN_ERRANDS_TOOLS = (
     "distance_matrix",
     "route",
     "places_along_route",
+    "render_map",
 )
 
 
@@ -207,6 +214,8 @@ total, and one sentence on why that order beats the order the user gave.
 If any stop carries a trust_note, add one "Verify before going:" line
 naming the 1–2 weakest-confidence stops — the ones most worth checking
 before anyone leaves the house.
+Then `render_map()` the ordered stops with the plan as `summary` — a
+one-pager the user can send as a local file.
 
 {_COMPACT}"""
 

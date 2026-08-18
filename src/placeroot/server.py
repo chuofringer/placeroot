@@ -1470,15 +1470,24 @@ def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
         return {"error": "invalid_geometry", "detail": e.detail}
 
 @_tool("Render map", annotations=_WRITES_A_FILE_ANNOTATIONS)
-def render_map(result: dict | list, title: str | None = None, inline: bool = False) -> dict:
-    """Render place-search or area-summary JSON (or caller-supplied GeoJSON) as a map.
+def render_map(
+    result: dict | list,
+    title: str | None = None,
+    inline: bool = False,
+    summary: str | None = None,
+) -> dict:
+    """Render any result as a shareable one-pager: map, verdict, and stop list.
 
-    Writes ONE self-contained HTML file — inline CSS/JS, vector markers with
-    labels and click popups, polygon/line shapes (including reachability
-    output shaped {"polygon": ..., "stats": {...}}), a scale
-    bar, attribution, no CDN, no tile server, no API key, zero network
-    requests when opened — to PLACEROOT_ARTIFACT_DIR (default: alongside the
-    tile cache directory). The file itself is the artifact; this tool's
+    Writes ONE self-contained HTML file — interactive SVG map (inline CSS/JS,
+    vector markers with labels and click popups, polygon/line shapes
+    including reachability output shaped {"polygon": ..., "stats": {...}}),
+    a composed verdict, per-stop details, a scale bar, and required
+    attribution. No CDN, no tile server, no API key, zero network requests
+    when opened — a local file the user can send as-is. Pass `summary` for
+    the verdict you want on the page (the sentence you'd tell a spouse,
+    co-founder, or landlord); when omitted a short fallback is composed
+    from the payload. Written to PLACEROOT_ARTIFACT_DIR (default: alongside
+    the tile cache directory). The file itself is the artifact; this tool's
     response stays small on purpose. Returns {"path", "bytes",
     "features_rendered", "skipped_features"} (plus "truncated": True when
     applicable) — skipped_features counts rows/features that couldn't be
@@ -1487,7 +1496,7 @@ def render_map(result: dict | list, title: str | None = None, inline: bool = Fal
     inline=true to also get the HTML back in the response when it's small
     enough to be worth it.
     """
-    return mapview.write_artifact(result, title=title, inline=inline)
+    return mapview.write_artifact(result, title=title, inline=inline, summary=summary)
 
 @_tool("Reachable area (isochrone)")
 def isochrone(

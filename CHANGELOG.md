@@ -13,6 +13,13 @@ fixing behavior is patch.
   Maps directions links (URL schemes only — no API, no keys, no extra
   network), a GPX 1.1 document, and a printable stop list, so a Saturday
   plan leaves the chat as something navigable (#312).
+- `render_map` writes a shareable one-pager: interactive map, composed
+  verdict, per-stop details, and the required Overture/OSM attribution —
+  one local HTML file, no hosting, no account, no network (#310). Pass
+  `summary` for the verdict you want on the page; a short fallback is
+  composed from the payload when it's omitted. The three workflow
+  prompts now finish by calling `render_map()` so the user leaves with
+  a file they can send.
 
 ## [0.9.7] — 2026-08-15
 
