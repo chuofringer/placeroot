@@ -36,6 +36,7 @@ from placeroot import (
     categories,
     divisions,
     errors,
+    export,
     geo,
     gers,
     honesty,
@@ -1563,8 +1564,11 @@ def route(
 
     Compact directions, not turn-by-turn: builds a street graph from
     Overture's transportation theme around the two points and returns
-    {"distance_m", "duration_s", "mode", "from", "to"} for the fastest path
-    — no polyline unless you ask for one. mode is "walk",
+    {"distance_m", "duration_s", "mode", "from", "to", "export"} for the
+    fastest path — no polyline unless you ask for one. export is the
+    pocket handoff: Google/Apple Maps directions URLs built from the same
+    two coordinates (URL schemes only — no Maps API, no extra network), a
+    GPX 1.1 document, and a printable stop list. mode is "walk",
     "cycle", or "drive" (default), on the same cost model every routing tool
     uses (walk 1.4 m/s, cycle 4.2 m/s, drive per-edge from Overture's
     speed_limits or a class-based default table). drive's duration is a posted-speed model
@@ -1602,7 +1606,7 @@ def route(
         if coord_error is not None:
             return coord_error
     try:
-        return routing.route(
+        result = routing.route(
             from_lat, from_lon, to_lat, to_lon, mode=mode, include_path=include_path
         )
     except routing.UnsupportedMode as e:
@@ -1625,6 +1629,9 @@ def route(
         }
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
+    if "error" not in result:
+        result["export"] = export.from_route_result(result)
+    return result
 
 
 @_tool("Places along a route")
@@ -1732,11 +1739,15 @@ def optimize_route(
 
     Returns {"order": [stop indices, in visiting order], "legs":
     [{"from_idx", "to_idx", "distance_m", "duration_s"}, ...],
-    "total_distance_m", "total_duration_s", "mode", "roundtrip"} — indices
-    refer to the input `stops` list, and there is no polyline/geometry — for
-    a single pair's numbers on their own, call `route`. If a stop already
-    carries confidence or operating_status (from a prior place lookup),
-    the response adds verify_before_going naming the 1–2 weakest.
+    "total_distance_m", "total_duration_s", "mode", "roundtrip", "export"}
+    — indices refer to the input `stops` list, and there is no
+    polyline/geometry — for a single pair's numbers on their own, call
+    `route`. export is the pocket handoff: a multi-stop Google/Apple Maps
+    directions URL (coordinates only — no Maps API), a GPX 1.1 document
+    with every stop as a waypoint, and a printable list that keeps any
+    names the caller passed. If a stop already carries confidence or
+    operating_status (from a prior place lookup), the response adds
+    verify_before_going naming the 1–2 weakest.
 
     start_index (default 0) is fixed as the first stop. roundtrip=true (the
     default) returns to it; the closing leg is in "legs" but the start is not
@@ -1816,11 +1827,22 @@ def optimize_route(
         }
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
-    # Caller-supplied stop fields (name/confidence/operating_status) are
-    # already in hand — no extra lookup. routing.py is untouched (#312).
-    # verify_before_going skips bare {lat, lon} stops — those are not
-    # place lookups and must not become "low confidence" warnings.
     if "error" not in result:
+        # Names never enter the TSP; they ride through here so the
+        # printable list / GPX waypoints say "bakery" instead of "Stop 3".
+        named = []
+        for point, raw in zip(points, stops):
+            row = {"lat": point[0], "lon": point[1]}
+            if isinstance(raw, dict):
+                name = raw.get("name")
+                if isinstance(name, str) and name.strip():
+                    row["name"] = name.strip()
+            named.append(row)
+        result["export"] = export.from_optimize_result(named, result)
+        # Caller-supplied stop fields (name/confidence/operating_status) are
+        # already in hand — no extra lookup. routing.py is untouched (#312).
+        # verify_before_going skips bare {lat, lon} stops — those are not
+        # place lookups and must not become "low confidence" warnings.
         line = honesty.verify_before_going(stops)
         if line:
             result = {**result, "verify_before_going": line}
