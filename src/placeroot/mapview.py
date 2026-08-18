@@ -39,6 +39,7 @@ import html
 import json
 import math
 import os
+import secrets
 import time
 from pathlib import Path
 
@@ -1131,7 +1132,9 @@ def compose_summary(
                     continue
                 total = area.get("total_places")
                 dens = area.get("density_per_km2")
-                bit = f"Area {i + 1}: {total} places"
+                bit = f"Area {i + 1}"
+                if total is not None:
+                    bit += f": {total} places"
                 if dens is not None:
                     bit += f" ({_fmt_stop_value('density_per_km2', dens)})"
                 parts.append(bit)
@@ -1205,6 +1208,15 @@ def compose_summary(
     return (" · ".join(parts) + ".") if parts else "No places to show."
 
 
+def _unique_slot(*blobs: str) -> str:
+    """A substitution token that does not appear in any of the given strings."""
+    for _ in range(16):
+        token = f"@@PR_{secrets.token_hex(16)}@@"
+        if all(token not in blob for blob in blobs):
+            return token
+    raise RuntimeError("could not allocate a collision-proof template token")
+
+
 def render_html(
     points: list[dict],
     title: str | None = None,
@@ -1256,19 +1268,31 @@ def render_html(
         {"points": points_for_js, "shapes": shapes_for_js}, default=str
     ).replace("</", "<\\/")
 
-    js = _JS.replace("__DATA_JSON__", data_json)
     stops_label, stops_html = _stops_html(points, shapes)
-    doc = (
-        _DOC.replace("@@CSS@@", _CSS)
-        .replace("@@JS@@", js)
-        .replace("@@TITLE@@", safe_title)
-        .replace("@@COUNT@@", html.escape(count_label))
-        .replace("@@SUMMARY@@", html.escape(_clip_summary(summary)))
-        .replace("@@STOPS_LABEL@@", html.escape(stops_label))
-        .replace("@@STOPS@@", stops_html)
-        .replace("@@ATTRIBUTION@@", html.escape(ATTRIBUTION))
-    )
-    return doc
+    # Swap every @@TOKEN@@ for a unique slot first so a place named
+    # "@@STOPS@@" (or a title/summary containing one) cannot rewrite
+    # another substitution. Embed the script — and its user JSON — last.
+    replacements = {
+        "CSS": _CSS,
+        "TITLE": safe_title,
+        "COUNT": html.escape(count_label),
+        "SUMMARY": html.escape(_clip_summary(summary)),
+        "STOPS_LABEL": html.escape(stops_label),
+        "STOPS": stops_html,
+        "ATTRIBUTION": html.escape(ATTRIBUTION),
+    }
+    known = [data_json, _JS, _DOC, *replacements.values()]
+    slots: dict[str, str] = {}
+    doc = _DOC
+    for name in (*replacements, "JS"):
+        token = _unique_slot(doc, *known, *slots.values())
+        doc = doc.replace(f"@@{name}@@", token)
+        slots[name] = token
+        known.append(token)
+    for name, value in replacements.items():
+        doc = doc.replace(slots[name], value)
+    js = _JS.replace("__DATA_JSON__", data_json)
+    return doc.replace(slots["JS"], js)
 
 
 def _shape_vertex_count(shape: dict) -> int:

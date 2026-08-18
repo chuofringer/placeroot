@@ -6,6 +6,7 @@ pin the document shape and the fallback verdicts; the existing mapview
 suite still owns projection, vertex caps, and the SVG viewer.
 """
 
+import json
 import re
 from html.parser import HTMLParser
 from pathlib import Path
@@ -15,7 +16,22 @@ from placeroot import mapview, server
 CENTER_LAT = 40.700000
 CENTER_LON = -73.900000
 
-_EXTERNAL_REF_RE = re.compile(r'(?:src|href)\s*=\s*["\']https?://', re.IGNORECASE)
+_EXTERNAL_REF_RE = re.compile(
+    r"""
+    (?:
+        (?:src|href|action)\s*=\s*["\']?https?://   # quoted or unquoted attrs
+      | url\s*\(\s*["\']?https?://                   # CSS url()
+      | \bfetch\s*\(\s*[`"\']https?://               # fetch("https://...")
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _embedded_data(doc: str) -> dict:
+    start = doc.index("var DATA = ") + len("var DATA = ")
+    data, _ = json.JSONDecoder().raw_decode(doc[start:])
+    return data
 
 
 def _rows(n):
@@ -282,3 +298,120 @@ def test_onepager_still_has_interactive_map_hooks(tmp_path):
     parser = _parse(doc)
     assert "svg" in parser.tags
     assert "script" in parser.tags
+
+
+def test_external_ref_regex_catches_css_unquoted_form_and_fetch():
+    assert _EXTERNAL_REF_RE.search('<img src="https://evil.example/x">')
+    assert _EXTERNAL_REF_RE.search("<img src=https://evil.example/x>")
+    assert _EXTERNAL_REF_RE.search("<link href='https://evil.example/x'>")
+    assert _EXTERNAL_REF_RE.search("background:url(https://evil.example/x)")
+    assert _EXTERNAL_REF_RE.search("background: url('https://evil.example/x')")
+    assert _EXTERNAL_REF_RE.search('<form action="https://evil.example/x">')
+    assert _EXTERNAL_REF_RE.search("<form action=https://evil.example/x>")
+    assert _EXTERNAL_REF_RE.search('fetch("https://evil.example/x")')
+    assert _EXTERNAL_REF_RE.search("fetch('https://evil.example/x')")
+    # XML namespaces and in-page refs must not trip it.
+    assert not _EXTERNAL_REF_RE.search('xmlns="http://www.w3.org/2000/svg"')
+    assert not _EXTERNAL_REF_RE.search('<a href="#stops">')
+    assert not _EXTERNAL_REF_RE.search("var SVGNS = \"http://www.w3.org/2000/svg\";")
+
+
+def test_compose_summary_compare_areas_without_total_places():
+    text = mapview.compose_summary(
+        {
+            "areas": [
+                {
+                    "center": {"lat": CENTER_LAT, "lon": CENTER_LON},
+                    "density_per_km2": 25.5,
+                },
+                {
+                    "center": {"lat": CENTER_LAT + 0.01, "lon": CENTER_LON},
+                    "total_places": 12,
+                },
+            ],
+            "categories": ["coffee_shop"],
+            "differentiators": [],
+        }
+    )
+    assert "None places" not in text
+    assert "Area 1" in text
+    assert "25.5/km" in text
+    assert "Area 2: 12 places" in text
+
+
+def test_place_name_matching_template_token_does_not_break_js(tmp_path):
+    payload = {
+        "results": [
+            {
+                "name": "@@STOPS@@",
+                "lat": CENTER_LAT,
+                "lon": CENTER_LON,
+                "category": "cafe",
+            }
+        ]
+    }
+    result = mapview.export_report(
+        payload, title="@@SUMMARY@@", summary="Stay put.", out_dir=tmp_path
+    )
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    data = _embedded_data(doc)
+    assert data["points"][0]["name"] == "@@STOPS@@"
+    # Title token is not rewritten by later substitutions.
+    assert "<title>@@SUMMARY@@</title>" in doc
+    assert "Stay put." in doc
+    # Stop-list markup was not spliced into the script.
+    script = doc[doc.index("<script>") : doc.index("</script>")]
+    assert '<li class="stop"' not in script
+
+
+def test_export_report_empty_payload(tmp_path):
+    result = mapview.export_report({}, title="Empty", out_dir=tmp_path)
+    assert result["features_rendered"] == 0
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    _parse(doc)
+    assert "No places to show." in doc
+    assert 'id="empty-msg"' in doc
+    assert "if (!POINTS.length && !SHAPES.length)" in doc
+    data = _embedded_data(doc)
+    assert data["points"] == []
+    assert data["shapes"] == []
+    assert "No stop details." in doc
+    assert not _EXTERNAL_REF_RE.search(doc)
+
+
+def test_export_report_shapes_only(tmp_path):
+    payload = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"name": "Walkshed"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [CENTER_LON, CENTER_LAT],
+                            [CENTER_LON + 0.01, CENTER_LAT],
+                            [CENTER_LON + 0.01, CENTER_LAT + 0.01],
+                            [CENTER_LON, CENTER_LAT + 0.01],
+                            [CENTER_LON, CENTER_LAT],
+                        ]
+                    ],
+                },
+            }
+        ],
+    }
+    result = mapview.export_report(payload, title="Shape only", out_dir=tmp_path)
+    assert result["features_rendered"] == 1
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    _parse(doc)
+    assert "Walkshed" in doc
+    assert "1 shape" in doc
+    # Shape rows are styled as stops but have no data-idx (list click is inert).
+    assert re.search(r'<li class="stop">', doc)
+    assert not re.search(r'<li class="stop"[^>]*data-idx=', doc)
+    assert 'id="verdict"' in doc
+    data = _embedded_data(doc)
+    assert data["points"] == []
+    assert len(data["shapes"]) == 1
+    assert not _EXTERNAL_REF_RE.search(doc)
