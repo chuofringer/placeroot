@@ -6,6 +6,77 @@ semver as it applies to an MCP server: removing a tool or changing a
 response shape is breaking, adding a tool is minor, loosening a filter or
 fixing behavior is patch.
 
+## [0.9.7] — 2026-08-15
+
+### Fixed
+- A polluted `sys.path` can no longer hijack PlaceRoot: the package is a
+  regular package that resolves to exactly one directory, every data
+  reader uses the traversal form instead of importing `placeroot.data` as
+  a module, and `serverInfo` reports its version instead of an empty
+  string. The field report was a Claude Desktop install where
+  `find_places` failed with `No module named 'placeroot.data'` while
+  every sibling tool worked (#293, #297).
+
+### Added
+- A privacy policy at placeroot.dev/privacy — no accounts, no telemetry,
+  queries go straight from the machine to Overture's public S3 bucket,
+  and the tile cache stays on disk. The policy ships in the README and
+  the `.mcpb` manifest, the last gate the Claude connector directory
+  requires of a local connector (#296).
+- The motivation page is live at placeroot.dev/why-placeroot: what
+  agents get wrong about maps, the two camps of existing tooling, and
+  the evidence from the 148-question corpus (#294).
+
+## [0.9.6] — 2026-08-14
+
+### Added
+- Official MCP registry listing: the ownership markers the registry
+  validates (`mcpName` in the npm package, an `mcp-name` stamp in the
+  PyPI description), and publishing it triggers the first automated
+  listing at registry.modelcontextprotocol.io — every future release
+  re-publishes the listing via GitHub OIDC with no stored credential
+  (#289, #292).
+- Pin bumps are mechanical: `scripts/bump_pin.py NEW_RELEASE` rewrites
+  the pinned fallback, and `docs/PIN.md` maps everything else that moves
+  with it — which artifacts regenerate, which historical measurement
+  comments must not be touched. The weekly canary's stale-pin report
+  points straight at the procedure (#290).
+- Mirrors can check themselves: `mirror_theme.py --check-current`
+  reports "mirror holds X, upstream is at Y", `--prune-releases` clears
+  superseded releases (dry-run by default), and `docs/MIRROR.md` gains
+  cron/Actions refresh recipes (#291).
+
+### Fixed
+- Error handlers stopped swallowing details they already had (#285).
+- `search_categories` clamps its limit like every sibling instead of
+  erroring (#286).
+
+## [0.9.5] — 2026-08-14
+
+### Fixed
+- Ambiguous city names answered cleanly: 24 fresh phrasings — misspellings,
+  filler words, partial names — each run cold in its own process. Five
+  failures, four root causes, each fixed with a regression test. **24/24
+  correct after** (was 19/24), every tool call under the 10-second cold
+  target (#274, #276).
+- "notre dame paris" no longer lands in Indiana: a longer name match now
+  only wins between comparably prominent places — a small CDP can't
+  outrank a world city.
+- "harvard square cambridge" survives the third Cambridge: ambiguous
+  city names contribute their namesakes as anchor alternates, searched
+  in one UNION ALL statement that keeps each city's files prunable
+  (8.9 s, right answer — versus 73.8 s for the OR-ed first draft).
+- "plaza mayor madrid" picks the one in Madrid: `resolve_place`'s merged
+  ranking gained a distance term when no division matches the whole
+  query.
+- "hoover dam" stops matching Adam Cox: the skip-redundant-scans gate
+  now counts only geocode hits near the reference, and per-token
+  searches skip feature nouns and the reference's own city word.
+
+### Changed
+- First release cut from the public repository: npm publishes behind the
+  new `npm` environment gate and ships with `--provenance` again (#275).
+
 ## [0.9.4] — 2026-08-13
 
 ### Added
