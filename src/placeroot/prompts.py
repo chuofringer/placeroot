@@ -280,22 +280,25 @@ def _get_to_know_my_city(city: str) -> str:
             "learn, then follow the steps below with it.\n\n"
         )
     )
-    return f"""{ask}Get to know {named} before the first real question, so that question is fast.
+    return f"""{ask}Get to know {named} before the first real question.
 
-The first cold query over a new city is a slow S3 scan; every later query
-over the same area answers in milliseconds. Pay that cost now.
+`warmup_city()` copies places and transportation tiles into the same
+local cache later tools read. It does not build the routing graph and
+does not pre-cache buildings. The first routing question still pays a one-time
+street-graph build; buildings questions still scan. Place searches over
+the warmed area should then be fast.
 
 1. `warmup_city()` with city {named} (or lat/lon if you already have them).
-   This pre-caches the metro using the same local tile cache later tools
-   read. It is the slow call — wait for it, and tell the user it is the
-   one-time warmup, not a hang.
+   This is the slow call — wait for it, and tell the user it is the
+   one-time tile warmup, not a hang.
 2. If `warmup_city()` is not registered on this install, `geocode()` {named}
    and then `find_places()` at the resolved point with a small radius.
    That still warms the places tiles; say that the dedicated warmup was
    unavailable.
 3. Confirm the city that landed (same-named places in different countries
-   are the usual miss) and say the area is warm. Do not dump the warmup
-   payload — one sentence is enough.
+   are the usual miss). Say which tiles are warm, and that the first
+   routing question still builds the graph. Do not dump the warmup payload — one
+   or two sentences is enough.
 
 Then stop. The next question the user asks is the real one.
 
@@ -331,8 +334,9 @@ PROMPTS: dict[str, tuple[Callable[..., str], str, tuple[str, ...]]] = {
     ),
     "get_to_know_my_city": (
         _get_to_know_my_city,
-        "Pre-cache a city so the first real question is fast — the "
-        "optional first-five-minutes warmup.",
+        "Pre-cache places and transportation tiles for a city — the "
+        "optional first-five-minutes warmup. Does not build the routing "
+        "graph or cache buildings.",
         GET_TO_KNOW_MY_CITY_TOOLS,
     ),
 }

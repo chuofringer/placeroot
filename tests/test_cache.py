@@ -775,3 +775,25 @@ def test_prewarm_bbox_is_noop_when_cache_disabled(con, monkeypatch):
     )
     assert result["status"] == "cache_disabled"
     assert result["cached"] == 0
+
+
+def test_force_sync_respects_heavy_theme_tile_cap(cache_dir, con, monkeypatch):
+    # force_sync must not bypass HEAVY_SYNC_MAX_TILES.
+    monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
+    monkeypatch.setitem(cache.HEAVY_THEME_TILE_DEG, THEME, 0.25)
+    fetches = []
+
+    def fake_ensure(*args, **kwargs):
+        fetches.append(args)
+        return Path("/tmp/nope")
+
+    monkeypatch.setattr(cache, "ensure_tile", fake_ensure)
+    bbox = (-74.9, 40.1, -73.1, 41.9)
+    tiles = cache.tiles_for_bbox(*bbox, tile_deg=0.25)
+    assert len(tiles) > cache.HEAVY_SYNC_MAX_TILES
+    cache.local_paths_for_query(
+        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), duckdb.connect,
+        force_sync=True,
+        schedule_missing=False,
+    )
+    assert len(fetches) <= cache.HEAVY_SYNC_MAX_TILES

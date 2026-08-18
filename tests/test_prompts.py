@@ -290,3 +290,10 @@ def test_flattening_preserves_ordinary_arguments():
     assert prompts._arg("Shoreditch, London") == "Shoreditch, London"
     assert prompts._arg("  padded  \n value ") == "padded value"
     assert prompts._arg("") == ""
+
+
+def test_get_to_know_my_city_does_not_overpromise():
+    text = prompts._get_to_know_my_city("Palo Alto").lower()
+    assert "millisecond" not in text
+    assert "does not build the routing graph" in text
+    assert "buildings" in text

@@ -1990,8 +1990,9 @@ DEFAULT_WARMUP_RADIUS_M = 8000.0
 MAX_WARMUP_RADIUS_M = 25_000.0
 
 # Themes the first real question typically hits. places first ("what's
-# around downtown"); transportation next (street graph for a later trip).
-# Buildings stay out: a metro bbox fans into too many 0.0625° tiles.
+# around downtown"); transportation tiles next (the routing graph is
+# still built on the first route). Buildings stay out: a metro bbox
+# fans into too many 0.0625° tiles.
 _WARMUP_THEMES: tuple[tuple[str, str], ...] = (
     ("places", "place"),
     ("transportation", "segment"),
@@ -2019,31 +2020,51 @@ def _prewarm_region(lat: float, lon: float, radius_m: float) -> dict:
         }
     bbox = geo.bbox_around(lat, lon, radius_m)
     themes = []
-    with db.conn_lock:
-        con = db.shared_conn()
-        for theme, type_ in _WARMUP_THEMES:
-            glob = overture.upstream_glob(theme=theme, type_=type_)
-            themes.append(
-                cache.prewarm_bbox(
-                    con,
-                    release.resolve_release(),
-                    theme,
-                    bbox,
-                    glob,
-                    db.new_connection,
-                )
+    # Do not hold conn_lock across the warmup. prewarm_bbox COPYs run
+    # on new_connection() cursors (the same path background fetches
+    # use), so other tools can keep answering between tiles/themes.
+    # Holding the lock here was a server-wide stall at 25 km.
+    for theme, type_ in _WARMUP_THEMES:
+        with db.conn_lock:
+            con = db.shared_conn()
+        glob = overture.upstream_glob(theme=theme, type_=type_)
+        themes.append(
+            cache.prewarm_bbox(
+                con,
+                release.resolve_release(),
+                theme,
+                bbox,
+                glob,
+                db.new_connection,
             )
+        )
     statuses = {row["status"] for row in themes}
+    graph = progress.format_eta(*progress.GRAPH_BUILD_S)
+    coverage = (
+        "Places and transportation tiles are cached; buildings are not. "
+        f"The first route still builds the street graph ({graph})."
+    )
     if statuses <= {"already_warm"}:
         status = "already_warm"
-        note = "This area is already cached; the next question should be fast."
-    elif statuses & {"warmed", "already_warm", "partial"} and not (
+        note = (
+            "This area is already cached. Later place searches over it "
+            f"should be fast. {coverage}"
+        )
+    elif "partial" in statuses and not (
         statuses & {"upstream_unavailable", "too_large"}
     ):
+        status = "partial"
+        note = (
+            "Some tiles for this area are cached; a heavy theme stopped "
+            "at the inline-tile cap so warmup would not monopolize the "
+            f"server. {coverage}"
+        )
+    elif statuses <= {"warmed", "already_warm"}:
         status = "warmed"
         note = (
-            "Map data for this area is cached. The next question over this "
-            "city should answer in milliseconds."
+            "Places and transportation tiles for this area are cached. "
+            "Place searches over this city should now be fast. "
+            f"{coverage}"
         )
     elif "upstream_unavailable" in statuses and statuses & {
         "warmed",
@@ -2079,12 +2100,10 @@ def warmup_city(
 ) -> dict:
     """Pre-cache a city.
 
-    Optional first-session step. Pass a city name ("Palo Alto") or lat/lon.
-    Materializes the local tile cache for that metro (places, plus a
-    small street-graph neighborhood)
-    using the same cache every later query reads. The first call is the
-    slow one — progress reports include an honest ETA — and every later
-    query over the area answers in milliseconds.
+    Copies places and transportation tiles into the same local cache later
+    queries read. Does not build the routing graph (the first route still
+    pays that cost) and does not pre-cache buildings. The warmup call is
+    the slow one; later place searches over the area read locally.
 
     radius_m defaults to 8000 (a city core) and is capped at 25 km so a
     warmup cannot fan into a planet-sized tile fetch.
@@ -2095,6 +2114,12 @@ def warmup_city(
             "error": "bad_request",
             "detail": "pass city, or lat and lon, not both",
         }
+    if (
+        not isinstance(radius_m, (int, float))
+        or isinstance(radius_m, bool)
+        or not math.isfinite(radius_m)
+    ):
+        return {"error": "bad_request", "detail": "radius_m must be a finite number"}
     resolved = None
     if city is not None:
         if not str(city).strip():
@@ -2121,12 +2146,6 @@ def warmup_city(
             return coord_error
     else:
         return {"error": "bad_request", "detail": "pass city, or both lat and lon"}
-    if (
-        not isinstance(radius_m, (int, float))
-        or isinstance(radius_m, bool)
-        or not math.isfinite(radius_m)
-    ):
-        return {"error": "bad_request", "detail": "radius_m must be a finite number"}
     try:
         payload = _prewarm_region(float(lat), float(lon), float(radius_m))
     except overture.UpstreamUnavailable as e:

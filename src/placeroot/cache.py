@@ -781,7 +781,9 @@ def local_paths_for_query(
     force_sync=True is the city-warmup / operator-prewarm path: materialize
     missing tiles inline even when PLACEROOT_CACHE_SYNC is unset, so the
     area is warm when this returns. Same tiles, same files — not a second
-    cache.
+    cache. Heavy themes still honor HEAVY_SYNC_MAX_TILES: tiles past the
+    cap warm in the background instead of turning warmup into a fetch
+    marathon (the cap the ordinary heavy-sync path already uses).
     """
     if not enabled():
         return None
@@ -810,6 +812,25 @@ def local_paths_for_query(
     # per tile, is the fast path AND leaves the area warm. A query wide
     # enough to need more than HEAVY_SYNC_MAX_TILES fetches falls back to
     # the ordinary path rather than stalling on a fetch marathon.
+    #
+    # force_sync used to bypass that cap. A 25 km transportation warmup
+    # (~20 tiles at 6-20s each) then held the caller for minutes. Cap
+    # the inline set the same way; overflow warms in the background.
+    overflow = []
+    if (
+        force_sync
+        and not sync_mode()
+        and theme in HEAVY_THEME_TILE_DEG
+        and len(missing) > HEAVY_SYNC_MAX_TILES
+    ):
+        overflow = missing[HEAVY_SYNC_MAX_TILES:]
+        missing = missing[:HEAVY_SYNC_MAX_TILES]
+        if schedule_missing:
+            for t in overflow:
+                _materialize_in_background(
+                    release, theme, t, upstream_glob, fingerprint, new_connection
+                )
+
     heavy_sync = (
         theme in HEAVY_THEME_TILE_DEG and len(missing) <= HEAVY_SYNC_MAX_TILES
     )
@@ -865,13 +886,18 @@ def local_paths_for_query(
             claim_paths(held)  # refresh mid-flight so no claim expires
             return path
 
-        if len(missing) == 1 or new_connection is None:
+        # Prefer new_connection() even for a single tile so a caller
+        # (warmup) can release conn_lock during COPYs: cursors are the
+        # documented concurrent path, shared_conn() is not.
+        if new_connection is None:
             # No factory for per-worker connections means no safe way to
             # run two COPYs at once (a DuckDB connection is single-user;
             # a caller's factory may also just return `con`, which the
             # sequential loop tolerates and a pool would corrupt).
             for t in missing:
                 cached.append(_fetch(t, con))
+        elif len(missing) == 1:
+            cached.append(_fetch(missing[0], new_connection()))
         else:
             import contextvars
             from concurrent.futures import ThreadPoolExecutor
@@ -895,6 +921,9 @@ def local_paths_for_query(
         # Fresh TTL on the way out so the caller has the full window to read
         # the files, however long the fetch loop took.
         claim_paths(paths)
+        if overflow:
+            # Incomplete coverage: do not pretend the whole bbox is local.
+            return None
         return paths
 
     if not schedule_missing:
@@ -996,7 +1025,9 @@ def prewarm_bbox(
 
     Same files, same fingerprint dirs as a later query — this is not a
     second cache. force_sync so the area is warm when this returns (the
-    warmup tool and the PLACEROOT_WARM_REGION startup path).
+    warmup tool and the PLACEROOT_WARM_REGION startup path). Heavy
+    themes stop at HEAVY_SYNC_MAX_TILES inline tiles; the rest warm in
+    the background and this returns status "partial".
     """
     if not enabled():
         return {"theme": theme, "status": "cache_disabled", "tiles": 0, "cached": 0}
@@ -1026,15 +1057,19 @@ def prewarm_bbox(
             "cached": len(already),
             "fetched": 0,
         }
-    paths = local_paths_for_query(
+    local_paths_for_query(
         con, release, theme, bbox, upstream_glob, new_connection,
         force_sync=True,
     )
-    cached_n = len(paths) if paths else len(already)
+    # Recount: force_sync may have capped a heavy theme, so the bbox
+    # can still have missing tiles even after the inline COPYs.
+    cached_now, still_missing = _claim_existing_tiles(
+        release, theme, fingerprint, tiles
+    )
     return {
         "theme": theme,
-        "status": "warmed" if paths else "partial",
+        "status": "warmed" if not still_missing else "partial",
         "tiles": len(tiles),
-        "cached": cached_n,
-        "fetched": len(missing),
+        "cached": len(cached_now),
+        "fetched": max(0, len(cached_now) - len(already)),
     }
