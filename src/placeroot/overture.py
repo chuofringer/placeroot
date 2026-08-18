@@ -29,7 +29,7 @@ import threading
 
 import duckdb
 
-from placeroot import budget, cache, db, geo, honesty, recreation, release, trace
+from placeroot import budget, cache, categories, db, geo, honesty, recreation, release, trace
 from placeroot.errors import (  # noqa: F401 - re-exported; see below
     SchemaDegraded,
     UpstreamUnavailable,
@@ -542,30 +542,51 @@ def _place_category_name_filters(
     return filters
 
 
+def _expand_need_slugs(slugs: list[str]) -> list[str]:
+    """Self plus bundled-taxonomy descendants, de-duplicated.
+
+    Unknown slugs are kept as-is so an exact primary match can still fire.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for slug in slugs:
+        if not slug:
+            continue
+        children = categories.slugs_under(slug)
+        for item in children or [slug]:
+            key = item.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(item)
+    return out
+
+
 def _place_categories_or_filter(
     missing: set[str], slugs: list[str], params: dict
 ) -> list[str]:
-    """OR of several category slugs, same match rules as a single category.
+    """OR of several category slugs — exact / hierarchy, never substring.
 
-    Used by find_places_for_categories so a checklist is one scan, not N
-    sequential find_places calls. Each slug is parameterized.
+    Public find_places keeps ILIKE so "coffee" still hits coffee_shop.
+    Verdict compose must not: park is not parking, school is not
+    driving_school. Each need slug is expanded to {self + descendants}
+    via the bundled taxonomy, then matched by equality on
+    basic_category / taxonomy.primary or list_contains on alternates.
     """
     clauses = []
-    for i, slug in enumerate(slugs):
+    for i, slug in enumerate(_expand_need_slugs(slugs)):
         if not slug:
             continue
         parts = []
+        exact = slug.lower()
         if "basic_category" not in missing:
-            parts.append(f"basic_category ILIKE $cat{i} ESCAPE '\\'")
+            parts.append(f"lower(basic_category) = $cat{i}_exact")
         if "taxonomy" not in missing:
-            parts.append(
-                f"(taxonomy.primary ILIKE $cat{i} ESCAPE '\\'"
-                f" OR list_contains(taxonomy.alternates, $cat{i}_exact))"
-            )
+            parts.append(f"lower(taxonomy.primary) = $cat{i}_exact")
+            parts.append(f"list_contains(taxonomy.alternates, $cat{i}_raw)")
         if parts:
             clauses.append(f"({' OR '.join(parts)})")
-            params[f"cat{i}"] = f"%{_like_escape(slug)}%"
-            params[f"cat{i}_exact"] = slug
+            params[f"cat{i}_exact"] = exact
+            params[f"cat{i}_raw"] = slug
     if not clauses:
         return []
     return [f"({' OR '.join(clauses)})"]

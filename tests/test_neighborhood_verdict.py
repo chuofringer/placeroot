@@ -5,7 +5,9 @@ another live S3 scan. The fixture places theme has no grocery/playground
 rows, so a live compose against it would only exercise the empty path.
 """
 
-from placeroot import overture, routing, server, verdict
+import pytest
+
+from placeroot import categories, overture, routing, server, verdict
 
 from .conftest import CENTER_LAT, CENTER_LON
 
@@ -265,3 +267,124 @@ def test_find_places_for_categories_is_one_scan_against_fixture():
     assert "coffee_shop" in cats
     # novelty_shop is the circle/square regression pair in the fixture
     assert "novelty_shop" in cats
+
+
+# --- attribution: exact / hierarchy, not substring ----------------------------
+
+
+def _park_is_ancestor(slug: str) -> bool:
+    path = categories.hierarchy_for(slug)
+    return bool(path and "park" in [seg.lower() for seg in path])
+
+
+def test_lookalike_slugs_do_not_satisfy_park_unless_hierarchy_says_so():
+    for slug in ("parking", "water_park", "rv_park", "dog_park"):
+        place = _place(slug, slug.replace("_", " ").title(), 50)
+        matches = verdict._place_matches(place, ("park",))
+        assert matches is _park_is_ancestor(slug), (slug, categories.hierarchy_for(slug), matches)
+        nearest = verdict._nearest_for_need([place], ("park",))
+        if _park_is_ancestor(slug):
+            assert nearest is place
+        else:
+            assert nearest is None
+
+
+def test_driving_school_does_not_satisfy_school():
+    path = categories.hierarchy_for("driving_school")
+    assert path is not None
+    assert "school" not in [seg.lower() for seg in path]
+    place = _place("driving_school", "A1 Driving", 80)
+    assert verdict._place_matches(place, ("school",)) is False
+    assert verdict._nearest_for_need([place], ("school",)) is None
+
+
+def test_true_park_and_school_and_real_descendants_still_match():
+    assert verdict._place_matches(_place("park", "Neighborhood Park", 40), ("park",))
+    assert verdict._place_matches(_place("school", "PS 1", 40), ("school",))
+    elem_path = categories.hierarchy_for("elementary_school")
+    assert elem_path and "school" in [seg.lower() for seg in elem_path]
+    assert verdict._place_matches(_place("elementary_school", "Lincoln", 90), ("school",))
+    # A closer lookalike must not steal nearest from a real park.
+    places = [
+        _place("parking", "Garage", 10),
+        _place("park", "Real Park", 400),
+    ]
+    assert verdict._nearest_for_need(places, ("park",))["name"] == "Real Park"
+
+
+def test_compose_parking_and_driving_school_do_not_cover_park_or_school(monkeypatch):
+    _patch_compose(
+        monkeypatch,
+        places=[
+            _place("parking", "City Garage", 80),
+            _place("driving_school", "A1 Driving", 120),
+        ],
+    )
+    result = verdict.neighborhood_verdict(CENTER_LAT, CENTER_LON, "kids, no car")
+    by_need = {r["need"]: r for r in result["checklist"]}
+    assert "park" in by_need
+    assert "school" in by_need
+    assert by_need["park"]["status"] != "covered"
+    assert by_need["school"]["status"] != "covered"
+    assert by_need["park"]["nearest"] is None
+    assert by_need["school"]["nearest"] is None
+    strengths = {s["need"] for s in result["strengths"]}
+    assert "park" not in strengths
+    assert "school" not in strengths
+
+
+def test_place_categories_or_filter_is_exact_not_ilike():
+    params = {}
+    clauses = overture._place_categories_or_filter(set(), ["park", "school"], params)
+    joined = " ".join(clauses)
+    assert "ILIKE" not in joined.upper()
+    assert "%" not in "".join(str(v) for v in params.values())
+    values = {str(v).lower() for v in params.values()}
+    assert "park" in values
+    assert "parking" not in values
+    assert "water_park" not in values
+    assert "school" in values
+    assert "driving_school" not in values
+    assert "elementary_school" in values
+    expanded = overture._expand_need_slugs(["park"])
+    assert "park" in expanded
+    assert "parking" not in expanded
+    assert "dog_park" in expanded  # real descendant in the bundled taxonomy
+
+
+# --- NaN budget / iso_max downgrade ------------------------------------------
+
+
+def test_derive_budget_rejects_nan_and_inf():
+    parsed = verdict.parse_context("")
+    with pytest.raises(ValueError, match="minutes"):
+        verdict.derive_budget(parsed, None, float("nan"), None)
+    with pytest.raises(ValueError, match="minutes"):
+        verdict.derive_budget(parsed, None, float("inf"), None)
+    with pytest.raises(ValueError, match="radius"):
+        verdict.derive_budget(parsed, float("nan"), 15, None)
+    with pytest.raises(ValueError, match="radius"):
+        verdict.derive_budget(parsed, float("inf"), 15, None)
+
+
+def test_nan_minutes_override_is_bad_request():
+    result = server.neighborhood_verdict(
+        CENTER_LAT, CENTER_LON, "", minutes=float("nan")
+    )
+    assert result["error"] == "bad_request"
+    result = server.neighborhood_verdict(
+        CENTER_LAT, CENTER_LON, "", radius_m=float("nan")
+    )
+    assert result["error"] == "bad_request"
+
+
+def test_iso_max_downgrades_covered_place_beyond_reach(monkeypatch):
+    # Grocery at 336 m is ~4 min walk (covered by the 15 min budget) but
+    # outside a 200 m isochrone reach, so the checklist row becomes weak.
+    _patch_compose(monkeypatch, iso=_iso(max_radius_m=200.0))
+    result = verdict.neighborhood_verdict(CENTER_LAT, CENTER_LON, "no car")
+    grocery = next(r for r in result["checklist"] if r["need"] == "grocery")
+    assert grocery["status"] == "weak"
+    assert grocery["nearest"]["distance_m"] == 336
+    assert "200" in grocery["detail"] and "reach" in grocery["detail"]
+

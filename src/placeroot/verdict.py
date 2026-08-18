@@ -163,16 +163,16 @@ def derive_budget(
     if resolved_mode not in routing.MODE_CONFIG:
         raise routing.UnsupportedMode(resolved_mode)
     resolved_minutes = DEFAULT_MINUTES if minutes is None else minutes
-    if not isinstance(resolved_minutes, (int, float)) or isinstance(resolved_minutes, bool):
-        raise ValueError("minutes must be a number")
+    if not routing._is_finite_number(resolved_minutes):
+        raise ValueError("minutes must be a finite number")
     if resolved_minutes <= 0:
         raise ValueError("minutes must be greater than 0")
     if radius_m is None:
         speed = _mode_speed_m_s(resolved_mode)
         cap = routing.MODE_CONFIG[resolved_mode]["max_radius_m"]
         radius_m = min(resolved_minutes * 60.0 * speed * routing.RADIUS_BUFFER, cap)
-    if not isinstance(radius_m, (int, float)) or isinstance(radius_m, bool):
-        raise ValueError("radius_m must be a number")
+    if not routing._is_finite_number(radius_m):
+        raise ValueError("radius_m must be a finite number")
     if radius_m < 0:
         raise ValueError("radius_m must be non-negative")
     cap = routing.MODE_CONFIG[resolved_mode]["max_radius_m"]
@@ -182,14 +182,28 @@ def derive_budget(
 
 
 def _place_matches(place: dict, slugs: tuple[str, ...]) -> bool:
+    """Exact slug or taxonomy ancestor — never substring.
+
+    A place matches a need slug iff category/basic_category equals the slug
+    (case-insensitive), or the need slug appears as a segment in
+    categories.hierarchy_for of either field. parking is not a park;
+    driving_school is not a school; elementary_school is a school.
+    """
+    slugs_l = {s.lower() for s in slugs if s}
+    if not slugs_l:
+        return False
     fields = [
-        (place.get("category") or "").lower(),
-        (place.get("basic_category") or "").lower(),
+        str(place.get("category") or "").lower(),
+        str(place.get("basic_category") or "").lower(),
     ]
-    slugs_l = [s.lower() for s in slugs]
-    if any(f in slugs_l for f in fields if f):
+    fields = [f for f in fields if f]
+    if any(f in slugs_l for f in fields):
         return True
-    return any(s in f for s in slugs_l for f in fields if f)
+    for field in fields:
+        path = categories.hierarchy_for(field)
+        if path and slugs_l & {seg.lower() for seg in path}:
+            return True
+    return False
 
 
 def _nearest_for_need(places: list[dict], slugs: tuple[str, ...]) -> dict | None:
