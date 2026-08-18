@@ -23,8 +23,11 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `infrastructure_at` | Infrastructure near a point, nearest first — filter by `subtype`/`infra_class` (e.g. `bridge`, `tower`) to see past the street furniture |
 | `water_near` | Water near a point, nearest first — is this waterfront, how far to the nearest river/canal/lake; filter by `subtype`/`water_class` |
 | `geocode` | Free-text place name → ranked candidates with coordinates and admin context (`geocode_batch` for many at once) |
+| `geocode_batch` | Many free-text place names → one best match each, one round-trip |
 | `resolve_place` | Free-text place reference → stable ids an agent can hold onto across turns (`resolve_place_batch`) |
+| `resolve_place_batch` | Many free-text place references → stable ids, one round-trip |
 | `reverse_geocode` | Point → nearest address plus its containing admin areas (`reverse_geocode_batch`) |
+| `reverse_geocode_batch` | Many points → nearest address plus containing admin areas, one round-trip |
 | `address_at` | Point → the nearest street addresses (number, street, unit, postcode), with an explicit note when the country is outside Overture's 39-country address coverage |
 | `geocode_address` | Street address → coordinates: "1600 Amphitheatre Parkway, Mountain View" — city-bounded, deduplicated to distinct number+street, nearest first |
 | `gers_lookup` | Any GERS id → the entity it names (place, division, or building), what it's inside, and the building at its point |
