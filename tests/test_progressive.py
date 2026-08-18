@@ -77,6 +77,7 @@ def test_progressive_registers_exactly_the_three_meta_tools():
         "placeroot_capabilities",
         "placeroot_call",
         "data_version",
+        "preferences",
     }
 
 
@@ -144,7 +145,7 @@ def test_build_server_logs_the_progressive_selection(caplog):
 
     with caplog.at_level(logging.INFO, logger="placeroot.server"):
         server.build_server("progressive")
-    assert "registered 3 of" in caplog.text
+    assert "registered 4 of" in caplog.text
     assert "PLACEROOT_TOOLS=progressive" in caplog.text
 
 

@@ -113,7 +113,7 @@ If you already use Python tooling, `uvx placeroot` skips this launcher entirely 
 
 ## What it can do
 
-**30 tools**, grouped into four families — every answer fits in a couple of thousand tokens:
+**31 tools**, grouped into four families — every answer fits in a couple of thousand tokens:
 
 | Family | Tools | Answers questions like |
 |---|---|---|
@@ -122,7 +122,7 @@ If you already use Python tooling, `uvx placeroot` skips this launcher entirely 
 | 🚴 **Routing** | `route`, `isochrone`, `optimize_route`, `places_along_route`, `distance_matrix` | How far by bike? What's reachable in 15 minutes? Best order for 6 stops? |
 | 🗺️ **Geometry & maps** | `render_map`, `simplify_geometry` | Show me this result as an interactive map |
 
-It also ships four **workflow prompts** (site selection, neighborhood comparison, errand planning, should I live here) and two attachable **resources** — and a `PLACEROOT_TOOLS` setting to load only the tool profiles you need, cutting schema overhead by up to 96%.
+It also ships four **workflow prompts** (site selection, neighborhood comparison, errand planning, should I live here) and three attachable **resources** — and a `PLACEROOT_TOOLS` setting to load only the tool profiles you need, cutting schema overhead by up to 96%.
 
 📚 **[Full tool catalog, prompts, resources & configuration → docs/REFERENCE.md](https://github.com/chuofringer/placeroot/blob/v0.9.7/docs/REFERENCE.md)**
 

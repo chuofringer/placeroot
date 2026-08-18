@@ -160,6 +160,10 @@
       "description": "Best order to visit several stops: multi-stop route ordering (a small TSP)."
     },
     {
+      "name": "preferences",
+      "description": "Read or update local travel and household defaults. Nothing leaves the machine."
+    },
+    {
       "name": "data_version",
       "description": "Which Overture Maps release backs the answers from every other tool."
     }

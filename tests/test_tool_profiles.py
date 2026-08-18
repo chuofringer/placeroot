@@ -62,6 +62,7 @@ def test_core_profile():
         "places_along_route",
         "neighborhood_verdict",
         "data_version",
+        "preferences",
     }
 
 
@@ -78,12 +79,13 @@ def test_explicit_tool_list():
         "geocode",
         "route",
         "data_version",
+        "preferences",
     }
 
 
 def test_mixed_profile_and_tool_list_unions():
     assert _names("routing,find_places") == (
-        set(tool_profiles.PROFILES["routing"]) | {"find_places", "data_version"}
+        set(tool_profiles.PROFILES["routing"]) | {"find_places", "data_version", "preferences"}
     )
 
 
@@ -107,6 +109,7 @@ def test_data_version_is_always_included():
     """Even a selection that names only one unrelated tool keeps it."""
     for spec in ("geometry", "simplify_geometry", "routing"):
         assert "data_version" in _names(spec)
+        assert "preferences" in _names(spec)
 
 
 def test_unknown_name_fails_fast_with_the_valid_names():
@@ -130,7 +133,7 @@ def test_unknown_name_reports_every_bad_entry_at_once():
 def test_env_var_drives_the_selection(monkeypatch):
     monkeypatch.setenv("PLACEROOT_TOOLS", "geometry")
     registered = {t.name for t in asyncio.run(server.build_server().list_tools())}
-    assert registered == {"simplify_geometry", "render_map", "data_version"}
+    assert registered == {"simplify_geometry", "render_map", "data_version", "preferences"}
 
 
 def test_env_var_unset_is_the_full_surface(monkeypatch):
@@ -178,7 +181,7 @@ def test_build_server_logs_the_active_selection(caplog):
     with caplog.at_level(logging.INFO, logger="placeroot.server"):
         server.build_server("core")
     assert "PLACEROOT_TOOLS=core" in caplog.text
-    assert f"registered {len(tool_profiles.PROFILES['core']) + 1} of" in caplog.text
+    assert f"registered {len(tool_profiles.PROFILES['core']) + len(tool_profiles.ALWAYS_INCLUDED)} of" in caplog.text
 
 
 @pytest.mark.parametrize("spec", [None, "", "   "])

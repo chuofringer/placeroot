@@ -56,6 +56,9 @@ from placeroot import (
     water,
 )
 from placeroot import geocode as geocoding
+from placeroot import (
+    preferences as preference_store,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +155,17 @@ _WRITES_A_FILE_ANNOTATIONS = ToolAnnotations(
 
 # Per-tool annotation overrides, keyed by function name. Anything absent
 # here gets _READ_ONLY_ANNOTATIONS.
+# preferences() writes (or deletes) a local JSON file. readOnlyHint is
+# what clients gate auto-approval on, so a write must not claim a lookup.
+# It is not destructive (no other files are touched) and a repeated
+# identical update leaves the same document, so idempotent_hint is true.
+_PREFERENCES_ANNOTATIONS = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
+
 _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {}
 
 # placeroot_call reaches every tool, render_map included, so it inherits the
@@ -1504,7 +1518,7 @@ def isochrone(
     lat: float,
     lon: float,
     minutes: float = 15,
-    mode: str = "walk",
+    mode: str | None = None,
     speed_m_s: float | None = None,
     radius_m: float | None = None,
 ) -> dict:
@@ -1535,6 +1549,7 @@ def isochrone(
     coord_error = _invalid_coord(lat, lon)
     if coord_error is not None:
         return coord_error
+    mode = preference_store.resolve_mode(mode, preference_store.DEFAULT_MODE_ISOCHRONE)
     try:
         return routing.isochrone(
             lat, lon, minutes=minutes, mode=mode, speed_m_s=speed_m_s, radius_m=radius_m
@@ -1567,7 +1582,7 @@ def route(
     from_lon: float,
     to_lat: float,
     to_lon: float,
-    mode: str = "drive",
+    mode: str | None = None,
     include_path: bool = False,
 ) -> dict:
     """Route: shortest-path distance and duration between two points, by mode.
@@ -1615,6 +1630,7 @@ def route(
         coord_error = _invalid_coord(lat, lon)
         if coord_error is not None:
             return coord_error
+    mode = preference_store.resolve_mode(mode, preference_store.DEFAULT_MODE_ROUTE)
     try:
         result = routing.route(
             from_lat, from_lon, to_lat, to_lon, mode=mode, include_path=include_path
@@ -1650,7 +1666,7 @@ def places_along_route(
     from_lon: float,
     to_lat: float,
     to_lon: float,
-    mode: str = "drive",
+    mode: str | None = None,
     category: str | None = None,
     name: str | None = None,
     max_detour_m: float = routing.CORRIDOR_DEFAULT_DETOUR_M,
@@ -1695,6 +1711,7 @@ def places_along_route(
         coord_error = _invalid_coord(lat, lon)
         if coord_error is not None:
             return coord_error
+    mode = preference_store.resolve_mode(mode, preference_store.DEFAULT_MODE_ROUTE)
     try:
         result = routing.places_along_route(
             from_lat, from_lon, to_lat, to_lon,
@@ -1790,7 +1807,7 @@ def neighborhood_verdict(
 @_tool("Best visiting order for stops")
 def optimize_route(
     stops: list[dict],
-    mode: str = "drive",
+    mode: str | None = None,
     roundtrip: bool = True,
     start_index: int = 0,
 ) -> dict:
@@ -1869,6 +1886,7 @@ def optimize_route(
         }
 
     try:
+        mode = preference_store.resolve_mode(mode, preference_store.DEFAULT_MODE_ROUTE)
         result = routing.optimize_route(
             points, mode=mode, roundtrip=bool(roundtrip), start_index=start_index
         )
@@ -1912,6 +1930,39 @@ def optimize_route(
         if line:
             result = {**result, "verify_before_going": line}
     return result
+
+
+@_tool("Persistent preferences", annotations=_PREFERENCES_ANNOTATIONS)
+def preferences(
+    mode: str | None = None,
+    pace: str | None = None,
+    household: list[str] | None = None,
+    note: str | None = None,
+    clear: bool = False,
+) -> dict:
+    """Travel defaults.
+
+    State "I bike everywhere, I have a dog" once. Routing tools use the
+    stored mode when you omit theirs; an explicit argument always wins.
+    The same document is the placeroot://preferences MCP resource.
+
+    Call with no arguments to read. Pass mode (walk / cycle / drive),
+    pace, household tags, or a free-text note to merge those fields.
+    clear=true deletes the file. Nothing is sent off this machine.
+    """
+    if clear:
+        return preference_store.clear()
+    if any(value is not None for value in (mode, pace, household, note)):
+        if mode is not None and str(mode).strip().lower() not in preference_store.MODES:
+            return {
+                "error": "bad_request",
+                "detail": f"mode={mode!r} is not supported",
+                "supported": sorted(preference_store.MODES),
+            }
+        return preference_store.update(
+            mode=mode, pace=pace, household=household, note=note
+        )
+    return preference_store.payload()
 
 
 @_tool("Data version")

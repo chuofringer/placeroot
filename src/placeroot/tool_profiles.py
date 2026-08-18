@@ -108,7 +108,7 @@ PROFILES: dict[str, frozenset[str]] = {
 # it is the only way an agent can tell which Overture release backs the
 # answers it is being given — orientation that every other answer depends
 # on, at a cost too small to be worth making optional.
-ALWAYS_INCLUDED: frozenset[str] = frozenset({"data_version"})
+ALWAYS_INCLUDED: frozenset[str] = frozenset({"data_version", "preferences"})
 
 # Selects the full surface; also what unset/empty means.
 ALL = "all"

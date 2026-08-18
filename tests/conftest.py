@@ -33,6 +33,18 @@ CENTER_LON = -73.900000
 
 
 @pytest.fixture(autouse=True)
+def isolate_preferences(tmp_path_factory, monkeypatch):
+    """Every test sees an empty preferences file, never the operator's.
+
+    Routing tools consult local preferences for omitted mode. An ambient
+    ~/.config/placeroot/preferences.json would make route/isochrone
+    defaults machine-dependent.
+    """
+    dest = tmp_path_factory.mktemp("prefs") / "preferences.json"
+    monkeypatch.setenv("PLACEROOT_PREFERENCES_PATH", str(dest))
+
+
+@pytest.fixture(autouse=True)
 def no_ambient_tool_selection(monkeypatch):
     """Every test sees PLACEROOT_TOOLS unset unless it sets one itself.
 
