@@ -85,7 +85,7 @@ tool answers, why existing tools can't answer it, which Overture theme(s)
 it reads, and a sketch of the response shape with a token estimate. Tools
 also need: MCP annotations (`readOnlyHint`, title), registration in the
 appropriate `PLACEROOT_TOOLS` profiles, a row in the tool catalog in
-[docs/REFERENCE.md](docs/REFERENCE.md#all-29-tools) and the site tool grid
+[docs/REFERENCE.md](docs/REFERENCE.md#all-30-tools) and the site tool grid
 in `site/index.html`, and offline tests against fixtures. `tests/test_site_tools_sync.py`
 only guards the site side — it asserts every registered tool is shown on
 the marketing site's tool grid (and vice versa) and that the site's

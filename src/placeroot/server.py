@@ -52,6 +52,7 @@ from placeroot import (
     simplify,
     tool_profiles,
     trace,
+    verdict,
     water,
 )
 from placeroot import geocode as geocoding
@@ -1731,6 +1732,61 @@ def places_along_route(
     return _with_category_hint(payload, category, widen_hint="widen max_detour_m")
 
 
+@_tool("Neighborhood verdict")
+def neighborhood_verdict(
+    lat: float,
+    lon: float,
+    context: str = "",
+    radius_m: float | None = None,
+    minutes: float | None = None,
+    mode: str | None = None,
+) -> dict:
+    """Life-decision neighborhood verdict, not a data dump.
+
+    Accepts a point plus free-form life context (household, mobility,
+    priorities) and returns a ranked verdict: strengths, weak points, and
+    the one thing to verify in person. Empty context still answers a
+    generic walk-first daily-needs check and says what was assumed.
+    Optional radius_m / minutes / mode override what the context implies
+    (no car / walk-first -> walk, bike -> cycle, car -> drive; default
+    walk, 15 minutes). Does not call out to extra remote APIs.
+
+    Returns a structured {"error": ...} for bad coordinates, an unknown
+    mode, a radius past the mode cap, upstream failure, or a degraded
+    schema. Missing street graph degrades to straight-line times with a
+    note rather than failing the verdict.
+    """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
+    try:
+        result = verdict.neighborhood_verdict(
+            lat, lon, context=context or "",
+            radius_m=radius_m, minutes=minutes, mode=mode,
+        )
+    except routing.UnsupportedMode as e:
+        return {
+            "error": "unsupported_mode",
+            "detail": e.detail,
+            "supported": sorted(routing.MODE_CONFIG),
+        }
+    except routing.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except (routing.SchemaDegraded, overture.SchemaDegraded) as e:
+        return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
+    except routing.RadiusTooLarge as e:
+        return {
+            "error": "radius_too_large",
+            "detail": e.detail,
+            "max_radius_m": e.max_radius_m,
+        }
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
+    return _with_degraded_fields(budget.apply_budget(result, "checklist"))
+
+
 @_tool("Best visiting order for stops")
 def optimize_route(
     stops: list[dict],
@@ -1884,8 +1940,8 @@ def data_version() -> dict:
 def _arg_summary(fn: Callable) -> str:
     """A tool's parameters as `required,optional?` — the catalog's arg column.
 
-    Names only, no types: the catalog's budget is the whole point (29 tools
-    have to fit in about 1k tokens), and the names here are already
+    Names only, no types: the catalog's budget is the whole point (30 tools
+    have to fit in about 1.1k tokens), and the names here are already
     self-describing (lat, radius_m, limit, category). A caller that guesses
     a type wrong gets placeroot_call's bad_request naming what the tool
     accepts, which is cheaper than paying for the types on every catalog

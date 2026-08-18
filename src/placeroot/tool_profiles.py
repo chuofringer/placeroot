@@ -1,6 +1,6 @@
 """PLACEROOT_TOOLS: load only the tools an install actually uses (issue #182).
 
-The whole 29-tool surface costs ~13.4k estimated tokens of JSON schema in
+The whole 30-tool surface costs ~13.4k estimated tokens of JSON schema in
 every conversation, paid before the agent asks anything. Most installs use
 a slice of it. This module is the single registry mapping a profile name to
 its tools, plus the parser for the `PLACEROOT_TOOLS` env var; server.py
@@ -44,6 +44,10 @@ PROFILES: dict[str, frozenset[str]] = {
         # and its description names both — so this is the profile where
         # those references resolve.
         "places_along_route",
+        # Life-decision compose: one call over search + area + reach
+        # internals. In core so a default install can answer "should I
+        # live here" without loading the analysis profile.
+        "neighborhood_verdict",
     }),
     # Find/name/identify, including the batch siblings and the category
     # lookup that makes find_places' category filter usable.
@@ -89,6 +93,8 @@ PROFILES: dict[str, frozenset[str]] = {
         # in analysis rather than search.
         "water_near",
         "admin_lookup",
+        # Same compose as core: a characterize-the-neighborhood question.
+        "neighborhood_verdict",
     }),
     # Working on geometry the caller already has, and turning results into
     # something a human can look at.
@@ -108,7 +114,7 @@ ALWAYS_INCLUDED: frozenset[str] = frozenset({"data_version"})
 ALL = "all"
 
 # Progressive disclosure (issue #210): instead of a slice of the surface,
-# a *meta* surface — a catalog tool plus a dispatcher — that keeps all 29
+# a *meta* surface — a catalog tool plus a dispatcher — that keeps all 30
 # tools reachable at the standing cost of three schemas. For the install
 # that wants everything available but can't pay 13.4k tokens for it in
 # every conversation; profiles need you to know up front which tools you

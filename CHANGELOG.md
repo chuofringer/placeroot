@@ -20,6 +20,12 @@ fixing behavior is patch.
   composed from the payload when it's omitted. The three workflow
   prompts now finish by calling `render_map()` so the user leaves with
   a file they can send.
+- `neighborhood_verdict`: a composed life-decision report — location plus
+  free-form household/mobility context in, a ranked verdict (strengths,
+  weak points, one thing to verify in person) out. One pass over
+  `summarize_area`, a multi-slug places scan, and `isochrone`; no new
+  remote APIs. Also a thin `should_i_live_here` prompt that tells the
+  agent to call it (#303).
 
 ## [0.9.7] — 2026-08-15
 
