@@ -6,6 +6,14 @@ semver as it applies to an MCP server: removing a tool or changing a
 response shape is breaking, adding a tool is minor, loosening a filter or
 fixing behavior is patch.
 
+## [Unreleased]
+
+### Added
+- `route` and `optimize_route` now return an `export` object: Google/Apple
+  Maps directions links (URL schemes only — no API, no keys, no extra
+  network), a GPX 1.1 document, and a printable stop list, so a Saturday
+  plan leaves the chat as something navigable (#312).
+
 ## [0.9.7] — 2026-08-15
 
 ### Fixed
