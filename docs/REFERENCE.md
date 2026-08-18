@@ -157,8 +157,10 @@ union of everything named:
 - **`geometry`** — `simplify_geometry`, `render_map`.
 - **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 31 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 14.1k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 
-`data_version` is registered under every profile: it is ~230 tokens and the
-only way an agent can tell which Overture release backs its answers.
+`data_version` and `preferences` are registered under every profile.
+`data_version` is ~230 tokens and the only way an agent can tell which
+Overture release backs its answers. `preferences` is the local defaults
+document; routing tools read its stored mode when theirs is omitted.
 
 Profiles may overlap, and a list may mix them with bare tool names —
 `PLACEROOT_TOOLS=routing,find_places` or

@@ -181,7 +181,10 @@ def test_build_server_logs_the_active_selection(caplog):
     with caplog.at_level(logging.INFO, logger="placeroot.server"):
         server.build_server("core")
     assert "PLACEROOT_TOOLS=core" in caplog.text
-    assert f"registered {len(tool_profiles.PROFILES['core']) + len(tool_profiles.ALWAYS_INCLUDED)} of" in caplog.text
+    registered = len(tool_profiles.PROFILES["core"]) + len(
+        tool_profiles.ALWAYS_INCLUDED
+    )
+    assert f"registered {registered} of" in caplog.text
 
 
 @pytest.mark.parametrize("spec", [None, "", "   "])

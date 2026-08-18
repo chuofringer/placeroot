@@ -2,8 +2,9 @@
 
 A user states "I bike everywhere, I have a dog" once. That document is
 exposed as the attachable `placeroot://preferences` resource and as a
-small read/update tool. Tools consult it for omitted defaults (travel
-mode, pace, household). An explicit argument always wins.
+small read/update tool. Routing tools consult the stored travel mode
+when theirs is omitted. An explicit argument always wins. pace and
+household are stored for later features; they do not change answers yet.
 
 Nothing leaves the machine: the file lives under the user's config
 directory (or PLACEROOT_PREFERENCES_PATH) and is never sent upstream.
@@ -13,6 +14,9 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +29,21 @@ DEFAULT_MODE_ISOCHRONE = "walk"
 DEFAULT_MODE_ROUTE = "drive"
 
 ENV_PATH = "PLACEROOT_PREFERENCES_PATH"
+
+_THREAD_LOCK = threading.Lock()
+
+
+class PreferencesError(Exception):
+    """A structured failure the preferences tool can return as JSON."""
+
+    def __init__(self, error: str, detail: str):
+        super().__init__(detail)
+        self.error = error
+        self.detail = detail
+
+    def as_dict(self) -> dict[str, str]:
+        return {"error": self.error, "detail": self.detail}
+
 
 def path() -> Path:
     """Where the document lives. Override with PLACEROOT_PREFERENCES_PATH."""
@@ -46,43 +65,68 @@ def empty() -> dict[str, Any]:
 
 
 def load() -> dict[str, Any]:
-    """Read the document. Missing or unreadable file is an empty document."""
+    """Read the document. A missing file is empty; a torn file is an error.
+
+    Never treat corrupt JSON as empty: an update that did that would
+    silently replace the torn file and drop every field it still held.
+    """
     dest = path()
     try:
         raw = dest.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
+    except FileNotFoundError:
         return empty()
+    except OSError as exc:
+        raise PreferencesError("io_error", str(exc)) from exc
+    except UnicodeError as exc:
+        raise PreferencesError(
+            "corrupt", "preferences file is not valid UTF-8"
+        ) from exc
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
-        return empty()
+    except json.JSONDecodeError as exc:
+        raise PreferencesError(
+            "corrupt", "preferences file is not valid JSON"
+        ) from exc
     if not isinstance(data, dict):
-        return empty()
+        raise PreferencesError("corrupt", "preferences file is not a JSON object")
     return _normalize(data)
 
 
 def save(doc: dict[str, Any]) -> dict[str, Any]:
-    """Write `doc` and return the normalized form that was stored."""
+    """Write `doc` atomically (temp + os.replace) and return the stored form."""
     stored = _normalize(doc)
     dest = path()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(json.dumps(stored, indent=2) + "\n", encoding="utf-8")
+    tmp = dest.with_name(dest.name + ".tmp")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(stored, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, dest)
+    except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise PreferencesError("io_error", str(exc)) from exc
     return stored
 
 
 def clear() -> dict[str, Any]:
     """Delete the file. Returns the empty document."""
-    dest = path()
-    try:
-        dest.unlink()
-    except FileNotFoundError:
-        pass
-    return empty()
+    with _exclusive():
+        dest = path()
+        try:
+            dest.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise PreferencesError("io_error", str(exc)) from exc
+        return empty()
 
 
 def payload() -> dict[str, Any]:
     """The attachable resource / tool-read body. Shared so they cannot drift."""
-    return load()
+    with _exclusive():
+        return load()
 
 
 def update(
@@ -92,17 +136,22 @@ def update(
     household: list[str] | None = None,
     note: str | None = None,
 ) -> dict[str, Any]:
-    """Merge the given fields into the document. Omitted fields stay as-is."""
-    current = load()
-    if mode is not None:
-        current["mode"] = mode
-    if pace is not None:
-        current["pace"] = pace
-    if household is not None:
-        current["household"] = household
-    if note is not None:
-        current["note"] = note
-    return save(current)
+    """Merge the given fields into the document. Omitted fields stay as-is.
+
+    Holds an exclusive lock for the load-merge-save so two concurrent
+    updates cannot drop each other's fields.
+    """
+    with _exclusive():
+        current = load()
+        if mode is not None:
+            current["mode"] = mode
+        if pace is not None:
+            current["pace"] = pace
+        if household is not None:
+            current["household"] = household
+        if note is not None:
+            current["note"] = note
+        return save(current)
 
 
 def resolve_mode(explicit: str | None, fallback: str) -> str:
@@ -110,26 +159,51 @@ def resolve_mode(explicit: str | None, fallback: str) -> str:
 
     `explicit` is what the caller passed. None means omitted — then the
     stored preference is used if it is a supported mode, else `fallback`.
+    A corrupt or unreadable file falls back rather than failing a route.
     """
     if explicit is not None:
         return explicit
-    stored = load().get("mode")
+    try:
+        stored = load().get("mode")
+    except PreferencesError:
+        return fallback
     if stored in MODES:
         return stored
     return fallback
 
 
-def resolve_pace(explicit: str | None) -> str | None:
-    if explicit is not None:
-        return explicit
-    stored = load().get("pace")
-    return stored if isinstance(stored, str) and stored.strip() else None
+@contextmanager
+def _exclusive() -> Iterator[None]:
+    """Same-process lock plus a POSIX file lock for two MCP processes."""
+    dest = path()
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise PreferencesError("io_error", str(exc)) from exc
+    lock_path = dest.with_name(dest.name + ".lock")
+    with _THREAD_LOCK:
+        with lock_path.open("a+") as fh:
+            _lock_file(fh)
+            try:
+                yield
+            finally:
+                _unlock_file(fh)
 
 
-def resolve_household(explicit: list[str] | None) -> list[str]:
-    if explicit is not None:
-        return _household(explicit)
-    return list(load().get("household") or [])
+def _lock_file(fh) -> None:
+    if os.name == "nt":
+        return
+    import fcntl
+
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_file(fh) -> None:
+    if os.name == "nt":
+        return
+    import fcntl
+
+    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 def _normalize(data: dict[str, Any]) -> dict[str, Any]:

@@ -201,7 +201,10 @@ def categories_payload() -> dict:
 
 def preferences_payload() -> dict:
     """The local preferences document. Shared with the preferences tool."""
-    return preferences.payload()
+    try:
+        return preferences.payload()
+    except preferences.PreferencesError as exc:
+        return exc.as_dict()
 
 
 def render(payload: dict) -> str:

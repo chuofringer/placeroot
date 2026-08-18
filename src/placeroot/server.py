@@ -155,13 +155,14 @@ _WRITES_A_FILE_ANNOTATIONS = ToolAnnotations(
 
 # Per-tool annotation overrides, keyed by function name. Anything absent
 # here gets _READ_ONLY_ANNOTATIONS.
-# preferences() writes (or deletes) a local JSON file. readOnlyHint is
+# preferences() writes or deletes a local JSON file. readOnlyHint is
 # what clients gate auto-approval on, so a write must not claim a lookup.
-# It is not destructive (no other files are touched) and a repeated
-# identical update leaves the same document, so idempotent_hint is true.
+# destructive_hint is true because clear=true unlinks the file.
+# A repeated identical update leaves the same document, so
+# idempotent_hint is true.
 _PREFERENCES_ANNOTATIONS = ToolAnnotations(
     read_only_hint=False,
-    destructive_hint=False,
+    destructive_hint=True,
     idempotent_hint=True,
     open_world_hint=False,
 )
@@ -1525,8 +1526,9 @@ def isochrone(
     """Isochrone: the area reachable from (lat, lon) within `minutes`, by mode.
 
     Builds a street graph from Overture's transportation theme and runs
-    Dijkstra out to the time budget. mode is "walk" (default), "cycle", or
-    "drive" — each excludes its own set of unusable road classes (e.g.
+    Dijkstra out to the time budget. mode is "walk", "cycle", or
+    "drive"; omit it to use the stored preferences mode, else walk. Each mode
+    excludes its own set of unusable road classes (e.g.
     drive excludes footway/path/steps; cycle and drive exclude
     motorway/trunk... drive itself allows motorways) and respects one-way
     restrictions for cycle/drive (walk ignores them). speed_m_s overrides
@@ -1589,12 +1591,13 @@ def route(
 
     Compact directions, not turn-by-turn: builds a street graph from
     Overture's transportation theme around the two points and returns
-    {"distance_m", "duration_s", "mode", "from", "to", "export"} for the
+{"distance_m", "duration_s", "mode", "from", "to", "export"} for the
     fastest path — no polyline unless you ask for one. export is the
     pocket handoff: Google/Apple Maps directions URLs built from the same
     two coordinates (URL schemes only — no Maps API, no extra network), a
     GPX 1.1 document, and a printable stop list. mode is "walk",
-    "cycle", or "drive" (default), on the same cost model every routing tool
+    "cycle", or "drive"; omit it to use the stored preferences mode,
+    else drive, on the same cost model every routing tool
     uses (walk 1.4 m/s, cycle 4.2 m/s, drive per-edge from Overture's
     speed_limits or a class-based default table). drive's duration is a posted-speed model
     with no live traffic; all modes snap each endpoint to the nearest
@@ -1701,7 +1704,8 @@ def places_along_route(
     considers, in which case the response carries "truncated": true and a
     note saying so.
 
-    mode is "walk", "cycle", or "drive" (default), with the same cost model
+    mode is "walk", "cycle", or "drive"; omit it to use the stored
+    preferences mode, else drive. Same cost model
     and the same straight-line-distance caps as `route`, and the same
     structured errors: route_too_long, no_graph_nearby, no_route,
     unsupported_mode, and bad_request for non-finite/out-of-range
@@ -1834,7 +1838,8 @@ def optimize_route(
     start_index (default 0) is fixed as the first stop. roundtrip=true (the
     default) returns to it; the closing leg is in "legs" but the start is not
     repeated in "order". roundtrip=false is an open path that ends wherever
-    is cheapest. mode is "walk", "cycle" or "drive" (default), on the same
+    is cheapest. mode is "walk", "cycle" or "drive"; omit it to use the
+    stored preferences mode, else drive. Same
     cost model every routing tool uses; one-ways make the drive/cycle cost
     matrix asymmetric and that is solved for exactly. The objective minimized
     is total duration.
@@ -1944,25 +1949,36 @@ def preferences(
 
     State "I bike everywhere, I have a dog" once. Routing tools use the
     stored mode when you omit theirs; an explicit argument always wins.
-    The same document is the placeroot://preferences MCP resource.
+    pace and household are stored for later features and do not change
+    answers yet. The same document is the placeroot://preferences resource.
 
     Call with no arguments to read. Pass mode (walk / cycle / drive),
     pace, household tags, or a free-text note to merge those fields.
-    clear=true deletes the file. Nothing is sent off this machine.
+    clear=true deletes the file and cannot be combined with other fields.
+    Nothing is sent off this machine.
     """
-    if clear:
-        return preference_store.clear()
-    if any(value is not None for value in (mode, pace, household, note)):
-        if mode is not None and str(mode).strip().lower() not in preference_store.MODES:
-            return {
-                "error": "bad_request",
-                "detail": f"mode={mode!r} is not supported",
-                "supported": sorted(preference_store.MODES),
-            }
-        return preference_store.update(
-            mode=mode, pace=pace, household=household, note=note
-        )
-    return preference_store.payload()
+    fields = (mode, pace, household, note)
+    if clear and any(value is not None for value in fields):
+        return {
+            "error": "bad_request",
+            "detail": "clear=true cannot be combined with other fields",
+        }
+    try:
+        if clear:
+            return preference_store.clear()
+        if any(value is not None for value in fields):
+            if mode is not None and str(mode).strip().lower() not in preference_store.MODES:
+                return {
+                    "error": "bad_request",
+                    "detail": f"mode={mode!r} is not supported",
+                    "supported": sorted(preference_store.MODES),
+                }
+            return preference_store.update(
+                mode=mode, pace=pace, household=household, note=note
+            )
+        return preference_store.payload()
+    except preference_store.PreferencesError as exc:
+        return exc.as_dict()
 
 
 @_tool("Data version")
@@ -1991,8 +2007,8 @@ def data_version() -> dict:
 def _arg_summary(fn: Callable) -> str:
     """A tool's parameters as `required,optional?` — the catalog's arg column.
 
-    Names only, no types: the catalog's budget is the whole point (30 tools
-    have to fit in about 1.1k tokens), and the names here are already
+    Names only, no types: the catalog's budget is the whole point (31 tools
+have to fit in about 1.1k tokens), and the names here are already
     self-describing (lat, radius_m, limit, category). A caller that guesses
     a type wrong gets placeroot_call's bad_request naming what the tool
     accepts, which is cheaper than paying for the types on every catalog
@@ -2125,7 +2141,7 @@ _UNSET = object()
 # — so the only event that invalidates a cached listing is the operator
 # upgrading the package. TTL is therefore a bound on how long a client could
 # keep showing a pre-upgrade tool list, and one day is the honest trade: it
-# spares a re-fetch of a ~13.2k-token schema surface on every session within a
+# spares a re-fetch of a ~14.4k-token schema surface on every session within a
 # day, while an upgrade is visible by the next one. A week would buy almost
 # nothing extra (sessions cluster well inside a day) for seven times the
 # staleness window; 0 is what we'd declare if the surface could move at

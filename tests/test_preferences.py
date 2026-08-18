@@ -1,6 +1,7 @@
 """Local persistent preferences (issue #315)."""
 
 import json
+import threading
 
 from placeroot import preferences, resources, server
 
@@ -120,3 +121,72 @@ def test_route_uses_stored_mode_when_omitted(monkeypatch):
     monkeypatch.setattr(server.routing, "route", fake)
     server.route(from_lat=37.0, from_lon=-122.0, to_lat=37.1, to_lon=-122.1)
     assert seen["mode"] == "cycle"
+
+
+
+def test_torn_json_is_not_wiped(tmp_path, monkeypatch):
+    dest = tmp_path / "prefs.json"
+    monkeypatch.setenv("PLACEROOT_PREFERENCES_PATH", str(dest))
+    dest.write_text("{not json", encoding="utf-8")
+    result = server.preferences(mode="cycle")
+    assert result["error"] == "corrupt"
+    assert dest.read_text(encoding="utf-8") == "{not json"
+    assert server.preferences()["error"] == "corrupt"
+
+
+def test_clear_with_other_fields_is_rejected():
+    result = server.preferences(clear=True, mode="walk")
+    assert result["error"] == "bad_request"
+    assert "clear" in result["detail"]
+
+
+def test_save_is_atomic_and_leaves_no_tmp(tmp_path, monkeypatch):
+    dest = tmp_path / "prefs.json"
+    monkeypatch.setenv("PLACEROOT_PREFERENCES_PATH", str(dest))
+    preferences.update(mode="walk")
+    assert dest.is_file()
+    assert not dest.with_name(dest.name + ".tmp").exists()
+
+
+def test_concurrent_updates_keep_both_fields(tmp_path, monkeypatch):
+    dest = tmp_path / "prefs.json"
+    monkeypatch.setenv("PLACEROOT_PREFERENCES_PATH", str(dest))
+    errors: list[BaseException] = []
+
+    def set_mode():
+        try:
+            preferences.update(mode="cycle")
+        except BaseException as exc:
+            errors.append(exc)
+
+    def set_house():
+        try:
+            preferences.update(household=["dog"])
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=set_mode), threading.Thread(target=set_house)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not errors
+    doc = preferences.load()
+    assert doc["mode"] == "cycle"
+    assert doc["household"] == ["dog"]
+
+
+def test_resolve_mode_falls_back_when_file_is_corrupt(tmp_path, monkeypatch):
+    dest = tmp_path / "prefs.json"
+    monkeypatch.setenv("PLACEROOT_PREFERENCES_PATH", str(dest))
+    dest.write_text("{", encoding="utf-8")
+    assert preferences.resolve_mode(None, "drive") == "drive"
+
+
+def test_io_error_is_structured(tmp_path, monkeypatch):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+    dest = blocker / "prefs.json"
+    monkeypatch.setenv("PLACEROOT_PREFERENCES_PATH", str(dest))
+    result = server.preferences(mode="walk")
+    assert result["error"] == "io_error"
