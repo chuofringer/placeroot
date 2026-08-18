@@ -26,6 +26,11 @@ LINE_START_INDEX = 1
 LINE_EXPECTED_ORDER = [1, 3, 0, 2]
 
 
+def _url_ll(lat, lon):
+    """Maps-URL coordinate pair: same 6 dp fixed-point as export._ll."""
+    return f"{lat:.6f},{lon:.6f}"
+
+
 def _as_dicts(stops, names=None):
     rows = [{"lat": lat, "lon": lon} for lat, lon in stops]
     if names is not None:
@@ -53,8 +58,8 @@ def test_two_point_google_link_contains_both_coords_and_travelmode():
     google = payload["maps_link"]["google"]
     assert google.startswith("https://www.google.com/maps/dir/?")
     assert "api=1" in google
-    assert "origin=37.7749,-122.4194" in google
-    assert "destination=37.8049,-122.2711" in google
+    assert f"origin={_url_ll(37.7749, -122.4194)}" in google
+    assert f"destination={_url_ll(37.8049, -122.2711)}" in google
     assert "travelmode=walking" in google
     assert "waypoints=" not in google
 
@@ -66,9 +71,12 @@ def test_apple_two_point_link_is_saddr_daddr():
     )
     apple = payload["maps_link"]["apple"]
     assert apple.startswith("https://maps.apple.com/?")
-    assert "saddr=37.7749,-122.4194" in apple
-    assert "daddr=37.8049,-122.2711" in apple
+    assert f"saddr={_url_ll(37.7749, -122.4194)}" in apple
+    assert f"daddr={_url_ll(37.8049, -122.2711)}" in apple
     assert "dirflg=d" in apple
+    # Documented two-stop scheme: no legacy +to: chain, no raw +.
+    assert "+to:" not in apple
+    assert "+" not in apple
 
 
 def test_optimize_multi_stop_google_link_lists_every_waypoint():
@@ -80,15 +88,18 @@ def test_optimize_multi_stop_google_link_lists_every_waypoint():
     )
     payload = export.build(stops, mode="cycle", roundtrip=False)
     google = payload["maps_link"]["google"]
-    assert "origin=40.7,-73.9" in google or "origin=40.70,-73.90" in google
-    assert "destination=40.73,-73.93" in google
+    assert f"origin={_url_ll(40.70, -73.90)}" in google
+    assert f"destination={_url_ll(40.73, -73.93)}" in google
     assert "waypoints=" in google
-    assert "40.71,-73.91" in google
-    assert "40.72,-73.92" in google
+    assert _url_ll(40.71, -73.91) in google
+    assert _url_ll(40.72, -73.92) in google
     assert "travelmode=bicycling" in google
     # Cycle has no Apple dirflg.
-    assert "dirflg=" not in payload["maps_link"]["apple"]
-    assert "+to:" in payload["maps_link"]["apple"]
+    apple = payload["maps_link"]["apple"]
+    assert "dirflg=" not in apple
+    assert "+to:" in apple
+    daddr = f"{_url_ll(40.71, -73.91)}+to:{_url_ll(40.72, -73.92)}+to:{_url_ll(40.73, -73.93)}"
+    assert f"daddr={daddr}" in apple
 
 
 def test_roundtrip_maps_destination_is_the_start():
@@ -99,13 +110,14 @@ def test_roundtrip_maps_destination_is_the_start():
     )
     payload = export.build(stops, mode="drive", roundtrip=True)
     google = payload["maps_link"]["google"]
-    assert "origin=1.0,2.0" in google
-    assert "destination=1.0,2.0" in google
-    assert "3.0,4.0" in google
-    assert "5.0,6.0" in google
+    assert f"origin={_url_ll(1.0, 2.0)}" in google
+    assert f"destination={_url_ll(1.0, 2.0)}" in google
+    assert _url_ll(3.0, 4.0) in google
+    assert _url_ll(5.0, 6.0) in google
     apple = payload["maps_link"]["apple"]
-    assert apple.startswith("https://maps.apple.com/?saddr=1.0,2.0")
-    assert apple.rstrip("&dirflg=d").endswith("1.0,2.0") or "to:1.0,2.0" in apple
+    assert apple.startswith(f"https://maps.apple.com/?saddr={_url_ll(1.0, 2.0)}")
+    closed = apple.rstrip("&dirflg=d")
+    assert closed.endswith(_url_ll(1.0, 2.0)) or f"to:{_url_ll(1.0, 2.0)}" in apple
 
 
 def test_gpx_is_well_formed_with_rtept_and_trkpt():
@@ -236,9 +248,44 @@ def test_from_optimize_result_follows_order_and_keeps_names():
     # Visit order, not input order.
     assert text.index("One") < text.index("Zero") < text.index("Two")
     google = payload["maps_link"]["google"]
-    assert "origin=1.0,1.0" in google
-    assert "destination=2.0,2.0" in google
-    assert "waypoints=0.0,0.0" in google
+    assert f"origin={_url_ll(1.0, 1.0)}" in google
+    assert f"destination={_url_ll(2.0, 2.0)}" in google
+    assert f"waypoints={_url_ll(0.0, 0.0)}" in google
+
+
+def test_maps_urls_use_fixed_point_for_tiny_coordinates():
+    # str(5e-5) is "5e-05"; Maps will not parse that as a latitude.
+    payload = export.build(
+        ((5e-5, -0.00004, "Near equator"), (1.0, 2.0, "Elsewhere")),
+        mode="walk",
+    )
+    google = payload["maps_link"]["google"]
+    apple = payload["maps_link"]["apple"]
+    for url in (google, apple):
+        assert "5e-05" not in url
+        assert "e-" not in url.lower()
+        assert "0.000050" in url
+        assert "-0.000040" in url
+        assert _url_ll(1.0, 2.0) in url
+
+
+def test_text_list_marks_estimated_legs():
+    payload = export.build(
+        ((37.1, -122.1, "A"), (37.2, -122.2, "B"), (37.3, -122.3, "C")),
+        mode="drive",
+        legs=(
+            {"distance_m": 300.0, "duration_s": 214.0},
+            {"distance_m": 450.0, "duration_s": 321.0, "estimated": True},
+        ),
+        total_distance_m=750.0,
+        total_duration_s=535.0,
+    )
+    text = payload["text"]
+    # Routed A→B is unmarked; estimated B→C is flagged.
+    assert "300 m, 3 min 34 s" in text
+    assert "450 m, 5 min 21 s (estimated)" in text
+    routed = [line for line in text.splitlines() if "300 m" in line]
+    assert routed and "(estimated)" not in routed[0]
 
 
 # --- tool boundary, fixture graph ----------------------------------------
@@ -250,10 +297,10 @@ def test_server_route_export_maps_link_contains_both_coords():
     exp = result["export"]
     google = exp["maps_link"]["google"]
     apple = exp["maps_link"]["apple"]
-    assert str(FROM_LAT) in google and str(FROM_LON) in google
-    assert str(TO_LAT) in google and str(TO_LON) in google
-    assert str(FROM_LAT) in apple and str(FROM_LON) in apple
-    assert str(TO_LAT) in apple and str(TO_LON) in apple
+    assert _url_ll(FROM_LAT, FROM_LON) in google
+    assert _url_ll(TO_LAT, TO_LON) in google
+    assert _url_ll(FROM_LAT, FROM_LON) in apple
+    assert _url_ll(TO_LAT, TO_LON) in apple
     root = _gpx_root(exp["gpx"])
     assert _gpx_findall(root, "rtept") or _gpx_findall(root, "trkpt")
     text = exp["text"]
@@ -283,8 +330,7 @@ def test_server_optimize_route_multi_stop_link_and_every_named_stop():
     google = exp["maps_link"]["google"]
     # Every input coordinate appears in the multi-stop link.
     for lat, lon in LINE_STOPS:
-        assert str(lat) in google
-        assert str(lon) in google
+        assert _url_ll(lat, lon) in google
     assert "waypoints=" in google
     text = exp["text"]
     for name in names:

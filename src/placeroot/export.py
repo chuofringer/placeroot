@@ -137,7 +137,12 @@ def build(
 
 
 def google_maps_url(stops: Sequence[tuple[float, float, str | None]], mode: str) -> str:
-    """Google Maps directions URL (api=1) for an ordered stop list."""
+    """Google Maps directions URL (api=1) for an ordered stop list.
+
+    Intermediate stops become `waypoints`. Desktop and the Google Maps
+    app honor up to 9; mobile browsers often honor only 3 and silently
+    drop the rest. The printable list and GPX keep every stop.
+    """
     origin = _ll(stops[0][0], stops[0][1])
     dest = _ll(stops[-1][0], stops[-1][1])
     params: list[tuple[str, str]] = [
@@ -155,15 +160,19 @@ def google_maps_url(stops: Sequence[tuple[float, float, str | None]], mode: str)
 def apple_maps_url(stops: Sequence[tuple[float, float, str | None]], mode: str) -> str:
     """Apple Maps directions URL for an ordered stop list.
 
-    Two stops are saddr/daddr. Extra stops use Apple's `+to:` destination
-    chain so a multi-stop plan opens with every pin pre-filled.
+    Two stops use the documented saddr/daddr pair. Extra stops are
+    appended with the undocumented `+to:` daddr chain (legacy Google
+    syntax). Current Apple Maps often opens only the first destination,
+    so the printable list and GPX carry the full itinerary; the Apple
+    link is a best-effort extra for 3+ stops.
     """
-    saddr = _ll(stops[0][0], stops[0][1])
-    rest = [_ll(lat, lon) for lat, lon, _ in stops[1:]]
-    daddr = "+to:".join(rest)
-    query = (
-        f"saddr={quote(saddr, safe=',')}&daddr={quote(daddr, safe=',+:')}"
-    )
+    saddr = quote(_ll(stops[0][0], stops[0][1]), safe=",")
+    # Quote each lat,lon on its own (comma stays literal). Join extras
+    # with a raw `+to:` so the two-stop URL never contains `+`, and the
+    # multi-stop chain keeps the legacy separator older parsers expect.
+    dests = [quote(_ll(lat, lon), safe=",") for lat, lon, _ in stops[1:]]
+    daddr = "+to:".join(dests)
+    query = f"saddr={saddr}&daddr={daddr}"
     dirflg = _APPLE_DIRFLG.get(mode)
     if dirflg is not None:
         query += f"&dirflg={dirflg}"
@@ -215,7 +224,12 @@ def text_list(
     total_distance_m: float | None = None,
     total_duration_s: float | None = None,
 ) -> str:
-    """Printable itinerary: names, coordinates, and per-leg times when present."""
+    """Printable itinerary: names, coordinates, and per-leg times when present.
+
+    Legs flagged `"estimated": true` (straight-line guesses from
+    optimize_route) are marked `(estimated)` so they are not read as
+    routed distances.
+    """
     lines = [_text_header(mode, len(stops), total_distance_m, total_duration_s, roundtrip)]
     lines.append("")
     for idx, (lat, lon, name) in enumerate(stops, start=1):
@@ -277,7 +291,8 @@ def _path_latlon(path: object) -> tuple[tuple[float, float], ...]:
 
 
 def _ll(lat: float, lon: float) -> str:
-    return f"{lat},{lon}"
+    """`lat,lon` in fixed-point — `str(float)` can emit `5e-05`, which Maps reject."""
+    return f"{_text_coord(lat)},{_text_coord(lon)}"
 
 
 def _gpx_coord(value: float) -> str:
@@ -320,7 +335,10 @@ def _text_coord(value: float) -> str:
 def _text_leg(leg: Mapping[str, object] | None) -> str:
     if leg is None:
         return ""
-    return _text_totals(_as_float(leg.get("distance_m")), _as_float(leg.get("duration_s")))
+    totals = _text_totals(_as_float(leg.get("distance_m")), _as_float(leg.get("duration_s")))
+    if totals and leg.get("estimated") is True:
+        return f"{totals} (estimated)"
+    return totals
 
 
 def _text_totals(distance_m: float | None, duration_s: float | None) -> str:
