@@ -136,12 +136,12 @@ Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Eve
 
 - Token counting method: **chars/4 heuristic — `placeroot.budget.estimate_tokens`, applied identically to all three servers**
 - Snapshots captured: **2026-08-08**
-- PlaceRoot's own answers were captured on **macOS-26.3.1-arm64-arm-64bit** (Python 3.11.15, Overture `2026-07-22.0`) and are snapshotted rather than recomputed here: floating-point differences in routing and geometry change digit counts between platforms, so a live rerun costs a few tokens more or less on Linux than on macOS. A tolerance test reruns them for real and fails if this snapshot drifts from what the code now answers.
+- PlaceRoot's own answers were captured on **Linux-6.12.94+-x86_64-with-glibc2.41** (Python 3.11.16, Overture `2026-07-22.0`) and are snapshotted rather than recomputed here: floating-point differences in routing and geometry change digit counts between platforms, so a live rerun costs a few tokens more or less on Linux than on macOS. A tolerance test reruns them for real and fails if this snapshot drifts from what the code now answers.
 - Schema figures are counted twice: over the **common fields** every server here publishes, and **verbatim** over everything it sends. The ratios below are the common-field ones, because Mapbox declares an `outputSchema` that PlaceRoot does not declare at all — see the note under the table.
-- Schema surface, whole install (common fields): PlaceRoot **13443** tokens (29 tools) · Mapbox **15190** (29 tools) · Google Maps **655** (7 tools)
-- Schema surface, the six tools each server needs for the scenarios below (common fields): PlaceRoot **3865** · Mapbox **4654** (1.2x ours) · Google Maps **500** (5 tools — no isochrone tool exists)
-- Whole-install surface: Mapbox is **1.1x** PlaceRoot's on common fields, on 29 tools against 29. Verbatim — counting the output schemas Mapbox publishes and we don't — it is 2.2x (29295 against 13443), and 3.4x on the six-tool subset.
-- Answers, over the 6 scenarios both PlaceRoot and Mapbox answer: PlaceRoot **1190** tokens total, Mapbox **1337** (1219 with pretty-print whitespace removed)
+- Schema surface, whole install (common fields): PlaceRoot **13548** tokens (29 tools) · Mapbox **15190** (29 tools) · Google Maps **655** (7 tools)
+- Schema surface, the six tools each server needs for the scenarios below (common fields): PlaceRoot **3884** · Mapbox **4654** (1.2x ours) · Google Maps **500** (5 tools — no isochrone tool exists)
+- Whole-install surface: Mapbox is **1.1x** PlaceRoot's on common fields, on 29 tools against 29. Verbatim — counting the output schemas Mapbox publishes and we don't — it is 2.2x (29295 against 13548), and 3.4x on the six-tool subset.
+- Answers, over the 6 scenarios both PlaceRoot and Mapbox answer: PlaceRoot **1337** tokens total, Mapbox **1337** (1219 with pretty-print whitespace removed)
 
 ### Where the competitor numbers come from
 
@@ -154,7 +154,7 @@ Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Eve
 
 | server | tools registered | whole install, verbatim | whole install, common fields | the 6-scenario subset | subset verbatim | subset common fields |
 |---|---:|---:|---:|---:|---:|---:|
-| PlaceRoot | 29 | 13443 | **13443** | 6 | 3865 | **3865** |
+| PlaceRoot | 29 | 13548 | **13548** | 6 | 3884 | **3884** |
 | Mapbox MCP | 29 | 29295 | **15190** | 6 | 13129 | **4654** |
 | Google Maps MCP (archived) | 7 | 655 | **655** | 5 | 500 | **500** |
 
@@ -172,14 +172,14 @@ Mapbox declares an `outputSchema` on almost every tool; PlaceRoot declares none,
 |---|---:|---:|---:|
 | `geocode_address` — Geocode one address / place name. | **87** | **93** (text) | **48** (41 minified) |
 | `reverse_geocode` — What address is at this coordinate? | **45** | **64** (text) | **288** (188 minified) |
-| `nearest_coffee` — Coffee shops near this point. | **702** | **117** (text) | not measured |
-| `route_a_to_b` — Route from A to B. | **41** | **422** (text) | not measured |
-| `isochrone_15min` — How far can I get in 15 minutes? | **208** | **396** (text) | not measured |
+| `nearest_coffee` — Coffee shops near this point. | **851** | **117** (text) | not measured |
+| `route_a_to_b` — Route from A to B. | **42** | **422** (text) | not measured |
+| `isochrone_15min` — How far can I get in 15 minutes? | **205** | **396** (text) | not measured |
 | `matrix_3x3` — 3x3 distance matrix over three points. | **107** | **245** (127 minified) | not measured |
 
 Competitor answers are their real servers' output: each server was run over stdio with its upstream HTTP calls pointed at a local stub replying with the vendor's own documented example response for that endpoint (`benchmarks/competitors/upstream_examples/`). The stub answers with that example whatever the request says, so a competitor cell is the size of their code's rendering of a payload they publish — not of an answer to our exact question, and not of the same content ours answered. Read the caveats below before comparing any row. Both pretty-print their JSON with two-space indentation, so the whitespace-free count is shown alongside; PlaceRoot serializes compact, and its two counts come out equal.
 
-PlaceRoot's answers were captured the same way, on macOS-26.3.1-arm64-arm-64bit: the six scenarios run through the same `placeroot.server` functions the MCP server exposes, answered from the committed fixtures with the Overture release pinned and the tile cache off.
+PlaceRoot's answers were captured the same way, on Linux-6.12.94+-x86_64-with-glibc2.41: the six scenarios run through the same `placeroot.server` functions the MCP server exposes, answered from the committed fixtures with the Overture release pinned and the tile cache off.
 
 ### What these numbers are not
 

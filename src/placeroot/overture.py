@@ -29,7 +29,7 @@ import threading
 
 import duckdb
 
-from placeroot import budget, cache, db, geo, recreation, release, trace
+from placeroot import budget, cache, db, geo, honesty, recreation, release, trace
 from placeroot.errors import (  # noqa: F401 - re-exported; see below
     SchemaDegraded,
     UpstreamUnavailable,
@@ -466,6 +466,12 @@ def _label_operating_status(value):
     return _OPERATING_STATUS_LABELS.get(value, value)
 
 
+def _annotate_place(row: dict) -> dict:
+    """Relabel operating_status and attach a compact trust_note (#308)."""
+    row["operating_status"] = _label_operating_status(row.get("operating_status"))
+    return honesty.attach_trust_note(row)
+
+
 def _operating_status_reverse_map() -> dict[str, list[str]]:
     """label -> every raw Overture value that relabels to it, e.g.
     "permanently closed" -> ["closed", "closed_permanently"]."""
@@ -721,7 +727,7 @@ def find_places(
     ]
     results = [dict(zip(cols, r)) for r in rows]
     for d in results:
-        d["operating_status"] = _label_operating_status(d["operating_status"])
+        _annotate_place(d)
     return results
 
 
@@ -830,7 +836,7 @@ def find_places_in_bbox(
     ]
     results = [dict(zip(cols, r)) for r in rows]
     for d in results:
-        d["operating_status"] = _label_operating_status(d["operating_status"])
+        _annotate_place(d)
     return results, len(results) >= limit
 
 
@@ -1151,7 +1157,7 @@ def find_places_in_division(
     ]
     results = [dict(zip(cols, r)) for r in rows]
     for d in results:
-        d["operating_status"] = _label_operating_status(d["operating_status"])
+        _annotate_place(d)
     return results
 
 
@@ -1422,7 +1428,7 @@ def place_details(
         # Truthful provenance for a recreation-layer row (docs/RECREATION.md);
         # absent for ordinary places rows, whose theme is the tool's default.
         result["source_theme"] = "base"
-    result["operating_status"] = _label_operating_status(result["operating_status"])
+    _annotate_place(result)
     for field in _PLACE_DETAIL_LIST_FIELDS:
         kept, omitted = budget.truncate_list(result[field])
         result[field] = kept

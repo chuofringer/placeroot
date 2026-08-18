@@ -10,12 +10,12 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 
 | Tool | Answers |
 |---|---|
-| `find_places` | Named places near a point **or inside a named area / division polygon**, nearest first — filter by category, brand, confidence, operating status, or has-website / has-phone |
+| `find_places` | Named places near a point **or inside a named area / division polygon**, nearest first — filter by category, brand, confidence, operating status, or has-website / has-phone; each result carries a compact trust note |
 | `summarize_area` | What's in an area: total places and top categories |
 | `compare_areas` | 2–5 areas side by side: category mix, density, and what differs most |
 | `within_distance` | Is the nearest matching place within N meters of a point? |
 | `distance_matrix` | Straight-line distances between many origins and destinations at once |
-| `place_details` | One place in full: addresses, contacts, brand, sources, confidence |
+| `place_details` | One place in full: addresses, contacts, brand, sources, confidence, and a compact before-you-go trust note |
 | `admin_lookup` | The admin hierarchy containing a point: neighborhood up to country |
 | `summarize_buildings` | Building stock in an area: count, footprint area, height and use mix |
 | `buildings_at` | Nearest building footprints to a point |
@@ -70,7 +70,7 @@ Desktop and Cursor surface them in their own prompt pickers.
 |---|---|---|
 | `/mcp__placeroot__site_selection` | `business_type`, `area` | `search_categories` → `geocode` → `summarize_area` → `compare_areas` → `find_places` + `within_distance` → one ranked recommendation |
 | `/mcp__placeroot__compare_neighborhoods` | `area_a`, `area_b` | `geocode`/`resolve_place` + `admin_lookup` → `summarize_area` ×2 → `compare_areas` → `summarize_buildings` → a small difference table |
-| `/mcp__placeroot__plan_errands` | `stops`, `start` (optional) | `geocode_batch` → `distance_matrix` → `route` per leg → optional `places_along_route` → an ordered run with per-leg distance and duration |
+| `/mcp__placeroot__plan_errands` | `stops`, `start` (optional) | `geocode_batch` → `distance_matrix` → `route` per leg → optional `places_along_route` → an ordered run with per-leg distance and duration, plus a verify-before-going line for the weakest 1–2 stops |
 
 ```
 /mcp__placeroot__site_selection bike repair shop | Portland, Oregon
@@ -114,8 +114,8 @@ without them registered.
 
 ## Loading fewer tools (`PLACEROOT_TOOLS`)
 
-All 29 tool schemas cost roughly **13.4k tokens** of every conversation's
-context, paid before the agent asks anything — about the cost of 103 median
+All 29 tool schemas cost roughly **13.5k tokens** of every conversation's
+context, paid before the agent asks anything — about the cost of 92 median
 answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS`
 selects which tools get registered. Unselected tools are never registered and
 never appear in `tools/list`.
@@ -137,7 +137,7 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 29 | ~13,438 | — |
+| unset / `all` (default) | 29 | ~13,548 | — |
 | `search` | 13 | ~6,440 | 52% |
 | `core` | 10 | ~5,558 | 59% |
 | `routing` | 6 | ~2,894 | 78% |

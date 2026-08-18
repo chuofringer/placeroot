@@ -300,6 +300,7 @@ def _probe_places(id: str, near_lat: float | None, near_lon: float | None) -> di
             "confidence": row.get("confidence"),
             "operating_status": row.get("operating_status"),
             "brand": row.get("brand"),
+            "trust_note": row.get("trust_note"),
         }),
     }
 
