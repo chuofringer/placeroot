@@ -333,6 +333,33 @@ If a future Overture release starts populating real extents on the division
 rows themselves, nothing here needs changing: _division_bbox already returns
 whatever it finds once the span clears the degeneracy floor.
 
+--- #329: city-hint ranking, last-resolve LRU, shared-table batch ---
+
+Three name-path levers, no new remote APIs.
+
+1. City-hint ranking. `resolve_place(city=)` (#271) already bounds a search
+   to a city; agents often skip it and a one-word landmark then exact-matches
+   a random division (Colosseum → Queensland, Ebisu → Shikoku). We now parse
+   a trailing well-known city off the query ("Colosseo Roma", "notre dame
+   paris") or look up a tiny alias list shipped next to the bundled stage-0
+   index (`data/geocode-index/aliases.json`) and pass that as `city=` /
+   `near_lat`/`near_lon`. When a hint is in play, division hits outside
+   ~50 km of it are dropped — the hint bounds where the search looks; every
+   returned row still comes from the data. A session's last successful city
+   is reused as the implicit hint for the *next* POI-shaped resolve in the
+   same process (not for a bare city-name query — "Paris" after a Palo Alto
+   resolve must still be Paris).
+
+2. Last-resolve LRU. Repeats of the same (normalized query, city hint) are
+   answered from an in-process OrderedDict, not a second cache system. The
+   tile cache in cache.py is untouched. `clear_resolve_session()` empties
+   the LRU and the last-city memory (tests, a new conversation).
+
+3. geocode_batch shares ONE name table. The server used to call geocode()
+   N times, and a cold pair paid N table resolutions / N S3 scans. The
+   library entry opens `_local_divisions_table()` once, looks every name
+   up against it, and threads the same path through geocode_detailed.
+
 --- #225: geocode_address, street-level forward search ---
 
 geocode answers at city/neighborhood granularity, address_at answers "what is
@@ -387,6 +414,7 @@ with the far west end of Market St; the division point is the city's label
 point, which is what "in San Francisco" means.
 """
 
+import json
 import logging
 import math
 import os
@@ -394,6 +422,7 @@ import re
 import threading
 import time
 import unicodedata
+from collections import OrderedDict
 from importlib import resources
 from pathlib import Path
 
@@ -709,6 +738,7 @@ def _rank_key(row: dict, query: str, region_population: dict[str, int]):
         1 if row.get("_fuzzy") else 0,
         -(row.get("_similarity") or 0.0),
         0 if tier >= _STRONG_TIER else 1,
+        _well_known_city_near(row, query),
         0 if (population or 0) > 0 else 1,
         -tier,
         0 if population is not None else 1,
@@ -1390,6 +1420,249 @@ def _parse_region_suffix(query: str, local_table: str | None) -> tuple[str, str 
             name, code = resolved
             return base, code, name
     return query, None, None
+
+
+# --- #329: city hints, POI aliases, last-resolve LRU ----------------------
+
+# Trailing tokens we will treat as a city= hint without a table lookup.
+# Ambiguous US namesakes the ranking corpus pins (Springfield, Portland) stay
+# off this list so a suffix parse cannot override #47.
+_WELL_KNOWN_CITIES = {
+    "amsterdam": "Amsterdam",
+    "anaheim": "Anaheim",
+    "barcelona": "Barcelona",
+    "berlin": "Berlin",
+    "brooklyn": "Brooklyn",
+    "cambridge": "Cambridge",
+    "casablanca": "Casablanca",
+    "chicago": "Chicago",
+    "dublin": "Dublin",
+    "london": "London",
+    "los angeles": "Los Angeles",
+    "new york": "New York",
+    "oakland": "Oakland",
+    "palo alto": "Palo Alto",
+    "paris": "Paris",
+    "rio de janeiro": "Rio de Janeiro",
+    "roma": "Rome",
+    "rome": "Rome",
+    "san francisco": "San Francisco",
+    "seattle": "Seattle",
+    "singapore": "Singapore",
+    "stanford": "Stanford",
+    "sydney": "Sydney",
+    "tokyo": "Tokyo",
+}
+
+# Canonical coords for the Casablanca→Chile class: a well-known city query
+# must not lose to a populated namesake 10,000 km away. Only cities with a
+# documented wrong-hemisphere failure live here — adding Cambridge/Portland
+# would fight the ranking corpus.
+_WELL_KNOWN_CITY_COORDS = {
+    "casablanca": (33.5731, -7.5898),
+}
+
+# When a city hint is in play, drop division (and far place) hits outside
+# this radius. Same "same metro" idea as _PLACES_FALLBACK_RADIUS_M, a bit
+# wider so a mall on the edge of town still counts.
+_CITY_HINT_RADIUS_M = 50_000
+
+_RESOLVE_LRU_MAX = 256
+_resolve_lru: OrderedDict[tuple, list[dict]] = OrderedDict()
+_resolve_lru_lock = threading.Lock()
+# One lock around the last-good pair: #335 _resolve_pair runs two
+# resolve_place calls concurrently, and two bare assignments can tear
+# (city from one pin, coords from the other).
+_last_good_lock = threading.Lock()
+_last_good_city: str | None = None
+_last_good_coords: tuple[float, float] | None = None
+_POI_ALIASES: dict[str, dict] | None = None
+
+
+def _fold_query_key(s: str) -> str:
+    return " ".join(_normalize_for_match(s).split())
+
+
+def _poi_aliases() -> dict[str, dict]:
+    """Tiny landmark → city overlay on the bundled stage-0 index (#329)."""
+    global _POI_ALIASES
+    if _POI_ALIASES is None:
+        try:
+            src = resources.files("placeroot") / "data" / "geocode-index" / "aliases.json"
+            _POI_ALIASES = json.loads(src.read_text(encoding="utf-8")) if src.is_file() else {}
+        except (OSError, TypeError, json.JSONDecodeError) as e:
+            logger.warning("POI alias table unreadable (%s); continuing without it", e)
+            _POI_ALIASES = {}
+    return _POI_ALIASES
+
+
+def _lookup_poi_alias(query: str) -> dict | None:
+    row = _poi_aliases().get(_fold_query_key(query))
+    if not row:
+        return None
+    try:
+        return {"city": row["city"], "lat": float(row["lat"]), "lon": float(row["lon"])}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _alias_names_for(query: str) -> list[str]:
+    """Other bundled spellings of the same landmark pin as `query`."""
+    target = _lookup_poi_alias(query)
+    if target is None:
+        place_q, _city, _coords = _extract_city_hint(query)
+        target = _lookup_poi_alias(place_q)
+    if target is None:
+        return []
+    names = []
+    for key, raw in _poi_aliases().items():
+        try:
+            if (
+                abs(float(raw["lat"]) - target["lat"]) < 1e-3
+                and abs(float(raw["lon"]) - target["lon"]) < 1e-3
+            ):
+                names.append(key)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return names
+
+
+def _canonical_city(token: str) -> str | None:
+    return _WELL_KNOWN_CITIES.get(_fold_query_key(token))
+
+
+def _extract_city_hint(query: str) -> tuple[str, str | None, tuple[float, float] | None]:
+    """Split a trailing well-known city or a POI alias off `query`.
+
+    Returns (place_query, city_name, coords). coords come only from the
+    bundled alias list — they bound the search, they are not an answer.
+    """
+    tokens = query.strip().split()
+    for n in (2, 1):
+        if len(tokens) <= n:
+            continue
+        tail = " ".join(tokens[-n:])
+        head = " ".join(tokens[:-n]).strip()
+        if not head:
+            continue
+        if tail.lower().strip(".,") in _GENERIC_PLACE_WORDS:
+            continue
+        city = _canonical_city(tail)
+        if city is None:
+            continue
+        alias = _lookup_poi_alias(head)
+        if alias:
+            return head, alias["city"] or city, (alias["lat"], alias["lon"])
+        return head, city, None
+    alias = _lookup_poi_alias(query)
+    if alias:
+        return query, alias["city"], (alias["lat"], alias["lon"])
+    return query, None, None
+
+
+def _query_is_poi_shaped(query: str) -> bool:
+    """Whether `query` names a thing rather than a city — last-city applies."""
+    if _lookup_poi_alias(query):
+        return True
+    if _names_a_feature(query):
+        return True
+    tokens = query.strip().split()
+    if len(tokens) >= 3:
+        return True
+    if len(tokens) == 2:
+        if _canonical_city(query):
+            return False
+        if tokens[0].lower().strip(".,") in _NAME_PREFIX_WORDS:
+            return False
+        return True
+    return False
+
+
+def _alias_anchor(query: str) -> tuple[float, float, str | None] | None:
+    """(lat, lon, name_query) from a POI alias, or None."""
+    place_q, _city, coords = _extract_city_hint(query)
+    if coords is None:
+        return None
+    name_query = None if _nothing_but_stopwords(place_q) else place_q
+    return (coords[0], coords[1], name_query)
+
+
+def _well_known_city_near(row: dict, query: str) -> int:
+    """0 if `row` sits on the canonical pin for a well-known city query."""
+    pin = _WELL_KNOWN_CITY_COORDS.get(_fold_query_key(query))
+    if pin is None:
+        return 1
+    return 0 if geo.haversine_m(pin[0], pin[1], row["lat"], row["lon"]) <= 80_000 else 1
+
+
+def _resolve_cache_key(
+    query: str, city: str | None, near_lat: float | None, near_lon: float | None,
+) -> tuple:
+    near = (
+        (round(near_lat, 3), round(near_lon, 3))
+        if near_lat is not None and near_lon is not None
+        else (None, None)
+    )
+    return (_fold_query_key(query), _fold_query_key(city) if city else "", *near)
+
+
+def _resolve_cache_get(
+    query: str, city: str | None, near_lat: float | None, near_lon: float | None,
+) -> list[dict] | None:
+    key = _resolve_cache_key(query, city, near_lat, near_lon)
+    with _resolve_lru_lock:
+        rows = _resolve_lru.get(key)
+        if rows is None:
+            return None
+        _resolve_lru.move_to_end(key)
+        return [dict(r) for r in rows]
+
+
+def _resolve_cache_put(
+    query: str,
+    city: str | None,
+    near_lat: float | None,
+    near_lon: float | None,
+    rows: list[dict],
+) -> None:
+    key = _resolve_cache_key(query, city, near_lat, near_lon)
+    stored = [dict(r) for r in rows]
+    with _resolve_lru_lock:
+        _resolve_lru[key] = stored
+        _resolve_lru.move_to_end(key)
+        while len(_resolve_lru) > _RESOLVE_LRU_MAX:
+            _resolve_lru.popitem(last=False)
+
+
+def _remember_last_city(city: str | None, top: dict) -> None:
+    global _last_good_city, _last_good_coords
+    name = (city or "").strip() or None
+    if name is None:
+        ctx = top.get("admin_context") or []
+        name = ctx[-1] if ctx else top.get("name")
+    coords = None
+    if top.get("lat") is not None and top.get("lon") is not None:
+        coords = (top["lat"], top["lon"])
+    with _last_good_lock:
+        if name:
+            _last_good_city = name
+        if coords is not None:
+            _last_good_coords = coords
+
+
+def clear_resolve_session() -> None:
+    """Drop the in-process resolve LRU and last-city memory (#329).
+
+    Tests and a fresh conversation call this so one resolve cannot leak a
+    city hint into the next. Not a second cache — the tile cache is
+    cache.py's, and this is only the last-resolve dict in this module.
+    """
+    global _last_good_city, _last_good_coords
+    with _resolve_lru_lock:
+        _resolve_lru.clear()
+    with _last_good_lock:
+        _last_good_city = None
+        _last_good_coords = None
 
 
 # --- #53: name-variant normalization -------------------------------------
@@ -2812,8 +3085,43 @@ def geocode(query: str, limit: int = DEFAULT_LIMIT) -> list[dict]:
     return geocode_detailed(query, limit)["results"]
 
 
+def geocode_batch(queries: list[str], limit_per_query: int = 3) -> list[dict]:
+    """Geocode many names against ONE opened local divisions table (#329).
+
+    Opens the name table (and its alt-name sibling) once, then looks every
+    query up against that same path. A two-name walk must not pay N cold
+    S3 scans or N table materializations. Each row is the top candidate
+    for that query, or {"query", "error": "no match"}; input order is
+    preserved. The caller (server.py) applies the 20-query cap.
+    """
+    local_table = _local_divisions_table()
+    alt_table = _local_alt_names_table(local_table)
+    rows = []
+    for query in queries:
+        hits = geocode_detailed(
+            query, limit_per_query, local_table=local_table, alt_table=alt_table,
+        )["results"]
+        if not hits:
+            rows.append({"query": query, "error": "no match"})
+            continue
+        top = hits[0]
+        rows.append({
+            "query": query,
+            "name": top["name"],
+            "type": top["type"],
+            "lat": top["lat"],
+            "lon": top["lon"],
+            "id": top["id"],
+            "rank_score": top["rank_score"],
+        })
+    return rows
+
+
 def geocode_detailed(
-    query: str, limit: int = DEFAULT_LIMIT, include_country: bool = False
+    query: str, limit: int = DEFAULT_LIMIT, include_country: bool = False,
+    *,
+    local_table: str | None = None,
+    alt_table: str | None = None,
 ) -> dict:
     """Free-text place name -> ranked candidates, from Overture divisions (and places fallback).
 
@@ -2862,7 +3170,8 @@ def geocode_detailed(
         return {"results": []}
 
     note = None
-    local_table = _local_divisions_table()
+    if local_table is None:
+        local_table = _local_divisions_table()
 
     # #223: a query that is *entirely* a postcode is not a name lookup, and
     # searching division names for "94110" finds nothing by construction. One
@@ -2901,7 +3210,8 @@ def geocode_detailed(
     # off, a cache directory predating the feature, a dataset without
     # names.common — in which case every _query_divisions call below is
     # exactly the primary-name-only search it was before.
-    alt_table = _local_alt_names_table(local_table)
+    if alt_table is None:
+        alt_table = _local_alt_names_table(local_table)
     base_query, region_code, _region_name = _parse_region_suffix(query, local_table)
     search_query = base_query if region_code else query
     # `region_code` is cleared below if its constrained search comes up
@@ -3079,6 +3389,21 @@ def geocode_detailed(
     region_population = _region_population_lookup(local_table)
     divisions.sort(key=lambda r: _rank_key(r, search_query, region_population))
 
+    # #329: a famous landmark's exact-matching namesake (Colosseo the
+    # Frosinone microhood, Colosseum in Queensland) must not stand the
+    # places fallback down or win the batch. If we have an alias pin,
+    # keep only rows in that city and still search places there.
+    alias_hit = _alias_anchor(search_query)
+    if alias_hit is not None:
+        alat, alon, _aname = alias_hit
+        def _near_alias(d):
+            return geo.haversine_m(alat, alon, d["lat"], d["lon"]) <= _CITY_HINT_RADIUS_M
+        divisions = [d for d in divisions if _near_alias(d)]
+        # #215 stands the places fallback down once *any* fuzzy row exists.
+        # A far namesake that only survived as a typo correction (Colosseo
+        # the Frosinone microhood for "Colosseo Roma") must not.
+        fuzzy_rows = [d for d in fuzzy_rows if _near_alias(d)]
+
     # Skip the places fallback once an exact-name division match is already
     # in hand: places is Overture's largest, least-indexed theme, and an
     # unbounded ILIKE scan over it live can cost tens of seconds (measured)
@@ -3103,6 +3428,17 @@ def geocode_detailed(
             search_query, divisions, region_code, local_table, alt_table=alt_table,
             region_population=region_population,
         )
+        # #329: a famous landmark with no derivable city still has an
+        # alias pin on the bundled index — use it as the places-fallback
+        # anchor rather than skipping the search (or aiming at a random
+        # "Tower"/"Center" division).
+        if alias_hit is not None:
+            pin = (round(alias_hit[0], 3), round(alias_hit[1], 3))
+            rest = [
+                a for a in anchor_options
+                if (round(a[0], 3), round(a[1], 3)) != pin
+            ]
+            anchor_options = [alias_hit] + rest
         anchor_hit = anchor_options[0] if anchor_options else None
         anchor, name_query = (
             ((anchor_hit[0], anchor_hit[1]), anchor_hit[2]) if anchor_hit else (None, search_query)
@@ -3456,12 +3792,42 @@ def resolve_place(
     if not query:
         return []
 
-    # #271: a caller-supplied city is the location half of the query, stated
-    # rather than guessed at. Resolving it first and using its coordinates as
-    # the reference skips _fallback_anchor's whole "which of these words is
-    # the place" problem — the problem behind every wrong-hemisphere answer
-    # this module has had. It is a hint, never an answer: it bounds where the
-    # search looks, and every row returned still comes from the data.
+    # #329: parse a trailing city / POI alias, or reuse the last good city
+    # for a POI-shaped query. Infer *before* the LRU lookup so the key
+    # includes the effective hint — otherwise "Observation Tower" after
+    # Brooklyn is cached under a bare query and replayed after Paris.
+    place_query = query
+    city_bounded = False
+    if city is None and near_lat is None and near_lon is None:
+        place_query, inferred_city, inferred_coords = _extract_city_hint(query)
+        if inferred_coords is not None:
+            near_lat, near_lon = inferred_coords
+            city = inferred_city or city
+            city_bounded = True
+        elif inferred_city:
+            city = inferred_city
+        elif _query_is_poi_shaped(query):
+            with _last_good_lock:
+                last_city = _last_good_city
+                last_coords = _last_good_coords
+            if last_city:
+                city = last_city
+                if last_coords is not None:
+                    near_lat, near_lon = last_coords
+                    city_bounded = True
+
+    cache_city, cache_lat, cache_lon = city, near_lat, near_lon
+    cached = _resolve_cache_get(query, cache_city, cache_lat, cache_lon)
+    if cached is not None:
+        return cached[:limit]
+
+    # #271: a caller-supplied (or now inferred) city is the location half
+    # of the query, stated rather than guessed at. Resolving it first and
+    # using its coordinates as the reference skips _fallback_anchor's
+    # whole "which of these words is the place" problem — the problem
+    # behind every wrong-hemisphere answer this module has had. It is a
+    # hint, never an answer: it bounds where the search looks, and every
+    # row returned still comes from the data.
     if city and near_lat is None and near_lon is None:
         try:
             hits = geocode(city, limit=1)
@@ -3469,10 +3835,22 @@ def resolve_place(
             hits = []
         if hits:
             near_lat, near_lon = hits[0]["lat"], hits[0]["lon"]
+            city_bounded = True
         else:
             logger.info("resolve_place: city hint %r did not resolve; ignoring it", city)
 
-    geocode_hits = geocode(query, limit=_RESOLVE_OVERFETCH)
+    if near_lat is not None and near_lon is not None:
+        city_bounded = True
+
+    # Search the place half when we stripped a trailing city, so
+    # "Colosseo Roma" does not return Rome the city as the pin.
+    search_query = place_query if city_bounded and place_query != query else query
+    geocode_hits = geocode(search_query, limit=_RESOLVE_OVERFETCH)
+    if city_bounded and near_lat is not None and near_lon is not None:
+        geocode_hits = [
+            r for r in geocode_hits
+            if geo.haversine_m(near_lat, near_lon, r["lat"], r["lon"]) <= _CITY_HINT_RADIUS_M
+        ]
     division_hits = [r for r in geocode_hits if r["type"] != "place"]
 
     if near_lat is not None and near_lon is not None:
@@ -3523,9 +3901,21 @@ def resolve_place(
         # "harvard square cambridge" token-by-token means searching
         # "harvard": the one word that distinguishes the place.
         tokens = [
-            t for t in _significant_tokens(query)
+            t for t in _significant_tokens(search_query)
             if t.lower().strip(".,") not in _GENERIC_PLACE_WORDS
         ]
+        # Phrase first: "harvard square" as one name, not just "harvard"
+        # (square is a feature noun and would otherwise be dropped, and
+        # the one-word scan then answers Harvard FCU).
+        if search_query and search_query.lower() not in {t.lower() for t in tokens}:
+            tokens.insert(0, search_query)
+        for alias_name in _alias_names_for(search_query):
+            for tok in alias_name.split():
+                if (
+                    tok not in tokens
+                    and tok.lower().strip(".,") not in _GENERIC_PLACE_WORDS
+                ):
+                    tokens.append(tok)
         if len(tokens) > 1:
             folded_city = {t.lower() for t in tokens}
             for div in division_hits[:1]:
@@ -3559,6 +3949,11 @@ def resolve_place(
             continue
         label = _place_match_label(r["name"], query)
         if label is None:
+            for alt in _alias_names_for(query) + ([search_query] if search_query != query else []):
+                label = _place_match_label(r["name"], alt)
+                if label is not None:
+                    break
+        if label is None:
             continue
         seen_ids.add(r["id"])
         candidates.append({
@@ -3579,6 +3974,11 @@ def resolve_place(
         if r["type"] != "place" or not r["id"] or r["id"] in seen_ids or not r["name"]:
             continue
         label = _place_match_label(r["name"], query)
+        if label is None:
+            for alt in _alias_names_for(query) + ([search_query] if search_query != query else []):
+                label = _place_match_label(r["name"], alt)
+                if label is not None:
+                    break
         if label is None:
             continue
         seen_ids.add(r["id"])
@@ -3609,10 +4009,12 @@ def resolve_place(
     candidates.sort(key=_rank_candidate)
     for c in candidates:
         del c["_prominence"]
-    trimmed = candidates[:limit]
-    if trimmed:
-        _kick_autowarm(trimmed[0])
-    return trimmed
+    out = candidates[:limit]
+    _resolve_cache_put(query, cache_city, cache_lat, cache_lon, out)
+    if out:
+        _remember_last_city(city, out[0])
+        _kick_autowarm(out[0])
+    return out
 
 
 def _nearest_address(lat: float, lon: float) -> dict | None:

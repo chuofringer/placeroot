@@ -1169,8 +1169,10 @@ def geocode(query: str, limit: int = 5) -> dict:
 def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
     """Geocode up to 20 free-text queries in one call, one best match each.
 
-    Cuts N round-trips of geocode() into one: for each query, runs
-    geocode(query, limit_per_query) and keeps only the top candidate.
+    Cuts N round-trips of geocode() into one and, more importantly,
+    shares ONE local divisions name table across the batch (#329) so a
+    two-name walk is not N cold S3 scans. For each query, keeps only
+    the top candidate.
     Returns {"results": [{"query", "name", "type", "lat", "lon", "id"
     (GERS), "rank_score"}, ...]}, one row per query, in input order — a
     query with no match gets {"query", "error": "no match"} instead, and
@@ -1184,25 +1186,8 @@ def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
             "error": "bad_request",
             "detail": f"geocode_batch accepts at most 20 queries, got {len(queries)}",
         }
-    rows = []
     try:
-        for query in queries:
-            candidates = geocoding.geocode(query, limit_per_query)
-            if not candidates:
-                rows.append({"query": query, "error": "no match"})
-                continue
-            top = candidates[0]
-            rows.append(
-                {
-                    "query": query,
-                    "name": top["name"],
-                    "type": top["type"],
-                    "lat": top["lat"],
-                    "lon": top["lon"],
-                    "id": top["id"],
-                    "rank_score": top["rank_score"],
-                }
-            )
+        rows = geocoding.geocode_batch(queries, limit_per_query)
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     return budget.apply_budget({"results": rows}, "results")
