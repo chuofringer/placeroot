@@ -67,6 +67,12 @@ WRITING_TOOLS = {
         "idempotent_hint": False,
         "open_world_hint": False,
     },
+    "preferences": {
+        "read_only_hint": False,
+        "destructive_hint": True,
+        "idempotent_hint": True,
+        "open_world_hint": False,
+    },
 }
 
 

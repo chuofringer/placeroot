@@ -26,6 +26,10 @@ fixing behavior is patch.
   `summarize_area`, a multi-slug places scan, and `isochrone`; no new
   remote APIs. Also a thin `should_i_live_here` prompt that tells the
   agent to call it (#303).
+- Persistent local preferences: state "I bike everywhere, I have a dog"
+  once. Exposed as `placeroot://preferences` and a small `preferences`
+  tool. Routing tools use the stored mode when you omit theirs; an
+  explicit argument always wins. Nothing leaves the machine (#315).
 
 ## [0.9.7] — 2026-08-15
 

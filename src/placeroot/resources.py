@@ -34,10 +34,11 @@ import json
 
 from mcp.server.mcpserver import MCPServer
 
-from placeroot import budget, categories, recreation, release
+from placeroot import budget, categories, preferences, recreation, release
 
 DATA_VERSION_URI = "placeroot://data-version"
 CATEGORIES_URI = "placeroot://categories"
+PREFERENCES_URI = "placeroot://preferences"
 
 DATA_VERSION_DESCRIPTION = (
     "Which Overture Maps release backs every PlaceRoot answer, and how it "
@@ -51,6 +52,13 @@ CATEGORIES_DESCRIPTION = (
     "exact slug for a query. Compact by design — use the "
     "search_categories tool for individual slugs."
 )
+
+PREFERENCES_DESCRIPTION = (
+    "Local travel and household preferences (mode, pace, household). "
+    "The same document the preferences tool reads and updates. "
+    "Nothing in this file leaves the machine."
+)
+
 
 # Soft ceiling for the categories payload, in the chars/4 token units
 # budget.py counts in. Not enforced at runtime (the payload is derived from
@@ -191,6 +199,14 @@ def categories_payload() -> dict:
     }
 
 
+def preferences_payload() -> dict:
+    """The local preferences document. Shared with the preferences tool."""
+    try:
+        return preferences.payload()
+    except preferences.PreferencesError as exc:
+        return exc.as_dict()
+
+
 def render(payload: dict) -> str:
     """The exact text a resources/read returns for `payload`.
 
@@ -240,3 +256,13 @@ def register(server: MCPServer) -> None:
     )
     def categories_resource() -> str:
         return render(categories_payload())
+
+    @server.resource(
+        PREFERENCES_URI,
+        name="preferences",
+        title="Local preferences",
+        description=PREFERENCES_DESCRIPTION,
+        mime_type="application/json",
+    )
+    def preferences_resource() -> str:
+        return render(preferences_payload())

@@ -60,7 +60,7 @@ def _read_json(uri: str, spec=None) -> dict:
     return json.loads(text)
 
 
-ALL_URIS = [resources.DATA_VERSION_URI, resources.CATEGORIES_URI]
+ALL_URIS = [resources.DATA_VERSION_URI, resources.CATEGORIES_URI, resources.PREFERENCES_URI]
 
 
 # --- resources/list -------------------------------------------------------
@@ -82,6 +82,7 @@ def test_descriptions_point_at_the_tools_that_do_the_rest():
     """A resource is a summary; the description has to say where the rest is."""
     assert "data_version" in _resources()[resources.DATA_VERSION_URI].description
     assert "search_categories" in _resources()[resources.CATEGORIES_URI].description
+    assert "preferences" in _resources()[resources.PREFERENCES_URI].description
 
 
 # --- resources/read -------------------------------------------------------
@@ -105,6 +106,10 @@ def test_unknown_uri_is_an_error():
 def test_data_version_resource_matches_the_tool_exactly():
     """The point of the shared code path: the two surfaces cannot drift."""
     assert _read_json(resources.DATA_VERSION_URI) == server.data_version()
+
+
+def test_preferences_resource_matches_the_tool_exactly():
+    assert _read_json(resources.PREFERENCES_URI) == server.preferences()
 
 
 @pytest.mark.parametrize(
@@ -278,7 +283,7 @@ def test_both_resources_survive_the_narrowest_possible_selection():
     """
     spec = "geocode"
     tools = {t.name for t in asyncio.run(_server(spec).list_tools())}
-    assert tools == {"geocode", "data_version"}
+    assert tools == {"geocode", "data_version", "preferences"}
     assert set(_resources(spec)) == set(ALL_URIS)
     assert _read_json(resources.DATA_VERSION_URI, spec) == server.data_version()
 

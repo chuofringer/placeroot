@@ -3,7 +3,7 @@
 The full tool catalog, workflow prompts, resources, and the `PLACEROOT_TOOLS`
 selection mechanism. For a quick overview, start with the [README](../README.md).
 
-## All 30 tools
+## All 31 tools
 
 Every tool returns a compact, budgeted answer. Several single-item tools have a
 `*_batch` sibling that collapses many calls into one round-trip.
@@ -40,14 +40,15 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `render_map` | Any result → a self-contained interactive HTML map |
 | `simplify_geometry` | Any geometry → simplified to fit a token budget |
 | `data_version` | Which Overture release the answers are drawn from |
+| `preferences` | Read or update local travel/household defaults (mode, pace, dog, …). Nothing leaves the machine |
 
 ## Tool annotations and listing cache hints
 
 Every tool declares MCP annotations — closed-world, plus a human-readable
 title, and `readOnlyHint: true` on the 29 that are pure lookups — so a client
-can tell before it prompts you which calls touch nothing. The one exception is
-honest about itself: `render_map` writes an HTML file, so it declares
-`readOnlyHint: false`. Honest caveat: Claude Code does not gate its permission
+can tell before it prompts you which calls touch nothing. Two tools write
+locally: `render_map` writes an HTML file, and `preferences` writes a local
+JSON document, so both declare `readOnlyHint: false`. Honest caveat: Claude Code does not gate its permission
 prompts on `readOnlyHint` (it uses its own classifier), so the practical win is
 with clients that do, such as Codex CLI and Copilot-class agents — plus spec
 hygiene everywhere else.
@@ -56,7 +57,7 @@ PlaceRoot also speaks the MCP 2026-07-28 revision's listing cache hints:
 `tools/list` (and the prompt and resource listings) come back with
 `ttlMs: 86400000` and `cacheScope: "public"`. The listings are frozen at build
 time — nothing at runtime can change them — so a client is free to reuse them
-for a day instead of re-reading a ~13.8k-token schema surface every session.
+for a day instead of re-reading a ~14.5k-token schema surface every session.
 Clients that speak an older revision are unaffected: those fields did not exist
 before 2026-07-28, and the response they get is byte-identical to what it was.
 
@@ -92,18 +93,20 @@ a call that would fail.
 
 ## Resources
 
-Two MCP **resources** expose the server's argument-free lookups as attachable
+Three MCP **resources** expose the server's argument-free lookups as attachable
 context, so you can pin them into a conversation without spending a tool call:
 
 | Resource | Contents |
 |---|---|
 | `placeroot://data-version` | The resolved Overture release, its date, how it was resolved (discovery, env override, the pinned fallback, or held at the artifact release), its age, and whether the bundled acceleration applies to it. Same values the `data_version` tool returns — one shared code path, so they cannot drift. |
+| `placeroot://preferences` | Local travel and household preferences (mode, pace, household). Same document the `preferences` tool reads and updates — one shared code path. Nothing in this file leaves the machine. |
 | `placeroot://categories` | Summary of the place-category taxonomy: all 22 top-level categories with how many slugs sit under each, plus how to get an exact slug. ~530 tokens — a summary, not the 2,117-slug CSV, which stays behind `search_categories`. |
 
 In Claude Code they auto-complete as @-mentions:
 
 ```
 @placeroot:placeroot://data-version
+@placeroot:placeroot://preferences
 @placeroot:placeroot://categories
 ```
 
@@ -116,8 +119,8 @@ without them registered.
 
 ## Loading fewer tools (`PLACEROOT_TOOLS`)
 
-All 30 tool schemas cost roughly **14.1k tokens** of every conversation's
-context, paid before the agent asks anything — about the cost of 69 median
+All 31 tool schemas cost roughly **14.5k tokens** of every conversation's
+context, paid before the agent asks anything — about the cost of 71 median
 answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS`
 selects which tools get registered. Unselected tools are never registered and
 never appear in `tools/list`.
@@ -139,23 +142,25 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 30 | ~14,143 | — |
-| `search` | 13 | ~6,445 | 53% |
-| `core` | 11 | ~5,941 | 57% |
-| `routing` | 6 | ~2,894 | 79% |
-| `analysis` | 10 | ~3,619 | 74% |
-| `geometry` | 3 | ~853 | 94% |
-| `progressive` | 3 (all 30 reachable) | ~552 | 96% |
+| unset / `all` (default) | 31 | ~14,529 | — |
+| `search` | 14 | ~6,445 | 53% |
+| `core` | 12 | ~5,941 | 57% |
+| `routing` | 7 | ~2,894 | 79% |
+| `analysis` | 11 | ~3,619 | 74% |
+| `geometry` | 4 | ~853 | 94% |
+| `progressive` | 4 (all 31 reachable) | ~552 | 96% |
 
 - **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `places_along_route`, `neighborhood_verdict`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
 - **`search`** — the find/name/identify family: `find_places`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, `address_at`, `geocode_address`, `search_categories`, and `gers_lookup`.
 - **`routing`** — `route`, `isochrone`, `distance_matrix`, `within_distance`, `optimize_route`.
 - **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`, `neighborhood_verdict`.
 - **`geometry`** — `simplify_geometry`, `render_map`.
-- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 30 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 14.1k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
+- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 31 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 14.5k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 
-`data_version` is registered under every profile: it is ~230 tokens and the
-only way an agent can tell which Overture release backs its answers.
+`data_version` and `preferences` are registered under every profile.
+`data_version` is ~230 tokens and the only way an agent can tell which
+Overture release backs its answers. `preferences` is the local defaults
+document; routing tools read its stored mode when theirs is omitted.
 
 Profiles may overlap, and a list may mix them with bare tool names —
 `PLACEROOT_TOOLS=routing,find_places` or
@@ -163,9 +168,9 @@ Profiles may overlap, and a list may mix them with bare tool names —
 nor a tool **fails at startup** with the list of valid names, rather than
 quietly falling back to loading everything. The server logs one line at
 startup naming what it registered
-(`registered 11 of 30 tools (PLACEROOT_TOOLS=core)`), so a selection that
+(`registered 12 of 31 tools (PLACEROOT_TOOLS=core)`), so a selection that
 didn't apply — an empty value, a variable that never reached the process — is
-visible rather than silently the full 30.
+visible rather than silently the full 31.
 
 ## What it deliberately does not do
 
