@@ -5,6 +5,7 @@ resolved pin on the answer. Ambiguous names return candidates.
 """
 
 import asyncio
+import re
 
 import pytest
 
@@ -15,6 +16,7 @@ from ._routing_fixture import build_routing_fixture as fx
 
 FROM_LAT, FROM_LON = fx.node_latlon(2, 2)
 TO_LAT, TO_LON = fx.node_latlon(2, 5)
+
 
 def _tools():
     return {t.name: t for t in asyncio.run(server.mcp.list_tools())}
@@ -50,12 +52,9 @@ def test_descriptions_tell_the_agent_to_pass_names_not_look_them_up():
     tools = _tools()
     for name in ("from_to", "find_near"):
         desc = tools[name].description
-        lower = desc.lower()
-        assert "name" in lower
-        assert "do not look" in lower
-        assert "geocode_batch" not in desc
-        assert "resolve_place" not in desc
-        assert "geocode(" not in desc
+        flat = re.sub(r"\s+", " ", desc)
+        assert "place name" in flat.lower()
+        assert "Do not call geocode(), resolve_place(), or geocode_batch() first." in flat
 
 
 def test_no_coord_overrides_on_either_tool():

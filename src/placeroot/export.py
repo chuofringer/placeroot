@@ -277,7 +277,6 @@ def _endpoint_name(value: object, fallback: str) -> str:
     return fallback
 
 
-
 def _point(value: object) -> tuple[float, float]:
     if not isinstance(value, Mapping):
         raise TypeError("stop must be a mapping with lat and lon")

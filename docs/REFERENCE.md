@@ -146,10 +146,10 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 34 | ~15,412 | — |
-| `search` | 15 | ~6,737 | 56% |
-| `core` | 15 | ~6,572 | 57% |
-| `routing` | 8 | ~3,233 | 79% |
+| unset / `all` (default) | 34 | ~15,434 | — |
+| `search` | 15 | ~6,749 | 56% |
+| `core` | 15 | ~6,594 | 57% |
+| `routing` | 8 | ~3,243 | 79% |
 | `analysis` | 11 | ~3,619 | 74% |
 | `geometry` | 4 | ~853 | 94% |
 | `progressive` | 4 (all 34 reachable) | ~552 | 96% |

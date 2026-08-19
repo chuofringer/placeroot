@@ -1755,10 +1755,11 @@ def route(
 def from_to(from_: str, to: str, mode: str = "walk") -> dict:
     """Shortest-path walk, cycle, or drive between two named places.
 
-    Pass the user place names as from and to; do not look the names up
-    first. Resolves both ends in parallel, builds one street graph, and
-    returns distance, duration, export maps/gpx/text, and the resolved
-    name and coordinates for each end. One hop for a named walk.
+    Pass the user's place names as from and to. Do not call geocode(),
+    resolve_place(), or geocode_batch() first. Resolves both ends in
+    parallel, builds one street graph, and returns distance, duration,
+    export maps/gpx/text, and the resolved name and coordinates for each
+    end. One hop for a named walk.
 
     If a name matches several equally-ranked places, returns
     {"error": "ambiguous_place", "candidates": [...]} instead of picking
@@ -1822,10 +1823,11 @@ def find_near(
 ) -> dict:
     """Places of a category near a named place or city.
 
-    Pass the user place name as near; do not look it up first. One hop
-    for a category near a named landmark. Resolves near, then searches
-    like a point find. Returns compact rows (name, category, distance,
-    trust_note) plus the resolved near (name and coordinates).
+    Pass the user's place name as near. Do not call geocode(),
+    resolve_place(), or geocode_batch() first. One hop for a category
+    near a named landmark. Resolves near, then searches like a point
+    find. Returns compact rows (name, category, distance, trust_note)
+    plus the resolved near (name and coordinates).
 
     If near matches several equally-ranked places, returns
     {"error": "ambiguous_place", "candidates": [...]} instead of picking
@@ -2682,7 +2684,6 @@ def _publish_from_keyword(mcp_server) -> None:
 
     tool.fn_metadata = tool.fn_metadata.model_copy(update={"arg_model": FromToArguments})
     tool.parameters = FromToArguments.model_json_schema(by_alias=True)
-
 
 
 def build_server(spec=_UNSET) -> MCPServer:
