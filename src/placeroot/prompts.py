@@ -220,6 +220,48 @@ one-pager the user can send as a local file.
 {_COMPACT}"""
 
 
+
+SHOULD_I_LIVE_HERE_TOOLS = (
+    "geocode",
+    "neighborhood_verdict",
+)
+
+
+def _should_i_live_here(location: str, context: str = "") -> str:
+    location = _arg(location)
+    context = _arg(context)
+    where = (
+        f'The neighborhood is "{location}".'
+        if location
+        else (
+            "The user has not named a location — ask for a place or "
+            "coordinates before calling anything. Do not invent one."
+        )
+    )
+    life = (
+        f'Life context: "{context}".'
+        if context
+        else (
+            "No household or mobility context was given — still call the "
+            "tool; it assumes a walk-first daily-needs check and says so."
+        )
+    )
+    return f"""{where} Should they live there? {life}
+
+This is a verdict, not a data table. Call `neighborhood_verdict()` once
+with the coordinates and the life context. Do not fan out to other
+PlaceRoot tools for the same scan — that tool already composes the area
+summary, reachable area, and places checklist in one pass.
+
+If you only have a place name, `geocode()` it first and pass lat/lon through.
+
+Then answer with the verdict, the strengths, the weak point, and the one
+thing to verify in person. Do not dump the raw checklist. Overture has no
+rent, crime, school quality, hours, or demographics — say so if asked.
+
+{_COMPACT}"""
+
+
 # name -> (function, description, referenced tool names). The description is
 # what a client shows next to the slash command.
 PROMPTS: dict[str, tuple[Callable[..., str], str, tuple[str, ...]]] = {
@@ -240,6 +282,12 @@ PROMPTS: dict[str, tuple[Callable[..., str], str, tuple[str, ...]]] = {
         "Order a list of errand stops into an efficient route with per-leg "
         "distances and durations.",
         PLAN_ERRANDS_TOOLS,
+    ),
+    "should_i_live_here": (
+        _should_i_live_here,
+        "Should I live in this neighborhood? One verdict shaped around the "
+        "asker's life, not a table of counts.",
+        SHOULD_I_LIVE_HERE_TOOLS,
     ),
 }
 
@@ -271,3 +319,11 @@ def register(server: MCPServer, selected: set[str]) -> None:
     @server.prompt(name="plan_errands", description=PROMPTS["plan_errands"][1])
     def plan_errands(stops: str, start: str = "") -> str:
         return _plan_errands(stops, start) + _profile_note(PLAN_ERRANDS_TOOLS, selected)
+
+    @server.prompt(
+        name="should_i_live_here", description=PROMPTS["should_i_live_here"][1]
+    )
+    def should_i_live_here(location: str, context: str = "") -> str:
+        return _should_i_live_here(location, context) + _profile_note(
+            SHOULD_I_LIVE_HERE_TOOLS, selected
+        )

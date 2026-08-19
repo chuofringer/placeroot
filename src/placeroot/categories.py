@@ -92,6 +92,24 @@ def hierarchy_for(slug: str) -> list[str] | None:
     return None
 
 
+def slugs_under(slug: str) -> list[str]:
+    """Every bundled slug whose path contains `slug` as a segment.
+
+    Includes the slug itself when it is in the taxonomy. Used by verdict
+    compose to expand a need (school → elementary_school) without the
+    substring false positives of ILIKE (driving_school is not a school).
+    Unknown slugs return [].
+    """
+    needle = (slug or "").strip().lower()
+    if not needle:
+        return []
+    return [
+        row["slug"]
+        for row in _load_categories()
+        if any(seg.lower() == needle for seg in row["path"])
+    ]
+
+
 def _match_rank(slug: str, query: str) -> int | None:
     """Lower is better; None means no match. query is already lowercased."""
     slug_l = slug.lower()

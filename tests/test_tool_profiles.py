@@ -60,6 +60,7 @@ def test_core_profile():
         "summarize_area",
         "route",
         "places_along_route",
+        "neighborhood_verdict",
         "data_version",
     }
 

@@ -29,7 +29,7 @@ import threading
 
 import duckdb
 
-from placeroot import budget, cache, db, geo, honesty, recreation, release, trace
+from placeroot import budget, cache, categories, db, geo, honesty, recreation, release, trace
 from placeroot.errors import (  # noqa: F401 - re-exported; see below
     SchemaDegraded,
     UpstreamUnavailable,
@@ -542,6 +542,56 @@ def _place_category_name_filters(
     return filters
 
 
+def _expand_need_slugs(slugs: list[str]) -> list[str]:
+    """Self plus bundled-taxonomy descendants, de-duplicated.
+
+    Unknown slugs are kept as-is so an exact primary match can still fire.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for slug in slugs:
+        if not slug:
+            continue
+        children = categories.slugs_under(slug)
+        for item in children or [slug]:
+            key = item.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(item)
+    return out
+
+
+def _place_categories_or_filter(
+    missing: set[str], slugs: list[str], params: dict
+) -> list[str]:
+    """OR of several category slugs — exact / hierarchy, never substring.
+
+    Public find_places keeps ILIKE so "coffee" still hits coffee_shop.
+    Verdict compose must not: park is not parking, school is not
+    driving_school. Each need slug is expanded to {self + descendants}
+    via the bundled taxonomy, then matched by equality on
+    basic_category / taxonomy.primary or list_contains on alternates.
+    """
+    clauses = []
+    for i, slug in enumerate(_expand_need_slugs(slugs)):
+        if not slug:
+            continue
+        parts = []
+        exact = slug.lower()
+        if "basic_category" not in missing:
+            parts.append(f"lower(basic_category) = $cat{i}_exact")
+        if "taxonomy" not in missing:
+            parts.append(f"lower(taxonomy.primary) = $cat{i}_exact")
+            parts.append(f"list_contains(taxonomy.alternates, $cat{i}_raw)")
+        if parts:
+            clauses.append(f"({' OR '.join(parts)})")
+            params[f"cat{i}_exact"] = exact
+            params[f"cat{i}_raw"] = slug
+    if not clauses:
+        return []
+    return [f"({' OR '.join(clauses)})"]
+
+
 def _place_attribute_filters(
     missing: set[str],
     min_confidence: float | None,
@@ -728,6 +778,75 @@ def find_places(
     results = [dict(zip(cols, r)) for r in rows]
     for d in results:
         _annotate_place(d)
+    return results
+
+
+# Higher than MAX_ROWS: a checklist of several slugs in one scan still
+# needs a nearest hit per slug, and a dense cluster of one category
+# would otherwise fill a 25-row cap before the others appear.
+CHECKLIST_MAX_CANDIDATES = 80
+
+
+def find_places_for_categories(
+    lat: float,
+    lon: float,
+    radius_m: float,
+    categories: list[str],
+    limit: int = CHECKLIST_MAX_CANDIDATES,
+) -> list[dict]:
+    """Places matching any of `categories`, nearest first — one scan.
+
+    Internal compose helper (neighborhood_verdict). The public find_places
+    API is single-category; this is the union so a 4-8 need checklist does
+    not become N sequential scans of the same bbox.
+    """
+    slugs = [s for s in categories if s]
+    if not slugs:
+        return []
+    limit = max(0, min(int(limit), CHECKLIST_MAX_CANDIDATES))
+    upstream = _upstream_glob()
+    missing = set(_check_schema(upstream))
+    bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(lat, lon, radius_m)
+    from_source, has_recreation = _places_source(bbox)
+    filters = [bbox_filter, distance_filter]
+    filters.extend(_name_filter(missing, has_recreation))
+    filters.extend(_place_categories_or_filter(missing, slugs, params))
+
+    exprs = _place_select_exprs(missing)
+    with_clause, from_clause, filters = _dedup_rows_sql(from_source, filters, has_recreation)
+
+    sql = f"""
+        {with_clause}
+        SELECT
+            {exprs["id"]}                       AS id,
+            {exprs["name"]}                      AS name,
+            {exprs["category"]}                  AS category,
+            {exprs["basic_category"]}             AS basic_category,
+            {exprs["operating_status"]}           AS operating_status,
+            {exprs["confidence"]}                AS confidence,
+            {exprs["brand"]}                     AS brand,
+            {exprs["has_website"]}               AS has_website,
+            {exprs["has_phone"]}                 AS has_phone,
+            round(bbox.ymin, 6)                 AS lat,
+            round(bbox.xmin, 6)                 AS lon,
+            round({_DISTANCE_EXPR}, 0)          AS distance_m
+        FROM {from_clause}
+        WHERE {' AND '.join(filters)}
+        ORDER BY distance_m
+        LIMIT {limit}
+    """
+    try:
+        with trace.scan("places checklist scan", bounded=True, source=from_clause), _conn_lock:
+            rows = _conn().execute(sql, params).fetchall()
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(str(e)) from e
+    cols = [
+        "id", "name", "category", "basic_category", "operating_status",
+        "confidence", "brand", "has_website", "has_phone", "lat", "lon", "distance_m",
+    ]
+    results = [dict(zip(cols, r)) for r in rows]
+    for d in results:
+        d["operating_status"] = _label_operating_status(d["operating_status"])
     return results
 
 

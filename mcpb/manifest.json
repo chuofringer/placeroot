@@ -3,8 +3,8 @@
   "name": "placeroot",
   "display_name": "PlaceRoot",
   "version": "0.9.7",
-  "description": "Ground AI agents in open map data. MCP server for Overture Maps — compact answers, no API key.",
-  "long_description": "PlaceRoot answers spatial questions from the Overture Maps public data release — nearby places, geocoding, admin hierarchy, buildings, land use, isochrones and routing — with no API key, no signup and no vendor platform. Every tool returns a compact, ranked answer sized for an agent's context window instead of a raw GeoJSON dump, and every place carries its Overture GERS id so an agent can hold onto it across turns.",
+  "description": "Ground AI agents in open map data. MCP server for Overture Maps \u2014 compact answers, no API key.",
+  "long_description": "PlaceRoot answers spatial questions from the Overture Maps public data release \u2014 nearby places, geocoding, admin hierarchy, buildings, land use, isochrones and routing \u2014 with no API key, no signup and no vendor platform. Every tool returns a compact, ranked answer sized for an agent's context window instead of a raw GeoJSON dump, and every place carries its Overture GERS id so an agent can hold onto it across turns.",
   "author": {
     "name": "Vibe Mapper",
     "email": "hello@placeroot.dev",
@@ -85,7 +85,7 @@
     },
     {
       "name": "infrastructure_at",
-      "description": "Infrastructure near a point, nearest first: bridges, towers, piers — and street furniture."
+      "description": "Infrastructure near a point, nearest first: bridges, towers, piers \u2014 and street furniture."
     },
     {
       "name": "water_near",
@@ -145,11 +145,15 @@
     },
     {
       "name": "gers_lookup",
-      "description": "Resolve any GERS id to its entity — place, division, or building — across Overture themes."
+      "description": "Resolve any GERS id to its entity \u2014 place, division, or building \u2014 across Overture themes."
     },
     {
       "name": "places_along_route",
       "description": "Places on the way from A to B: corridor search along the route, ranked by detour."
+    },
+    {
+      "name": "neighborhood_verdict",
+      "description": "Life-decision neighborhood verdict, not a data dump."
     },
     {
       "name": "optimize_route",
