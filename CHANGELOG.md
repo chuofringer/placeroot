@@ -9,6 +9,7 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Changed
+- Profile token table in `docs/REFERENCE.md` remeasured from `list_tools()` after #335/#334: all 34 tools are ~15,458 (was ~15,434); subset rows and the 96% savings claim follow the same ruler.
 - Name path (#329): parse a trailing city (or reuse the last good one) as
   `resolve_place(city=)`, cache last resolve in-process keyed by
   (normalized query, effective city/coords including the implicit last
@@ -165,7 +166,7 @@ fixing behavior is patch.
   back empty.
 - "san jose airport" no longer anchors in Henan, nor "palo alto caltrain"
   in Leyte: leading word *pairs* are anchor candidates, name-prefix words
-  (san, los, santa, new…) are refused as standalone anchors, and matching
+  (san, salto, santa, new…) are refused as standalone anchors, and matching
   more of the query outranks a bigger population.
 
 ## [0.9.3] — 2026-08-13

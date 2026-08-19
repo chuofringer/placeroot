@@ -122,7 +122,7 @@ If you already use Python tooling, `uvx placeroot` skips this launcher entirely 
 | 🚴 **Routing** | `route`, `from_to`, `isochrone`, `optimize_route`, `places_along_route`, `distance_matrix` | How far to walk from A to B? What's reachable in 15 minutes? Best order for 6 stops? |
 | 🗺️ **Geometry & maps** | `render_map`, `simplify_geometry` | Show me this result as an interactive map |
 
-It also ships five **workflow prompts** (site selection, neighborhood comparison, errand planning, should I live here, get to know my city) and three attachable **resources** — and a `PLACEROOT_TOOLS` setting to load only the tool profiles you need, cutting schema overhead by up to 96%.
+It also ships five **workflow prompts** (site selection, neighborhood comparison, errand planning, should I live here, get to know my city) and three attachable **resources** — and a `PLACEROOT_TOOLS` setting to load only the tool profiles you need, cutting schema overhead by up to 94%.
 
 📚 **[Full tool catalog, prompts, resources & configuration → docs/REFERENCE.md](https://github.com/chuofringer/placeroot/blob/v0.9.7/docs/REFERENCE.md)**
 
