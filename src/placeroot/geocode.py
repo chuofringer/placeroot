@@ -404,6 +404,16 @@ from placeroot.errors import AmbiguousArea
 
 logger = logging.getLogger(__name__)
 
+
+def _kick_autowarm(hit: dict | None) -> None:
+    """Background metro warm on a city-scale hit. Never raises, never waits."""
+    try:
+        from placeroot import autowarm
+
+        autowarm.maybe_autowarm_hit(hit)
+    except Exception:  # noqa: BLE001 - resolve must not fail because warm failed
+        logger.warning("autowarm kick failed", exc_info=True)
+
 DEFAULT_LIMIT = 5
 MAX_LIMIT = 25
 DIVISION_OVERFETCH = 50  # rows pulled per theme before Python-side ranking trims to `limit`
@@ -3217,6 +3227,8 @@ def geocode_detailed(
             # correction a "substring" match.
             entry["matched_by"] = "fuzzy"
         out.append(entry)
+    if out:
+        _kick_autowarm(out[0])
     result = {"results": out}
     fuzzy_out = [row for row in candidates[:limit] if row.get("_fuzzy")]
     if fuzzy_out:
@@ -3537,6 +3549,7 @@ def resolve_place(
         candidates.append({
             "id": r["id"], "kind": "division", "name": r["name"],
             "lat": r["lat"], "lon": r["lon"],
+            "type": r.get("type"),
             "admin_context": r["admin_context"],
             "match": _match_label(r, query),
             "_prominence": r["rank_score"],
@@ -3596,7 +3609,10 @@ def resolve_place(
     candidates.sort(key=_rank_candidate)
     for c in candidates:
         del c["_prominence"]
-    return candidates[:limit]
+    trimmed = candidates[:limit]
+    if trimmed:
+        _kick_autowarm(trimmed[0])
+    return trimmed
 
 
 def _nearest_address(lat: float, lon: float) -> dict | None:
@@ -3782,6 +3798,7 @@ def resolve_area(area: str) -> dict | None:
     if len(tied) > 1:
         raise AmbiguousArea(area, [_area_candidate(d) for d in tied[:_AREA_MAX_CANDIDATES]])
 
+    _kick_autowarm(top)
     return _area_candidate(top)
 
 

@@ -9,6 +9,12 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- Auto-warm on first city-scale resolve: a successful `geocode` /
+  `resolve_place` / `resolve_area` of a locality (not a POI, street, or
+  address) starts background tile prewarm through the existing
+  `warmup_city` path. Walk street graphs persist next to tiles — not
+  inside the tile LRU — and survive process restart. Tiles are not a
+  built graph; the first walk still builds or loads one (#330).
 - Question-level 15s ship gate: 20 corpus ids, cold then warm, clock on
   the whole user question (all hops). Fails on a wrong place and on
   timeout; 10s is a stretch column, not a fail. Weekdays 15:00 UTC

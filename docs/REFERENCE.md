@@ -198,7 +198,7 @@ env vars; see below.) The ones an operator is most likely to reach for:
 | `PLACEROOT_TOKEN_BUDGET` | `2000` | Soft per-response token budget (chars/4 heuristic); rows are dropped lowest-ranked first, then optional fields, until a response fits |
 | `PLACEROOT_RECREATION_LAYER` | on | `0`/`false`/`no`/`off` disables the base-theme recreation layer ([docs/RECREATION.md](RECREATION.md)) |
 | `PLACEROOT_CACHE` | on | `off` disables the local tile cache entirely |
-| `PLACEROOT_CACHE_DIR` | `~/.cache/placeroot` | Where tiles, the geocode name index, and support tables live |
+| `PLACEROOT_CACHE_DIR` | `~/.cache/placeroot` | Where tiles, persisted walk graphs, the geocode name index, and support tables live |
 | `PLACEROOT_ARTIFACT_DIR` | sibling of `PLACEROOT_CACHE_DIR` (`.../artifacts`) | Where `render_map` writes its self-contained HTML files |
 | `PLACEROOT_CACHE_MAX_MB` | `500` | LRU size cap for the cache directory |
 | `PLACEROOT_CACHE_SYNC` | off | Materialize missing tiles inline instead of in the background (tests, warm-starts) |
@@ -214,8 +214,12 @@ env vars; see below.) The ones an operator is most likely to reach for:
 Cold-query behavior worth knowing: the first query over a new area fetches
 that area's tiles (narrated via MCP progress when the client sends a
 `progressToken`); repeat queries answer from the local cache in
-milliseconds. Wheel-bundled per-release manifests keep even the first
-query's scan to the few files its bounding box intersects.
+milliseconds. Resolving a city-scale place also starts background tile
+warming for that metro — users never have to call `warmup_city`. Tiles
+are not a built street graph: the first walk still builds or loads the
+graph; later walks reuse the on-disk graph across process restarts.
+Wheel-bundled per-release manifests keep even the first query's scan to
+the few files its bounding box intersects.
 
 **Which Overture release you get.** Three bundled artifact sets — the file
 manifests, the stage-0 geocode index and the coarse land-cover grid — are
