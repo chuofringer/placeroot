@@ -143,11 +143,21 @@ def _run_autowarm(lat: float, lon: float, key: tuple[int, int]) -> None:
 
         # Existing warmup path — own connections inside prewarm_bbox, and
         # conn_lock is not held across COPYs (see server._prewarm_region).
-        server._prewarm_region(lat, lon, server.DEFAULT_WARMUP_RADIUS_M)
-        try:
-            write_warm_marker(key)
-        except OSError as e:
-            logger.warning("autowarm: could not write warm marker %s: %s", key, e)
+        # Do not stamp the marker on a degraded/error status: a transient
+        # S3 fail must stay retryable on the next city resolve.
+        result = server._prewarm_region(lat, lon, server.DEFAULT_WARMUP_RADIUS_M)
+        status = result.get("status") if isinstance(result, dict) else None
+        if status in {"warmed", "already_warm"}:
+            try:
+                write_warm_marker(key)
+            except OSError as e:
+                logger.warning("autowarm: could not write warm marker %s: %s", key, e)
+        else:
+            logger.warning(
+                "autowarm: skip warm marker for %s (status=%s); will retry",
+                key,
+                status,
+            )
         # Walk is the cliff (20–41s rebuild). Drive is a much larger extract
         # and is left to the first drive query. Tiles being warm only makes
         # this extract cheaper than cold S3; the graph still has to be

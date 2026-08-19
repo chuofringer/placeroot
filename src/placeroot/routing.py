@@ -70,7 +70,9 @@ graph's (deliberately over-fetched) area, keyed by (release, upstream
 source, mode, drive-speed-baking) — see _get_or_build_graph. The
 in-memory LRU is 8 slots; walk graphs are also pickled next to tiles
 (not inside the tile LRU) so a process restart loads instead of
-rebuilding. Tiles are not a built graph.
+rebuilding. Tiles are not a built graph. pickle.load from
+PLACEROOT_CACHE_DIR is code execution for anyone who can write that
+dir; format-version is not a safety boundary.
 
 Graph size cap (#73, defense in depth): DRIVE_MAX_RADIUS_M bounds the
 extraction *radius*, not the graph's node/edge count — a dense-enough urban
@@ -1566,8 +1568,11 @@ def _load_graph_from_disk(
         return None
     prefix = f"{mode}_{speed_tag}_"
     tile = _graph_cache_tile(lat, lon)
+    cap_m = MODE_CONFIG[mode]["max_radius_m"]
     preferred = [
-        root / _graph_disk_name(mode, speed_tag, tile, r, shapes)
+        root / _graph_disk_name(
+            mode, speed_tag, tile, min(r * GRAPH_CACHE_MARGIN, cap_m), shapes
+        )
         for r in (WALK_MAX_RADIUS_M, 5000.0, 8000.0)
         for shapes in (True, False)
     ]

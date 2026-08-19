@@ -173,3 +173,61 @@ def test_tiles_vs_graph_honesty_in_copy():
     assert "street-graph neighborhood" not in text
     # The warmup tool itself still does not build the graph.
     assert "does not build the routing graph" in (server.warmup_city.__doc__ or "").lower()
+
+def test_failed_prewarm_does_not_write_marker(monkeypatch, tmp_path):
+    """Transient S3/upstream fail must stay retryable — no disk marker."""
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "c"))
+    monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
+    key = autowarm.metro_key(CENTER_LAT, CENTER_LON)
+
+    def fail(lat, lon, radius_m):
+        return {
+            "lat": lat, "lon": lon, "radius_m": radius_m,
+            "status": "failed", "themes": [], "note": "upstream_unavailable",
+        }
+
+    monkeypatch.setattr(server, "_prewarm_region", fail)
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: None)
+    autowarm.clear_autowarm_state()
+    autowarm._run_autowarm(CENTER_LAT, CENTER_LON, key)
+    assert not autowarm.warm_marker_exists(key)
+
+
+def test_partial_prewarm_does_not_write_marker(monkeypatch, tmp_path):
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "c"))
+    monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
+    key = autowarm.metro_key(CENTER_LAT, CENTER_LON)
+
+    def partial(lat, lon, radius_m):
+        return {
+            "lat": lat, "lon": lon, "radius_m": radius_m,
+            "status": "partial", "themes": [], "note": "mixed",
+        }
+
+    monkeypatch.setattr(server, "_prewarm_region", partial)
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: None)
+    autowarm.clear_autowarm_state()
+    autowarm._run_autowarm(CENTER_LAT, CENTER_LON, key)
+    assert not autowarm.warm_marker_exists(key)
+
+
+def test_preferred_disk_name_uses_padded_radius():
+    """Persist writes padded radius; exact-filename lookup must match."""
+    mode = "walk"
+    cap_m = routing.MODE_CONFIG[mode]["max_radius_m"]
+    tile = (0, 0)
+    raw = routing.WALK_MAX_RADIUS_M
+    padded = min(raw * routing.GRAPH_CACHE_MARGIN, cap_m)
+    raw_name = routing._graph_disk_name(mode, "default", tile, raw, True)
+    padded_name = routing._graph_disk_name(mode, "default", tile, padded, True)
+    persist_name = routing._graph_disk_name(
+        mode, "default", tile,
+        min(raw * routing.GRAPH_CACHE_MARGIN, cap_m),
+        True,
+    )
+    assert padded_name == persist_name
+    # The old list used raw radii and never matched a padded persist name
+    # unless the cap already clamped them equal.
+    if padded != raw:
+        assert raw_name != persist_name
+
