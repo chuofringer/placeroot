@@ -106,3 +106,22 @@ def test_p95_is_nearest_rank_not_a_pass():
     # 20 samples: 95th nearest-rank is toward the top, not the mean.
     twenty = [float(i) for i in range(20)]
     assert mod._p95(twenty) >= 18.0
+
+
+def test_missing_warm_leg_is_a_fail():
+    spec = importlib.util.spec_from_file_location(
+        "run_query_corpus", BENCH / "run_query_corpus.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    q = {"id": "r01", "tool": "resolve_place", "question": "Where is X?"}
+    cold_only = [{"id": "r01", "tool": "resolve_place", "q": "Where is X?",
+                  "leg": "cold", "s": 1.2, "ok": True, "detail": "ok"}]
+    out = mod._ensure_warm_leg(list(cold_only), q)
+    assert any(r["leg"] == "warm" and r["ok"] is False for r in out)
+    both = cold_only + [{"id": "r01", "leg": "warm", "s": 0.2, "ok": True,
+                         "detail": "ok"}]
+    kept = mod._ensure_warm_leg(list(both), q)
+    assert sum(1 for r in kept if r["leg"] == "warm") == 1
+    assert kept[-1]["ok"] is True
+

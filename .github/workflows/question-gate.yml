@@ -1,5 +1,5 @@
 name: Question gate
-# Nightly 20-id question-level 15s gate (#331). Clock is the whole user
+# Weekday 20-id question-level 15s gate (#331). Clock is the whole user
 # question (all hops), cold then warm, fail on WRONG PLACE and on timeout.
 # Not the #265 per-tool 10s matrix. Not the weekly 148-id corpus
 # (that one stays --fail-on wrong — hosted S3 bandwidth is not the
@@ -11,7 +11,7 @@ name: Question gate
 #   uv run python benchmarks/run_query_corpus.py --smoke --warm --budget-s 15 --fail-on both
 on:
   schedule:
-    - cron: '0 15 * * 1-5'   # 08:00 PT weekdays
+    - cron: '0 15 * * 1-5'   # 15:00 UTC weekdays = 08:00 PDT / 07:00 PST
   workflow_dispatch:
 
 permissions:

@@ -180,7 +180,7 @@ cold leg just filled. A 14s warm is a hang. Suite fails if any id×leg
 is wrong or over 15s. p95 is printed; it is not the gate.
 
 ```bash
-# ship / nightly (20 ids)
+# ship / weekday gate (20 ids)
 uv run python benchmarks/run_query_corpus.py --question-gate --warm --budget-s 15 --fail-on both
 
 # PR smoke (r01 Stanford, g10 Casablanca, c01 playgrounds-near-Stanford)
@@ -188,5 +188,6 @@ uv run python benchmarks/run_query_corpus.py --smoke --warm --budget-s 15 --fail
 ```
 
 The weekly Query Corpus workflow still runs all 148 with `--fail-on wrong`
-only. The 20-id gate is `.github/workflows/question-gate.yml` (weekdays
-08:00 PT) plus the commands above. Do not run either from pytest.
+only. The 20-id gate is `.github/workflows/question-gate.yml`
+(weekdays 15:00 UTC = 08:00 PDT / 07:00 PST) plus the commands
+above. Do not run either from pytest.

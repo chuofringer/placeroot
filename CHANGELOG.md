@@ -11,7 +11,8 @@ fixing behavior is patch.
 ### Added
 - Question-level 15s ship gate: 20 corpus ids, cold then warm, clock on
   the whole user question (all hops). Fails on a wrong place and on
-  timeout; 10s is a stretch column, not a fail. Nightly on weekdays;
+  timeout; 10s is a stretch column, not a fail. Weekdays 15:00 UTC
+  (08:00 PDT / 07:00 PST);
   PR authors prove a change with `--smoke --warm --budget-s 15
   --fail-on both` (#331).
 - `route` and `optimize_route` now return an `export` object: Google/Apple

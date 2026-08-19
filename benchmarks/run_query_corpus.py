@@ -62,6 +62,25 @@ def _p95(times: list[float]) -> float:
     return ordered[idx]
 
 
+def _ensure_warm_leg(rows: list[dict], q: dict) -> list[dict]:
+    """If --warm was requested, a missing warm row is a fail, not a skip.
+
+    A worker that prints the cold JSON and then dies would otherwise
+    leave the suite with only a passing cold leg.
+    """
+    if any(r.get("leg") == "warm" for r in rows):
+        return rows
+    tail = ""
+    if rows:
+        tail = str(rows[-1].get("detail") or "")[-80:]
+    rows.append({
+        "id": q["id"], "tool": q["tool"], "q": q["question"],
+        "leg": "warm", "s": 0.0, "ok": False,
+        "detail": "WARM MISSING (worker died after cold) " + tail,
+    })
+    return rows
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--tool", action="append", default=[],
@@ -159,6 +178,9 @@ def main() -> int:
                      "detail": f"RUNNER ERROR {e}"}]
         finally:
             shutil.rmtree(cache_dir, ignore_errors=True)
+
+        if args.warm:
+            rows = _ensure_warm_leg(rows, q)
 
         for row in rows:
             row.setdefault("leg", "cold")
