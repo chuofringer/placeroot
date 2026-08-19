@@ -30,6 +30,20 @@ def q(qid, tool, question, fn):
     QUERIES.append({"id": qid, "tool": tool, "question": question, "fn": fn})
 
 
+# Question-level 15s ship gate (#331). Clock is the whole user question
+# (every hop inside fn), never a single tool. #265's per-tool 10s matrix
+# is a different number and is out of scope here.
+QUESTION_GATE_IDS = (
+    "r01", "r02", "r05", "g10",
+    "f01", "f16", "f13", "f14",
+    "s01", "s07",
+    "t01", "t02", "t04",
+    "c01", "c02", "c13", "c15",
+    "x01", "x03", "x04",
+)
+QUESTION_GATE_SMOKE_IDS = ("r01", "g10", "c01")
+
+
 def _mods():
     from placeroot import (
         addresses,
