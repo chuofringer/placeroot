@@ -41,6 +41,10 @@ fixing behavior is patch.
   question is fast. Cold scans now carry an honest ETA on MCP progress
   notifications. A `get_to_know_my_city` prompt walks the same path
   (#314).
+- Actionable place rows now include a `trust_note`: a short before-you-go
+  line from existing confidence and operating status. Composed itineraries
+  add `verify_before_going` naming the 1–2 weakest-confidence stops
+  (#308, #323).
 
 ## [0.9.7] — 2026-08-15
 
