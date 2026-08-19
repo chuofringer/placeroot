@@ -1,4 +1,4 @@
-"""Self-contained HTML map artifact renderer (issue #15, extended by #34).
+"""Self-contained HTML map / one-pager renderer (issues #15, #34, #310).
 
 Turns find_places / summarize_area JSON — or caller-supplied GeoJSON — into
 ONE standalone HTML file: inline CSS, inline JS, vector data embedded, no
@@ -7,6 +7,12 @@ viewer is a small hand-written SVG pan/zoom map (equirectangular projection,
 cos(lat) corrected so both axes share one meters-per-unit scale) with marker
 dots, polygon/line shapes, click-to-open popups, a scale bar, and an
 attribution line — not an embedded copy of Leaflet/MapLibre.
+
+Issue #310 extends the artifact from a map-only viewer into a shareable
+one-pager: the interactive map, a composed verdict, a per-stop detail
+list, and the required data attribution — a local file the user can send
+to a spouse, co-founder, or landlord. export_report() is the named entry
+point; render_map / write_artifact produce the same document.
 
 Beyond Point features, the renderer understands Polygon, MultiPolygon,
 LineString and MultiLineString geometry (from caller GeoJSON, and from
@@ -33,6 +39,7 @@ import html
 import json
 import math
 import os
+import secrets
 import time
 from pathlib import Path
 
@@ -58,6 +65,11 @@ INLINE_MAX_BYTES = 300_000
 # output (isochrone polygons are capped to MAX_POLYGON_POINTS ~= 100 in
 # routing.py; find_places results are page-sized) but finite.
 MAX_RENDER_VERTICES = 50_000
+
+# A composed verdict is meant to be read by a human on a one-pager, not a
+# novel. Agents that dump raw tool JSON into summary get clipped so the
+# file stays sendable.
+SUMMARY_MAX_CHARS = 8_000
 
 _ARTIFACT_DIRNAME = "artifacts"
 
@@ -332,6 +344,27 @@ def _handle_feature_dict(item: dict, points: list[dict], shapes: list[dict]) -> 
     return False
 
 
+def _is_compare_areas_result(data: dict) -> bool:
+    """compare_areas returns {areas, categories, differentiators} — no top-level coords."""
+    return isinstance(data.get("areas"), list) and isinstance(data.get("differentiators"), list)
+
+
+def _points_from_compare_areas(data: dict, points: list[dict]) -> None:
+    """One marker per compared area, popup carrying density and category mix."""
+    for i, area in enumerate(data.get("areas") or []):
+        if not isinstance(area, dict):
+            continue
+        center = area.get("center")
+        if not isinstance(center, dict):
+            continue
+        lat = _as_float(center.get("lat"))
+        lon = _as_float(center.get("lon"))
+        if lat is None or lon is None:
+            continue
+        props = {k: v for k, v in area.items() if k != "center" and v is not None}
+        points.append({"lat": lat, "lon": lon, "name": f"Area {i + 1}", "props": props})
+
+
 def extract_features(data) -> dict:
     """Normalize a tool result or caller GeoJSON into points + shapes.
 
@@ -361,6 +394,10 @@ def extract_features(data) -> dict:
                 shapes.append(shape)
             else:
                 skipped += 1
+            return {"points": points, "shapes": shapes, "skipped_features": skipped}
+        if _is_compare_areas_result(data):
+            _points_from_compare_areas(data, points)
+            skipped += max(0, len(data.get("areas") or []) - len(points))
             return {"points": points, "shapes": shapes, "skipped_features": skipped}
         if isinstance(data.get("results"), list):
             for r in data["results"]:
@@ -453,11 +490,11 @@ _CSS = """
 }
 * { box-sizing: border-box; }
 html, body {
-  margin: 0; padding: 0; height: 100%;
+  margin: 0; padding: 0; min-height: 100%;
   background: var(--bg); color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
-#app { display: flex; flex-direction: column; height: 100%; }
+#app { display: flex; flex-direction: column; min-height: 100vh; }
 header {
   display: flex; align-items: baseline; gap: 0.6em;
   padding: 0.7em 1em; border-bottom: 1px solid var(--border);
@@ -465,7 +502,59 @@ header {
 }
 header h1 { font-size: 1.05rem; margin: 0; font-weight: 600; }
 header .count { color: var(--muted); font-size: 0.85rem; }
-#map-container { position: relative; flex: 1; min-height: 0; }
+#verdict {
+  padding: 0.85em 1.1em 1em;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--border);
+}
+.section-label {
+  font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--muted); margin: 0 0 0.45em;
+}
+.verdict-text { line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+#body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 28rem);
+  flex: 1;
+  min-height: 0;
+}
+#map-container { position: relative; min-height: 320px; height: min(64vh, 640px); }
+#stops {
+  padding: 0.85em 1.1em 1.2em;
+  background: var(--panel-bg);
+  border-left: 1px solid var(--border);
+  overflow: auto;
+}
+.stop-list { list-style: none; margin: 0; padding: 0; }
+.stop {
+  padding: 0.65em 0.55em;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.stop:last-child { border-bottom: none; }
+.stop:hover, .stop:focus { background: var(--bg); outline: none; }
+.stop-name { font-weight: 600; font-size: 0.92rem; }
+.stop-meta { color: var(--muted); font-size: 0.8rem; margin-top: 0.2em; }
+.stop-meta .k { margin-right: 0.15em; }
+.stops-empty { color: var(--muted); font-size: 0.9rem; margin: 0; }
+#credit {
+  display: flex; flex-wrap: wrap; gap: 0.4em 1.2em;
+  align-items: baseline; justify-content: space-between;
+  padding: 0.6em 1.1em;
+  border-top: 1px solid var(--border);
+  background: var(--panel-bg);
+  font-size: 11px; color: var(--muted);
+}
+@media (max-width: 800px) {
+  #body { grid-template-columns: 1fr; }
+  #map-container { height: min(50vh, 420px); }
+  #stops { border-left: none; border-top: 1px solid var(--border); }
+}
+@media print {
+  #map-container { height: 360px; break-inside: avoid; }
+  .panel { display: none; }
+  #stops { overflow: visible; }
+}
 #map {
   display: block; width: 100%; height: 100%;
   background: var(--bg); touch-action: none; cursor: grab;
@@ -793,6 +882,19 @@ _JS = """
   var origShowPopup = showPopup;
   showPopup = function (p) { activePopupPoint = p; origShowPopup(p); };
 
+  function bindStop(el) {
+    var idx = parseInt(el.getAttribute("data-idx"), 10);
+    function open() {
+      if (POINTS[idx]) showPopup(POINTS[idx]);
+    }
+    el.addEventListener("click", function (ev) { ev.stopPropagation(); open(); });
+    el.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(); }
+    });
+  }
+  var stopNodes = document.querySelectorAll(".stop[data-idx]");
+  for (var si = 0; si < stopNodes.length; si++) bindStop(stopNodes[si]);
+
   applyTransform();
 })();
 """
@@ -811,6 +913,11 @@ _DOC = """<!doctype html>
     <h1>@@TITLE@@</h1>
     <span class="count">@@COUNT@@</span>
   </header>
+  <section id="verdict">
+    <div class="section-label">Verdict</div>
+    <div class="verdict-text">@@SUMMARY@@</div>
+  </section>
+  <div id="body">
   <div id="map-container">
     <svg id="map" viewBox="0 0 1000 640" preserveAspectRatio="xMidYMid meet">
       <g id="viewport">
@@ -833,6 +940,15 @@ _DOC = """<!doctype html>
     <div class="attribution">@@ATTRIBUTION@@</div>
     <div class="popup" id="popup" style="display:none"></div>
   </div>
+  <aside id="stops">
+    <div class="section-label">@@STOPS_LABEL@@</div>
+    @@STOPS@@
+  </aside>
+  </div>
+  <footer id="credit">
+    <span>@@ATTRIBUTION@@</span>
+    <span class="credit-note">PlaceRoot one-pager · local file · nothing uploaded</span>
+  </footer>
 </div>
 <script>@@JS@@</script>
 </body>
@@ -882,15 +998,241 @@ def _unwrap_longitudes(points: list[dict], shapes: list[dict]) -> None:
                     c[0] += 360
 
 
+
+def _fmt_distance(meters) -> str:
+    try:
+        m = float(meters)
+    except (TypeError, ValueError):
+        return str(meters)
+    if m >= 1000:
+        return f"{m / 1000:.1f} km"
+    return f"{int(round(m))} m"
+
+
+def _fmt_duration(seconds) -> str:
+    try:
+        s = float(seconds)
+    except (TypeError, ValueError):
+        return str(seconds)
+    if s >= 3600:
+        hours = int(s // 3600)
+        mins = int((s % 3600) // 60)
+        return f"{hours} h {mins} min" if mins else f"{hours} h"
+    if s >= 60:
+        return f"{int(round(s / 60))} min"
+    return f"{int(round(s))} s"
+
+
+def _clip_summary(text: str | None) -> str:
+    clipped = (text or "").strip()
+    if len(clipped) <= SUMMARY_MAX_CHARS:
+        return clipped
+    return clipped[:SUMMARY_MAX_CHARS].rstrip() + "…"
+
+
+# Props worth putting on a stop row. Nested objects (addresses lists,
+# category_counts dicts) stay in the map popup, not the scannable list.
+_STOP_DETAIL_KEYS = (
+    "category",
+    "basic_category",
+    "distance_m",
+    "operating_status",
+    "brand",
+    "confidence",
+    "address",
+    "minutes",
+    "mode",
+    "total_places",
+    "density_per_km2",
+    "duration_s",
+    "detour_m",
+    "area_km2",
+    "max_radius_m",
+)
+
+
+def _fmt_stop_value(key: str, value) -> str:
+    if key == "distance_m":
+        return _fmt_distance(value)
+    if key == "duration_s":
+        return _fmt_duration(value)
+    if key == "density_per_km2":
+        try:
+            return f"{float(value):g}/km²"
+        except (TypeError, ValueError):
+            return str(value)
+    if key == "confidence":
+        try:
+            return f"{float(value):.2f}"
+        except (TypeError, ValueError):
+            return str(value)
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def _stop_meta(props: dict) -> str:
+    bits = []
+    for key in _STOP_DETAIL_KEYS:
+        if key not in props or props[key] is None:
+            continue
+        value = props[key]
+        if isinstance(value, (list, dict)):
+            continue
+        bits.append(_fmt_stop_value(key, value))
+    return " · ".join(bits)
+
+
+def _stops_html(points: list[dict], shapes: list[dict]) -> tuple[str, str]:
+    """Label + inner HTML for the one-pager stop list (server-rendered, no JS)."""
+    items: list[str] = []
+    for i, point in enumerate(points):
+        name = html.escape(str(point.get("name") or f"Stop {i + 1}"))
+        meta = html.escape(_stop_meta(point.get("props") or {}))
+        meta_html = f'<div class="stop-meta">{meta}</div>' if meta else ""
+        items.append(
+            f'<li class="stop" data-idx="{i}" tabindex="0">'
+            f'<div class="stop-name">{name}</div>{meta_html}</li>'
+        )
+    for shape in shapes:
+        name = html.escape(str(shape.get("name") or shape.get("kind") or "Shape"))
+        meta = html.escape(_stop_meta(shape.get("props") or {}))
+        meta_html = f'<div class="stop-meta">{meta}</div>' if meta else ""
+        items.append(
+            f'<li class="stop">'
+            f'<div class="stop-name">{name}</div>{meta_html}</li>'
+        )
+    n = len(items)
+    if n == 0:
+        return "Stops", '<p class="stops-empty">No stop details.</p>'
+    noun = "stop" if n == 1 else "stops"
+    return f"{n} {noun}", f'<ol class="stop-list">{"".join(items)}</ol>'
+
+
+def compose_summary(
+    data, points: list[dict] | None = None, shapes: list[dict] | None = None
+) -> str:
+    """A short fallback verdict when the caller did not write one.
+
+    Reads the well-known tool result shapes (find_places, summarize_area,
+    compare_areas, isochrone, optimize_route) and otherwise falls back to a
+    count of extracted points/shapes. Never raises — a one-pager without a
+    verdict is worse than a generic sentence.
+    """
+    points = points or []
+    shapes = shapes or []
+
+    if isinstance(data, dict):
+        if _is_compare_areas_result(data):
+            parts = []
+            for i, area in enumerate(data.get("areas") or []):
+                if not isinstance(area, dict):
+                    continue
+                total = area.get("total_places")
+                dens = area.get("density_per_km2")
+                bit = f"Area {i + 1}"
+                if total is not None:
+                    bit += f": {total} places"
+                if dens is not None:
+                    bit += f" ({_fmt_stop_value('density_per_km2', dens)})"
+                parts.append(bit)
+            diffs = data.get("differentiators") or []
+            if diffs and isinstance(diffs[0], dict) and diffs[0].get("category"):
+                parts.append(f"Biggest difference: {diffs[0]['category']}.")
+            if parts:
+                return " ".join(parts)
+
+        if "total_places" in data and isinstance(data.get("center"), dict):
+            n = data["total_places"]
+            try:
+                n_int = int(n)
+                line = f"{n_int} place{'s' if n_int != 1 else ''}"
+            except (TypeError, ValueError):
+                line = f"{n} places"
+            radius = data.get("radius_m")
+            if radius is not None:
+                line += f" within {_fmt_distance(radius)}"
+            line += "."
+            tops = data.get("top_categories") or []
+            cats = []
+            for row in tops[:5]:
+                if isinstance(row, dict) and row.get("category") is not None:
+                    cats.append(f"{row['category']} ({row.get('count', '?')})")
+            if cats:
+                line += f" Top: {', '.join(cats)}."
+            return line
+
+        if _is_isochrone_result(data):
+            minutes = data.get("minutes")
+            mode = data.get("mode") or "travel"
+            line = f"{minutes}-minute {mode} reachability."
+            stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
+            area = stats.get("area_km2")
+            if area is not None:
+                line += f" About {area} km²."
+            return line
+
+        if isinstance(data.get("order"), list) and "total_distance_m" in data:
+            n = len(data["order"])
+            line = f"{n}-stop run"
+            dist = data.get("total_distance_m")
+            if dist is not None:
+                line += f", {_fmt_distance(dist)} total"
+            dur = data.get("total_duration_s")
+            if dur is not None:
+                line += f" (~{_fmt_duration(dur)})"
+            return line + "."
+
+        if isinstance(data.get("results"), list):
+            rows = [r for r in data["results"] if isinstance(r, dict)]
+            n = len(rows)
+            if n == 0:
+                return "No places in this result."
+            first = rows[0].get("name") or "Unnamed"
+            line = f"{n} place{'s' if n != 1 else ''}."
+            dist = rows[0].get("distance_m")
+            if dist is not None:
+                line += f" Nearest: {first} ({_fmt_distance(dist)})."
+            else:
+                line += f" First: {first}."
+            return line
+
+    n_pts, n_shp = len(points), len(shapes)
+    parts = []
+    if n_pts:
+        parts.append(f"{n_pts} place{'s' if n_pts != 1 else ''}")
+    if n_shp:
+        parts.append(f"{n_shp} shape{'s' if n_shp != 1 else ''}")
+    return (" · ".join(parts) + ".") if parts else "No places to show."
+
+
+def _unique_slot(*blobs: str) -> str:
+    """A substitution token that does not appear in any of the given strings."""
+    for _ in range(16):
+        token = f"@@PR_{secrets.token_hex(16)}@@"
+        if all(token not in blob for blob in blobs):
+            return token
+    raise RuntimeError("could not allocate a collision-proof template token")
+
+
 def render_html(
-    points: list[dict], title: str | None = None, shapes: list[dict] | None = None
+    points: list[dict],
+    title: str | None = None,
+    shapes: list[dict] | None = None,
+    summary: str | None = None,
 ) -> str:
     """Render points + shapes (as produced by extract_points/extract_features) into one HTML doc.
 
     `shapes` is optional and defaults to none, so callers that only ever
-    dealt with points (extract_points()) keep working unchanged.
+    dealt with points (extract_points()) keep working unchanged. `summary`
+    is the composed verdict on the one-pager; when omitted a short fallback
+    is composed from the extracted features (#310).
     """
     shapes = shapes or []
+    if summary is None:
+        summary = compose_summary(None, points, shapes)
     safe_title = html.escape(title or "PlaceRoot map", quote=True)
     count = len(points)
     shape_count = len(shapes)
@@ -926,15 +1268,31 @@ def render_html(
         {"points": points_for_js, "shapes": shapes_for_js}, default=str
     ).replace("</", "<\\/")
 
+    stops_label, stops_html = _stops_html(points, shapes)
+    # Swap every @@TOKEN@@ for a unique slot first so a place named
+    # "@@STOPS@@" (or a title/summary containing one) cannot rewrite
+    # another substitution. Embed the script — and its user JSON — last.
+    replacements = {
+        "CSS": _CSS,
+        "TITLE": safe_title,
+        "COUNT": html.escape(count_label),
+        "SUMMARY": html.escape(_clip_summary(summary)),
+        "STOPS_LABEL": html.escape(stops_label),
+        "STOPS": stops_html,
+        "ATTRIBUTION": html.escape(ATTRIBUTION),
+    }
+    known = [data_json, _JS, _DOC, *replacements.values()]
+    slots: dict[str, str] = {}
+    doc = _DOC
+    for name in (*replacements, "JS"):
+        token = _unique_slot(doc, *known, *slots.values())
+        doc = doc.replace(f"@@{name}@@", token)
+        slots[name] = token
+        known.append(token)
+    for name, value in replacements.items():
+        doc = doc.replace(slots[name], value)
     js = _JS.replace("__DATA_JSON__", data_json)
-    doc = (
-        _DOC.replace("@@CSS@@", _CSS)
-        .replace("@@JS@@", js)
-        .replace("@@TITLE@@", safe_title)
-        .replace("@@COUNT@@", html.escape(count_label))
-        .replace("@@ATTRIBUTION@@", html.escape(ATTRIBUTION))
-    )
-    return doc
+    return doc.replace(slots["JS"], js)
 
 
 def _shape_vertex_count(shape: dict) -> int:
@@ -989,6 +1347,7 @@ def write_artifact(
     title: str | None = None,
     inline: bool = False,
     out_dir: Path | None = None,
+    summary: str | None = None,
 ) -> dict:
     """Extract points/shapes from data, render the HTML artifact, and write it to disk.
 
@@ -1000,12 +1359,17 @@ def write_artifact(
     (extract_features) or dropped for exceeding MAX_RENDER_VERTICES
     (_cap_vertices) — render_map degrades rather than failing or writing an
     unbounded artifact.
+
+    `summary` is the composed verdict on the one-pager (#310). When omitted,
+    compose_summary() writes a short fallback from the payload itself.
     """
     extracted = extract_features(data)
     points, shapes, dropped = _cap_vertices(
         extracted["points"], extracted["shapes"], MAX_RENDER_VERTICES
     )
-    doc = render_html(points, title=title, shapes=shapes)
+    if summary is None:
+        summary = compose_summary(data, points, shapes)
+    doc = render_html(points, title=title, shapes=shapes, summary=summary)
     encoded = doc.encode("utf-8")
 
     directory = out_dir if out_dir is not None else artifact_dir()
@@ -1025,3 +1389,22 @@ def write_artifact(
     if inline and len(encoded) <= INLINE_MAX_BYTES:
         result["html"] = doc
     return result
+
+
+def export_report(
+    data,
+    title: str | None = None,
+    summary: str | None = None,
+    inline: bool = False,
+    out_dir: Path | None = None,
+) -> dict:
+    """Write a shareable one-pager: map + verdict + stop list + attribution.
+
+    Same envelope as write_artifact. `summary` is the verdict you would tell
+    a spouse, co-founder, or landlord; when omitted a short fallback is
+    composed from the payload. The file is dependency-free and opens at
+    file:// with no network.
+    """
+    return write_artifact(
+        data, title=title, inline=inline, out_dir=out_dir, summary=summary
+    )
