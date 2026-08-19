@@ -9,6 +9,12 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- Auto-warm on first city-scale resolve: a successful `geocode` /
+  `resolve_place` / `resolve_area` of a locality (not a POI, street, or
+  address) starts background tile prewarm through the existing
+  `warmup_city` path. Walk street graphs persist next to tiles — not
+  inside the tile LRU — and survive process restart. Tiles are not a
+  built graph; the first walk still builds or loads one (#330).
 - `route` and `optimize_route` now return an `export` object: Google/Apple
   Maps directions links (URL schemes only — no API, no keys, no extra
   network), a GPX 1.1 document, and a printable stop list, so a Saturday
