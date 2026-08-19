@@ -12,3 +12,5 @@ MIT licensed, works with Claude Code, Claude Desktop, Cursor, Codex, Grok — an
 
 🌐 Website: https://placeroot.dev
 💻 Repo: https://github.com/chuofringer/placeroot
+
+#Geospatial #GIS #OpenData #OpenSource #MCP #AIAgents #Maps #OvertureMaps #LLM #AgenticAI
