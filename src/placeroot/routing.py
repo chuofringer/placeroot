@@ -64,10 +64,15 @@ find a loop, isochrone() falls back to the convex hull, same as before
 #36. Either way the *stats* (reachable node count, per-node distances) are
 exact; only the drawn polygon shape approximates.
 
-Graph cache (#39): isochrone() reuses a previously-built Graph when the
-newly-needed extraction area is fully contained within a cached graph's
-(deliberately over-fetched) area, keyed by (release, upstream source,
-mode, drive-speed-baking) — see _get_or_build_graph.
+Graph cache (#39, #330): isochrone() reuses a previously-built Graph when
+the newly-needed extraction area is fully contained within a cached
+graph's (deliberately over-fetched) area, keyed by (release, upstream
+source, mode, drive-speed-baking) — see _get_or_build_graph. The
+in-memory LRU is 8 slots; walk graphs are also pickled next to tiles
+(not inside the tile LRU) so a process restart loads instead of
+rebuilding. Tiles are not a built graph. pickle.load from
+PLACEROOT_CACHE_DIR is code execution for anyone who can write that
+dir; format-version is not a safety boundary.
 
 Graph size cap (#73, defense in depth): DRIVE_MAX_RADIUS_M bounds the
 extraction *radius*, not the graph's node/edge count — a dense-enough urban
@@ -104,8 +109,11 @@ import heapq
 import itertools
 import logging
 import math
+import os
+import pickle
 import threading
 from collections import OrderedDict
+from pathlib import Path
 
 import duckdb
 
@@ -358,6 +366,15 @@ CONCAVE_CELL_DIVISOR = 40.0  # cell size ~= max(CONCAVE_CELL_MIN_M, reached_radi
 
 GRAPH_CACHE_MAXSIZE = 8
 GRAPH_CACHE_MARGIN = 1.3  # over-fetch factor so nearby repeat queries hit the cache
+
+# On-disk sibling of the in-memory LRU (#330). Walk graphs survive process
+# restart here; they are NOT tiles and must not live inside the tile LRU
+# that evicts parquet. Path:
+#   {cache_dir}/{release}/graphs/{mode}_{speed}_{shapes}_r{radius}_t{ty}_{tx}.pkl
+# Own file-count cap, independent of PLACEROOT_CACHE_MAX_MB.
+GRAPH_DISK_FORMAT = 1
+GRAPH_DISK_MAX_FILES = 16
+GRAPH_DISK_SUBDIR = "graphs"
 
 REQUIRED_COLUMNS = ["id", "geometry", "bbox", "class", "connectors"]
 ESSENTIAL_COLUMNS = {"geometry", "bbox"}
@@ -891,8 +908,9 @@ def build_graph(
     """
     progress.report(
         "Building the street graph for this area from Overture's road "
-        "network — the first routing query here is slow; the graph is "
-        "cached, repeat routing over this area answers in milliseconds",
+        "network — the first walk here is slow even when tiles are warm "
+        "(tiles are not a built graph); the graph is then cached in "
+        "memory and on disk",
         eta_s=progress.GRAPH_BUILD_S,
     )
     if mode not in MODE_CONFIG:
@@ -1434,9 +1452,170 @@ def _graph_cache_tile(lat: float, lon: float, tile_deg: float = 0.05) -> tuple[i
 
 
 def clear_graph_cache() -> None:
-    """Drop every cached graph. Used by tests; safe to call anytime."""
+    """Drop every in-memory cached graph. Used by tests; safe to call anytime.
+
+    Does not delete on-disk graphs — that is the point of #330: a process
+    restart (or this call) still loads a persisted walk graph instead of
+    rebuilding.
+    """
     with _graph_cache_lock:
         _graph_cache.clear()
+
+
+def _graph_disk_root(release_key: str) -> Path:
+    """Sibling of theme tile dirs: {cache_dir}/{release}/graphs/."""
+    return cache.cache_dir() / release_key / GRAPH_DISK_SUBDIR
+
+
+def _graph_disk_name(
+    mode: str, speed_tag: str, tile: tuple[int, int], radius_m: float, has_shapes: bool
+) -> str:
+    ty, tx = tile
+    flag = "s" if has_shapes else "n"
+    return f"{mode}_{speed_tag}_{flag}_r{int(round(radius_m))}_t{ty}_{tx}.pkl"
+
+
+def _evict_disk_graphs(root: Path) -> None:
+    """Own file-count cap — never walks tile_*.parquet."""
+    try:
+        files = [f for f in root.glob("*.pkl") if f.is_file()]
+    except OSError:
+        return
+    files.sort(key=lambda f: f.stat().st_mtime)
+    while len(files) > GRAPH_DISK_MAX_FILES:
+        old = files.pop(0)
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
+
+def _persist_graph_to_disk(
+    key_prefix: tuple,
+    lat: float,
+    lon: float,
+    radius_m: float,
+    bbox: tuple[float, float, float, float],
+    graph: Graph,
+) -> None:
+    """Atomic pickle next to tiles. Never holds conn_lock. Best-effort."""
+    if not cache.enabled() or graph.node_count() == 0:
+        return
+    release_key, _upstream, mode, speed_tag = key_prefix
+    root = _graph_disk_root(release_key)
+    path = root / _graph_disk_name(
+        mode, speed_tag, _graph_cache_tile(lat, lon), radius_m, graph.has_shapes
+    )
+    payload = {
+        "format": GRAPH_DISK_FORMAT,
+        "bbox": bbox,
+        "radius_m": radius_m,
+        "graph": graph,
+    }
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "wb") as fh:
+            pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, path)
+        _evict_disk_graphs(root)
+    except Exception as e:  # noqa: BLE001 - persist must not fail the route
+        logger.warning("graph persist failed for %s: %s", path, e)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _load_one_graph_file(path: Path) -> tuple[tuple[float, float, float, float], Graph] | None:
+    try:
+        with open(path, "rb") as fh:
+            payload = pickle.load(fh)
+    except Exception:  # noqa: BLE001 - corrupt/unreadable file: rebuild
+        logger.warning("graph load failed for %s; will rebuild", path, exc_info=True)
+        return None
+    if not isinstance(payload, dict) or payload.get("format") != GRAPH_DISK_FORMAT:
+        return None
+    graph = payload.get("graph")
+    bbox = payload.get("bbox")
+    if not isinstance(graph, Graph):
+        return None
+    if isinstance(bbox, list):
+        bbox = tuple(bbox)
+    if not (isinstance(bbox, tuple) and len(bbox) == 4):
+        return None
+    return bbox, graph
+
+
+def _load_graph_from_disk(
+    key_prefix: tuple,
+    needed_bbox: tuple[float, float, float, float],
+    want_shapes: bool,
+    lat: float,
+    lon: float,
+) -> tuple[tuple[float, float, float, float], Graph] | None:
+    """Load a persisted graph whose bbox covers this query, if any.
+
+    Tries the exact tile filename first, then scans the small graphs dir
+    (capped at GRAPH_DISK_MAX_FILES). A shapeless file never satisfies
+    want_shapes=True — same subsumption rule as the in-memory LRU.
+    """
+    if not cache.enabled():
+        return None
+    release_key, _upstream, mode, speed_tag = key_prefix
+    root = _graph_disk_root(release_key)
+    if not root.is_dir():
+        return None
+    prefix = f"{mode}_{speed_tag}_"
+    tile = _graph_cache_tile(lat, lon)
+    cap_m = MODE_CONFIG[mode]["max_radius_m"]
+    preferred = [
+        root / _graph_disk_name(
+            mode, speed_tag, tile, min(r * GRAPH_CACHE_MARGIN, cap_m), shapes
+        )
+        for r in (WALK_MAX_RADIUS_M, 5000.0, 8000.0)
+        for shapes in (True, False)
+    ]
+    seen: set[Path] = set()
+    candidates: list[Path] = []
+    for path in preferred:
+        if path.is_file() and path not in seen:
+            seen.add(path)
+            candidates.append(path)
+    try:
+        others = sorted(root.glob(f"{prefix}*.pkl"), key=lambda f: -f.stat().st_mtime)
+    except OSError:
+        others = []
+    for path in others:
+        if path not in seen:
+            seen.add(path)
+            candidates.append(path)
+    for path in candidates:
+        loaded = _load_one_graph_file(path)
+        if loaded is None:
+            continue
+        bbox, graph = loaded
+        if want_shapes and not graph.has_shapes:
+            continue
+        if _bbox_contains(bbox, needed_bbox):
+            logger.debug("graph cache disk hit %s", path.name)
+            return bbox, graph
+    return None
+
+
+def _store_graph_in_memory(
+    key_prefix: tuple,
+    lat: float,
+    lon: float,
+    extraction_bbox: tuple[float, float, float, float],
+    graph: Graph,
+) -> None:
+    with _graph_cache_lock:
+        key = (*key_prefix, _graph_cache_tile(lat, lon))
+        _graph_cache[key] = _GraphCacheEntry(extraction_bbox, graph)
+        _graph_cache.move_to_end(key)
+        while len(_graph_cache) > GRAPH_CACHE_MAXSIZE:
+            _graph_cache.popitem(last=False)
 
 
 def _get_or_build_graph(
@@ -1453,7 +1632,9 @@ def _get_or_build_graph(
     A cached graph is reused when its (deliberately over-fetched, by
     GRAPH_CACHE_MARGIN) extraction bbox fully contains the bbox this query
     actually needs, and the cache key (release, upstream source, mode,
-    speed-baking) matches exactly. On a miss, a fresh graph is built for
+    speed-baking) matches exactly. Memory is checked first; on a miss the
+    on-disk walk-graph sibling is tried before rebuild (#330). On a miss,
+    a fresh graph is built for
     GRAPH_CACHE_MARGIN x the requested radius (capped at radius_cap_m) so
     nearby repeat queries are likely to hit next time, and stored, evicting
     the least-recently-used entry once the cache exceeds GRAPH_CACHE_MAXSIZE.
@@ -1498,6 +1679,12 @@ def _get_or_build_graph(
                 _graph_cache.move_to_end(key)
                 return entry.graph
 
+    loaded = _load_graph_from_disk(key_prefix, needed_bbox, want_shapes, lat, lon)
+    if loaded is not None:
+        extraction_bbox, graph = loaded
+        _store_graph_in_memory(key_prefix, lat, lon, extraction_bbox, graph)
+        return graph
+
     cap_m = radius_cap_m if radius_cap_m is not None else MODE_CONFIG[mode]["max_radius_m"]
     if extraction_radius_m > cap_m:
         raise RadiusTooLarge(extraction_radius_m, cap_m)
@@ -1509,14 +1696,12 @@ def _get_or_build_graph(
         lat, lon, padded_radius_m, mode=mode, speed_m_s=speed_m_s, want_shapes=want_shapes, **extra
     )
     extraction_bbox = _bbox_around(lat, lon, padded_radius_m)
-
-    with _graph_cache_lock:
-        key = (*key_prefix, _graph_cache_tile(lat, lon))
-        _graph_cache[key] = _GraphCacheEntry(extraction_bbox, graph)
-        _graph_cache.move_to_end(key)
-        while len(_graph_cache) > GRAPH_CACHE_MAXSIZE:
-            _graph_cache.popitem(last=False)
-
+    # Persist off the lock — pickle I/O must not hold conn_lock either
+    # (build_graph already released it). Memory insert is a short dict write.
+    _persist_graph_to_disk(
+        key_prefix, lat, lon, padded_radius_m, extraction_bbox, graph
+    )
+    _store_graph_in_memory(key_prefix, lat, lon, extraction_bbox, graph)
     return graph
 
 

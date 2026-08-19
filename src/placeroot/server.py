@@ -90,9 +90,11 @@ BASE_INSTRUCTIONS = (
     "verify_before_going naming the 1–2 stops most worth checking — surface "
     "both. Users forgive missing data; they do not forgive a shuttered café.\n\n"
     "The first query over a new city is the slow one (a cold scan of "
-    "public S3 data); every later query over that area answers in "
-    "milliseconds. An optional warmup pays that cost before the first "
-    "real question.\n\n"
+    "public S3 data). Resolving a city starts background tile warming "
+    "so later place searches over that metro read locally. Tiles are "
+    "not a built street graph — the first walk still builds or loads "
+    "the graph; later walks reuse it. Optional warmup_city pays the "
+    "tile cost inline if you want to wait.\n\n"
     "Named walks and \"X near Y\" are one hop each: from_to() "
     "and find_near() accept place names. Do not chain "
     "geocode + route or resolve + find_places for those questions."
@@ -2209,8 +2211,9 @@ _WARMUP_THEMES: tuple[tuple[str, str], ...] = (
 def _prewarm_region(lat: float, lon: float, radius_m: float) -> dict:
     """Materialize existing-cache tiles for a metro bbox.
 
-    Shared by warmup_city and _warm_start. Same cache.py tiles — no
-    second cache, no extra remote API.
+    Shared by warmup_city, _warm_start, and autowarm (first city-scale
+    resolve). Same cache.py tiles — no second cache, no extra remote API.
+    Tiles are not a built street graph.
     """
     radius_m = min(max(float(radius_m), 0.0), MAX_WARMUP_RADIUS_M)
     if not cache.enabled():

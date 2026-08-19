@@ -13,6 +13,18 @@ fixing behavior is patch.
   "X near Y" is one tool hop. Resolves names inside the server
   (A and B in parallel), reuses `route` / `find_places`, and refuses
   a city-apart pair before any continent graph is built (#328).
+- Auto-warm on first city-scale resolve: a successful `geocode` /
+  `resolve_place` / `resolve_area` of a locality (not a POI, street, or
+  address) starts background tile prewarm through the existing
+  `warmup_city` path. Walk street graphs persist next to tiles — not
+  inside the tile LRU — and survive process restart. Tiles are not a
+  built graph; the first walk still builds or loads one (#330).
+- Question-level 15s ship gate: 20 corpus ids, cold then warm, clock on
+  the whole user question (all hops). Fails on a wrong place and on
+  timeout; 10s is a stretch column, not a fail. Weekdays 15:00 UTC
+  (08:00 PDT / 07:00 PST);
+  PR authors prove a change with `--smoke --warm --budget-s 15
+  --fail-on both` (#331).
 - `route` and `optimize_route` now return an `export` object: Google/Apple
   Maps directions links (URL schemes only — no API, no keys, no extra
   network), a GPX 1.1 document, and a printable stop list, so a Saturday
@@ -39,6 +51,10 @@ fixing behavior is patch.
   question is fast. Cold scans now carry an honest ETA on MCP progress
   notifications. A `get_to_know_my_city` prompt walks the same path
   (#314).
+- Actionable place rows now include a `trust_note`: a short before-you-go
+  line from existing confidence and operating status. Composed itineraries
+  add `verify_before_going` naming the 1–2 weakest-confidence stops
+  (#308, #323).
 
 ## [0.9.7] — 2026-08-15
 

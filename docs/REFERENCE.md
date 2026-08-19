@@ -33,13 +33,13 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `gers_lookup` | Any GERS id → the entity it names (place, division, or building), what it's inside, and the building at its point |
 | `search_categories` | Free text → the right Overture category slug to filter `find_places` by |
 | `isochrone` | The area reachable within N minutes on foot, bike, or car |
-| `route` | Shortest-path distance and duration between two points, on foot, bike, or car; `include_path=true` adds the simplified route polyline |
+| `route` | Shortest-path distance and duration between two points, on foot, bike, or car; `include_path=true` adds the simplified route polyline; also returns an `export` object (Google/Apple Maps links, GPX, printable stop list) |
 | `from_to` | Named-place walk/cycle/drive: resolve A and B in parallel, one graph, same shape as `route` including `export` maps/gpx/text. Fails with `too_far` if the ends are a city apart |
 | `find_near` | Category near a named place or city — one hop for "coffee shops near the Eiffel Tower"; compact rows with `trust_note` |
-| `places_along_route` | Places on the way from A to B: corridor search along the route, with each result's detour and how far along it sits |
+| `places_along_route` | Places on the way from A to B: corridor search along the route, with each result's detour and how far along it sits, compact trust notes on results, and a verify-before-going line for the weakest stops |
 | `neighborhood_verdict` | Should I live here? A ranked verdict from life context (household, mobility, priorities) — strengths, weak points, one thing to verify in person |
-| `optimize_route` | Best order to visit 2–10 stops, solved exactly over the street graph — order, per-leg distance/duration, and totals |
-| `render_map` | Any result → a self-contained interactive HTML map |
+| `optimize_route` | Best order to visit 2–10 stops, solved exactly over the street graph — order, per-leg distance/duration, totals, an `export` object (Google/Apple Maps links, GPX, printable stop list), and `verify_before_going` when stops already carry confidence/operating_status |
+| `render_map` | Any result → a shareable one-pager (interactive map, verdict, stop list, and Overture/OSM attribution); optional `summary` for the verdict, otherwise a short fallback is composed from the payload |
 | `simplify_geometry` | Any geometry → simplified to fit a token budget |
 | `warmup_city` | Pre-cache a city's places and transportation tiles so later place searches over it read locally — does not build the street graph or cache buildings |
 | `data_version` | Which Overture release the answers are drawn from |
@@ -73,9 +73,9 @@ Desktop and Cursor surface them in their own prompt pickers.
 
 | Prompt | Arguments | Workflow |
 |---|---|---|
-| `/mcp__placeroot__site_selection` | `business_type`, `area` | `search_categories` → `geocode` → `summarize_area` → `compare_areas` → `find_places` + `within_distance` → one ranked recommendation |
-| `/mcp__placeroot__compare_neighborhoods` | `area_a`, `area_b` | `geocode`/`resolve_place` + `admin_lookup` → `summarize_area` ×2 → `compare_areas` → `summarize_buildings` → a small difference table |
-| `/mcp__placeroot__plan_errands` | `stops`, `start` (optional) | `geocode_batch` → `distance_matrix` → `route` per leg → optional `places_along_route` → an ordered run with per-leg distance and duration, plus a verify-before-going line for the weakest 1–2 stops |
+| `/mcp__placeroot__site_selection` | `business_type`, `area` | `search_categories` → `geocode` → `summarize_area` → `compare_areas` → `find_places` + `within_distance` → one ranked recommendation → `render_map()` so the user leaves with a file |
+| `/mcp__placeroot__compare_neighborhoods` | `area_a`, `area_b` | `geocode`/`resolve_place` + `admin_lookup` → `summarize_area` ×2 → `compare_areas` → `summarize_buildings` → a small difference table → `render_map()` so the user leaves with a file |
+| `/mcp__placeroot__plan_errands` | `stops`, `start` (optional) | `geocode_batch` → `distance_matrix` → `route` per leg → optional `places_along_route` → an ordered run with per-leg distance and duration, plus a verify-before-going line for the weakest 1–2 stops → `render_map()` so the user leaves with a file |
 | `/mcp__placeroot__should_i_live_here` | `location`, `context` (optional) | `geocode` (if needed) → `neighborhood_verdict` → a verdict, strengths, the weak point, and the one thing to verify in person |
 | `/mcp__placeroot__get_to_know_my_city` | `city` (optional) | `warmup_city` → pre-cache the metro so the first real question is fast |
 
@@ -200,7 +200,7 @@ env vars; see below.) The ones an operator is most likely to reach for:
 | `PLACEROOT_TOKEN_BUDGET` | `2000` | Soft per-response token budget (chars/4 heuristic); rows are dropped lowest-ranked first, then optional fields, until a response fits |
 | `PLACEROOT_RECREATION_LAYER` | on | `0`/`false`/`no`/`off` disables the base-theme recreation layer ([docs/RECREATION.md](RECREATION.md)) |
 | `PLACEROOT_CACHE` | on | `off` disables the local tile cache entirely |
-| `PLACEROOT_CACHE_DIR` | `~/.cache/placeroot` | Where tiles, the geocode name index, and support tables live |
+| `PLACEROOT_CACHE_DIR` | `~/.cache/placeroot` | Where tiles, persisted walk graphs, the geocode name index, and support tables live |
 | `PLACEROOT_ARTIFACT_DIR` | sibling of `PLACEROOT_CACHE_DIR` (`.../artifacts`) | Where `render_map` writes its self-contained HTML files |
 | `PLACEROOT_CACHE_MAX_MB` | `500` | LRU size cap for the cache directory |
 | `PLACEROOT_CACHE_SYNC` | off | Materialize missing tiles inline instead of in the background (tests, warm-starts) |
@@ -216,8 +216,12 @@ env vars; see below.) The ones an operator is most likely to reach for:
 Cold-query behavior worth knowing: the first query over a new area fetches
 that area's tiles (narrated via MCP progress when the client sends a
 `progressToken`); repeat queries answer from the local cache in
-milliseconds. Wheel-bundled per-release manifests keep even the first
-query's scan to the few files its bounding box intersects.
+milliseconds. Resolving a city-scale place also starts background tile
+warming for that metro — users never have to call `warmup_city`. Tiles
+are not a built street graph: the first walk still builds or loads the
+graph; later walks reuse the on-disk graph across process restarts.
+Wheel-bundled per-release manifests keep even the first query's scan to
+the few files its bounding box intersects.
 
 **Which Overture release you get.** Three bundled artifact sets — the file
 manifests, the stage-0 geocode index and the coarse land-cover grid — are
