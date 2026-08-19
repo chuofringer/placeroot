@@ -1,6 +1,7 @@
 import os
 import threading
 import time
+from pathlib import Path
 
 import duckdb
 import pytest
@@ -736,3 +737,63 @@ def test_eviction_blocked_while_a_query_is_resolving_its_tiles(con, cache_dir, s
     assert paths
     missing = [p for p in paths if not os.path.exists(p)]
     assert not missing, f"eviction deleted {len(missing)} tile(s) mid-resolve: {missing}"
+
+
+
+def test_force_sync_materializes_without_cache_sync_env(con, cache_dir, monkeypatch):
+    """warmup_city / _warm_start must not depend on PLACEROOT_CACHE_SYNC."""
+    monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
+    bbox = (-74.0, 40.0, -73.0, 41.0)
+    paths = cache.local_paths_for_query(
+        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), duckdb.connect,
+        force_sync=True,
+    )
+    assert paths
+    assert all(Path(p).exists() for p in paths)
+
+
+def test_prewarm_bbox_reuses_the_tile_cache(con, cache_dir, monkeypatch):
+    monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
+    bbox = (-74.0, 40.0, -73.0, 41.0)
+    first = cache.prewarm_bbox(
+        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), duckdb.connect,
+    )
+    assert first["status"] == "warmed"
+    assert first["fetched"] >= 1
+    assert first["cached"] >= 1
+    second = cache.prewarm_bbox(
+        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), duckdb.connect,
+    )
+    assert second["status"] == "already_warm"
+    assert second["fetched"] == 0
+
+
+def test_prewarm_bbox_is_noop_when_cache_disabled(con, monkeypatch):
+    monkeypatch.setenv("PLACEROOT_CACHE", "off")
+    result = cache.prewarm_bbox(
+        con, RELEASE, THEME, (-74.0, 40.0, -73.0, 41.0), str(FIXTURE_PATH),
+    )
+    assert result["status"] == "cache_disabled"
+    assert result["cached"] == 0
+
+
+def test_force_sync_respects_heavy_theme_tile_cap(cache_dir, con, monkeypatch):
+    # force_sync must not bypass HEAVY_SYNC_MAX_TILES.
+    monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
+    monkeypatch.setitem(cache.HEAVY_THEME_TILE_DEG, THEME, 0.25)
+    fetches = []
+
+    def fake_ensure(*args, **kwargs):
+        fetches.append(args)
+        return Path("/tmp/nope")
+
+    monkeypatch.setattr(cache, "ensure_tile", fake_ensure)
+    bbox = (-74.9, 40.1, -73.1, 41.9)
+    tiles = cache.tiles_for_bbox(*bbox, tile_deg=0.25)
+    assert len(tiles) > cache.HEAVY_SYNC_MAX_TILES
+    cache.local_paths_for_query(
+        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), duckdb.connect,
+        force_sync=True,
+        schedule_missing=False,
+    )
+    assert len(fetches) <= cache.HEAVY_SYNC_MAX_TILES

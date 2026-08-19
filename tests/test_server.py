@@ -223,32 +223,31 @@ def test_parse_warm_region_reexported_for_operators():
     assert parse_warm_region("40.7,-73.9,1000") == (40.7, -73.9, 1000.0)
 
 
-def test_warm_start_forces_sync_cache_mode_and_restores_previous_value(monkeypatch):
-    """Issue #31: _warm_start must materialize its tiles inline (it's a
-    one-shot startup call, blocking is fine), and must not leak
-    PLACEROOT_CACHE_SYNC into the rest of the process afterward.
+def test_warm_start_materializes_via_existing_cache(monkeypatch):
+    """Issue #314: _warm_start reuses cache.prewarm_bbox (force_sync),
+    not a second cache and not a leaked PLACEROOT_CACHE_SYNC flag.
     """
     monkeypatch.setenv("PLACEROOT_WARM_REGION", f"{CENTER_LAT},{CENTER_LON},1000")
     monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
     monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
 
-    seen_during_call = {}
-    original_find_places = server.overture.find_places
+    called = []
 
-    def spy_find_places(*args, **kwargs):
-        seen_during_call["sync"] = os.environ.get("PLACEROOT_CACHE_SYNC")
-        return original_find_places(*args, **kwargs)
+    def spy_prewarm(lat, lon, radius_m):
+        called.append((lat, lon, radius_m))
+        return {"status": "warmed"}
 
-    monkeypatch.setattr(server.overture, "find_places", spy_find_places)
+    monkeypatch.setattr(server, "_prewarm_region", spy_prewarm)
     server._warm_start()
-    assert seen_during_call["sync"] == "1"
-    assert os.environ.get("PLACEROOT_CACHE_SYNC") is None  # restored
+    assert called == [(CENTER_LAT, CENTER_LON, 1000.0)]
+    assert os.environ.get("PLACEROOT_CACHE_SYNC") is None
 
 
-def test_warm_start_restores_prior_sync_value_if_one_was_set(monkeypatch):
+def test_warm_start_does_not_mutate_cache_sync_env(monkeypatch):
     monkeypatch.setenv("PLACEROOT_WARM_REGION", f"{CENTER_LAT},{CENTER_LON},1000")
     monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
     monkeypatch.setenv("PLACEROOT_CACHE_SYNC", "0")
+    monkeypatch.setattr(server, "_prewarm_region", lambda *a, **k: {"status": "warmed"})
     server._warm_start()
     assert os.environ.get("PLACEROOT_CACHE_SYNC") == "0"
 

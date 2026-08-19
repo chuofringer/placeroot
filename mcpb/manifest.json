@@ -166,6 +166,10 @@
     {
       "name": "data_version",
       "description": "Which Overture Maps release backs the answers from every other tool."
+    },
+    {
+      "name": "warmup_city",
+      "description": "Pre-cache a city so the first question is fast."
     }
   ],
   "tools_generated": false,

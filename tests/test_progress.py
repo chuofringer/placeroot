@@ -204,3 +204,42 @@ def test_middleware_ignores_non_tool_requests():
         return "ok"
 
     assert asyncio.run(server._progress_middleware(ctx, call_next)) == "ok"
+
+
+# --- honest ETAs (issue #314) ------------------------------------------------
+
+
+def test_format_eta_is_a_range_not_a_countdown():
+    assert progress.format_eta(8, 15) == "about 8–15 seconds"
+    assert progress.format_eta(5, 5) == "about 5 seconds"
+    assert progress.format_eta(1, 1) == "about 1 second"
+    assert progress.format_eta(45, 180) == "about 1–3 minutes"
+    assert progress.format_eta(0, 0) == "about a second"
+
+
+def test_tile_eta_scales_with_missing_tiles_and_two_workers():
+    lo, hi = progress.tile_eta("places", 1)
+    assert (lo, hi) == (3.0, 8.0)
+    # 4 tiles / 2 workers = 2 waves
+    lo4, hi4 = progress.tile_eta("places", 4)
+    assert (lo4, hi4) == (6.0, 16.0)
+    assert progress.tile_eta("places", 0) == (0.0, 0.0)
+
+
+def test_report_appends_eta_when_given(captured):
+    progress.report("Fetching map data", 0, 2, eta_s=(3, 8))
+    assert captured == [("Fetching map data — about 3–8 seconds", 0, 2)]
+
+
+def test_sync_materialization_messages_carry_an_eta(captured, tmp_path, monkeypatch):
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "c"))
+    monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
+    monkeypatch.setenv("PLACEROOT_CACHE_SYNC", "1")
+    con = duckdb.connect()
+    bbox = (CENTER_LON - 0.01, CENTER_LAT - 0.01, CENTER_LON + 0.01, CENTER_LAT + 0.01)
+    cache.local_paths_for_query(
+        con, release.resolve_release(), "places", bbox, overture._upstream_glob(),
+        duckdb.connect,
+    )
+    messages = [m for m, _, _ in captured]
+    assert any("about" in m and "second" in m for m in messages)

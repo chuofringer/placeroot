@@ -48,6 +48,10 @@ PROFILES: dict[str, frozenset[str]] = {
         # internals. In core so a default install can answer "should I
         # live here" without loading the analysis profile.
         "neighborhood_verdict",
+        # Optional first-session step: pre-cache a metro so the first
+        # real question is fast. Lives in core because that is the
+        # install-to-wow path (issue #314).
+        "warmup_city",
     }),
     # Find/name/identify, including the batch siblings and the category
     # lookup that makes find_places' category filter usable.

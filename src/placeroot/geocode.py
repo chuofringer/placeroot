@@ -1269,7 +1269,8 @@ def _local_divisions_table() -> str | None:
     glob = overture.upstream_glob(theme="divisions", type_="division")
     progress.report(
         "Building the place-name index (one-time per data release) — this "
-        "first name search is slow; every search after it answers instantly"
+        "first name search is slow; every search after it answers instantly",
+        eta_s=progress.DIVISIONS_INDEX_S,
     )
     logger.info(
         "materializing local divisions name table for release %s "

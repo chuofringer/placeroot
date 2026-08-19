@@ -34,6 +34,7 @@ from placeroot import (
     buildings,
     cache,
     categories,
+    db,
     divisions,
     errors,
     export,
@@ -86,7 +87,11 @@ BASE_INSTRUCTIONS = (
     "Actionable place rows carry trust_note, a calibrated before-you-go "
     "clause from confidence and operating status. Composed itineraries add "
     "verify_before_going naming the 1–2 stops most worth checking — surface "
-    "both. Users forgive missing data; they do not forgive a shuttered café."
+    "both. Users forgive missing data; they do not forgive a shuttered café.\n\n"
+    "The first query over a new city is the slow one (a cold scan of "
+    "public S3 data); every later query over that area answers in "
+    "milliseconds. An optional warmup pays that cost before the first "
+    "real question."
 )
 
 DEFAULT_HTTP_HOST = "127.0.0.1"
@@ -1981,6 +1986,177 @@ def preferences(
         return exc.as_dict()
 
 
+DEFAULT_WARMUP_RADIUS_M = 8000.0
+MAX_WARMUP_RADIUS_M = 25_000.0
+
+# Themes the first real question typically hits. places first ("what's
+# around downtown"); transportation tiles next (the routing graph is
+# still built on the first route). Buildings stay out: a metro bbox
+# fans into too many 0.0625° tiles.
+_WARMUP_THEMES: tuple[tuple[str, str], ...] = (
+    ("places", "place"),
+    ("transportation", "segment"),
+)
+
+
+def _prewarm_region(lat: float, lon: float, radius_m: float) -> dict:
+    """Materialize existing-cache tiles for a metro bbox.
+
+    Shared by warmup_city and _warm_start. Same cache.py tiles — no
+    second cache, no extra remote API.
+    """
+    radius_m = min(max(float(radius_m), 0.0), MAX_WARMUP_RADIUS_M)
+    if not cache.enabled():
+        return {
+            "lat": lat,
+            "lon": lon,
+            "radius_m": radius_m,
+            "status": "cache_disabled",
+            "themes": [],
+            "note": (
+                "The tile cache is off (PLACEROOT_CACHE=off), so there is "
+                "nothing to pre-warm. Repeat queries will still hit upstream."
+            ),
+        }
+    bbox = geo.bbox_around(lat, lon, radius_m)
+    themes = []
+    # Do not hold conn_lock across the warmup. prewarm_bbox COPYs run
+    # on new_connection() cursors (the same path background fetches
+    # use), so other tools can keep answering between tiles/themes.
+    # Holding the lock here was a server-wide stall at 25 km.
+    for theme, type_ in _WARMUP_THEMES:
+        with db.conn_lock:
+            con = db.shared_conn()
+        glob = overture.upstream_glob(theme=theme, type_=type_)
+        themes.append(
+            cache.prewarm_bbox(
+                con,
+                release.resolve_release(),
+                theme,
+                bbox,
+                glob,
+                db.new_connection,
+            )
+        )
+    statuses = {row["status"] for row in themes}
+    graph = progress.format_eta(*progress.GRAPH_BUILD_S)
+    coverage = (
+        "Places and transportation tiles are cached; buildings are not. "
+        f"The first route still builds the street graph ({graph})."
+    )
+    if statuses <= {"already_warm"}:
+        status = "already_warm"
+        note = (
+            "This area is already cached. Later place searches over it "
+            f"should be fast. {coverage}"
+        )
+    elif "partial" in statuses and not (
+        statuses & {"upstream_unavailable", "too_large"}
+    ):
+        status = "partial"
+        note = (
+            "Some tiles for this area are cached; a heavy theme stopped "
+            "at the inline-tile cap so warmup would not monopolize the "
+            f"server. {coverage}"
+        )
+    elif statuses <= {"warmed", "already_warm"}:
+        status = "warmed"
+        note = (
+            "Places and transportation tiles for this area are cached. "
+            "Place searches over this city should now be fast. "
+            f"{coverage}"
+        )
+    elif "upstream_unavailable" in statuses and statuses & {
+        "warmed",
+        "already_warm",
+        "partial",
+    }:
+        status = "partial"
+        note = "Some themes cached; others could not reach upstream."
+    elif "too_large" in statuses:
+        status = "too_large"
+        note = "The radius covers too many tiles; try a smaller radius_m."
+    else:
+        status = "failed"
+        note = (
+            "Warmup could not cache this area; the next query will scan upstream."
+        )
+    return {
+        "lat": lat,
+        "lon": lon,
+        "radius_m": radius_m,
+        "status": status,
+        "themes": themes,
+        "note": note,
+    }
+
+
+@_tool("Get to know my city")
+def warmup_city(
+    city: str | None = None,
+    lat: float | None = None,
+    lon: float | None = None,
+    radius_m: float = DEFAULT_WARMUP_RADIUS_M,
+) -> dict:
+    """Pre-cache a city.
+
+    Copies places and transportation tiles into the same local cache later
+    queries read. Does not build the routing graph (the first route still
+    pays that cost) and does not pre-cache buildings. The warmup call is
+    the slow one; later place searches over the area read locally.
+
+    radius_m defaults to 8000 (a city core) and is capped at 25 km so a
+    warmup cannot fan into a planet-sized tile fetch.
+    """
+    point_given = lat is not None or lon is not None
+    if point_given and city is not None:
+        return {
+            "error": "bad_request",
+            "detail": "pass city, or lat and lon, not both",
+        }
+    if (
+        not isinstance(radius_m, (int, float))
+        or isinstance(radius_m, bool)
+        or not math.isfinite(radius_m)
+    ):
+        return {"error": "bad_request", "detail": "radius_m must be a finite number"}
+    resolved = None
+    if city is not None:
+        if not str(city).strip():
+            return {"error": "bad_request", "detail": "city must be a non-empty name"}
+        try:
+            result = geocoding.geocode_detailed(city, limit=1)
+        except overture.UpstreamUnavailable as e:
+            return _upstream_error(e)
+        rows = result["results"]
+        if not rows:
+            return {"error": "not_found", "detail": f"no place matched city {city!r}"}
+        top = rows[0]
+        lat = float(top["lat"])
+        lon = float(top["lon"])
+        resolved = {
+            "name": top.get("name"),
+            "id": top.get("id"),
+            "lat": lat,
+            "lon": lon,
+        }
+    elif lat is not None and lon is not None:
+        coord_error = _invalid_coord(lat, lon)
+        if coord_error is not None:
+            return coord_error
+    else:
+        return {"error": "bad_request", "detail": "pass city, or both lat and lon"}
+    try:
+        payload = _prewarm_region(float(lat), float(lon), float(radius_m))
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except Exception as e:  # noqa: BLE001 - warmup must return structured errors
+        return {"error": "upstream_unavailable", "detail": str(e), "retry_advised": True}
+    if resolved is not None:
+        payload["city"] = resolved
+    return payload
+
+
 @_tool("Data version")
 def data_version() -> dict:
     """Which Overture Maps release backs the answers from every other tool.
@@ -2356,9 +2532,9 @@ def _warm_start() -> None:
     """Best-effort cache pre-warm for PLACEROOT_WARM_REGION. Never blocks or raises.
 
     "Never blocks" refers to startup not being able to hang or crash on
-    this — the call itself is synchronous (PLACEROOT_CACHE_SYNC), since
-    this already only runs once, at startup, specifically to materialize
-    the home region's tiles before real traffic arrives.
+    this — the call itself is synchronous (cache.prewarm_bbox force_sync),
+    since this already only runs once, at startup, specifically to
+    materialize the home region's tiles before real traffic arrives.
     """
     spec = os.environ.get("PLACEROOT_WARM_REGION")
     if not spec or not cache.enabled():
@@ -2368,17 +2544,10 @@ def _warm_start() -> None:
         logger.warning("PLACEROOT_WARM_REGION=%r is malformed, expected 'lat,lon,radius_m'", spec)
         return
     lat, lon, radius_m = parsed
-    previous = os.environ.get("PLACEROOT_CACHE_SYNC")
-    os.environ["PLACEROOT_CACHE_SYNC"] = "1"
     try:
-        overture.find_places(lat, lon, radius_m, limit=1)
+        _prewarm_region(lat, lon, radius_m)
     except Exception as e:  # noqa: BLE001 - warm-on-start must never break startup
         logger.warning("PLACEROOT_WARM_REGION pre-warm failed (continuing): %s", e)
-    finally:
-        if previous is None:
-            os.environ.pop("PLACEROOT_CACHE_SYNC", None)
-        else:
-            os.environ["PLACEROOT_CACHE_SYNC"] = previous
 
 
 def _warm_metadata_async() -> None:

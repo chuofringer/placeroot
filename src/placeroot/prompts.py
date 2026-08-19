@@ -262,6 +262,49 @@ rent, crime, school quality, hours, or demographics — say so if asked.
 {_COMPACT}"""
 
 
+GET_TO_KNOW_MY_CITY_TOOLS = (
+    "warmup_city",
+    "geocode",
+    "find_places",
+)
+
+
+def _get_to_know_my_city(city: str) -> str:
+    city = _arg(city)
+    named = f'"{city}"' if city else "the city the user named"
+    ask = (
+        ""
+        if city
+        else (
+            "The user has not named a city yet — ask them which metro to "
+            "learn, then follow the steps below with it.\n\n"
+        )
+    )
+    return f"""{ask}Get to know {named} before the first real question.
+
+`warmup_city()` copies places and transportation tiles into the same
+local cache later tools read. It does not build the routing graph and
+does not pre-cache buildings. The first routing question still pays a one-time
+street-graph build; buildings questions still scan. Place searches over
+the warmed area should then be fast.
+
+1. `warmup_city()` with city {named} (or lat/lon if you already have them).
+   This is the slow call — wait for it, and tell the user it is the
+   one-time tile warmup, not a hang.
+2. If `warmup_city()` is not registered on this install, `geocode()` {named}
+   and then `find_places()` at the resolved point with a small radius.
+   That still warms the places tiles; say that the dedicated warmup was
+   unavailable.
+3. Confirm the city that landed (same-named places in different countries
+   are the usual miss). Say which tiles are warm, and that the first
+   routing question still builds the graph. Do not dump the warmup payload — one
+   or two sentences is enough.
+
+Then stop. The next question the user asks is the real one.
+
+{_COMPACT}"""
+
+
 # name -> (function, description, referenced tool names). The description is
 # what a client shows next to the slash command.
 PROMPTS: dict[str, tuple[Callable[..., str], str, tuple[str, ...]]] = {
@@ -288,6 +331,13 @@ PROMPTS: dict[str, tuple[Callable[..., str], str, tuple[str, ...]]] = {
         "Should I live in this neighborhood? One verdict shaped around the "
         "asker's life, not a table of counts.",
         SHOULD_I_LIVE_HERE_TOOLS,
+    ),
+    "get_to_know_my_city": (
+        _get_to_know_my_city,
+        "Pre-cache places and transportation tiles for a city — the "
+        "optional first-five-minutes warmup. Does not build the routing "
+        "graph or cache buildings.",
+        GET_TO_KNOW_MY_CITY_TOOLS,
     ),
 }
 
@@ -326,4 +376,12 @@ def register(server: MCPServer, selected: set[str]) -> None:
     def should_i_live_here(location: str, context: str = "") -> str:
         return _should_i_live_here(location, context) + _profile_note(
             SHOULD_I_LIVE_HERE_TOOLS, selected
+        )
+
+    @server.prompt(
+        name="get_to_know_my_city", description=PROMPTS["get_to_know_my_city"][1]
+    )
+    def get_to_know_my_city(city: str = "") -> str:
+        return _get_to_know_my_city(city) + _profile_note(
+            GET_TO_KNOW_MY_CITY_TOOLS, selected
         )
