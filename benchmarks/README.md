@@ -176,8 +176,11 @@ tool. The #265 per-tool 10s matrix is a different number and is out of
 scope.
 
 `--warm` reruns the same id in the same process against the cache the
-cold leg just filled. A 14s warm is a hang. Suite fails if any id×leg
-is wrong or over 15s. p95 is printed; it is not the gate.
+cold leg just filled. A 14s warm is a hang. Suite fails if any id×leg is wrong or over 15s, except a valid
+`needs_confirm` (outcome `ask`): that is a fast structured peek,
+not a wrong place and not a 15s timeout. `--warm` on those ids is
+`confirm=true` (the real hop; over 15s is not `slow`). p95 is
+printed; it is not the gate.
 
 ```bash
 # ship / weekday gate (20 ids)

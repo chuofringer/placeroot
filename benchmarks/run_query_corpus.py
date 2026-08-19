@@ -81,6 +81,50 @@ def _ensure_warm_leg(rows: list[dict], q: dict) -> list[dict]:
     return rows
 
 
+ASK_PEEK_S = 0.5
+
+
+def _annotate_row(row: dict, budget_s: float, stretch_s: float) -> dict:
+    """needs_confirm is ask: not wrong, not a 15s fail.
+
+    Route-only peeks (t01/t02/t04) over ASK_PEEK_S become ASK TOO SLOW.
+    from_to/flow asks can include name-resolve time, so they are not
+    judged against 500ms — they still must not be a 15s graph extract.
+    confirm=true completed hops are not slow (user accepted the ETA).
+    """
+    detail = str(row.get("detail") or "")
+    outcome = row.get("outcome")
+    if outcome is None:
+        if detail.startswith("ASK ON CONFIRM") or detail.startswith("ASK TOO SLOW"):
+            outcome = "wrong"
+        elif detail.startswith("ASK"):
+            outcome = "ask"
+        elif detail.startswith("CONFIRMED"):
+            outcome = "confirmed"
+        else:
+            outcome = "ok" if row.get("ok") else "wrong"
+    row["outcome"] = outcome
+    if outcome == "ask":
+        peek_cap = ASK_PEEK_S if row.get("tool") == "route" else budget_s
+        if row["s"] >= peek_cap:
+            row["ok"] = False
+            row["outcome"] = "wrong"
+            row["detail"] = f"ASK TOO SLOW {row['s']:.1f}s {detail}"[:150]
+            row["over_budget"] = True
+            row["over_stretch"] = False
+        else:
+            row["ok"] = True
+            row["over_budget"] = False
+            row["over_stretch"] = False
+    elif outcome == "confirmed":
+        row["over_budget"] = False
+        row["over_stretch"] = row["s"] > stretch_s
+    else:
+        row["over_budget"] = row["s"] > budget_s
+        row["over_stretch"] = row["s"] > stretch_s and not row["over_budget"]
+    return row
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--tool", action="append", default=[],
@@ -184,10 +228,11 @@ def main() -> int:
 
         for row in rows:
             row.setdefault("leg", "cold")
-            row["over_budget"] = row["s"] > args.budget_s
-            row["over_stretch"] = row["s"] > args.stretch_s
+            row = _annotate_row(row, args.budget_s, args.stretch_s)
             results.append(row)
             mark = "ok  " if row["ok"] else "FAIL"
+            if row.get("outcome") == "ask":
+                mark = "ask "
             flags = ""
             if row["over_budget"]:
                 flags += " SLOW"

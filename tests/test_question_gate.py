@@ -61,7 +61,7 @@ def test_question_gate_covers_the_required_families():
     for needed in ("r", "g", "f", "s", "t", "c", "x"):
         assert needed in prefixes, f"gate is missing family {needed}*"
     assert "f13" in ids and "f14" in ids, "sparse/remote find ids"
-    assert "c15" in ids, "deepest composite (2x resolve + route)"
+    assert "c15" in ids, "named-place walk (from_to)"
     assert "g10" in ids, "Casablanca Chile-trap must stay"
 
 
@@ -124,4 +124,83 @@ def test_missing_warm_leg_is_a_fail():
     kept = mod._ensure_warm_leg(list(both), q)
     assert sum(1 for r in kept if r["leg"] == "warm") == 1
     assert kept[-1]["ok"] is True
+
+
+def test_score_routed_result_ask_is_not_wrong():
+    import sys
+    sys.path.insert(0, str(BENCH))
+    import query_corpus
+
+    ok, detail = query_corpus._score_routed_result(
+        {"error": "needs_confirm", "detail": "ask then confirm=true"},
+        confirm=False,
+    )
+    assert ok is True
+    assert detail.startswith("ASK ")
+    ok, detail = query_corpus._score_routed_result(
+        {"error": "needs_confirm", "detail": "ask then confirm=true"},
+        confirm=True,
+    )
+    assert ok is False
+    assert detail.startswith("ASK ON CONFIRM")
+    ok, detail = query_corpus._score_routed_result(
+        {"distance_m": 1200.0}, confirm=True,
+    )
+    assert ok is True
+    assert detail.startswith("CONFIRMED ")
+
+
+def test_invoke_maybe_confirm_skips_unknown_kwarg():
+    import sys
+    sys.path.insert(0, str(BENCH))
+    import query_corpus
+
+    def old_route(a, b):
+        return {"distance_m": 10, "args": (a, b)}
+
+    r = query_corpus._invoke_maybe_confirm(old_route, 1, 2, confirm=True)
+    assert r["distance_m"] == 10
+
+    def new_route(a, b, confirm=False):
+        return {"confirm": confirm}
+
+    r = query_corpus._invoke_maybe_confirm(new_route, 1, 2, confirm=True)
+    assert r["confirm"] is True
+
+
+def test_annotate_row_ask_is_not_slow_or_wrong():
+    spec = importlib.util.spec_from_file_location(
+        "run_query_corpus", BENCH / "run_query_corpus.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    ask = mod._annotate_row(
+        {"ok": True, "s": 0.2, "tool": "route", "detail": "ASK peek",
+         "outcome": "ask"},
+        15.0, 10.0,
+    )
+    assert ask["ok"] is True
+    assert ask["over_budget"] is False
+    assert ask["outcome"] == "ask"
+    slow_peek = mod._annotate_row(
+        {"ok": True, "s": 0.8, "tool": "route", "detail": "ASK peek",
+         "outcome": "ask"},
+        15.0, 10.0,
+    )
+    assert slow_peek["ok"] is False
+    assert "ASK TOO SLOW" in slow_peek["detail"]
+    confirmed = mod._annotate_row(
+        {"ok": True, "s": 22.0, "tool": "route", "detail": "CONFIRMED 1200m",
+         "outcome": "confirmed"},
+        15.0, 10.0,
+    )
+    assert confirmed["ok"] is True
+    assert confirmed["over_budget"] is False
+    flow_ask = mod._annotate_row(
+        {"ok": True, "s": 2.4, "tool": "flow", "detail": "ASK peek",
+         "outcome": "ask"},
+        15.0, 10.0,
+    )
+    assert flow_ask["ok"] is True
+    assert flow_ask["over_budget"] is False
 
