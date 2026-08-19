@@ -166,7 +166,7 @@ fixing behavior is patch.
   back empty.
 - "san jose airport" no longer anchors in Henan, nor "palo alto caltrain"
   in Leyte: leading word *pairs* are anchor candidates, name-prefix words
-  (san, salto, santa, new…) are refused as standalone anchors, and matching
+  (san, los, santa, new…) are refused as standalone anchors, and matching
   more of the query outranks a bigger population.
 
 ## [0.9.3] — 2026-08-13
