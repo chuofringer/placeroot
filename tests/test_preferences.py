@@ -125,7 +125,7 @@ def test_route_uses_stored_mode_when_omitted(monkeypatch):
         }
 
     monkeypatch.setattr(server.routing, "route", fake)
-    server.route(from_lat=37.0, from_lon=-122.0, to_lat=37.1, to_lon=-122.1)
+    server.route(from_lat=37.0, from_lon=-122.0, to_lat=37.1, to_lon=-122.1, confirm=True)
     assert seen["mode"] == "cycle"
 
 

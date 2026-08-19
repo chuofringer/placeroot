@@ -297,3 +297,12 @@ def test_get_to_know_my_city_does_not_overpromise():
     assert "millisecond" not in text
     assert "does not build the routing graph" in text
     assert "buildings" in text
+
+
+def test_get_to_know_my_city_uses_confirm_not_prompt_only_wait():
+    """#336: no prompt-only please wait — ask, then same tool with confirm=true."""
+    text = prompts._get_to_know_my_city("Palo Alto").lower()
+    assert "needs_confirm" in text
+    assert "confirm=true" in text
+    assert "please wait" not in text
+    assert "wait for it" not in text

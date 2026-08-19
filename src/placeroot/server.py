@@ -12,6 +12,7 @@ stays safe under that concurrency.
 
 import argparse
 import asyncio
+import contextvars
 import functools
 import importlib.metadata
 import inspect
@@ -332,10 +333,15 @@ def _resolve_named_place(query: str) -> dict:
 
 
 def _resolve_pair(a: str, b: str) -> tuple[dict, dict]:
-    """Resolve two names in parallel. Each call uses the shared conn lock."""
+    """Resolve two names in parallel. Each call uses the shared conn lock.
+
+    Workers do not inherit contextvars, so copy the request context into
+    each submit — otherwise progress.report from a cold resolve lands in
+    a throwaway per-thread log and never reaches attach().
+    """
     with ThreadPoolExecutor(max_workers=2) as pool:
-        fa = pool.submit(_resolve_named_place, a)
-        fb = pool.submit(_resolve_named_place, b)
+        fa = pool.submit(contextvars.copy_context().run, _resolve_named_place, a)
+        fb = pool.submit(contextvars.copy_context().run, _resolve_named_place, b)
         return fa.result(), fb.result()
 
 
@@ -1661,6 +1667,7 @@ def route(
     to_lon: float,
     mode: str | None = None,
     include_path: bool = False,
+    confirm: bool = False,
 ) -> dict:
     """Route: shortest-path distance and duration between two points, by mode.
 
@@ -1703,15 +1710,46 @@ def route(
     answer) — ask for it only to draw or trace the route. If even a fully
     simplified line won't fit, you get "path_omitted": true instead of a
     line that stops short of the destination.
+
+    confirm=true after the user agreed to wait for a first-time street-graph
+    build (about 5–25 seconds). Pass it only after a needs_confirm reply
+    and they said yes. A warm or cached graph never needs it.
+    Omit confirm unless you just asked and they said yes.
     """
     for lat, lon in ((from_lat, from_lon), (to_lat, to_lon)):
         coord_error = _invalid_coord(lat, lon)
         if coord_error is not None:
             return coord_error
     mode = preference_store.resolve_mode(mode, preference_store.DEFAULT_MODE_ROUTE)
+    if mode not in routing.MODE_CONFIG:
+        return {
+            "error": "unsupported_mode",
+            "detail": f"unsupported mode {mode!r}; supported: {sorted(routing.MODE_CONFIG)}",
+            "supported": sorted(routing.MODE_CONFIG),
+        }
+    straight_m = routing._haversine_m(from_lat, from_lon, to_lat, to_lon)
+    cap_m = routing.ROUTE_MAX_STRAIGHT_LINE_M[mode]
+    if straight_m > cap_m:
+        return {
+            "error": "route_too_long",
+            "detail": (
+                f"straight-line distance {straight_m:.0f}m exceeds the "
+                f"{cap_m:.0f}m cap for this mode"
+            ),
+            "max_distance_m": cap_m,
+        }
+    cached = routing.route_graph_is_cached(
+        from_lat, from_lon, to_lat, to_lon, mode, want_shapes=include_path
+    )
+    if not cached and not confirm:
+        return _needs_confirm_graph(mode)
+    if cached:
+        progress.report(f"Routing a {mode}…")
     try:
-        result = routing.route(
-            from_lat, from_lon, to_lat, to_lon, mode=mode, include_path=include_path
+        result = _run_route(
+            from_lat, from_lon, to_lat, to_lon,
+            mode=mode, include_path=include_path,
+            cap_confirm_build=confirm and not cached,
         )
     except routing.UnsupportedMode as e:
         return {
@@ -1735,11 +1773,12 @@ def route(
         return {"error": "bad_request", "detail": str(e)}
     if "error" not in result:
         result["export"] = export.from_route_result(result)
-    return result
+    # Middleware attach()s again; idempotent (same request log, status not clobbered).
+    return progress.attach(result)
 
 
 @_tool("Named-place route")
-def from_to(from_: str, to: str, mode: str = "walk") -> dict:
+def from_to(from_: str, to: str, mode: str = "walk", confirm: bool = False) -> dict:
     """Shortest-path walk, cycle, or drive between two named places.
 
     Pass the user's place names as from and to. Do not call geocode(),
@@ -1757,6 +1796,11 @@ def from_to(from_: str, to: str, mode: str = "walk") -> dict:
     An unresolvable name returns {"error": "not_found"}; empty names
     return {"error": "bad_request"}. mode is "walk", "cycle", or "drive"
     (default walk).
+
+    confirm=true after the user agreed to wait for a first-time street-graph
+    build (about 5–25 seconds). Pass it only after a needs_confirm reply
+    and they said yes. A warm or cached graph never needs it.
+    Omit confirm unless you just asked and they said yes.
     """
     if not isinstance(from_, str) or not from_.strip():
         return {"error": "bad_request", "detail": "from must be a non-empty place name"}
@@ -1789,7 +1833,9 @@ def from_to(from_: str, to: str, mode: str = "walk") -> dict:
             "max_distance_m": cap_m,
             "mode": mode,
         }
-    result = route(origin["lat"], origin["lon"], dest["lat"], dest["lon"], mode=mode)
+    result = route(
+        origin["lat"], origin["lon"], dest["lat"], dest["lon"], mode=mode, confirm=confirm
+    )
     for key, place in (("from", origin), ("to", dest)):
         point = result.get(key)
         if isinstance(point, dict):
@@ -2180,6 +2226,106 @@ def preferences(
         return exc.as_dict()
 
 
+def _confirm_graph_cap_s() -> float:
+    """2x the advertised graph-build upper bound. Warm cache hits stay uncapped."""
+    return 2.0 * float(progress.GRAPH_BUILD_S[1])
+
+
+def _eta_exceeded_graph() -> dict:
+    lo, hi = progress.GRAPH_BUILD_S
+    return {
+        "error": "eta_exceeded",
+        "eta": progress.format_eta(lo, hi),
+        "eta_s": [int(lo), int(hi)],
+        "limit_s": int(_confirm_graph_cap_s()),
+        "detail": (
+            "The street-graph build exceeded twice the advertised wait "
+            f"({progress.format_eta(lo, hi)}). Try a smaller area or a warm cache."
+        ),
+    }
+
+
+def _run_route(
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+    *,
+    mode: str,
+    include_path: bool,
+    cap_confirm_build: bool,
+) -> dict:
+    """routing.route, with a 2x-ETA cap on a confirmed cold graph build."""
+    if not cap_confirm_build:
+        return routing.route(
+            from_lat, from_lon, to_lat, to_lon, mode=mode, include_path=include_path
+        )
+    limit_s = _confirm_graph_cap_s()
+    # Install a log list before copy so worker report() appends are visible
+    # to attach() on this thread (copy_context snapshots the list reference).
+    progress._ensure_log()
+    ctx = contextvars.copy_context()
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        fut = pool.submit(
+            ctx.run,
+            routing.route,
+            from_lat, from_lon, to_lat, to_lon,
+            mode=mode, include_path=include_path,
+        )
+        try:
+            return fut.result(timeout=limit_s)
+        except TimeoutError:
+            fut.add_done_callback(lambda f: f.cancelled() or f.exception())
+            return _eta_exceeded_graph()
+    finally:
+        # Do not join the worker — that would turn the cap back into a hang.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _needs_confirm_graph(mode: str) -> dict:
+    """Cheap reject before a cold street-graph extract (#336)."""
+    lo, hi = progress.GRAPH_BUILD_S
+    return {
+        "error": "needs_confirm",
+        "eta": progress.format_eta(lo, hi),
+        "eta_s": [int(lo), int(hi)],
+        "detail": (
+            f"First {mode} in this city builds the street graph. "
+            "Ask the user if they want to wait, then call the same tool "
+            "again with confirm=true."
+        ),
+    }
+
+
+def _needs_confirm_warmup() -> dict:
+    lo, hi = progress.WARMUP_S
+    return {
+        "error": "needs_confirm",
+        "eta": progress.format_eta(lo, hi),
+        "eta_s": [int(lo), int(hi)],
+        "detail": (
+            "First warmup in this city copies map tiles into the local cache. "
+            "Ask the user if they want to wait, then call the same tool "
+            "again with confirm=true."
+        ),
+    }
+
+
+def _warmup_is_cached(lat: float, lon: float, radius_m: float) -> bool:
+    """True if warmup would not COPY — cache off, or both themes already on disk."""
+    if not cache.enabled():
+        return True
+    radius_m = min(max(float(radius_m), 0.0), MAX_WARMUP_RADIUS_M)
+    bbox = geo.bbox_around(lat, lon, radius_m)
+    rel = release.resolve_release()
+    for theme, type_ in _WARMUP_THEMES:
+        glob = overture.upstream_glob(theme=theme, type_=type_)
+        if not cache.bbox_is_cached(rel, theme, bbox, glob):
+            return False
+    return True
+
+
 DEFAULT_WARMUP_RADIUS_M = 8000.0
 MAX_WARMUP_RADIUS_M = 25_000.0
 
@@ -2292,6 +2438,7 @@ def warmup_city(
     lat: float | None = None,
     lon: float | None = None,
     radius_m: float = DEFAULT_WARMUP_RADIUS_M,
+    confirm: bool = False,
 ) -> dict:
     """Pre-cache a city.
 
@@ -2302,6 +2449,11 @@ def warmup_city(
 
     radius_m defaults to 8000 (a city core) and is capped at 25 km so a
     warmup cannot fan into a planet-sized tile fetch.
+
+    confirm=true after the user agreed to wait for a first-time tile
+    warmup (about 5–25 seconds). Pass it only after a needs_confirm reply
+    and they said yes. An already-cached city never needs it.
+    Omit confirm unless you just asked and they said yes.
     """
     point_given = lat is not None or lon is not None
     if point_given and city is not None:
@@ -2341,6 +2493,13 @@ def warmup_city(
             return coord_error
     else:
         return {"error": "bad_request", "detail": "pass city, or both lat and lon"}
+    if not confirm and not _warmup_is_cached(float(lat), float(lon), float(radius_m)):
+        return _needs_confirm_warmup()
+    if confirm:
+        progress.report(
+            "Caching map tiles for this city",
+            eta_s=progress.WARMUP_S,
+        )
     try:
         payload = _prewarm_region(float(lat), float(lon), float(radius_m))
     except overture.UpstreamUnavailable as e:
@@ -2349,7 +2508,7 @@ def warmup_city(
         return {"error": "upstream_unavailable", "detail": str(e), "retry_advised": True}
     if resolved is not None:
         payload["city"] = resolved
-    return payload
+    return progress.attach(payload)
 
 
 @_tool("Data version")
@@ -2562,8 +2721,10 @@ async def _progress_middleware(ctx, call_next):
     a progressToken to its tools/call, this installs a request-scoped
     reporter (progress.set_reporter) that the query layer's phase
     boundaries feed — the start of a direct upstream scan, each tile COPY
-    — and the client renders as live status. Callers without a token, and
-    every non-tool request, pass through untouched.
+    — and the client renders as live status. Every tools/call also starts
+    a request-scoped log so attach() can put the same line on the JSON
+    answer when the client never sent a token. Non-tool requests pass
+    through untouched.
 
     The reporter is called from the worker thread the SDK runs a sync tool
     on, so the async send is scheduled onto the event loop with
@@ -2571,9 +2732,16 @@ async def _progress_middleware(ctx, call_next):
     fail the query it narrates (see progress.py's contract), and per the
     spec a progress send for a completed request is dropped harmlessly.
     """
-    token = (ctx.meta or {}).get("progress_token") if ctx.method == "tools/call" else None
-    if token is None:
+    if ctx.method != "tools/call":
         return await call_next(ctx)
+    log_token = progress.begin()
+    token = (ctx.meta or {}).get("progress_token")
+    if token is None:
+        try:
+            result = await call_next(ctx)
+            return progress.attach(result)
+        finally:
+            progress.reset_log(log_token)
 
     loop = asyncio.get_running_loop()
     session, request_id = ctx.session, ctx.request_id
@@ -2605,9 +2773,11 @@ async def _progress_middleware(ctx, call_next):
 
     reset_token = progress.set_reporter(reporter)
     try:
-        return await call_next(ctx)
+        result = await call_next(ctx)
+        return progress.attach(result)
     finally:
         progress.reset(reset_token)
+        progress.reset_log(log_token)
 
 
 async def _trace_middleware(ctx, call_next):
@@ -2676,9 +2846,15 @@ def _publish_from_keyword(mcp_server) -> None:
             from_: str = Field(alias="from")
             to: str
             mode: str = "walk"
+            confirm: bool = False
 
             def model_dump_one_level(self) -> dict:
-                return {"from_": self.from_, "to": self.to, "mode": self.mode}
+                return {
+                    "from_": self.from_,
+                    "to": self.to,
+                    "mode": self.mode,
+                    "confirm": self.confirm,
+                }
 
         tool.fn_metadata = tool.fn_metadata.model_copy(update={"arg_model": FromToArguments})
         tool.parameters = FromToArguments.model_json_schema(by_alias=True)

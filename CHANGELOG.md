@@ -8,6 +8,14 @@ fixing behavior is patch.
 
 ## [Unreleased]
 
+### Fixed
+- Confirm-path review (#338): a disk graph peek now parks the loaded graph
+  in the in-memory LRU (no second unpickle on the follow-up `route()`);
+  `from_to` parallel resolves copy the request progress context into each
+  worker; a `confirm=true` cold graph build that exceeds 2x the advertised
+  ETA (`GRAPH_BUILD_S`) returns `eta_exceeded` instead of hanging. Warm
+  cache hits stay uncapped.
+
 ### Changed
 - Question-gate route ids go through `server.route` / `from_to` so a
   valid `needs_confirm` is outcome `ask`, not a 15s fail and not a
@@ -24,6 +32,13 @@ fixing behavior is patch.
   still a fail even at 200ms.
 
 ### Added
+- `route`, `from_to`, and a first `warmup_city` ask before a hop we already know
+  will take 15+ seconds: a cold street-graph build returns
+  `needs_confirm` in well under 500ms with an honest 5–25s ETA unless
+  the caller passes `confirm=true` after the user agreed to wait. A
+  warm or cached graph never asks. Long answers also carry `status`
+  and a short `progress` list so a host without a progressToken can
+  still show what is happening (#336).
 - `from_to` and `find_near`: named-place compose so a walk or an
   "X near Y" is one tool hop. Resolves names inside the server
   (A and B in parallel), reuses `route` / `find_places`, and refuses

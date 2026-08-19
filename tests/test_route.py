@@ -288,7 +288,7 @@ def test_route_non_finite_coordinate_raises_value_error():
 
 
 def test_server_route_tool_happy_path():
-    result = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
+    result = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", confirm=True)
     assert "error" not in result
     assert result["distance_m"] > 0
     assert result["duration_s"] > 0
@@ -326,7 +326,7 @@ def test_server_route_rejects_out_of_range_coordinate():
 
 
 def test_server_route_no_graph_nearby_far_from_the_grid():
-    result = server.route(0.0, 0.0, 0.001, 0.001, mode="walk")
+    result = server.route(0.0, 0.0, 0.001, 0.001, mode="walk", confirm=True)
     assert result["error"] == "no_graph_nearby"
 
 
@@ -662,12 +662,14 @@ def test_route_path_omitted_note_is_priced_inside_the_budget(monkeypatch):
 
 
 def test_server_route_include_path_passthrough():
-    result = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", include_path=True)
+    result = server.route(
+        FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", include_path=True, confirm=True
+    )
     assert "error" not in result
     assert result["path"]["type"] == "LineString"
     assert "path_max_deviation_m" in result
 
-    default = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
+    default = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", confirm=True)
     assert "path" not in default
 
 
@@ -679,6 +681,19 @@ def test_server_route_schema_exposes_include_path_defaulting_to_false():
     assert prop.get("type") == "boolean"
     assert prop.get("default") is False
     assert "include_path" not in schema.get("required", [])
+
+
+def test_server_route_schema_exposes_confirm_defaulting_to_false():
+    tools = asyncio.run(server.mcp.list_tools())
+    tool = next(t for t in tools if t.name == "route")
+    schema = tool.model_dump(mode="json", by_alias=True, exclude_none=True)["inputSchema"]
+    prop = schema["properties"]["confirm"]
+    assert prop.get("type") == "boolean"
+    assert prop.get("default") is False
+    assert "confirm" not in schema.get("required", [])
+    desc = (tool.description or "").lower()
+    assert "confirm=true after the user agreed" in desc
+    assert "geocode" not in desc
 
 
 # --- shape identity: the geometry emitted must be the edge dijkstra used ----

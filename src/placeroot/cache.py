@@ -1073,3 +1073,28 @@ def prewarm_bbox(
         "cached": len(cached_now),
         "fetched": max(0, len(cached_now) - len(already)),
     }
+
+
+def bbox_is_cached(
+    release: str,
+    theme: str,
+    bbox: tuple[float, float, float, float],
+    upstream_glob: str,
+) -> bool:
+    """True if every tile covering bbox is already on disk. Does not COPY.
+
+    Filesystem peek only — no S3, no DuckDB. Used to decide whether a
+    warmup would be the 15s+ first-touch hop. Returns False when the
+    cache is off, the fingerprint cannot be resolved, or any tile is
+    missing. Does not claim tiles against eviction (a peek must not
+    mark them hot).
+    """
+    if not enabled():
+        return False
+    tiles = tiles_for_bbox(*bbox, tile_deg=tile_deg_for(theme))
+    if not tiles or len(tiles) > MAX_TILES_PER_QUERY:
+        return False
+    fingerprint = resolve_fingerprint(release, theme, upstream_glob)
+    if fingerprint is None:
+        return False
+    return all(tile_path(release, theme, fingerprint, t).exists() for t in tiles)

@@ -9,7 +9,7 @@ import asyncio
 
 import pytest
 
-from placeroot import geocode, routing, server
+from placeroot import geocode, progress, routing, server
 
 from ._routing_fixture import build_routing_fixture as fx
 
@@ -17,12 +17,18 @@ FROM_LAT, FROM_LON = fx.node_latlon(2, 2)
 TO_LAT, TO_LON = fx.node_latlon(2, 5)
 
 
-def _call_from_to(origin: str, dest: str, mode: str = "walk") -> dict:
-    return server.from_to(origin, dest, mode=mode)
+def _call_from_to(origin: str, dest: str, mode: str = "walk", confirm: bool = True) -> dict:
+    return server.from_to(origin, dest, mode=mode, confirm=confirm)
 
 
 def _hit(name, lat, lon, type_="place", id_="gers-x"):
     return {"name": name, "lat": lat, "lon": lon, "id": id_, "type": type_}
+
+
+def _ab(query):
+    if query == "A":
+        return _hit(query, FROM_LAT, FROM_LON)
+    return _hit(query, TO_LAT, TO_LON)
 
 
 def test_from_to_schema_accepts_from_and_to():
@@ -33,6 +39,8 @@ def test_from_to_schema_accepts_from_and_to():
     assert "from_" not in props
     required = set(tools["from_to"].input_schema.get("required") or [])
     assert "from" in required and "to" in required
+    assert "confirm" in props
+    assert "confirm" not in required
 
 
 def test_from_to_with_mocked_resolves_returns_route_shape(monkeypatch):
@@ -100,3 +108,46 @@ def test_from_to_unsupported_mode(monkeypatch):
     )
     result = _call_from_to("A", "B", mode="hovercraft")
     assert result["error"] == "unsupported_mode"
+
+
+def test_from_to_cold_without_confirm_is_needs_confirm(monkeypatch):
+    routing.clear_graph_cache()
+    monkeypatch.setattr(
+        geocode,
+        "resolve_named_place",
+        _ab,
+    )
+    result = _call_from_to("A", "B", confirm=False)
+    assert result["error"] == "needs_confirm"
+    assert result["eta"] == progress.format_eta(*progress.GRAPH_BUILD_S)
+    assert result["eta_s"] == [int(progress.GRAPH_BUILD_S[0]), int(progress.GRAPH_BUILD_S[1])]
+
+
+def test_from_to_confirm_runs(monkeypatch):
+    routing.clear_graph_cache()
+    monkeypatch.setattr(
+        geocode,
+        "resolve_named_place",
+        _ab,
+    )
+    result = _call_from_to("A", "B", confirm=True)
+    assert "error" not in result
+    assert result["distance_m"] > 0
+
+
+def test_from_to_parallel_resolves_keep_progress(monkeypatch):
+    """ThreadPool workers must see the request log (contextvars.copy_context)."""
+    progress.clear()
+
+    def resolve_with_progress(query):
+        progress.report(f"Resolving {query}")
+        return _ab(query)
+
+    monkeypatch.setattr(geocode, "resolve_named_place", resolve_with_progress)
+    origin, dest = server._resolve_pair("A", "B")
+    assert origin["name"] == "A"
+    assert dest["name"] == "B"
+    attached = progress.attach({"ok": True})
+    lines = attached.get("progress") or []
+    assert any("Resolving A" in line for line in lines)
+    assert any("Resolving B" in line for line in lines)

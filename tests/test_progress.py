@@ -243,3 +243,47 @@ def test_sync_materialization_messages_carry_an_eta(captured, tmp_path, monkeypa
     )
     messages = [m for m, _, _ in captured]
     assert any("about" in m and "second" in m for m in messages)
+
+
+# --- host-agnostic attach (#336) --------------------------------------------
+
+
+def test_attach_includes_reported_phases():
+    progress.clear()
+    progress.report("Building the street graph…")
+    progress.report("Routing a walk…")
+    result = progress.attach({"distance_m": 100})
+    assert result["status"] == "Routing a walk…"
+    assert result["progress"] == ["Building the street graph…", "Routing a walk…"]
+    assert result["distance_m"] == 100
+
+
+def test_attach_skips_a_fast_call_with_no_phases():
+    progress.clear()
+    result = progress.attach({"ok": True})
+    assert "status" not in result
+    assert "progress" not in result
+
+
+def test_report_collects_without_a_reporter():
+    progress.clear()
+    progress.report("phase one")
+    result = progress.attach({})
+    assert result["progress"] == ["phase one"]
+    assert result["status"] == "phase one"
+
+
+def test_attach_extra_appends_a_line():
+    progress.clear()
+    progress.report("Building the street graph…")
+    result = progress.attach({"ok": True}, extra="Routing a walk…")
+    assert result["progress"][-1] == "Routing a walk…"
+    assert result["status"] == "Routing a walk…"
+
+
+def test_attach_preserves_existing_status():
+    progress.clear()
+    progress.report("Fetching map data")
+    result = progress.attach({"status": "warmed"})
+    assert result["status"] == "warmed"
+    assert result["progress"] == ["Fetching map data"]
