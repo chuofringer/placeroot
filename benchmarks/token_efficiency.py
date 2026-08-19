@@ -258,7 +258,8 @@ SCENARIOS: list[Scenario] = [
         "route (walk)",
         "How do I walk from one grid corner to another?",
         lambda: server.route(
-            ROUTE_FROM_LAT, ROUTE_FROM_LON, ROUTE_TO_LAT, ROUTE_TO_LON, mode="walk"
+            ROUTE_FROM_LAT, ROUTE_FROM_LON, ROUTE_TO_LAT, ROUTE_TO_LON, mode="walk",
+            confirm=True,
         ),
     ),
     Scenario(

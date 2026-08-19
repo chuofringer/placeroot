@@ -20,6 +20,7 @@ from placeroot import (  # noqa: E402
     buildings,
     gers,
     overture,
+    progress,
     recreation,
     release,
     routing,
@@ -155,6 +156,7 @@ def offline_data(request, monkeypatch):
     autowarm.clear_autowarm_state()
     from placeroot import geocode as geocode_mod
     geocode_mod.clear_resolve_session()
+    progress.clear()
     # gers.py's negative cache is keyed by (release, id), and the release is
     # pinned identically for every test — so a not-found cached against one
     # test's fixtures would answer for the next test's. Start each test cold.

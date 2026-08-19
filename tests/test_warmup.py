@@ -39,7 +39,7 @@ def test_warmup_city_pre_caches_via_existing_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "c"))
     monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
     monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
-    result = server.warmup_city(lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000)
+    result = server.warmup_city(lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000, confirm=True)
     assert "error" not in result and result["status"] in {
         "warmed",
         "already_warm",

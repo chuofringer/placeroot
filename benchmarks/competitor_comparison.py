@@ -283,7 +283,7 @@ SCENARIOS: list[tuple[str, str, object]] = [
         "route_a_to_b",
         "Route from A to B.",
         lambda: server.route(
-            ROUTE_FROM_LAT, ROUTE_FROM_LON, ROUTE_TO_LAT, ROUTE_TO_LON, mode="walk"
+            ROUTE_FROM_LAT, ROUTE_FROM_LON, ROUTE_TO_LAT, ROUTE_TO_LON, mode="walk", confirm=True
         ),
     ),
     (

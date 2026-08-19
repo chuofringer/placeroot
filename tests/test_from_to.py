@@ -17,8 +17,8 @@ FROM_LAT, FROM_LON = fx.node_latlon(2, 2)
 TO_LAT, TO_LON = fx.node_latlon(2, 5)
 
 
-def _call_from_to(origin: str, dest: str, mode: str = "walk") -> dict:
-    return server.from_to(origin, dest, mode=mode)
+def _call_from_to(origin: str, dest: str, mode: str = "walk", confirm: bool = True) -> dict:
+    return server.from_to(origin, dest, mode=mode, confirm=confirm)
 
 
 def _hit(name, lat, lon, type_="place", id_="gers-x"):
@@ -33,6 +33,8 @@ def test_from_to_schema_accepts_from_and_to():
     assert "from_" not in props
     required = set(tools["from_to"].input_schema.get("required") or [])
     assert "from" in required and "to" in required
+    assert "confirm" in props
+    assert "confirm" not in required
 
 
 def test_from_to_with_mocked_resolves_returns_route_shape(monkeypatch):
@@ -100,3 +102,27 @@ def test_from_to_unsupported_mode(monkeypatch):
     )
     result = _call_from_to("A", "B", mode="hovercraft")
     assert result["error"] == "unsupported_mode"
+
+
+def test_from_to_cold_without_confirm_is_needs_confirm(monkeypatch):
+    routing.clear_graph_cache()
+    monkeypatch.setattr(
+        geocode,
+        "resolve_named_place",
+        lambda query: _hit(query, FROM_LAT, FROM_LON) if query == "A" else _hit(query, TO_LAT, TO_LON),
+    )
+    result = _call_from_to("A", "B", confirm=False)
+    assert result["error"] == "needs_confirm"
+    assert result["eta_s"] == [5, 25]
+
+
+def test_from_to_confirm_runs(monkeypatch):
+    routing.clear_graph_cache()
+    monkeypatch.setattr(
+        geocode,
+        "resolve_named_place",
+        lambda query: _hit(query, FROM_LAT, FROM_LON) if query == "A" else _hit(query, TO_LAT, TO_LON),
+    )
+    result = _call_from_to("A", "B", confirm=True)
+    assert "error" not in result
+    assert result["distance_m"] > 0

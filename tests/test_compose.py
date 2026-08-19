@@ -142,7 +142,7 @@ def test_from_to_happy_path_returns_resolved_ends_and_export(monkeypatch):
         return origin if "Ferry" in query else dest
 
     monkeypatch.setattr(server, "_resolve_named_place", fake_resolve)
-    result = server.from_to(from_="Ferry Building", to="Dolores Park")
+    result = server.from_to(from_="Ferry Building", to="Dolores Park", confirm=True)
     assert "error" not in result
     assert result["distance_m"] > 0
     assert result["mode"] == "walk"
@@ -185,6 +185,6 @@ def test_from_to_default_mode_is_walk(monkeypatch):
         return {"name": query, "lat": lat, "lon": lon, "id": query, "type": "place"}
 
     monkeypatch.setattr(server, "_resolve_named_place", fake_resolve)
-    result = server.from_to(from_="A", to="B")
+    result = server.from_to(from_="A", to="B", confirm=True)
     seen["mode"] = result.get("mode")
     assert result["mode"] == "walk"

@@ -1618,6 +1618,99 @@ def _store_graph_in_memory(
             _graph_cache.popitem(last=False)
 
 
+def _memory_graph_for(
+    lat: float,
+    lon: float,
+    extraction_radius_m: float,
+    mode: str,
+    speed_m_s: float | None,
+    want_shapes: bool = False,
+    *,
+    touch: bool = True,
+) -> Graph | None:
+    """In-memory LRU hit whose bbox covers this extraction, or None.
+
+    touch=False is the peek path — it must not bump LRU.
+    """
+    release_key = release.resolve_release()
+    upstream = _upstream_glob()
+    key_prefix = (release_key, upstream, mode, _graph_cache_speed_tag(mode, speed_m_s))
+    needed_bbox = _bbox_around(lat, lon, extraction_radius_m)
+    with _graph_cache_lock:
+        for key, entry in _graph_cache.items():
+            if key[:4] != key_prefix:
+                continue
+            if want_shapes and not entry.graph.has_shapes:
+                continue
+            if _bbox_contains(entry.bbox, needed_bbox):
+                if touch:
+                    _graph_cache.move_to_end(key)
+                return entry.graph
+    return None
+
+
+def graph_is_cached(
+    lat: float,
+    lon: float,
+    mode: str,
+    radius_m: float | None = None,
+    *,
+    want_shapes: bool = False,
+    speed_m_s: float | None = None,
+) -> bool:
+    """True if a street graph covering this point (or radius) is already built.
+
+    Peeks the in-memory LRU and the on-disk persist (#330). Does not extract
+    a new graph. A miss is False, not an error. radius_m=None means "is this
+    point inside any cached graph for mode".
+    """
+    if mode not in MODE_CONFIG:
+        return False
+    if not _is_finite_number(lat) or not _is_finite_number(lon):
+        return False
+    if radius_m is not None and not _is_finite_number(radius_m):
+        return False
+    r = 0.0 if radius_m is None else float(radius_m)
+    if _memory_graph_for(lat, lon, r, mode, speed_m_s, want_shapes, touch=False) is not None:
+        return True
+    release_key = release.resolve_release()
+    upstream = _upstream_glob()
+    key_prefix = (release_key, upstream, mode, _graph_cache_speed_tag(mode, speed_m_s))
+    needed_bbox = _bbox_around(lat, lon, r)
+    return _load_graph_from_disk(key_prefix, needed_bbox, want_shapes, lat, lon) is not None
+
+
+def route_graph_is_cached(
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+    mode: str,
+    *,
+    want_shapes: bool = False,
+) -> bool:
+    """True if this A→B route would reuse a cached street graph.
+
+    Uses the same midpoint and extraction radius route() would ask for, so
+    a True here means the next route() call will not extract.
+    """
+    if mode not in MODE_CONFIG:
+        return False
+    for value in (from_lat, from_lon, to_lat, to_lon):
+        if not _is_finite_number(value):
+            return False
+    straight_line_m = _haversine_m(from_lat, from_lon, to_lat, to_lon)
+    if straight_line_m > ROUTE_MAX_STRAIGHT_LINE_M[mode]:
+        return False
+    center_lat, center_lon = _midpoint(from_lat, from_lon, to_lat, to_lon)
+    base_radius_m = max(
+        straight_line_m / 2.0 * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M
+    )
+    return graph_is_cached(
+        center_lat, center_lon, mode, radius_m=base_radius_m, want_shapes=want_shapes
+    )
+
+
 def _get_or_build_graph(
     lat: float,
     lon: float,

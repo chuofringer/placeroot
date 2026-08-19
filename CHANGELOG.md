@@ -24,6 +24,13 @@ fixing behavior is patch.
   still a fail even at 200ms.
 
 ### Added
+- `route`, `from_to`, and a first `warmup_city` ask before a hop we already know
+  will take 15+ seconds: a cold street-graph build returns
+  `needs_confirm` in well under 500ms with an honest 5–25s ETA unless
+  the caller passes `confirm=true` after the user agreed to wait. A
+  warm or cached graph never asks. Long answers also carry `status`
+  and a short `progress` list so a host without a progressToken can
+  still show what is happening (#336).
 - `from_to` and `find_near`: named-place compose so a walk or an
   "X near Y" is one tool hop. Resolves names inside the server
   (A and B in parallel), reuses `route` / `find_places`, and refuses

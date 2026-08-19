@@ -19,8 +19,11 @@ the MCP session. This module bridges the two with a contextvar:
   reporter, and it propagates into the worker thread the SDK runs a sync
   tool on (anyio.to_thread carries contextvars).
 - query-layer code calls `progress.report(...)` at phase boundaries and
-  never knows whether anyone is listening. No reporter (a direct library
-  call, a test, a background thread) means the call is a no-op.
+  never knows whether anyone is listening. The message is always collected
+  on a request-scoped log (the host-agnostic path: many clients never send
+  a progressToken). An MCP reporter, when installed, also gets the send.
+  No log and no reporter (a bare library call that never called begin)
+  still no-ops the wire send.
 
 Reporting is best-effort by contract: a reporter must never raise into
 the query path, and its failures must never fail a query that would
@@ -51,6 +54,22 @@ _reporter: contextvars.ContextVar[Reporter | None] = contextvars.ContextVar(
 MIN_INTERVAL_S = 1.0
 _last_sent = contextvars.ContextVar("placeroot_progress_last", default=(0.0, ""))
 
+# Host-agnostic log: report() always appends here so attach() can put the
+# same line on the JSON answer. Default is an empty tuple (immutable) so
+# a forgotten begin() cannot leak a shared list across requests; begin()
+# / clear() install a fresh list. Lazy-init in report() covers direct
+# library calls and tests that never go through middleware.
+_log: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "placeroot_progress_log", default=None
+)
+_started: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "placeroot_progress_started", default=None
+)
+
+# Don't stamp status onto a 50ms find. Attach if we reported a phase, or
+# the call clearly lingered (graph / warmup / a cold scan).
+SLOW_ATTACH_S = 2.0
+
 
 def set_reporter(reporter: Reporter | None) -> contextvars.Token:
     """Install reporter for the current context; returns the reset token."""
@@ -59,6 +78,10 @@ def set_reporter(reporter: Reporter | None) -> contextvars.Token:
 
 def reset(token: contextvars.Token) -> None:
     _reporter.reset(token)
+
+
+def reset_log(token: contextvars.Token) -> None:
+    _log.reset(token)
 
 
 # Honest first-touch ranges (seconds), from measured comments in cache.py /
@@ -123,6 +146,30 @@ def scan_eta(theme: str) -> tuple[float, float]:
     return _DIRECT_SCAN_S.get(theme, _DEFAULT_SCAN_S)
 
 
+def begin() -> contextvars.Token:
+    """Start a request-scoped progress log. Returns the reset token for the log."""
+    _started.set(time.monotonic())
+    _last_sent.set((0.0, ""))
+    return _log.set([])
+
+
+def clear() -> None:
+    """Drop the request log. Tests call this so phases do not leak."""
+    _log.set([])
+    _started.set(time.monotonic())
+    _last_sent.set((0.0, ""))
+
+
+def _ensure_log() -> list[str]:
+    log = _log.get()
+    if log is None:
+        log = []
+        _log.set(log)
+        if _started.get() is None:
+            _started.set(time.monotonic())
+    return log
+
+
 def report(
     message: str,
     current: float | None = None,
@@ -130,7 +177,11 @@ def report(
     *,
     eta_s: tuple[float, float] | None = None,
 ) -> None:
-    """Report a phase of a slow operation. No-op unless a reporter is installed.
+    """Report a phase of a slow operation.
+
+    Always collected on the request-scoped log (even with no MCP reporter)
+    so attach() can put the same line on the JSON answer. The MCP send is
+    still a no-op unless a reporter is installed.
 
     Never raises: a progress send failing (client gone, queue full) must not
     take down the query it was narrating.
@@ -141,6 +192,9 @@ def report(
     """
     if eta_s is not None:
         message = f"{message} — {format_eta(*eta_s)}"
+    log = _ensure_log()
+    if not log or log[-1] != message:
+        log.append(message)
     reporter = _reporter.get()
     if reporter is None:
         return
@@ -153,3 +207,36 @@ def report(
         reporter(message, current, total)
     except Exception as e:  # noqa: BLE001 - progress must never fail the query
         logger.debug("progress report dropped: %s", e)
+
+
+def attach(result, extra: list[str] | str | None = None):
+    """Copy this request's progress log onto a JSON answer.
+
+    Adds `status` (the latest line) and `progress` (the phase list) so an
+    agent can relay them without a progressToken. No-op on a fast call that
+    never reported a phase — a 50ms find stays a 50ms find. `extra` appends
+    one more line (or a short list) before the copy.
+    """
+    if not isinstance(result, dict):
+        return result
+    log = list(_log.get() or [])
+    if extra:
+        extras = extra if isinstance(extra, (list, tuple)) else [extra]
+        for item in extras:
+            if item and item not in log:
+                log.append(str(item))
+    started = _started.get()
+    elapsed = (time.monotonic() - started) if started is not None else 0.0
+    if not log and elapsed < SLOW_ATTACH_S:
+        return result
+    if log:
+        # warmup_city (and a few others) already use status for their own
+        # state machine. Do not clobber it; the phase list is enough for
+        # an agent to relay, and the last line still lands on status when
+        # the key is free (route, a cold scan).
+        if "status" not in result:
+            result["status"] = log[-1]
+        result["progress"] = log
+    elif elapsed >= SLOW_ATTACH_S and "status" not in result:
+        result["status"] = f"Took about {max(1, int(round(elapsed)))} seconds"
+    return result

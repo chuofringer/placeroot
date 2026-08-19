@@ -292,7 +292,7 @@ def test_text_list_marks_estimated_legs():
 
 
 def test_server_route_export_maps_link_contains_both_coords():
-    result = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
+    result = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", confirm=True)
     assert "error" not in result
     exp = result["export"]
     google = exp["maps_link"]["google"]
