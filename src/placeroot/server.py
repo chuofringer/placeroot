@@ -12,6 +12,7 @@ stays safe under that concurrency.
 
 import argparse
 import asyncio
+import contextvars
 import functools
 import importlib.metadata
 import inspect
@@ -332,10 +333,15 @@ def _resolve_named_place(query: str) -> dict:
 
 
 def _resolve_pair(a: str, b: str) -> tuple[dict, dict]:
-    """Resolve two names in parallel. Each call uses the shared conn lock."""
+    """Resolve two names in parallel. Each call uses the shared conn lock.
+
+    Workers do not inherit contextvars, so copy the request context into
+    each submit — otherwise progress.report from a cold resolve lands in
+    a throwaway per-thread log and never reaches attach().
+    """
     with ThreadPoolExecutor(max_workers=2) as pool:
-        fa = pool.submit(_resolve_named_place, a)
-        fb = pool.submit(_resolve_named_place, b)
+        fa = pool.submit(contextvars.copy_context().run, _resolve_named_place, a)
+        fb = pool.submit(contextvars.copy_context().run, _resolve_named_place, b)
         return fa.result(), fb.result()
 
 
@@ -1740,8 +1746,10 @@ def route(
     if cached:
         progress.report(f"Routing a {mode}…")
     try:
-        result = routing.route(
-            from_lat, from_lon, to_lat, to_lon, mode=mode, include_path=include_path
+        result = _run_route(
+            from_lat, from_lon, to_lat, to_lon,
+            mode=mode, include_path=include_path,
+            cap_confirm_build=confirm and not cached,
         )
     except routing.UnsupportedMode as e:
         return {
@@ -1765,6 +1773,7 @@ def route(
         return {"error": "bad_request", "detail": str(e)}
     if "error" not in result:
         result["export"] = export.from_route_result(result)
+    # Middleware attach()s again; idempotent (same request log, status not clobbered).
     return progress.attach(result)
 
 
@@ -2217,6 +2226,63 @@ def preferences(
         return exc.as_dict()
 
 
+def _confirm_graph_cap_s() -> float:
+    """2x the advertised graph-build upper bound. Warm cache hits stay uncapped."""
+    return 2.0 * float(progress.GRAPH_BUILD_S[1])
+
+
+def _eta_exceeded_graph() -> dict:
+    lo, hi = progress.GRAPH_BUILD_S
+    return {
+        "error": "eta_exceeded",
+        "eta": progress.format_eta(lo, hi),
+        "eta_s": [int(lo), int(hi)],
+        "limit_s": int(_confirm_graph_cap_s()),
+        "detail": (
+            "The street-graph build exceeded twice the advertised wait "
+            f"({progress.format_eta(lo, hi)}). Try a smaller area or a warm cache."
+        ),
+    }
+
+
+def _run_route(
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+    *,
+    mode: str,
+    include_path: bool,
+    cap_confirm_build: bool,
+) -> dict:
+    """routing.route, with a 2x-ETA cap on a confirmed cold graph build."""
+    if not cap_confirm_build:
+        return routing.route(
+            from_lat, from_lon, to_lat, to_lon, mode=mode, include_path=include_path
+        )
+    limit_s = _confirm_graph_cap_s()
+    # Install a log list before copy so worker report() appends are visible
+    # to attach() on this thread (copy_context snapshots the list reference).
+    progress._ensure_log()
+    ctx = contextvars.copy_context()
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        fut = pool.submit(
+            ctx.run,
+            routing.route,
+            from_lat, from_lon, to_lat, to_lon,
+            mode=mode, include_path=include_path,
+        )
+        try:
+            return fut.result(timeout=limit_s)
+        except TimeoutError:
+            fut.add_done_callback(lambda f: f.cancelled() or f.exception())
+            return _eta_exceeded_graph()
+    finally:
+        # Do not join the worker — that would turn the cap back into a hang.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 def _needs_confirm_graph(mode: str) -> dict:
     """Cheap reject before a cold street-graph extract (#336)."""
     lo, hi = progress.GRAPH_BUILD_S
@@ -2233,10 +2299,11 @@ def _needs_confirm_graph(mode: str) -> dict:
 
 
 def _needs_confirm_warmup() -> dict:
+    lo, hi = progress.WARMUP_S
     return {
         "error": "needs_confirm",
-        "eta": progress.format_eta(5.0, 25.0),
-        "eta_s": [5, 25],
+        "eta": progress.format_eta(lo, hi),
+        "eta_s": [int(lo), int(hi)],
         "detail": (
             "First warmup in this city copies map tiles into the local cache. "
             "Ask the user if they want to wait, then call the same tool "
@@ -2431,7 +2498,7 @@ def warmup_city(
     if confirm:
         progress.report(
             "Caching map tiles for this city",
-            eta_s=(5.0, 25.0),
+            eta_s=progress.WARMUP_S,
         )
     try:
         payload = _prewarm_region(float(lat), float(lon), float(radius_m))

@@ -9,7 +9,7 @@ import asyncio
 
 import pytest
 
-from placeroot import geocode, routing, server
+from placeroot import geocode, progress, routing, server
 
 from ._routing_fixture import build_routing_fixture as fx
 
@@ -119,7 +119,8 @@ def test_from_to_cold_without_confirm_is_needs_confirm(monkeypatch):
     )
     result = _call_from_to("A", "B", confirm=False)
     assert result["error"] == "needs_confirm"
-    assert result["eta_s"] == [5, 25]
+    assert result["eta"] == progress.format_eta(*progress.GRAPH_BUILD_S)
+    assert result["eta_s"] == [int(progress.GRAPH_BUILD_S[0]), int(progress.GRAPH_BUILD_S[1])]
 
 
 def test_from_to_confirm_runs(monkeypatch):
@@ -132,3 +133,21 @@ def test_from_to_confirm_runs(monkeypatch):
     result = _call_from_to("A", "B", confirm=True)
     assert "error" not in result
     assert result["distance_m"] > 0
+
+
+def test_from_to_parallel_resolves_keep_progress(monkeypatch):
+    """ThreadPool workers must see the request log (contextvars.copy_context)."""
+    progress.clear()
+
+    def resolve_with_progress(query):
+        progress.report(f"Resolving {query}")
+        return _ab(query)
+
+    monkeypatch.setattr(geocode, "resolve_named_place", resolve_with_progress)
+    origin, dest = server._resolve_pair("A", "B")
+    assert origin["name"] == "A"
+    assert dest["name"] == "B"
+    attached = progress.attach({"ok": True})
+    lines = attached.get("progress") or []
+    assert any("Resolving A" in line for line in lines)
+    assert any("Resolving B" in line for line in lines)

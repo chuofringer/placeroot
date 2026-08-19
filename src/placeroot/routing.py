@@ -1660,9 +1660,10 @@ def graph_is_cached(
 ) -> bool:
     """True if a street graph covering this point (or radius) is already built.
 
-    Peeks the in-memory LRU and the on-disk persist (#330). Does not extract
-    a new graph. A miss is False, not an error. radius_m=None means "is this
-    point inside any cached graph for mode".
+    Peeks the in-memory LRU and the on-disk persist (#330). A disk hit is
+    parked in the LRU so a follow-up route() does not unpickle twice. Does
+    not extract a new graph. A miss is False, not an error. radius_m=None
+    means "is this point inside any cached graph for mode".
     """
     if mode not in MODE_CONFIG:
         return False
@@ -1677,7 +1678,14 @@ def graph_is_cached(
     upstream = _upstream_glob()
     key_prefix = (release_key, upstream, mode, _graph_cache_speed_tag(mode, speed_m_s))
     needed_bbox = _bbox_around(lat, lon, r)
-    return _load_graph_from_disk(key_prefix, needed_bbox, want_shapes, lat, lon) is not None
+    loaded = _load_graph_from_disk(key_prefix, needed_bbox, want_shapes, lat, lon)
+    if loaded is None:
+        return False
+    # Peek already paid the unpickle. Park it in the LRU so the follow-up
+    # route() hits memory instead of loading the same file again.
+    extraction_bbox, graph = loaded
+    _store_graph_in_memory(key_prefix, lat, lon, extraction_bbox, graph)
+    return True
 
 
 def route_graph_is_cached(

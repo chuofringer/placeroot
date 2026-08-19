@@ -8,6 +8,14 @@ fixing behavior is patch.
 
 ## [Unreleased]
 
+### Fixed
+- Confirm-path review (#338): a disk graph peek now parks the loaded graph
+  in the in-memory LRU (no second unpickle on the follow-up `route()`);
+  `from_to` parallel resolves copy the request progress context into each
+  worker; a `confirm=true` cold graph build that exceeds 2x the advertised
+  ETA (`GRAPH_BUILD_S`) returns `eta_exceeded` instead of hanging. Warm
+  cache hits stay uncapped.
+
 ### Changed
 - Question-gate route ids go through `server.route` / `from_to` so a
   valid `needs_confirm` is outcome `ask`, not a 15s fail and not a

@@ -108,6 +108,7 @@ _DIRECT_SCAN_S: dict[str, tuple[float, float]] = {
 _DEFAULT_SCAN_S = (5.0, 20.0)
 DIVISIONS_INDEX_S = (20.0, 40.0)
 GRAPH_BUILD_S = (5.0, 25.0)
+WARMUP_S = (5.0, 25.0)  # first-city tile COPY, same band as a graph build
 
 
 def format_eta(lo: float, hi: float) -> str:

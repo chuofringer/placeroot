@@ -8,7 +8,7 @@ user and passed confirm=true. A warm / cached graph never asks.
 import asyncio
 import time
 
-from placeroot import routing, server
+from placeroot import progress, routing, server
 
 from ._routing_fixture import build_routing_fixture as fx
 from .conftest import CENTER_LAT, CENTER_LON
@@ -23,8 +23,8 @@ def test_cold_route_without_confirm_is_needs_confirm_and_fast():
     result = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
     elapsed_ms = (time.monotonic() - started) * 1000
     assert result["error"] == "needs_confirm"
-    assert result["eta"] == "about 5–25 seconds"
-    assert result["eta_s"] == [5, 25]
+    assert result["eta"] == progress.format_eta(*progress.GRAPH_BUILD_S)
+    assert result["eta_s"] == [int(progress.GRAPH_BUILD_S[0]), int(progress.GRAPH_BUILD_S[1])]
     assert "confirm=true" in result["detail"]
     assert "street graph" in result["detail"]
     assert elapsed_ms < 500
@@ -100,7 +100,8 @@ def test_cold_warmup_without_confirm_is_needs_confirm(tmp_path, monkeypatch):
     result = server.warmup_city(lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000)
     elapsed_ms = (time.monotonic() - started) * 1000
     assert result["error"] == "needs_confirm"
-    assert result["eta_s"] == [5, 25]
+    assert result["eta"] == progress.format_eta(*progress.WARMUP_S)
+    assert result["eta_s"] == [int(progress.WARMUP_S[0]), int(progress.WARMUP_S[1])]
     assert "confirm=true" in result["detail"]
     assert elapsed_ms < 500
 
@@ -184,7 +185,18 @@ def test_disk_graph_after_restart_never_asks(tmp_path, monkeypatch):
         return real(*args, **kwargs)
 
     monkeypatch.setattr(routing, "build_graph", spy)
+    loads = []
+    real_load = routing._load_graph_from_disk
+
+    def load_spy(*args, **kwargs):
+        loads.append(1)
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(routing, "_load_graph_from_disk", load_spy)
     assert routing.graph_is_cached(FROM_LAT, FROM_LON, "walk") is True
+    assert routing._graph_cache, "disk peek must populate the in-memory LRU"
+    n_after_peek = len(loads)
+    assert n_after_peek >= 1
     assert routing.route_graph_is_cached(
         FROM_LAT, FROM_LON, TO_LAT, TO_LON, "walk"
     )
@@ -193,3 +205,37 @@ def test_disk_graph_after_restart_never_asks(tmp_path, monkeypatch):
     assert "error" not in result
     assert result["distance_m"] > 0
     assert builds == []
+    assert len(loads) == n_after_peek, "follow-up route must hit memory, not unpickle again"
+
+
+def test_confirmed_graph_build_over_2x_eta_fails(monkeypatch):
+    """confirm=true cold build that exceeds 2x advertised ETA fails honestly."""
+    routing.clear_graph_cache()
+    monkeypatch.setattr(progress, "GRAPH_BUILD_S", (0.05, 0.1))
+
+    def hang(*_a, **_k):
+        time.sleep(1.0)
+        raise AssertionError("cap should have returned before the build finished")
+
+    monkeypatch.setattr(routing, "build_graph", hang)
+    started = time.monotonic()
+    result = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", confirm=True)
+    elapsed = time.monotonic() - started
+    assert result["error"] == "eta_exceeded"
+    assert result["limit_s"] == int(2.0 * 0.1)
+    assert result["eta"] == progress.format_eta(0.05, 0.1)
+    assert elapsed < 0.8
+
+
+def test_warm_graph_stays_uncapped(monkeypatch):
+    routing.clear_graph_cache()
+    routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
+    monkeypatch.setattr(progress, "GRAPH_BUILD_S", (0.01, 0.02))
+
+    def boom(*_a, **_k):
+        raise AssertionError("warm hit must not rebuild")
+
+    monkeypatch.setattr(routing, "build_graph", boom)
+    result = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", confirm=True)
+    assert "error" not in result
+    assert result["distance_m"] > 0
