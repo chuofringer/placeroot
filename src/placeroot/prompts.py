@@ -289,8 +289,10 @@ street-graph build; buildings questions still scan. Place searches over
 the warmed area should then be fast.
 
 1. `warmup_city()` with city {named} (or lat/lon if you already have them).
-   This is the slow call — wait for it, and tell the user it is the
-   one-time tile warmup, not a hang.
+   Do not pass confirm on the first call. If the reply is needs_confirm,
+   ask the user whether they want to wait (about 5–25 seconds), then call
+   the same `warmup_city()` again with confirm=true. An already-cached
+   city never asks. Do not tell them to wait without asking.
 2. If `warmup_city()` is not registered on this install, `geocode()` {named}
    and then `find_places()` at the resolved point with a small radius.
    That still warms the places tiles; say that the dedicated warmup was
