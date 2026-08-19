@@ -167,3 +167,26 @@ residential connection the published numbers describe.
 uv run python benchmarks/run_query_corpus.py --tool geocode   # one family
 uv run python benchmarks/run_query_corpus.py --fail-on wrong  # CI's gate
 ```
+
+## Question-level 15s gate (#331)
+
+Any *user question* under 15s wall (10s is stretch, reported, not a
+fail). The clock is the whole corpus `fn` — every hop — never a single
+tool. The #265 per-tool 10s matrix is a different number and is out of
+scope.
+
+`--warm` reruns the same id in the same process against the cache the
+cold leg just filled. A 14s warm is a hang. Suite fails if any id×leg
+is wrong or over 15s. p95 is printed; it is not the gate.
+
+```bash
+# ship / nightly (20 ids)
+uv run python benchmarks/run_query_corpus.py --question-gate --warm --budget-s 15 --fail-on both
+
+# PR smoke (r01 Stanford, g10 Casablanca, c01 playgrounds-near-Stanford)
+uv run python benchmarks/run_query_corpus.py --smoke --warm --budget-s 15 --fail-on both
+```
+
+The weekly Query Corpus workflow still runs all 148 with `--fail-on wrong`
+only. The 20-id gate is `.github/workflows/question-gate.yml` (weekdays
+08:00 PT) plus the commands above. Do not run either from pytest.

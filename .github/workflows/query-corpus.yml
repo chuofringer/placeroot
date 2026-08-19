@@ -8,6 +8,9 @@ name: Query Corpus
 # returned nothing, and geocode("Casablanca") answered Chile in 0.2s — which a
 # timing-only bench scores as the best result in the suite.
 #
+# The 20-id 15s question-level gate (cold+warm, --fail-on both) is
+# question-gate.yml (#331). This weekly job stays the full corpus.
+#
 # Gated on correctness only. Latency is reported, never failed on: a hosted
 # runner's bandwidth to S3 is not the residential connection the published
 # numbers describe, and a flapping weekly job is one nobody reads.

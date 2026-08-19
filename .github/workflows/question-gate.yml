@@ -1,0 +1,54 @@
+name: Question gate
+# Nightly 20-id question-level 15s gate (#331). Clock is the whole user
+# question (all hops), cold then warm, fail on WRONG PLACE and on timeout.
+# Not the #265 per-tool 10s matrix. Not the weekly 148-id corpus
+# (that one stays --fail-on wrong — hosted S3 bandwidth is not the
+# residential pipe the published numbers describe).
+#
+# Do not add this to pull_request. 20 cold + 20 warm vs live S3 is
+# bandwidth-bound; PR authors run the 3-id smoke locally:
+#
+#   uv run python benchmarks/run_query_corpus.py --smoke --warm --budget-s 15 --fail-on both
+on:
+  schedule:
+    - cron: '0 15 * * 1-5'   # 08:00 PT weekdays
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  question-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d  # v10.0.0
+        with:
+          # v10 still installs uv if cache is off. schedule/workflow_dispatch
+          # are not in the auto-disable list; keep true anyway.
+          enable-cache: true
+
+      - name: Run the 20-id question gate
+        run: |
+          set -o pipefail
+          uv run python benchmarks/run_query_corpus.py \
+            --question-gate \
+            --warm \
+            --budget-s 15 \
+            --stretch-s 10 \
+            --fail-on both \
+            --json question-gate.jsonl \
+            | tee question-gate-report.txt
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: question-gate-results
+          archive: true
+          path: |
+            question-gate.jsonl
+            question-gate-report.txt
