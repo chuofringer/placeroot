@@ -38,6 +38,7 @@ from placeroot import (
     errors,
     geo,
     gers,
+    honesty,
     infrastructure,
     land_use,
     mapview,
@@ -76,7 +77,11 @@ BASE_INSTRUCTIONS = (
     "A hint only bounds where the search looks; every row returned still "
     "comes from the data, so a wrong hint costs a retry, never a wrong "
     "answer. When a reply carries need: \"location\" it could not bound "
-    "the search at all — retry with the city rather than rephrasing."
+    "the search at all — retry with the city rather than rephrasing.\n"
+    "Actionable place rows carry trust_note, a calibrated before-you-go "
+    "clause from confidence and operating status. Composed itineraries add "
+    "verify_before_going naming the 1–2 stops most worth checking — surface "
+    "both. Users forgive missing data; they do not forgive a shuttered café."
 )
 
 DEFAULT_HTTP_HOST = "127.0.0.1"
@@ -314,7 +319,8 @@ def find_places(
     'grocery'); name is a substring match on the place name — both compose
     with either mode. Results include operating_status ("in business" /
     "permanently closed" / null when unknown) — a business-lifecycle
-    signal, NOT opening hours; this data has no open-now information.
+    signal, NOT opening hours; this data has no open-now information —
+    and a compact trust_note calibrated from confidence and that status.
 
     min_confidence (0.0-1.0) keeps only rows whose confidence score is at
     least that value; out-of-range values return a bad_request error.
@@ -456,7 +462,8 @@ def place_details(
     near_lon: float | None = None,
 ) -> dict:
     """One place, in full: addresses, websites, phones, socials, brand,
-    source attribution, GERS id, confidence, and operating status.
+    source attribution, GERS id, confidence, operating status, and a
+    compact trust_note.
 
     Resolve either by GERS id (the `id` field find_places and other tools
     return) or by name + lat/lon (nearest name match within radius_m of
@@ -1650,7 +1657,9 @@ def places_along_route(
     whole route — never just the first limit, which would drop the far end
     of the journey — and carries "truncated": true saying so. It also
     carries {"route": {"distance_m", "duration_s", "mode"}} for the
-    underlying route.
+    underlying route. A composed itinerary also carries
+    verify_before_going when any stop is low-confidence or listed closed,
+    naming the 1–2 places most worth checking.
 
     category and name narrow the search exactly as they do in find_places
     (category matches Overture's taxonomy, e.g. 'coffee_shop'; name is a
@@ -1697,6 +1706,11 @@ def places_along_route(
         return {"error": "bad_request", "detail": str(e)}
     if "error" in result:
         return result
+    # Compute the verify line from pre-truncation rows. apply_budget may
+    # strip confidence first, after which every survivor reads as low.
+    # Attaching first also puts the line in the envelope so its tokens
+    # are accounted for.
+    honesty.attach_verify_line(result)
     payload = _with_degraded_fields(budget.apply_budget(result, "results"))
     return _with_category_hint(payload, category, widen_hint="widen max_detour_m")
 
@@ -1720,7 +1734,9 @@ def optimize_route(
     [{"from_idx", "to_idx", "distance_m", "duration_s"}, ...],
     "total_distance_m", "total_duration_s", "mode", "roundtrip"} — indices
     refer to the input `stops` list, and there is no polyline/geometry — for
-    a single pair's numbers on their own, call `route`.
+    a single pair's numbers on their own, call `route`. If a stop already
+    carries confidence or operating_status (from a prior place lookup),
+    the response adds verify_before_going naming the 1–2 weakest.
 
     start_index (default 0) is fixed as the first stop. roundtrip=true (the
     default) returns to it; the closing leg is in "legs" but the start is not
@@ -1777,7 +1793,7 @@ def optimize_route(
         }
 
     try:
-        return routing.optimize_route(
+        result = routing.optimize_route(
             points, mode=mode, roundtrip=bool(roundtrip), start_index=start_index
         )
     except routing.UnsupportedMode as e:
@@ -1800,6 +1816,15 @@ def optimize_route(
         }
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
+    # Caller-supplied stop fields (name/confidence/operating_status) are
+    # already in hand — no extra lookup. routing.py is untouched (#312).
+    # verify_before_going skips bare {lat, lon} stops — those are not
+    # place lookups and must not become "low confidence" warnings.
+    if "error" not in result:
+        line = honesty.verify_before_going(stops)
+        if line:
+            result = {**result, "verify_before_going": line}
+    return result
 
 
 @_tool("Data version")

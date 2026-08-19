@@ -204,6 +204,9 @@ def _plan_errands(stops: str, start: str = "") -> str:
 
 Then give the ordered stop list with per-leg distance and duration and a
 total, and one sentence on why that order beats the order the user gave.
+If any stop carries a trust_note, add one "Verify before going:" line
+naming the 1–2 weakest-confidence stops — the ones most worth checking
+before anyone leaves the house.
 
 {_COMPACT}"""
 

@@ -22,7 +22,9 @@ CHARS_PER_TOKEN = 4
 
 # Stripped from rows, in this order, if dropping rows alone isn't enough
 # to fit a single remaining row within budget.
-OPTIONAL_FIELD_PRIORITY = ["confidence", "operating_status", "category", "basic_category"]
+OPTIONAL_FIELD_PRIORITY = [
+    "confidence", "operating_status", "category", "basic_category", "trust_note",
+]
 
 
 def token_budget() -> int:
