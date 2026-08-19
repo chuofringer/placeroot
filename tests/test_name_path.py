@@ -142,6 +142,57 @@ def test_last_city_is_reused_for_the_next_poi(monkeypatch):
     assert abs(seen["near"][1] - CENTER_LON) < 0.01
 
 
+def test_observation_tower_does_not_replay_brooklyn_after_paris(monkeypatch):
+    """Implicit last-city must be part of the resolve cache key.
+
+    Brooklyn → Observation Tower caches a Brooklyn pin. After Paris
+    updates last-city, the same query must resolve against Paris, not
+    replay the Brooklyn cache entry.
+    """
+    geocode.resolve_place("Brooklyn")
+    assert geocode._last_good_city
+
+    def fake_geocode(query, limit=5):
+        q = query.lower()
+        if q == "paris":
+            return [{
+                "name": "Paris", "type": "locality", "lat": 48.857, "lon": 2.351,
+                "id": "paris", "admin_context": ["France"], "rank_score": 1.0,
+            }]
+        return [{
+            "name": query, "type": "locality", "lat": CENTER_LAT, "lon": CENTER_LON,
+            "id": "div", "admin_context": ["United States", "New York"],
+            "rank_score": 0.5,
+        }]
+
+    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10):
+        if abs(lat - 48.857) < 1.0:
+            return [{
+                "id": "paris-tower", "name": "Observation Tower",
+                "category": "monument", "basic_category": "monument",
+                "operating_status": "open", "confidence": 0.8,
+                "lat": 48.858, "lon": 2.294, "distance_m": 10,
+            }]
+        return [{
+            "id": "bk-tower", "name": "Observation Tower",
+            "category": "monument", "basic_category": "monument",
+            "operating_status": "open", "confidence": 0.8,
+            "lat": CENTER_LAT, "lon": CENTER_LON, "distance_m": 5,
+        }]
+
+    monkeypatch.setattr(geocode, "geocode", fake_geocode)
+    monkeypatch.setattr(overture, "find_places", fake_find_places)
+
+    first = geocode.resolve_place("Observation Tower")
+    assert first and first[0]["id"] == "bk-tower"
+
+    paris = geocode.resolve_place("Paris")
+    assert paris and paris[0]["id"] == "paris"
+
+    second = geocode.resolve_place("Observation Tower")
+    assert second and second[0]["id"] == "paris-tower"
+
+
 def test_last_city_does_not_bind_a_bare_city_query(monkeypatch):
     geocode._last_good_city = "Palo Alto"
     geocode._last_good_coords = (37.44, -122.14)

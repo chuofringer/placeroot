@@ -1470,6 +1470,10 @@ _CITY_HINT_RADIUS_M = 50_000
 _RESOLVE_LRU_MAX = 256
 _resolve_lru: OrderedDict[tuple, list[dict]] = OrderedDict()
 _resolve_lru_lock = threading.Lock()
+# One lock around the last-good pair: #335 _resolve_pair runs two
+# resolve_place calls concurrently, and two bare assignments can tear
+# (city from one pin, coords from the other).
+_last_good_lock = threading.Lock()
 _last_good_city: str | None = None
 _last_good_coords: tuple[float, float] | None = None
 _POI_ALIASES: dict[str, dict] | None = None
@@ -1636,10 +1640,14 @@ def _remember_last_city(city: str | None, top: dict) -> None:
     if name is None:
         ctx = top.get("admin_context") or []
         name = ctx[-1] if ctx else top.get("name")
-    if name:
-        _last_good_city = name
+    coords = None
     if top.get("lat") is not None and top.get("lon") is not None:
-        _last_good_coords = (top["lat"], top["lon"])
+        coords = (top["lat"], top["lon"])
+    with _last_good_lock:
+        if name:
+            _last_good_city = name
+        if coords is not None:
+            _last_good_coords = coords
 
 
 def clear_resolve_session() -> None:
@@ -1652,8 +1660,9 @@ def clear_resolve_session() -> None:
     global _last_good_city, _last_good_coords
     with _resolve_lru_lock:
         _resolve_lru.clear()
-    _last_good_city = None
-    _last_good_coords = None
+    with _last_good_lock:
+        _last_good_city = None
+        _last_good_coords = None
 
 
 # --- #53: name-variant normalization -------------------------------------
@@ -3783,13 +3792,10 @@ def resolve_place(
     if not query:
         return []
 
-    given_city, given_lat, given_lon = city, near_lat, near_lon
-    cached = _resolve_cache_get(query, given_city, given_lat, given_lon)
-    if cached is not None:
-        return cached[:limit]
-
     # #329: parse a trailing city / POI alias, or reuse the last good city
-    # for a POI-shaped query. Then fall through to the #271 city= path.
+    # for a POI-shaped query. Infer *before* the LRU lookup so the key
+    # includes the effective hint — otherwise "Observation Tower" after
+    # Brooklyn is cached under a bare query and replayed after Paris.
     place_query = query
     city_bounded = False
     if city is None and near_lat is None and near_lon is None:
@@ -3800,11 +3806,20 @@ def resolve_place(
             city_bounded = True
         elif inferred_city:
             city = inferred_city
-        elif _query_is_poi_shaped(query) and _last_good_city:
-            city = _last_good_city
-            if _last_good_coords is not None:
-                near_lat, near_lon = _last_good_coords
-                city_bounded = True
+        elif _query_is_poi_shaped(query):
+            with _last_good_lock:
+                last_city = _last_good_city
+                last_coords = _last_good_coords
+            if last_city:
+                city = last_city
+                if last_coords is not None:
+                    near_lat, near_lon = last_coords
+                    city_bounded = True
+
+    cache_city, cache_lat, cache_lon = city, near_lat, near_lon
+    cached = _resolve_cache_get(query, cache_city, cache_lat, cache_lon)
+    if cached is not None:
+        return cached[:limit]
 
     # #271: a caller-supplied (or now inferred) city is the location half
     # of the query, stated rather than guessed at. Resolving it first and
@@ -3995,7 +4010,7 @@ def resolve_place(
     for c in candidates:
         del c["_prominence"]
     out = candidates[:limit]
-    _resolve_cache_put(query, given_city, given_lat, given_lon, out)
+    _resolve_cache_put(query, cache_city, cache_lat, cache_lon, out)
     if out:
         _remember_last_city(city, out[0])
         _kick_autowarm(out[0])

@@ -11,7 +11,8 @@ fixing behavior is patch.
 ### Changed
 - Name path (#329): parse a trailing city (or reuse the last good one) as
   `resolve_place(city=)`, cache last resolve in-process keyed by
-  (normalized query, city hint), and run `geocode_batch` against one
+  (normalized query, effective city/coords including the implicit last
+  city), and run `geocode_batch` against one
   shared divisions name table plus a tiny alias list on the bundled
   stage-0 index. Famous one-word POIs no longer lose to a random exact
   division (Colosseum → Queensland, Ebisu → Shikoku). Wrong place is
