@@ -17,3 +17,11 @@ property is slated for removal ~Sept 2026 in favor of `taxonomy` /
 `basic_category`). When PlaceRoot bumps the Overture release it queries, refresh
 this file from the matching schema tag and update the pin + date above. Keep the
 same filename and column shape, or update `search_categories`' parser to match.
+
+
+## geocode-index/aliases.json
+
+Tiny landmark → city overlay for the bundled stage-0 name index (#329).
+Looked up locally so a one-word famous POI (Colosseum, Eiffel Tower, Ebisu)
+does not lose to a random exact division. Hints only — every returned row
+still comes from the data. Not regenerated with the index; edit in place.

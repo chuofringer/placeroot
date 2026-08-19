@@ -153,6 +153,8 @@ def offline_data(request, monkeypatch):
     # which the cache-specific tests rely on to count extractions accurately.
     routing.clear_graph_cache()
     autowarm.clear_autowarm_state()
+    from placeroot import geocode as geocode_mod
+    geocode_mod.clear_resolve_session()
     # gers.py's negative cache is keyed by (release, id), and the release is
     # pinned identically for every test — so a not-found cached against one
     # test's fixtures would answer for the next test's. Start each test cold.
