@@ -33,11 +33,11 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `gers_lookup` | Any GERS id → the entity it names (place, division, or building), what it's inside, and the building at its point |
 | `search_categories` | Free text → the right Overture category slug to filter `find_places` by |
 | `isochrone` | The area reachable within N minutes on foot, bike, or car |
-| `route` | Shortest-path distance and duration between two points, on foot, bike, or car; `include_path=true` adds the simplified route polyline |
-| `places_along_route` | Places on the way from A to B: corridor search along the route, with each result's detour and how far along it sits |
+| `route` | Shortest-path distance and duration between two points, on foot, bike, or car; `include_path=true` adds the simplified route polyline; also returns an `export` object (Google/Apple Maps links, GPX, printable stop list) |
+| `places_along_route` | Places on the way from A to B: corridor search along the route, with each result's detour and how far along it sits, compact trust notes on results, and a verify-before-going line for the weakest stops |
 | `neighborhood_verdict` | Should I live here? A ranked verdict from life context (household, mobility, priorities) — strengths, weak points, one thing to verify in person |
-| `optimize_route` | Best order to visit 2–10 stops, solved exactly over the street graph — order, per-leg distance/duration, and totals |
-| `render_map` | Any result → a self-contained interactive HTML map |
+| `optimize_route` | Best order to visit 2–10 stops, solved exactly over the street graph — order, per-leg distance/duration, totals, an `export` object (Google/Apple Maps links, GPX, printable stop list), and `verify_before_going` when stops already carry confidence/operating_status |
+| `render_map` | Any result → a shareable one-pager (interactive map, verdict, stop list, and Overture/OSM attribution); optional `summary` for the verdict, otherwise a short fallback is composed from the payload |
 | `simplify_geometry` | Any geometry → simplified to fit a token budget |
 | `warmup_city` | Pre-cache a city's places and transportation tiles so later place searches over it read locally — does not build the street graph or cache buildings |
 | `data_version` | Which Overture release the answers are drawn from |
@@ -71,9 +71,9 @@ Desktop and Cursor surface them in their own prompt pickers.
 
 | Prompt | Arguments | Workflow |
 |---|---|---|
-| `/mcp__placeroot__site_selection` | `business_type`, `area` | `search_categories` → `geocode` → `summarize_area` → `compare_areas` → `find_places` + `within_distance` → one ranked recommendation |
-| `/mcp__placeroot__compare_neighborhoods` | `area_a`, `area_b` | `geocode`/`resolve_place` + `admin_lookup` → `summarize_area` ×2 → `compare_areas` → `summarize_buildings` → a small difference table |
-| `/mcp__placeroot__plan_errands` | `stops`, `start` (optional) | `geocode_batch` → `distance_matrix` → `route` per leg → optional `places_along_route` → an ordered run with per-leg distance and duration, plus a verify-before-going line for the weakest 1–2 stops |
+| `/mcp__placeroot__site_selection` | `business_type`, `area` | `search_categories` → `geocode` → `summarize_area` → `compare_areas` → `find_places` + `within_distance` → one ranked recommendation → `render_map()` so the user leaves with a file |
+| `/mcp__placeroot__compare_neighborhoods` | `area_a`, `area_b` | `geocode`/`resolve_place` + `admin_lookup` → `summarize_area` ×2 → `compare_areas` → `summarize_buildings` → a small difference table → `render_map()` so the user leaves with a file |
+| `/mcp__placeroot__plan_errands` | `stops`, `start` (optional) | `geocode_batch` → `distance_matrix` → `route` per leg → optional `places_along_route` → an ordered run with per-leg distance and duration, plus a verify-before-going line for the weakest 1–2 stops → `render_map()` so the user leaves with a file |
 | `/mcp__placeroot__should_i_live_here` | `location`, `context` (optional) | `geocode` (if needed) → `neighborhood_verdict` → a verdict, strengths, the weak point, and the one thing to verify in person |
 | `/mcp__placeroot__get_to_know_my_city` | `city` (optional) | `warmup_city` → pre-cache the metro so the first real question is fast |
 
