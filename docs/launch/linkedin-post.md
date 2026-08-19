@@ -1,6 +1,6 @@
 # LinkedIn launch post
 
-Sharing a side project fully built by agents running continuous loops: PlaceRoot 🗺️ (https://placeroot.dev)
+Sharing a side project fully built by agents running in continuous loops with almost no human intervention: PlaceRoot 🗺️ (https://placeroot.dev)
 
 It's an MCP server that lets AI agents answer real location questions — what's nearby, how do I get there, what's in this neighborhood — all from open data.
 
