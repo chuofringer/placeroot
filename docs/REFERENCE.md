@@ -58,13 +58,13 @@ PlaceRoot also speaks the MCP 2026-07-28 revision's listing cache hints:
 `tools/list` (and the prompt and resource listings) come back with
 `ttlMs: 86400000` and `cacheScope: "public"`. The listings are frozen at build
 time — nothing at runtime can change them — so a client is free to reuse them
-for a day instead of re-reading a ~14.5k-token schema surface every session.
+for a day instead of re-reading a ~14.8k-token schema surface every session.
 Clients that speak an older revision are unaffected: those fields did not exist
 before 2026-07-28, and the response they get is byte-identical to what it was.
 
 ## Workflow prompts
 
-Four MCP **prompts** ship with the server: canned multi-tool workflows that
+Five MCP **prompts** ship with the server: canned multi-tool workflows that
 encode which tool to call first, what to do with its output, and what the
 answer should look like. In Claude Code they appear as slash commands; Claude
 Desktop and Cursor surface them in their own prompt pickers.
@@ -75,6 +75,7 @@ Desktop and Cursor surface them in their own prompt pickers.
 | `/mcp__placeroot__compare_neighborhoods` | `area_a`, `area_b` | `geocode`/`resolve_place` + `admin_lookup` → `summarize_area` ×2 → `compare_areas` → `summarize_buildings` → a small difference table |
 | `/mcp__placeroot__plan_errands` | `stops`, `start` (optional) | `geocode_batch` → `distance_matrix` → `route` per leg → optional `places_along_route` → an ordered run with per-leg distance and duration, plus a verify-before-going line for the weakest 1–2 stops |
 | `/mcp__placeroot__should_i_live_here` | `location`, `context` (optional) | `geocode` (if needed) → `neighborhood_verdict` → a verdict, strengths, the weak point, and the one thing to verify in person |
+| `/mcp__placeroot__get_to_know_my_city` | `city` (optional) | `warmup_city` → pre-cache the metro so the first real question is fast |
 
 ```
 /mcp__placeroot__site_selection bike repair shop | Portland, Oregon
@@ -120,8 +121,8 @@ without them registered.
 
 ## Loading fewer tools (`PLACEROOT_TOOLS`)
 
-All 32 tool schemas cost roughly **14.5k tokens** of every conversation's
-context, paid before the agent asks anything — about the cost of 71 median
+All 32 tool schemas cost roughly **14.8k tokens** of every conversation's
+context, paid before the agent asks anything — about the cost of 72 median
 answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS`
 selects which tools get registered. Unselected tools are never registered and
 never appear in `tools/list`.
@@ -143,7 +144,7 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 32 | ~14,529 | — |
+| unset / `all` (default) | 32 | ~14,781 | — |
 | `search` | 14 | ~6,445 | 53% |
 | `core` | 13 | ~5,941 | 57% |
 | `routing` | 7 | ~2,894 | 79% |
@@ -156,7 +157,7 @@ union of everything named:
 - **`routing`** — `route`, `isochrone`, `distance_matrix`, `within_distance`, `optimize_route`.
 - **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`, `neighborhood_verdict`.
 - **`geometry`** — `simplify_geometry`, `render_map`.
-- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 32 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 14.5k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
+- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 32 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 14.8k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 
 `data_version` and `preferences` are registered under every profile.
 `data_version` is ~230 tokens and the only way an agent can tell which
