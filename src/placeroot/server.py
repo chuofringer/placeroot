@@ -1810,6 +1810,8 @@ def from_to(from_: str, to: str, mode: str = "walk") -> dict:
                 if place.get(field) is not None:
                     point[field] = place[field]
     if "error" not in result:
+        # Intentional overwrite: route() already attached export; rebuild so
+        # maps/gpx/text use the named endpoints rather than bare coordinates.
         result["export"] = export.from_route_result(result)
     return result
 
@@ -2400,7 +2402,11 @@ have to fit in about 1.1k tokens), and the names here are already
         for name, param in inspect.signature(fn).parameters.items()
     )
     # from is reserved in Python; from_to's public name is still from.
-    return summary.replace("from_", "from")
+    # Alias only that exact token — a substring replace would turn
+    # route / places_along_route from_lat into fromlat.
+    return ",".join(
+        {"from_": "from", "from_?": "from?"}.get(part, part) for part in summary.split(",")
+    )
 
 
 @functools.cache
@@ -2666,24 +2672,30 @@ def _publish_from_keyword(mcp_server) -> None:
 
     The implementation parameter is from_. The public schema and the
     validator both use from so the agent never sees the underscore.
+
+    Patches mcp 2.0.0 private internals (pinned in uv.lock). If those
+    move, fail with a clear assertion rather than a raw AttributeError.
     """
-    tool = mcp_server._tool_manager.get_tool("from_to")
-    if tool is None:
-        return
-    from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase
-    from pydantic import ConfigDict, Field
+    try:
+        tool = mcp_server._tool_manager.get_tool("from_to")
+        if tool is None:
+            return
+        from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase
+        from pydantic import ConfigDict, Field
 
-    class FromToArguments(ArgModelBase):
-        model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
-        from_: str = Field(alias="from")
-        to: str
-        mode: str = "walk"
+        class FromToArguments(ArgModelBase):
+            model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
+            from_: str = Field(alias="from")
+            to: str
+            mode: str = "walk"
 
-        def model_dump_one_level(self) -> dict:
-            return {"from_": self.from_, "to": self.to, "mode": self.mode}
+            def model_dump_one_level(self) -> dict:
+                return {"from_": self.from_, "to": self.to, "mode": self.mode}
 
-    tool.fn_metadata = tool.fn_metadata.model_copy(update={"arg_model": FromToArguments})
-    tool.parameters = FromToArguments.model_json_schema(by_alias=True)
+        tool.fn_metadata = tool.fn_metadata.model_copy(update={"arg_model": FromToArguments})
+        tool.parameters = FromToArguments.model_json_schema(by_alias=True)
+    except (AttributeError, ImportError) as e:
+        raise AssertionError("from_to schema patch failed; mcp internals changed") from e
 
 
 def build_server(spec=_UNSET) -> MCPServer:

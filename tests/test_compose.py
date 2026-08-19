@@ -25,6 +25,14 @@ def _tools():
 # --- schema: names, not coordinates ----------------------------------------
 
 
+def test_publish_from_keyword_fails_loudly_if_mcp_internals_move():
+    class _Broken:
+        pass
+
+    with pytest.raises(AssertionError, match="from_to schema patch failed; mcp internals changed"):
+        server._publish_from_keyword(_Broken())
+
+
 def test_from_to_schema_requires_from_and_to_as_strings():
     schema = _tools()["from_to"].input_schema
     props = schema["properties"]
