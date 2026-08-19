@@ -170,6 +170,14 @@
     {
       "name": "warmup_city",
       "description": "Pre-cache a city so the first question is fast."
+    },
+    {
+      "name": "from_to",
+      "description": "Shortest-path walk/cycle/drive between two named places."
+    },
+    {
+      "name": "find_near",
+      "description": "Places of a category near a named place or city."
     }
   ],
   "tools_generated": false,

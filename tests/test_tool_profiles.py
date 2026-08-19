@@ -62,6 +62,8 @@ def test_core_profile():
         "places_along_route",
         "neighborhood_verdict",
         "warmup_city",
+        "from_to",
+        "find_near",
         "data_version",
         "preferences",
     }

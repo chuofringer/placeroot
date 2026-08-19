@@ -38,11 +38,13 @@ _TEXT_COORD_DP = 6
 
 def from_route_result(result: Mapping[str, object]) -> dict[str, object]:
     """Build the export object for a successful two-point `route` result."""
-    origin = _point(result["from"])
-    dest = _point(result["to"])
+    origin_pt = result["from"]
+    dest_pt = result["to"]
+    origin = _point(origin_pt)
+    dest = _point(dest_pt)
     stops = (
-        (origin[0], origin[1], "Start"),
-        (dest[0], dest[1], "End"),
+        (origin[0], origin[1], _endpoint_name(origin_pt, "Start")),
+        (dest[0], dest[1], _endpoint_name(dest_pt, "End")),
     )
     distance_m = _as_float(result.get("distance_m"))
     duration_s = _as_float(result.get("duration_s"))
@@ -265,6 +267,15 @@ def _named_stop(stop: Mapping[str, object], idx: int) -> tuple[float, float, str
     else:
         name = f"Stop {idx + 1}"
     return (lat, lon, name)
+
+
+def _endpoint_name(value: object, fallback: str) -> str:
+    if isinstance(value, Mapping):
+        raw = value.get("name")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return fallback
+
 
 
 def _point(value: object) -> tuple[float, float]:

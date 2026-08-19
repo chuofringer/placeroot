@@ -9,6 +9,10 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `from_to` and `find_near`: named-place compose so a walk or an
+  "X near Y" is one tool hop. Resolves names inside the server
+  (A and B in parallel), reuses `route` / `find_places`, and refuses
+  a city-apart pair before any continent graph is built (#328).
 - `route` and `optimize_route` now return an `export` object: Google/Apple
   Maps directions links (URL schemes only — no API, no keys, no extra
   network), a GPX 1.1 document, and a printable stop list, so a Saturday
