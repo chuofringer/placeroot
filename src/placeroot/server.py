@@ -1706,7 +1706,8 @@ def route(
     line that stops short of the destination.
 
     confirm=true after the user agreed to wait for a first-time street-graph
-    build (about 5–25 seconds). A warm or cached graph never needs it.
+    build (about 5–25 seconds). Pass it only after a needs_confirm reply
+    and they said yes. A warm or cached graph never needs it.
     Omit confirm unless you just asked and they said yes.
     """
     for lat, lon in ((from_lat, from_lon), (to_lat, to_lon)):
@@ -1788,7 +1789,9 @@ def from_to(from_: str, to: str, mode: str = "walk", confirm: bool = False) -> d
     (default walk).
 
     confirm=true after the user agreed to wait for a first-time street-graph
-    build (about 5–25 seconds). A warm or cached graph never needs it.
+    build (about 5–25 seconds). Pass it only after a needs_confirm reply
+    and they said yes. A warm or cached graph never needs it.
+    Omit confirm unless you just asked and they said yes.
     """
     if not isinstance(from_, str) or not from_.strip():
         return {"error": "bad_request", "detail": "from must be a non-empty place name"}
@@ -2223,7 +2226,8 @@ def _needs_confirm_graph(mode: str) -> dict:
         "eta_s": [int(lo), int(hi)],
         "detail": (
             f"First {mode} in this city builds the street graph. "
-            "Ask the user if they want to wait, then call again with confirm=true."
+            "Ask the user if they want to wait, then call the same tool "
+            "again with confirm=true."
         ),
     }
 
@@ -2235,7 +2239,8 @@ def _needs_confirm_warmup() -> dict:
         "eta_s": [5, 25],
         "detail": (
             "First warmup in this city copies map tiles into the local cache. "
-            "Ask the user if they want to wait, then call again with confirm=true."
+            "Ask the user if they want to wait, then call the same tool "
+            "again with confirm=true."
         ),
     }
 
@@ -2379,7 +2384,9 @@ def warmup_city(
     warmup cannot fan into a planet-sized tile fetch.
 
     confirm=true after the user agreed to wait for a first-time tile
-    warmup (about 5–25 seconds). An already-cached city never needs it.
+    warmup (about 5–25 seconds). Pass it only after a needs_confirm reply
+    and they said yes. An already-cached city never needs it.
+    Omit confirm unless you just asked and they said yes.
     """
     point_given = lat is not None or lon is not None
     if point_given and city is not None:

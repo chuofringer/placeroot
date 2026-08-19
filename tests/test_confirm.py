@@ -5,6 +5,7 @@ needs_confirm in well under 500ms unless the caller already asked the
 user and passed confirm=true. A warm / cached graph never asks.
 """
 
+import asyncio
 import time
 
 from placeroot import routing, server
@@ -115,3 +116,49 @@ def test_route_confirm_docstring_does_not_mention_geocode():
     doc = server.route.__doc__.lower()
     assert "confirm=true after the user agreed" in doc
     assert "geocode" not in doc
+
+
+def _tool(name):
+    tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
+    return tools[name]
+
+
+def test_confirm_descriptions_require_needs_confirm_and_user_yes():
+    """CTO schema bar: confirm=true only after needs_confirm AND the user said wait."""
+    for name in ("route", "from_to", "warmup_city"):
+        tool = _tool(name)
+        desc = (tool.description or "").lower()
+        assert "confirm=true after the user agreed" in desc, name
+        assert "needs_confirm" in desc, name
+        schema = tool.input_schema
+        prop = schema["properties"]["confirm"]
+        assert prop.get("type") == "boolean", name
+        assert prop.get("default") is False, name
+        assert "confirm" not in (schema.get("required") or []), name
+
+
+def test_from_to_stays_names_only():
+    props = _tool("from_to").input_schema["properties"]
+    assert "lat" not in props and "lon" not in props
+    assert "near_lat" not in props and "near_lon" not in props
+    assert set(props) >= {"from", "to", "mode", "confirm"}
+
+
+def test_find_near_has_no_confirm():
+    props = _tool("find_near").input_schema["properties"]
+    assert "confirm" not in props
+    assert "near_lat" not in props
+
+
+def test_needs_confirm_detail_asks_then_same_tool():
+    for result in (
+        server._needs_confirm_graph("walk"),
+        server._needs_confirm_warmup(),
+    ):
+        detail = result["detail"].lower()
+        assert "ask the user" in detail
+        assert "same tool" in detail
+        assert "confirm=true" in detail
+        assert "geocode" not in detail
+        assert "resolve_place" not in detail
+        assert "geocode_batch" not in detail
