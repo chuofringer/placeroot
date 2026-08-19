@@ -9,6 +9,10 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `from_to` and `find_near`: named-place compose so a walk or an
+  "X near Y" is one tool hop. Resolves names inside the server
+  (A and B in parallel), reuses `route` / `find_places`, and refuses
+  a city-apart pair before any continent graph is built (#328).
 - Auto-warm on first city-scale resolve: a successful `geocode` /
   `resolve_place` / `resolve_area` of a locality (not a POI, street, or
   address) starts background tile prewarm through the existing

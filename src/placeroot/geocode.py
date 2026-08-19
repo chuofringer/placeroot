@@ -400,7 +400,7 @@ from pathlib import Path
 import duckdb
 
 from placeroot import addresses, cache, geo, manifest, overture, progress, release, trace
-from placeroot.errors import AmbiguousArea
+from placeroot.errors import AmbiguousArea, AmbiguousPlace
 
 logger = logging.getLogger(__name__)
 
@@ -3809,6 +3809,55 @@ def _area_candidate(row: dict) -> dict:
         "name": row["name"],
         "admin_context": row["admin_context"],
     }
+
+
+def resolve_named_place(query: str) -> dict | None:
+    """Free-text place name -> one place or division, or AmbiguousPlace.
+
+    Same ranking as geocode() / resolve_area(): a prominence winner is a
+    safe pick. Several same-name, same-score hits raise AmbiguousPlace
+    so a compose tool cannot silently route the wrong city. Includes
+    places as well as divisions — "Ferry Building" is not an area.
+
+    Returns {name, lat, lon, id, type, admin_context} or None if nothing
+    matched. Raises AmbiguousPlace or overture.UpstreamUnavailable.
+    """
+    query = query.strip()
+    if not query:
+        return None
+
+    rows = [
+        r for r in geocode(query, limit=_RESOLVE_OVERFETCH)
+        if r.get("lat") is not None and r.get("lon") is not None
+    ]
+    if not rows:
+        return None
+
+    top = rows[0]
+    top_name = _normalize_for_match(top["name"])
+    tied = [
+        r for r in rows
+        if _normalize_for_match(r["name"]) == top_name
+        and abs(r.get("rank_score", 0) - top.get("rank_score", 0)) < _AREA_RANK_EPSILON
+    ]
+    if len(tied) > 1:
+        raise AmbiguousPlace(query, [_named_candidate(r) for r in tied[:_AREA_MAX_CANDIDATES]])
+
+    return _named_candidate(top)
+
+
+def _named_candidate(row: dict) -> dict:
+    """A geocode row, projected to what a named-place compose needs."""
+    out = {
+        "name": row["name"],
+        "lat": row["lat"],
+        "lon": row["lon"],
+        "id": row.get("id"),
+        "type": row.get("type"),
+    }
+    if row.get("admin_context"):
+        out["admin_context"] = row["admin_context"]
+    return out
 
 
 # --- #225: street-level forward search --------------------------------------

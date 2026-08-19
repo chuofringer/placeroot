@@ -207,6 +207,20 @@ def test_required_and_optional_args_are_distinguished():
     assert server._arg_summary(server._TOOL_FUNCS["data_version"]) == ""
 
 
+def test_route_advertised_params_keep_from_lat():
+    """from_ alias is the exact token only; route still advertises from_lat."""
+    advertised = server._arg_summary(server._TOOL_FUNCS["route"])
+    tokens = advertised.split(",")
+    assert "from_lat" in tokens
+    assert "fromlat" not in advertised
+    catalog = next(e for e in server.placeroot_capabilities()["tools"] if e.startswith("route("))
+    assert "from_lat" in catalog
+    assert "fromlat" not in catalog
+    along = server._arg_summary(server._TOOL_FUNCS["places_along_route"])
+    assert "from_lat" in along.split(",")
+    assert server._arg_summary(server._TOOL_FUNCS["from_to"]).split(",")[0] == "from"
+
+
 # --- Dispatch ---------------------------------------------------------------
 
 

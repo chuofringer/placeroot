@@ -21,6 +21,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 from mcp.server.caching import CacheableMethod, CacheHint
 from mcp.server.mcpserver import MCPServer
@@ -93,7 +94,10 @@ BASE_INSTRUCTIONS = (
     "so later place searches over that metro read locally. Tiles are "
     "not a built street graph — the first walk still builds or loads "
     "the graph; later walks reuse it. Optional warmup_city pays the "
-    "tile cost inline if you want to wait."
+    "tile cost inline if you want to wait.\n\n"
+    "Named walks and \"X near Y\" are one hop each: from_to() "
+    "and find_near() accept place names. Do not chain "
+    "geocode + route or resolve + find_places for those questions."
 )
 
 DEFAULT_HTTP_HOST = "127.0.0.1"
@@ -300,6 +304,85 @@ def _with_category_hint(payload: dict, category: str | None, widen_hint: str) ->
         )
         payload["note"] = "; ".join(filter(None, [payload.get("note"), hint]))
     return payload
+
+
+def _resolve_named_place(query: str) -> dict:
+    """A free-text name -> compact {name, lat, lon, id, type} or an error.
+
+    Shared by from_to and find_near. Ambiguous same-score names return
+    candidates instead of silently picking a city.
+    """
+    if not isinstance(query, str) or not query.strip():
+        return {"error": "bad_request", "detail": "place name must be a non-empty string"}
+    query = query.strip()
+    try:
+        resolved = geocoding.resolve_named_place(query)
+    except errors.AmbiguousPlace as e:
+        return {
+            "error": "ambiguous_place",
+            "detail": e.detail,
+            "query": e.query,
+            "candidates": e.candidates,
+        }
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    if resolved is None:
+        return {"error": "not_found", "detail": f"no place matched {query!r}"}
+    return resolved
+
+
+def _resolve_pair(a: str, b: str) -> tuple[dict, dict]:
+    """Resolve two names in parallel. Each call uses the shared conn lock."""
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fa = pool.submit(_resolve_named_place, a)
+        fb = pool.submit(_resolve_named_place, b)
+        return fa.result(), fb.result()
+
+
+def _category_slug(category: str) -> str:
+    """A slug, or the top search_categories hit for short free text.
+
+    "coffee_shop" stays a slug. "coffee" / "coffee shops" / "playgrounds"
+    map through the taxonomy (singularize, then the first word) so the
+    phrases users actually type reach find_places.
+    """
+    raw = category.strip()
+    if not raw:
+        return raw
+    candidates = [raw, raw.lower().replace(" ", "_")]
+    lower = raw.lower()
+    if lower.endswith("s") and len(lower) > 3:
+        stem = lower[:-1].strip()
+        candidates.append(stem)
+        candidates.append(stem.replace(" ", "_"))
+    first = raw.split()[0]
+    if first.lower() != lower:
+        candidates.append(first)
+    seen: set[str] = set()
+    for cand in candidates:
+        key = cand.lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        slug = key.replace(" ", "_")
+        if categories.hierarchy_for(slug):
+            return slug
+        hits = categories.search_categories(cand, limit=1)
+        if hits:
+            return hits[0]["slug"]
+    return raw.lower().replace(" ", "_")
+
+
+_FIND_NEAR_KEYS = (
+    "id",
+    "name",
+    "category",
+    "distance_m",
+    "lat",
+    "lon",
+    "trust_note",
+    "operating_status",
+)
 
 
 @_tool("Find places")
@@ -1670,6 +1753,130 @@ def route(
     return result
 
 
+@_tool("Named-place route")
+def from_to(from_: str, to: str, mode: str = "walk") -> dict:
+    """Shortest-path walk, cycle, or drive between two named places.
+
+    Pass the user's place names as from and to. Do not call geocode(),
+    resolve_place(), or geocode_batch() first. Resolves both ends in
+    parallel, builds one street graph, and returns distance, duration,
+    export maps/gpx/text, and the resolved name and coordinates for each
+    end. One hop for a named walk.
+
+    If a name matches several equally-ranked places, returns
+    {"error": "ambiguous_place", "candidates": [...]} instead of picking
+    a city. If the two names resolve a city apart, returns
+    {"error": "too_far"} with the resolved ends and the mode cap rather
+    than extracting a continent graph. Same per-mode straight-line caps
+    as a coordinate route (walk ~7.5 km, cycle ~23.5 km, drive ~95.5 km).
+    An unresolvable name returns {"error": "not_found"}; empty names
+    return {"error": "bad_request"}. mode is "walk", "cycle", or "drive"
+    (default walk).
+    """
+    if not isinstance(from_, str) or not from_.strip():
+        return {"error": "bad_request", "detail": "from must be a non-empty place name"}
+    if not isinstance(to, str) or not to.strip():
+        return {"error": "bad_request", "detail": "to must be a non-empty place name"}
+    origin, dest = _resolve_pair(from_, to)
+    if "error" in origin:
+        return {**origin, "field": "from"}
+    if "error" in dest:
+        return {**dest, "field": "to"}
+    mode = preference_store.resolve_mode(mode, "walk")
+    if mode not in routing.MODE_CONFIG:
+        return {
+            "error": "unsupported_mode",
+            "detail": f"unsupported mode {mode!r}",
+            "supported": sorted(routing.MODE_CONFIG),
+        }
+    straight_m = geo.haversine_m(origin["lat"], origin["lon"], dest["lat"], dest["lon"])
+    cap_m = routing.ROUTE_MAX_STRAIGHT_LINE_M[mode]
+    if straight_m > cap_m:
+        return {
+            "error": "too_far",
+            "detail": (
+                f"{origin['name']!r} and {dest['name']!r} are {round(straight_m)} m "
+                f"apart; from_to stays inside one city ({mode} cap {round(cap_m)} m)"
+            ),
+            "from": origin,
+            "to": dest,
+            "distance_m": round(straight_m, 1),
+            "max_distance_m": cap_m,
+            "mode": mode,
+        }
+    result = route(origin["lat"], origin["lon"], dest["lat"], dest["lon"], mode=mode)
+    for key, place in (("from", origin), ("to", dest)):
+        point = result.get(key)
+        if isinstance(point, dict):
+            for field in ("name", "id", "type", "admin_context"):
+                if place.get(field) is not None:
+                    point[field] = place[field]
+    if "error" not in result:
+        # Intentional overwrite: route() already attached export; rebuild so
+        # maps/gpx/text use the named endpoints rather than bare coordinates.
+        result["export"] = export.from_route_result(result)
+    return result
+
+
+@_tool("Find places near a name")
+def find_near(
+    category: str,
+    near: str,
+    radius_m: float = 1000,
+    limit: int = 10,
+) -> dict:
+    """Places of a category near a named place or city.
+
+    Pass the user's place name as near. Do not call geocode(),
+    resolve_place(), or geocode_batch() first. One hop for a category
+    near a named landmark. Resolves near, then searches like a point
+    find. Returns compact rows (name, category, distance, trust_note)
+    plus the resolved near (name and coordinates).
+
+    If near matches several equally-ranked places, returns
+    {"error": "ambiguous_place", "candidates": [...]} instead of picking
+    a city. An unresolvable name returns {"error": "not_found"}; empty
+    category or near returns {"error": "bad_request"}. radius_m and
+    limit follow the same clamps as a point search.
+    """
+    if not isinstance(category, str) or not category.strip():
+        return {"error": "bad_request", "detail": "category must be a non-empty slug or phrase"}
+    if not isinstance(near, str) or not near.strip():
+        return {"error": "bad_request", "detail": "near must be a non-empty place name"}
+    if (
+        not isinstance(radius_m, (int, float))
+        or isinstance(radius_m, bool)
+        or not math.isfinite(radius_m)
+    ):
+        return {"error": "bad_request", "detail": "radius_m must be a finite number"}
+    if not isinstance(limit, (int, float)) or isinstance(limit, bool):
+        return {"error": "bad_request", "detail": "limit must be an integer"}
+    slug = _category_slug(category)
+    pin = _resolve_named_place(near)
+    if "error" in pin:
+        return {**pin, "field": "near"}
+    payload = find_places(
+        lat=pin["lat"],
+        lon=pin["lon"],
+        radius_m=float(radius_m),
+        category=slug,
+        limit=int(limit),
+    )
+    if "error" in payload:
+        return payload
+    rows = []
+    for row in payload.get("results") or []:
+        compact = {k: row[k] for k in _FIND_NEAR_KEYS if k in row}
+        rows.append(compact)
+    out: dict = {"near": pin, "category": slug, "results": rows}
+    if slug != category.strip():
+        out["category_resolved_from"] = category.strip()
+    for key in ("truncated", "omitted_count", "note", "degraded_fields"):
+        if key in payload:
+            out[key] = payload[key]
+    return budget.apply_budget(out, "results")
+
+
 @_tool("Places along a route")
 def places_along_route(
     from_lat: float,
@@ -2193,9 +2400,15 @@ have to fit in about 1.1k tokens), and the names here are already
     accepts, which is cheaper than paying for the types on every catalog
     read.
     """
-    return ",".join(
+    summary = ",".join(
         name if param.default is inspect.Parameter.empty else f"{name}?"
         for name, param in inspect.signature(fn).parameters.items()
+    )
+    # from is reserved in Python; from_to's public name is still from.
+    # Alias only that exact token — a substring replace would turn
+    # route / places_along_route from_lat into fromlat.
+    return ",".join(
+        {"from_": "from", "from_?": "from?"}.get(part, part) for part in summary.split(",")
     )
 
 
@@ -2278,6 +2491,9 @@ def placeroot_call(tool: str, args: dict | None = None) -> dict:
             "valid_tools": sorted(_TOOL_FUNCS),
         }
     call_args = {} if args is None else args
+    if tool == "from_to" and isinstance(call_args, dict) and "from" in call_args:
+        call_args = {**call_args, "from_": call_args["from"]}
+        call_args.pop("from", None)
     if not isinstance(call_args, dict):
         return {
             "error": "bad_request",
@@ -2454,6 +2670,37 @@ async def _trace_middleware(ctx, call_next):
     return result
 
 
+def _publish_from_keyword(mcp_server) -> None:
+    """Advertise from_to's origin as `from` — a reserved word in Python.
+
+    The implementation parameter is from_. The public schema and the
+    validator both use from so the agent never sees the underscore.
+
+    Patches mcp 2.0.0 private internals (pinned in uv.lock). If those
+    move, fail with a clear assertion rather than a raw AttributeError.
+    """
+    try:
+        tool = mcp_server._tool_manager.get_tool("from_to")
+        if tool is None:
+            return
+        from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase
+        from pydantic import ConfigDict, Field
+
+        class FromToArguments(ArgModelBase):
+            model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
+            from_: str = Field(alias="from")
+            to: str
+            mode: str = "walk"
+
+            def model_dump_one_level(self) -> dict:
+                return {"from_": self.from_, "to": self.to, "mode": self.mode}
+
+        tool.fn_metadata = tool.fn_metadata.model_copy(update={"arg_model": FromToArguments})
+        tool.parameters = FromToArguments.model_json_schema(by_alias=True)
+    except (AttributeError, ImportError) as e:
+        raise AssertionError("from_to schema patch failed; mcp internals changed") from e
+
+
 def build_server(spec=_UNSET) -> MCPServer:
     """An MCPServer with the PLACEROOT_TOOLS-selected subset registered.
 
@@ -2492,6 +2739,7 @@ def build_server(spec=_UNSET) -> MCPServer:
                 title=_TOOL_TITLES[name],
                 annotations=_TOOL_ANNOTATIONS.get(name, _READ_ONLY_ANNOTATIONS),
             )(fn)
+    _publish_from_keyword(server)
     # Resources are registered whatever the selection: they never appear in
     # tools/list, so they cost a subset install nothing, and
     # placeroot://data-version is worth having precisely when the

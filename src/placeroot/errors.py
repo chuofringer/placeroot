@@ -52,3 +52,17 @@ class AmbiguousArea(Exception):
         self.detail = detail
         self.area = area
         self.candidates = candidates
+
+
+class AmbiguousPlace(Exception):
+    """A free-text place name matched several equally-ranked candidates."""
+
+    def __init__(self, query: str, candidates: list[dict]):
+        detail = (
+            f"{query!r} matches {len(candidates)} equally-ranked places; "
+            "pass a more specific name (add the city or region)"
+        )
+        super().__init__(detail)
+        self.detail = detail
+        self.query = query
+        self.candidates = candidates

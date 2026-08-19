@@ -52,6 +52,10 @@ PROFILES: dict[str, frozenset[str]] = {
         # real question is fast. Lives in core because that is the
         # install-to-wow path (issue #314).
         "warmup_city",
+        # Named-place compose: one hop for "walk from A to B" and
+        # "X near Y" so the agent cannot triple-geocode (#328).
+        "from_to",
+        "find_near",
     }),
     # Find/name/identify, including the batch siblings and the category
     # lookup that makes find_places' category filter usable.
@@ -73,6 +77,8 @@ PROFILES: dict[str, frozenset[str]] = {
         "search_categories",
         # Identify: any GERS id back to the entity it names.
         "gers_lookup",
+        # Named "X near Y" compose over find_places + resolve.
+        "find_near",
     }),
     # Getting between points, and how far apart things are.
     "routing": frozenset({
@@ -82,6 +88,8 @@ PROFILES: dict[str, frozenset[str]] = {
         "within_distance",
         # Multi-stop ordering over the same street graph route() uses.
         "optimize_route",
+        # Named-place compose over route().
+        "from_to",
     }),
     # Characterizing an area rather than locating a thing in it.
     "analysis": frozenset({

@@ -62,6 +62,8 @@ def test_core_profile():
         "places_along_route",
         "neighborhood_verdict",
         "warmup_city",
+        "from_to",
+        "find_near",
         "data_version",
         "preferences",
     }
@@ -210,14 +212,20 @@ def test_no_profile_describes_a_tool_it_does_not_register():
     The match is on tool names as whole words, so a description that uses
     "route" or "geocode" as ordinary English will trip this. That's the
     intended sensitivity: rephrase rather than exempt.
+
+    A prohibition ("Do not call geocode(), resolve_place(), or
+    geocode_batch() first.") is not a next-step pointer, so those clauses
+    are stripped before the check.
     """
     all_names = _all_names()
+    do_not_call = re.compile(r"do not call [^.]*\.?", re.IGNORECASE)
     dangling: list[str] = []
     for profile in sorted(tool_profiles.PROFILES):
         tools = asyncio.run(server.build_server(profile).list_tools())
         absent = all_names - {t.name for t in tools}
         for tool in tools:
-            named = sorted(a for a in absent if re.search(rf"\b{a}\b", tool.description or ""))
+            desc = do_not_call.sub("", tool.description or "")
+            named = sorted(a for a in absent if re.search(rf"\b{a}\b", desc))
             if named:
                 dangling.append(f"{profile}/{tool.name} -> {', '.join(named)}")
     assert not dangling, "descriptions naming unregistered tools:\n" + "\n".join(dangling)
