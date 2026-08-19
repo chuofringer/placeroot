@@ -54,14 +54,50 @@ def _mods():
         land_use,
         overture,
         routing,
+        server,
         water,
     )
     from placeroot import geocode as geo_mod
     return dict(
         addresses=addresses, buildings=buildings, divisions=divisions, gers=gers,
         infrastructure=infrastructure, land_use=land_use, overture=overture,
-        routing=routing, water=water, geo=geo_mod,
+        routing=routing, server=server, water=water, geo=geo_mod,
     )
+
+
+def _invoke_maybe_confirm(fn, *args, confirm: bool, **kwargs):
+    """Pass confirm= only if the tool already advertises it (#338).
+
+    This harness lands on main before the confirm PR. Until then the
+    call is a normal hop. After #338, cold is a peek and the second
+    call in the same process is confirm=true (the real hop).
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "confirm" in params:
+        kwargs["confirm"] = confirm
+    return fn(*args, **kwargs)
+
+
+def _score_routed_result(r: dict, *, confirm: bool) -> tuple[bool, str]:
+    """needs_confirm is ask, not a wrong place. Ask on confirm=true is wrong."""
+    if not isinstance(r, dict):
+        return False, f"NO ROUTE {str(r)[:80]}"
+    if r.get("error") == "needs_confirm":
+        detail = str(r.get("detail") or "needs_confirm")[:80]
+        if confirm:
+            return False, f"ASK ON CONFIRM {detail}"
+        return True, f"ASK {detail}"
+    d = r.get("distance_m")
+    if not d:
+        return False, f"NO ROUTE {str(r)[:80]}"
+    if confirm:
+        return True, f"CONFIRMED {d:.0f}m"
+    return True, f"{d:.0f}m"
 
 
 def _names(rows):
@@ -426,13 +462,22 @@ q("w04", "water_near", "Is there water near Venice?",
 # --------------------------------------------------------------------------
 
 def _route(a, b, mode="walk"):
+    """server.route so a valid needs_confirm is ask (#336 / #338).
+
+    First call in this process is confirm=false (peek after #338).
+    Second call (--warm) is confirm=true — the real hop.
+    """
+    n = {"i": 0}
+
     def run():
+        n["i"] += 1
+        confirm = n["i"] > 1
         m = _mods()
-        r = m["routing"].route(a[0], a[1], b[0], b[1], mode=mode)
-        d = r.get("distance_m")
-        if not d:
-            return False, f"NO ROUTE {str(r)[:80]}"
-        return True, f"{d:.0f}m"
+        r = _invoke_maybe_confirm(
+            m["server"].route, a[0], a[1], b[0], b[1], mode=mode,
+            confirm=confirm,
+        )
+        return _score_routed_result(r, confirm=confirm)
     return run
 
 
@@ -566,15 +611,27 @@ q("c13", "flow", "What's the neighborhood like around Pike Place Market?",
 q("c14", "flow", "Which admin area is the Colosseum in?",
   _resolve_then("Colosseo Roma", _admin_follow))
 def _route_between(from_place, to_place, mode="walk"):
-    """Two resolves feeding a route — three calls, the deepest flow here."""
+    """Named walk through from_to so the peek is one hop (#328 / #336).
+
+    First call in this process is confirm=false. Second (--warm) is
+    confirm=true. Do not pre-resolve then routing.route — that bypasses
+    needs_confirm and still pays the 18–40s graph.
+    """
+    n = {"i": 0}
+
     def run():
+        n["i"] += 1
+        confirm = n["i"] > 1
         m = _mods()
-        a = m["geo"].resolve_place(from_place) or []
-        b = m["geo"].resolve_place(to_place) or []
-        if not (a and b):
+        r = _invoke_maybe_confirm(
+            m["server"].from_to, from_place, to_place, mode=mode,
+            confirm=confirm,
+        )
+        if isinstance(r, dict) and r.get("error") == "not_found":
             return False, f"resolve EMPTY ({from_place!r} -> {to_place!r})"
-        r = m["routing"].route(a[0]["lat"], a[0]["lon"], b[0]["lat"], b[0]["lon"], mode=mode)
-        return bool(r.get("distance_m")), f"{r.get('distance_m')}m"
+        if isinstance(r, dict) and r.get("error") == "too_far":
+            return False, f"too_far {str(r)[:80]}"
+        return _score_routed_result(r, confirm=confirm)
     return run
 
 

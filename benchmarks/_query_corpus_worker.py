@@ -39,11 +39,24 @@ entry = QUERIES[index]
 _watch_gen = 0
 
 
+def _classify(ok: bool, detail: object) -> tuple[bool, str, str]:
+    """Map corpus detail prefixes to an outcome. ask is not wrong."""
+    text = str(detail)
+    if text.startswith("ASK ON CONFIRM") or text.startswith("ASK TOO SLOW"):
+        return False, "wrong", text
+    if text.startswith("ASK"):
+        return True, "ask", text
+    if text.startswith("CONFIRMED"):
+        return bool(ok), "confirmed", text
+    return bool(ok), ("ok" if ok else "wrong"), text
+
+
 def _emit(seconds: float, ok: bool, detail: object, *, leg: str) -> None:
+    ok, outcome, text = _classify(ok, detail)
     print(json.dumps({
         "id": entry["id"], "tool": entry["tool"], "q": entry["question"],
         "leg": leg, "s": round(seconds, 1), "ok": bool(ok),
-        "detail": str(detail)[:150],
+        "outcome": outcome, "detail": text[:150],
     }))
     sys.stdout.flush()
 

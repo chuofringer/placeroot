@@ -9,6 +9,10 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Changed
+- Question-gate route ids go through `server.route` / `from_to` so a
+  valid `needs_confirm` is outcome `ask`, not a 15s fail and not a
+  wrong place. Cold t01/c15 without confirm is the peek; `--warm` is
+  `confirm=true`. Same `--fail-on both` commands (#336).
 - Profile token table in `docs/REFERENCE.md` remeasured from `list_tools()` after #335/#334: all 34 tools are ~15,458 (was ~15,434); subset rows and the 96% savings claim follow the same ruler.
 - Name path (#329): parse a trailing city (or reuse the last good one) as
   `resolve_place(city=)`, cache last resolve in-process keyed by
