@@ -40,6 +40,23 @@ REQUIRED_COLUMNS = ["id", "names", "subtype", "geometry", "bbox", "division_id"]
 ESSENTIAL_COLUMNS = {"geometry"}
 
 
+def index_is_loaded() -> bool:
+    """Cheap peek: is a divisions spatial index already built?
+
+    admin_lookup does not materialize an on-disk or in-memory index (see
+    the module docstring: each call is a bbox-pruned ST_Contains scan).
+    There is no file to stat and no in-memory structure to check, so this
+    cannot honestly report a 20–40s cold hop. Returns True: there is no
+    DIVISIONS_INDEX_S load to ask about. A False would mean "cold, will
+    pay that cost" — that hop is geocode's name table, not this tool.
+
+    Named so the #336 confirm gate can share the route protocol (peek,
+    then maybe needs_confirm) without inventing a second one. Tests may
+    monkeypatch this to False to exercise the cold path.
+    """
+    return True
+
+
 def _ensure_spatial() -> None:
     """Load DuckDB's spatial extension on the shared connection, once.
 

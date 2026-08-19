@@ -732,8 +732,22 @@ def compare_areas(areas: list[dict], radius_m: float = 1000) -> dict:
     return _with_degraded_fields(budget.apply_budget(result, "differentiators"))
 
 
+def _needs_confirm_admin() -> dict:
+    """Cheap reject before a cold divisions-index load (#336)."""
+    lo, hi = progress.DIVISIONS_INDEX_S
+    return {
+        "error": "needs_confirm",
+        "eta": progress.format_eta(lo, hi),
+        "eta_s": [int(lo), int(hi)],
+        "detail": (
+            "First admin lookup loads the divisions index. "
+            "Ask the user if they want to wait, then call again with confirm=true."
+        ),
+    }
+
+
 @_tool("Admin hierarchy lookup")
-def admin_lookup(lat: float, lon: float) -> dict:
+def admin_lookup(lat: float, lon: float, confirm: bool = False) -> dict:
     """Containing admin hierarchy for a point: neighborhood up to country.
 
     Point-in-polygon against Overture's divisions theme. Returns {"chain":
@@ -743,10 +757,22 @@ def admin_lookup(lat: float, lon: float) -> dict:
     point, which is a valid answer for remote areas, not an error. Returns
     a structured {"error": ...} if upstream is unavailable or the divisions
     dataset is missing the geometry column this tool depends on.
+
+    confirm=true after the user agreed to wait for a first-time divisions-index
+    load (about 20–40 seconds). A warm or already-loaded index never needs it.
+    Omit confirm unless you just asked and they said yes.
     """
     coord_error = _invalid_coord(lat, lon)
     if coord_error is not None:
         return coord_error
+    loaded = divisions.index_is_loaded()
+    if not loaded and not confirm:
+        return _needs_confirm_admin()
+    if not loaded:
+        progress.report(
+            "Loading the divisions index",
+            eta_s=progress.DIVISIONS_INDEX_S,
+        )
     try:
         result = divisions.admin_lookup(lat, lon)
     except overture.UpstreamUnavailable as e:
