@@ -33,17 +33,28 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `gers_lookup` | Any GERS id → the entity it names (place, division, or building), what it's inside, and the building at its point |
 | `search_categories` | Free text → the right Overture category slug to filter `find_places` by |
 | `isochrone` | The area reachable within N minutes on foot, bike, or car |
-| `route` | Shortest-path distance and duration between two points, on foot, bike, or car; `include_path=true` adds the simplified route polyline; also returns an `export` object (Google/Apple Maps links, GPX, printable stop list) |
-| `from_to` | Named-place walk/cycle/drive: resolve A and B in parallel, one graph, same shape as `route` including `export` maps/gpx/text. Fails with `too_far` if the ends are a city apart |
+| `route` | Shortest-path distance and duration between two points, on foot, bike, or car; `include_path=true` adds the simplified route polyline; also returns an `export` object (Google/Apple Maps links, GPX, printable stop list). Optional `confirm` (bool, default false): a cold street-graph build returns `needs_confirm` with an ETA instead of blocking |
+| `from_to` | Named-place walk/cycle/drive: resolve A and B in parallel, one graph, same shape as `route` including `export` maps/gpx/text. Fails with `too_far` if the ends are a city apart. Same optional `confirm` / `needs_confirm` gate as `route` |
 | `find_near` | Category near a named place or city — one hop for "coffee shops near the Eiffel Tower"; compact rows with `trust_note` |
 | `places_along_route` | Places on the way from A to B: corridor search along the route, with each result's detour and how far along it sits, compact trust notes on results, and a verify-before-going line for the weakest stops |
 | `neighborhood_verdict` | Should I live here? A ranked verdict from life context (household, mobility, priorities) — strengths, weak points, one thing to verify in person |
 | `optimize_route` | Best order to visit 2–10 stops, solved exactly over the street graph — order, per-leg distance/duration, totals, an `export` object (Google/Apple Maps links, GPX, printable stop list), and `verify_before_going` when stops already carry confidence/operating_status |
 | `render_map` | Any result → a shareable one-pager (interactive map, verdict, stop list, and Overture/OSM attribution); optional `summary` for the verdict, otherwise a short fallback is composed from the payload |
 | `simplify_geometry` | Any geometry → simplified to fit a token budget |
-| `warmup_city` | Pre-cache a city's places and transportation tiles so later place searches over it read locally — does not build the street graph or cache buildings |
+| `warmup_city` | Pre-cache a city's places and transportation tiles so later place searches over it read locally — does not build the street graph or cache buildings. A first tile COPY without `confirm` returns `needs_confirm` |
 | `data_version` | Which Overture release the answers are drawn from |
 | `preferences` | Read or update local travel/household defaults (mode, pace, dog, …). Nothing leaves the machine |
+
+
+## Confirming a slow hop
+
+`route`, `from_to`, and a first `warmup_city` take optional `confirm` (bool, default false). A cold street-graph build or a first tile COPY returns immediately:
+
+```json
+{"error":"needs_confirm","eta":"about 5–25 seconds","eta_s":[5,25],"detail":"Ask the user if they want to wait, then call the same tool again with confirm=true."}
+```
+
+Ask the user, then call the same tool again with `confirm=true`. A warm or on-disk cached graph never asks. Long answers also carry `status` (string) and `progress` (a short list of phase strings) so a host without a progressToken can still show what is happening. Fast lookups stay clean.
 
 ## Tool annotations and listing cache hints
 
@@ -147,12 +158,12 @@ union of everything named:
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
 | unset / `all` (default) | 34 | ~15,711 | — |
-| `search` | 15 | ~6,749 | 56% |
-| `core` | 15 | ~6,847 | 56% |
-| `routing` | 8 | ~3,413 | 78% |
-| `analysis` | 11 | ~3,619 | 74% |
-| `geometry` | 4 | ~853 | 94% |
-| `progressive` | 4 (all 34 reachable) | ~552 | 96% |
+| `search` | 15 | ~7,113 | 55% |
+| `core` | 15 | ~7,569 | 52% |
+| `routing` | 8 | ~3,941 | 75% |
+| `analysis` | 11 | ~3,933 | 75% |
+| `geometry` | 4 | ~1,265 | 92% |
+| `progressive` | 4 (all 34 reachable) | ~866 | 94% |
 
 - **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `from_to`, `find_near`, `places_along_route`, `neighborhood_verdict`, `warmup_city`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
 - **`search`** — the find/name/identify family: `find_places`, `find_near`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, `address_at`, `geocode_address`, `search_categories`, and `gers_lookup`.
