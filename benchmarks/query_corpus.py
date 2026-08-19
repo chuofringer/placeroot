@@ -93,7 +93,7 @@ def _score_routed_result(r: dict, *, confirm: bool) -> tuple[bool, str]:
             return False, f"ASK ON CONFIRM {detail}"
         return True, f"ASK {detail}"
     d = r.get("distance_m")
-    if not d:
+    if d is None:
         return False, f"NO ROUTE {str(r)[:80]}"
     if confirm:
         return True, f"CONFIRMED {d:.0f}m"
@@ -481,6 +481,10 @@ def _route(a, b, mode="walk"):
     return run
 
 
+# ASK_PEEK_S (0.5s) keys on tool=="route" in the runner. These three
+# gate ids (t01/t02/t04) are the only question-gate rows that use that
+# cap. c15 is tool=="flow" (from_to) and is judged against the 15s
+# budget, not 500ms.
 q("t01", "route", "How do I walk from Shibuya to Ebisu?",
   _route((35.6595, 139.7005), (35.6467, 139.7101)))
 q("t02", "route", "Walking route from Times Square to Bryant Park?",
