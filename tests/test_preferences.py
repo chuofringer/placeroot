@@ -116,7 +116,13 @@ def test_route_uses_stored_mode_when_omitted(monkeypatch):
 
     def fake(*args, **kwargs):
         seen["mode"] = kwargs.get("mode")
-        return {"distance_m": 1, "duration_s": 1}
+        return {
+            "distance_m": 1,
+            "duration_s": 1,
+            "mode": kwargs.get("mode") or "drive",
+            "from": {"lat": 37.0, "lon": -122.0},
+            "to": {"lat": 37.1, "lon": -122.1},
+        }
 
     monkeypatch.setattr(server.routing, "route", fake)
     server.route(from_lat=37.0, from_lon=-122.0, to_lat=37.1, to_lon=-122.1)
