@@ -10,9 +10,12 @@ Why use it over other geo MCPs:
 🔓 Fully in your control — open source (MIT) and self-hostable end to end. Your queries stay yours; no vendor platform in the loop, nothing to get locked into.
 🎯 Built for agents, not dashboards — compact, ranked answers sized for a context window instead of raw GeoJSON dumps, so it works out of the box with Claude Code, Claude Desktop, Cursor, Codex, Grok — anything that speaks MCP.
 
-Already published on PyPI and npm, and listed on mcpservers.org and Sparkgeo's geo-mcp-servers directory.
+Code and instructions are all in the repo, and it's already published on:
 
-Code and instructions are all in the repo:
-💻 https://github.com/chuofringer/placeroot
+💻 Repo: https://github.com/chuofringer/placeroot
+📦 PyPI: https://pypi.org/project/placeroot/
+📦 npm: https://www.npmjs.com/package/placeroot
+🗂️ mcpservers.org: https://mcpservers.org/servers/chuofringer/placeroot
+🗂️ Sparkgeo geo-mcp-servers: https://github.com/sparkgeo/geo-mcp-servers
 
 #Geospatial #GIS #OpenData #OpenSource #MCP #AIAgents #Maps #OvertureMaps #LLM #AgenticAI
