@@ -17,6 +17,7 @@ fixing behavior is patch.
   cache hits stay uncapped.
 
 ### Changed
+- Profile token table in `docs/REFERENCE.md` remeasured after #336 confirm fields: all 34 tools stay ~15,711; subset rows follow the same ruler (search ~7,113, core ~7,569). Catalog rows for `route`, `from_to`, and `warmup_city` now name `confirm` / `needs_confirm`, plus `status`/`progress` on long answers.
 - Question-gate route ids go through `server.route` / `from_to` so a
   valid `needs_confirm` is outcome `ask`, not a 15s fail and not a
   wrong place. Cold t01/c15 without confirm is the peek; `--warm` is
