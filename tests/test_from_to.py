@@ -25,6 +25,12 @@ def _hit(name, lat, lon, type_="place", id_="gers-x"):
     return {"name": name, "lat": lat, "lon": lon, "id": id_, "type": type_}
 
 
+def _ab(query):
+    if query == "A":
+        return _hit(query, FROM_LAT, FROM_LON)
+    return _hit(query, TO_LAT, TO_LON)
+
+
 def test_from_to_schema_accepts_from_and_to():
     tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
     props = tools["from_to"].input_schema["properties"]
@@ -109,7 +115,7 @@ def test_from_to_cold_without_confirm_is_needs_confirm(monkeypatch):
     monkeypatch.setattr(
         geocode,
         "resolve_named_place",
-        lambda query: _hit(query, FROM_LAT, FROM_LON) if query == "A" else _hit(query, TO_LAT, TO_LON),
+        _ab,
     )
     result = _call_from_to("A", "B", confirm=False)
     assert result["error"] == "needs_confirm"
@@ -121,7 +127,7 @@ def test_from_to_confirm_runs(monkeypatch):
     monkeypatch.setattr(
         geocode,
         "resolve_named_place",
-        lambda query: _hit(query, FROM_LAT, FROM_LON) if query == "A" else _hit(query, TO_LAT, TO_LON),
+        _ab,
     )
     result = _call_from_to("A", "B", confirm=True)
     assert "error" not in result

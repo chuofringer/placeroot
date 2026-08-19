@@ -1821,7 +1821,9 @@ def from_to(from_: str, to: str, mode: str = "walk", confirm: bool = False) -> d
             "max_distance_m": cap_m,
             "mode": mode,
         }
-    result = route(origin["lat"], origin["lon"], dest["lat"], dest["lon"], mode=mode, confirm=confirm)
+    result = route(
+        origin["lat"], origin["lon"], dest["lat"], dest["lon"], mode=mode, confirm=confirm
+    )
     for key, place in (("from", origin), ("to", dest)):
         point = result.get(key)
         if isinstance(point, dict):
@@ -2770,9 +2772,15 @@ def _publish_from_keyword(mcp_server) -> None:
             from_: str = Field(alias="from")
             to: str
             mode: str = "walk"
+            confirm: bool = False
 
             def model_dump_one_level(self) -> dict:
-                return {"from_": self.from_, "to": self.to, "mode": self.mode}
+                return {
+                    "from_": self.from_,
+                    "to": self.to,
+                    "mode": self.mode,
+                    "confirm": self.confirm,
+                }
 
         tool.fn_metadata = tool.fn_metadata.model_copy(update={"arg_model": FromToArguments})
         tool.parameters = FromToArguments.model_json_schema(by_alias=True)

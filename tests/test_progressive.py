@@ -32,8 +32,8 @@ STANDING_COST_CEILING = 1500
 # placeroot_capabilities' answer is read once per conversation that uses it,
 # so it is budgeted like a response, not like documentation. A new tool
 # that doesn't fit under this belongs in a shorter one-liner, not a raised
-# ceiling. 30 tools currently sit just over the old 1000-token line.
-CATALOG_CEILING = 1100
+# ceiling. 34 tools plus confirm? on three hops sit just over 1100 (#336).
+CATALOG_CEILING = 1150
 
 # The subset note's opening words, rendered by the renderer itself rather than
 # retyped here. A phrase typed from memory can drift from what prompts.py
