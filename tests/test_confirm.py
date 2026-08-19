@@ -162,3 +162,34 @@ def test_needs_confirm_detail_asks_then_same_tool():
         assert "geocode" not in detail
         assert "resolve_place" not in detail
         assert "geocode_batch" not in detail
+
+
+def test_disk_graph_after_restart_never_asks(tmp_path, monkeypatch):
+    """#333 persist is the warm path after process restart — no confirm."""
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "c"))
+    monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
+    routing.clear_graph_cache()
+    built = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
+    assert built["distance_m"] > 0
+    graphs = list((tmp_path / "c").rglob("*.pkl"))
+    assert graphs, "walk graph must persist next to tiles"
+    routing.clear_graph_cache()
+    assert len(routing._graph_cache) == 0
+
+    builds = []
+    real = routing.build_graph
+
+    def spy(*args, **kwargs):
+        builds.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(routing, "build_graph", spy)
+    assert routing.graph_is_cached(FROM_LAT, FROM_LON, "walk") is True
+    assert routing.route_graph_is_cached(
+        FROM_LAT, FROM_LON, TO_LAT, TO_LON, "walk"
+    )
+    result = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
+    assert result.get("error") != "needs_confirm"
+    assert "error" not in result
+    assert result["distance_m"] > 0
+    assert builds == []
