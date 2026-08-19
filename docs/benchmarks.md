@@ -72,15 +72,15 @@ ceiling.
 
 <!-- BEGIN GENERATED: benchmarks/token_efficiency.py -->
 
-Generated 2026-08-18 by `uv run python benchmarks/token_efficiency.py --write`.
+Generated 2026-08-19 by `uv run python benchmarks/token_efficiency.py --write`.
 
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-07-22.0`
 - Tools registered: **30**
-- Total schema surface: **13821 tokens** (55331 chars, 55481 bytes)
-- Schema cost per tool: min 158, median 378, max 1316 tokens
-- Median scenario response: **131 tokens** (range 42-702)
-- Break-even: the schema surface costs about as much as **106 median answers**
+- Total schema surface: **14143 tokens** (56619 chars, 56779 bytes)
+- Schema cost per tool: min 158, median 378, max 1335 tokens
+- Median scenario response: **205 tokens** (range 87-811)
+- Break-even: the schema surface costs about as much as **69 median answers**
 
 ### Schema surface (paid once per conversation)
 
@@ -98,8 +98,8 @@ Generated 2026-08-18 by `uv run python benchmarks/token_efficiency.py --write`.
 | `isochrone` | 374 | 115 | **548** | 2193 |
 | `address_at` | 427 | 54 | **541** | 2164 |
 | `gers_lookup` | 385 | 74 | **519** | 2079 |
-| `place_details` | 259 | 158 | **469** | 1879 |
-| `render_map` | 243 | 85 | **381** | 1526 |
+| `render_map` | 318 | 107 | **479** | 1918 |
+| `place_details` | 265 | 158 | **476** | 1906 |
 | `neighborhood_verdict` | 200 | 123 | **378** | 1512 |
 | `land_use_at` | 274 | 41 | **373** | 1493 |
 | `distance_matrix` | 224 | 78 | **358** | 1434 |
@@ -116,7 +116,7 @@ Generated 2026-08-18 by `uv run python benchmarks/token_efficiency.py --write`.
 | `data_version` | 166 | 16 | **231** | 926 |
 | `reverse_geocode` | 111 | 42 | **205** | 820 |
 | `summarize_area` | 53 | 57 | **158** | 635 |
-| **all 30 tools** | 9449 | 2610 | **13821** | 55331 |
+| **all 30 tools** | 9743 | 2632 | **14143** | 56619 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 
