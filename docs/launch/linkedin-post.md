@@ -2,18 +2,15 @@
 
 Sharing a side project fully built by agents running in continuous loops with almost no human intervention: PlaceRoot 🗺️ (https://placeroot.dev)
 
-It's an MCP server that lets AI agents answer real location questions — what's nearby, how do I get there, what's in this neighborhood — all from open data.
+It's an MCP server that lets AI agents answer real location questions — what's nearby, how do I get there, what's in this neighborhood — all from open data. Geocoding, place search, routing & isochrones, area analysis, map rendering — 32 tools in total.
 
-32 tools covering geocoding, place search, routing & isochrones, area analysis, and map rendering.
+Why use it over other geo MCPs:
 
-Why it's different from other geo MCPs:
+💸 No paid API behind it — search, geocoding, and routing all run on open Overture data. Zero usage bills, no rate-limit anxiety, no key to leak.
+🔓 Fully in your control — open source (MIT) and self-hostable end to end. Your queries stay yours; no vendor platform in the loop, nothing to get locked into.
+🎯 Built for agents, not dashboards — compact, ranked answers sized for a context window instead of raw GeoJSON dumps, so it works out of the box with Claude Code, Claude Desktop, Cursor, Codex, Grok — anything that speaks MCP.
 
-🎯 Answers, not data dumps — compact, ranked results sized for an agent's context window, never raw GeoJSON
-🛣️ Real routing & isochrones with zero keys — walks an actual street graph from Overture data, anywhere on Earth, no paid maps API behind it
-📐 Boundary-accurate search — queries inside a place's real administrative polygon, not a guessed radius circle
-
-No API key, no signup. MIT licensed, works with Claude Code, Claude Desktop, Cursor, Codex, Grok — anything that speaks MCP. On PyPI and npm (`uvx placeroot` / `npx placeroot`), listed on mcpservers.org.
-
-💻 Repo: https://github.com/chuofringer/placeroot
+Code and instructions are all in the repo:
+💻 https://github.com/chuofringer/placeroot
 
 #Geospatial #GIS #OpenData #OpenSource #MCP #AIAgents #Maps #OvertureMaps #LLM #AgenticAI
