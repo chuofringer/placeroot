@@ -150,6 +150,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, design rules, and how to p
 
 `hello@placeroot.dev`
 
+Developed by [vibemapper](https://vibemapper.dev).
+
 ## Privacy Policy
 
 PlaceRoot runs on your machine — no account, no API key, no sign-up. It has no telemetry and sends nothing to us; the only network traffic is your own queries going straight to Overture Maps' public data on AWS S3 (or a mirror you configure). Full details: [placeroot.dev/privacy.html](https://placeroot.dev/privacy.html).
