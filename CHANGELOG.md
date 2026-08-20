@@ -9,6 +9,22 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Fixed
+- Routing to a POI centroid inside a large campus (an airport terminal, a
+  park) no longer fails with `no_graph_nearby` when the real road network
+  sits just past the snap radius: `snap_to_graph` makes one widened pass
+  (4x the radius) for a usable-component node when everything closer is a
+  tiny disconnected fragment. Measured at Austin–Bergstrom: nearest
+  main-network node 455m out, everything within 300m a 1–4 node
+  service-road sliver. Genuinely off-network points still return the error.
+- `from_to` resolves its two names in parallel for real: `_resolve_pair`'s
+  workers used to serialize on the shared DuckDB connection lock, so the
+  cold name-pair peek cost two full resolves back to back (measured 17.3s
+  on the c15 corpus walk, ~9s after). Each worker now runs on its own
+  cursor of the shared instance via `db.isolated_reads()` (#328).
+- The query-corpus worker imports the server before starting a leg's
+  clock: an MCP server pays module import once at startup, not per
+  question, and route peeks were reporting ~1s of interpreter import as
+  question latency.
 - Confirm-path review (#338): a disk graph peek now parks the loaded graph
   in the in-memory LRU (no second unpickle on the follow-up `route()`);
   `from_to` parallel resolves copy the request progress context into each
