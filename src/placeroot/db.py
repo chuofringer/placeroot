@@ -14,6 +14,7 @@ conn_lock (deprecated in favor of importing db directly) so existing
 external references — tests included — keep working unchanged.
 """
 
+import contextlib
 import logging
 import os
 import threading
@@ -23,6 +24,39 @@ from functools import lru_cache
 import duckdb
 
 logger = logging.getLogger(__name__)
+
+# Threads running inside isolated_reads() get their own cursor and their own
+# lock (see isolated_reads below); everything else shares the global RLock.
+_isolation = threading.local()
+
+
+class _ThreadAwareRLock:
+    """The global connection RLock, unless this thread opted into isolation.
+
+    All existing call sites — including the import-time aliases
+    (overture._conn_lock = db.conn_lock) — hold a reference to this one
+    object, so delegation has to happen inside it rather than by swapping
+    the module attribute.
+    """
+
+    def __init__(self):
+        self._global = threading.RLock()
+
+    def _target(self):
+        return getattr(_isolation, "lock", None) or self._global
+
+    def acquire(self, *args, **kwargs):
+        return self._target().acquire(*args, **kwargs)
+
+    def release(self):
+        return self._target().release()
+
+    def __enter__(self):
+        return self._target().__enter__()
+
+    def __exit__(self, *exc):
+        return self._target().__exit__(*exc)
+
 
 # Guards every use of shared_conn(). See the module docstring above.
 #
@@ -34,7 +68,7 @@ logger = logging.getLogger(__name__)
 # allows the same-thread re-acquire while still fully serializing *across*
 # threads — which is all the invariant needs, since a single thread never
 # runs two shared_conn().execute() calls at once (they're sequential).
-conn_lock = threading.RLock()
+conn_lock = _ThreadAwareRLock()
 
 _spatial_loaded = False
 
@@ -126,12 +160,51 @@ def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
 
 
 @lru_cache(maxsize=1)
+def _shared_instance() -> duckdb.DuckDBPyConnection:
+    return _configure(duckdb.connect())
+
+
 def shared_conn() -> duckdb.DuckDBPyConnection:
     """The one shared DuckDB connection every query-layer module reuses.
 
     Callers must hold conn_lock around any query they run against it.
+    Inside isolated_reads() this returns the thread's private cursor
+    instead, so parallel read-only work stops contending.
     """
-    return _configure(duckdb.connect())
+    override = getattr(_isolation, "conn", None)
+    if override is not None:
+        return override
+    return _shared_instance()
+
+
+@contextlib.contextmanager
+def isolated_reads():
+    """Run this thread's queries on a private cursor with a private lock.
+
+    Cursors of one DuckDB instance are the documented way to use one
+    database from many threads (see new_connection); the instance-level
+    parquet/object caches stay shared. With the private lock in place of
+    the global one, two threads doing read-only work (from_to resolving
+    both ends, #328) genuinely overlap instead of serializing — measured
+    on the c15 corpus walk, the cold name-pair peek halves.
+
+    Read-only by contract: local-table builds stay serialized by their own
+    dedicated locks (geocode's _build_lock), which this does not replace.
+    """
+    if getattr(_isolation, "conn", None) is not None:
+        yield
+        return
+    _isolation.conn = _shared_instance().cursor()
+    _isolation.lock = threading.RLock()
+    try:
+        yield
+    finally:
+        try:
+            _isolation.conn.close()
+        except duckdb.Error:  # pragma: no cover - close is best-effort
+            pass
+        _isolation.conn = None
+        _isolation.lock = None
 
 
 def new_connection() -> duckdb.DuckDBPyConnection:

@@ -32,7 +32,15 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "src"))
 
-from query_corpus import QUERIES  # noqa: E402
+from query_corpus import QUERIES, _mods  # noqa: E402
+
+# Import the server before any clock starts: a real MCP server pays module
+# import once at startup, then answers many questions — it is server boot,
+# not part of any user question. The cold leg still measures the real cold
+# data path (empty cache, fresh DuckDB metadata, no local tables); without
+# this, sub-second answers (a route peek) report interpreter import time
+# (~1s on a slower machine) as question latency.
+_mods()
 
 entry = QUERIES[index]
 # Generation token so a finished leg's watchdog cannot kill the next one.

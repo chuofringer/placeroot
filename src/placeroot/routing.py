@@ -389,6 +389,13 @@ _bbox_around = geo.bbox_around
 _bbox_filter_sql = geo.bbox_filter_sql
 
 
+# Widened snap pass (see snap_to_graph): when nothing usable lies within
+# snap_radius_m, a node of a usable component up to this multiple further
+# out still snaps. POI centroids inside large campuses (airport terminals,
+# parks) sit hundreds of meters from the drivable network.
+SNAP_FALLBACK_FACTOR = 4.0
+
+
 class UnsupportedMode(Exception):
     def __init__(self, mode: str):
         detail = f"unsupported mode {mode!r}; supported: {sorted(MODE_CONFIG)}"
@@ -1107,6 +1114,18 @@ def snap_to_graph(
     threshold). This avoids snapping the origin onto a tiny disconnected
     fragment — e.g. an isolated sidewalk pair — that happens to sit closer
     to the query point than the real street network.
+
+    When nothing usable lies within snap_radius_m, the search widens once,
+    to SNAP_FALLBACK_FACTOR x snap_radius_m, for a usable-component node
+    only. A point that is a POI centroid inside a large campus — an
+    airport terminal, a park, a mall — routinely sits a few hundred meters
+    from the real road network with only service-road slivers nearby
+    (measured at Austin-Bergstrom: nearest main-network node 455m out,
+    everything closer a 1-4 node fragment), and "drive to the airport"
+    should snap to the entrance road rather than fail with
+    no_graph_nearby. Tiny fragments never qualify at fallback range; a
+    genuinely off-network point (4x the radius from any real road) still
+    returns None.
     """
     components = graph.connected_components()
     if not components:
@@ -1117,36 +1136,53 @@ def snap_to_graph(
         for node_id in component:
             component_of[node_id] = component
 
+    fallback_radius_m = snap_radius_m * SNAP_FALLBACK_FACTOR
     candidates = []
     for node_id, (nlat, nlon) in graph.coords.items():
         d = _haversine_m(lat, lon, nlat, nlon)
-        if d <= snap_radius_m:
+        if d <= fallback_radius_m:
             candidates.append((d, node_id))
     if not candidates:
         return None
     candidates.sort(key=lambda pair: pair[0])
 
-    nearest_d, nearest_id = candidates[0]
-    nearest_component = component_of[nearest_id]
-    if len(nearest_component) >= min_component_nodes or nearest_component is largest:
-        return nearest_id
+    in_radius = [pair for pair in candidates if pair[0] <= snap_radius_m]
+    if in_radius:
+        nearest_d, nearest_id = in_radius[0]
+        nearest_component = component_of[nearest_id]
+        if len(nearest_component) >= min_component_nodes or nearest_component is largest:
+            return nearest_id
 
-    # The nearest node is stuck in a small disconnected fragment; look
-    # further out (still within the snap radius) for a node in a usable
-    # component instead.
-    for d, node_id in candidates[1:]:
+        # The nearest node is stuck in a small disconnected fragment; look
+        # further out (still within the snap radius) for a node in a usable
+        # component instead.
+        for d, node_id in in_radius[1:]:
+            component = component_of[node_id]
+            if len(component) >= min_component_nodes or component is largest:
+                logger.info(
+                    "snap_to_graph: nearest node %s is %.1fm away in an isolated "
+                    "%d-node fragment; snapping to %s (%.1fm away, %d-node "
+                    "component) instead",
+                    nearest_id, nearest_d, len(nearest_component),
+                    node_id, d, len(component),
+                )
+                return node_id
+
+    # Nothing usable within the snap radius (empty, or tiny fragments only):
+    # one widened pass for a usable-component node — see the docstring.
+    for d, node_id in candidates:
+        if d <= snap_radius_m:
+            continue
         component = component_of[node_id]
         if len(component) >= min_component_nodes or component is largest:
             logger.info(
-                "snap_to_graph: nearest node %s is %.1fm away in an isolated "
-                "%d-node fragment; snapping to %s (%.1fm away, %d-node "
-                "component) instead",
-                nearest_id, nearest_d, len(nearest_component),
-                node_id, d, len(component),
+                "snap_to_graph: nothing usable within %.0fm of (%.5f, %.5f); "
+                "snapping to %s %.1fm out (%d-node component)",
+                snap_radius_m, lat, lon, node_id, d, len(component),
             )
             return node_id
 
-    # Everything within the snap radius is a tiny fragment.
+    # Everything within fallback range is a tiny fragment.
     return None
 
 
