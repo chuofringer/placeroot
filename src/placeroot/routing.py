@@ -1170,11 +1170,16 @@ def snap_to_graph(
 
     # Nothing usable within the snap radius (empty, or tiny fragments only):
     # one widened pass for a usable-component node — see the docstring.
+    # Unlike the in-radius pass, "is the graph's largest component" is NOT
+    # good enough out here: a graph whose largest component is itself a
+    # tiny sliver must stay None so route()'s larger retry radius (and
+    # ultimately NoGraphNearby) runs, rather than snapping two far-away
+    # points onto the sliver and returning a garbage route.
     for d, node_id in candidates:
         if d <= snap_radius_m:
             continue
         component = component_of[node_id]
-        if len(component) >= min_component_nodes or component is largest:
+        if len(component) >= min_component_nodes:
             logger.info(
                 "snap_to_graph: nothing usable within %.0fm of (%.5f, %.5f); "
                 "snapping to %s %.1fm out (%d-node component)",

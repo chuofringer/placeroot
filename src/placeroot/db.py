@@ -159,9 +159,24 @@ def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     return con
 
 
-@lru_cache(maxsize=1)
+# Serializes first creation of the shared instance. lru_cache does not
+# serialize a cold first call, and isolated_reads() runs off conn_lock —
+# without this, two parallel workers on a cold process would each connect
+# and configure their own DuckDB instance, binding one worker's cursor (and
+# everything it warms) to an orphan that loses the cache race.
+_instance_lock = threading.Lock()
+_instance: duckdb.DuckDBPyConnection | None = None
+
+
 def _shared_instance() -> duckdb.DuckDBPyConnection:
-    return _configure(duckdb.connect())
+    global _instance
+    inst = _instance
+    if inst is None:
+        with _instance_lock:
+            if _instance is None:
+                _instance = _configure(duckdb.connect())
+            inst = _instance
+    return inst
 
 
 def shared_conn() -> duckdb.DuckDBPyConnection:
@@ -188,8 +203,11 @@ def isolated_reads():
     both ends, #328) genuinely overlap instead of serializing — measured
     on the c15 corpus walk, the cold name-pair peek halves.
 
-    Read-only by contract: local-table builds stay serialized by their own
-    dedicated locks (geocode's _build_lock), which this does not replace.
+    Read-only by contract: writes that parallel readers could trigger stay
+    serialized by their own dedicated locks — geocode's _build_lock dedups
+    the background table-build spawn, and its _blocking_build_lock
+    serializes the blocking (foreground) divisions builds — which this does
+    not replace.
     """
     if getattr(_isolation, "conn", None) is not None:
         yield
