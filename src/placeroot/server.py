@@ -333,15 +333,24 @@ def _resolve_named_place(query: str) -> dict:
 
 
 def _resolve_pair(a: str, b: str) -> tuple[dict, dict]:
-    """Resolve two names in parallel. Each call uses the shared conn lock.
+    """Resolve two names in parallel, each on its own cursor.
+
+    db.isolated_reads gives each worker a private cursor and lock so the
+    two resolves genuinely overlap instead of serializing on the shared
+    conn lock (#328's parallel-inside-the-compose requirement).
 
     Workers do not inherit contextvars, so copy the request context into
     each submit — otherwise progress.report from a cold resolve lands in
     a throwaway per-thread log and never reaches attach().
     """
+
+    def _isolated(query: str) -> dict:
+        with db.isolated_reads():
+            return _resolve_named_place(query)
+
     with ThreadPoolExecutor(max_workers=2) as pool:
-        fa = pool.submit(contextvars.copy_context().run, _resolve_named_place, a)
-        fb = pool.submit(contextvars.copy_context().run, _resolve_named_place, b)
+        fa = pool.submit(contextvars.copy_context().run, _isolated, a)
+        fb = pool.submit(contextvars.copy_context().run, _isolated, b)
         return fa.result(), fb.result()
 
 
