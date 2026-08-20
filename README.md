@@ -34,6 +34,8 @@
 
 **PlaceRoot grounds AI agents in open map data.** It's an MCP server that answers spatial questions — what's nearby, what's in this neighborhood, how do I get there — from [Overture Maps](https://overturemaps.org) open data. No API key, no signup, no vendor platform.
 
+An independent project by [vibemapper](https://vibemapper.dev).
+
 - 🎯 **Answers, not data dumps.** Every tool returns compact, ranked results sized for an agent's context window — never a raw GeoJSON dump.
 - 🗺️ **Real routing, zero keys.** `route` and `isochrone` walk an actual street graph built from Overture's transportation segments — not a straight-line guess — anywhere on Earth.
 - 🏙️ **Rich, filterable place data.** Category, brand, confidence, operating status, contactability — sourced from Overture's open dataset (contributed by Meta, Uber, TomTom, and others).
@@ -149,6 +151,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, design rules, and how to p
 ## Contact
 
 `hello@placeroot.dev`
+
+Developed by [vibemapper](https://vibemapper.dev).
 
 ## Privacy Policy
 
