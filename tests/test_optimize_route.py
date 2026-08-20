@@ -359,6 +359,10 @@ def test_snap_failure_at_the_retry_radius_falls_back_to_the_estimated_matrix(mon
     small, _ = _disconnected_and_connected_graphs()
     empty_near_b = routing.Graph()
     _cluster(empty_near_b, "a", *RETRY_STOP_A)  # stop B has nothing to snap to
+    # The widened snap pass (SNAP_FALLBACK_FACTOR) would reach stop A's
+    # cluster ~850m away and snap B onto it; pin it off so this test keeps
+    # exercising a retry graph with genuinely nothing snappable near B.
+    monkeypatch.setattr(routing, "SNAP_FALLBACK_FACTOR", 1.0)
     radii = _patched_extractions(monkeypatch, [small, empty_near_b])
 
     result = routing.optimize_route([RETRY_STOP_A, RETRY_STOP_B], mode="walk")
@@ -704,8 +708,9 @@ def test_equilateral_triple_on_the_fixture_grid_routes_end_to_end():
 def test_stop_with_no_street_nearby_names_its_index():
     stops = list(LINE_STOPS)
     # Middle of the ocean-ish: inside the extraction circle, nowhere near a
-    # fixture segment.
-    stops[2] = (fx.ORIGIN_LAT + 0.02, fx.ORIGIN_LON + 0.02)
+    # fixture segment — and past the widened snap pass (SNAP_FALLBACK_FACTOR),
+    # which reaches ~1.2km; 0.05 degrees is ~5.5km out.
+    stops[2] = (fx.ORIGIN_LAT + 0.05, fx.ORIGIN_LON + 0.05)
     with pytest.raises(routing.NoGraphNearby) as excinfo:
         routing.optimize_route(stops, mode="walk")
     assert "stops[2]" in excinfo.value.detail
@@ -713,7 +718,7 @@ def test_stop_with_no_street_nearby_names_its_index():
 
 def test_no_graph_nearby_is_structured_at_the_tool_boundary():
     stops = list(LINE_STOPS)
-    stops[2] = (fx.ORIGIN_LAT + 0.02, fx.ORIGIN_LON + 0.02)
+    stops[2] = (fx.ORIGIN_LAT + 0.05, fx.ORIGIN_LON + 0.05)
     result = server.optimize_route(_as_dicts(stops), mode="walk")
     assert result["error"] == "no_graph_nearby"
     assert "stops[2]" in result["detail"]

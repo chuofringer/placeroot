@@ -989,6 +989,15 @@ _UPGRADE_DELAY_S = 20.0
 _build_started: set[str] = set()
 _build_lock = threading.Lock()
 
+# Serializes the *blocking* (foreground) divisions-table builds — the
+# unbundled-release first call in _local_divisions_table and the #224 bbox
+# rebuild. _build_lock above only dedups the background spawn; the blocking
+# COPY itself never held any lock, so two threads resolving names in
+# parallel (from_to's _resolve_pair runs its workers on isolated cursors,
+# see db.isolated_reads) could both run _materialize_divisions_table
+# against the same table.parquet.tmp and race the final rename.
+_blocking_build_lock = threading.Lock()
+
 
 def _spawn_divisions_build(path: Path, glob: str) -> None:
     """Build the full local table in the background (stage-0 index serving
@@ -1214,29 +1223,39 @@ def _rebuild_once_for_bbox_columns(path: Path) -> None:
     key = str(path)
     if key in _DIVISIONS_BBOX_CHECKED:
         return
-    # Recorded before the check, not after, so the schema probe is also once
-    # per process: the common case is a table that already has the columns,
-    # and re-probing it on every geocode call would be pure overhead.
-    _DIVISIONS_BBOX_CHECKED.add(key)
-    if _divisions_table_has_bbox(path):
-        return
-    logger.info("divisions table at %s predates #224 (no bbox columns); rebuilding it", path)
-    t0 = time.time()
-    try:
-        # Resolved here rather than by the caller: a warm table must not so
-        # much as name the upstream dataset (see #215's
-        # test_fuzzy_pass_never_scans_upstream), and this is the one branch
-        # that genuinely needs it. _local_alt_names_table resolves it the
-        # same way, for the same reason.
-        _materialize_divisions_table(
-            path, overture.upstream_glob(theme="divisions", type_="division")
+    with _blocking_build_lock:
+        # Re-checked under the lock so two parallel resolves (from_to's
+        # isolated workers, see db.isolated_reads) can't both
+        # probe-and-rebuild the same table; the whole probe-and-rebuild
+        # holds the lock so the COPY and rename never race.
+        if key in _DIVISIONS_BBOX_CHECKED:
+            return
+        # Recorded before the check, not after, so the schema probe is also
+        # once per process: the common case is a table that already has the
+        # columns, and re-probing it on every geocode call would be pure
+        # overhead.
+        _DIVISIONS_BBOX_CHECKED.add(key)
+        if _divisions_table_has_bbox(path):
+            return
+        logger.info(
+            "divisions table at %s predates #224 (no bbox columns); rebuilding it", path
         )
-    except (duckdb.Error, overture.UpstreamUnavailable) as e:
-        logger.warning(
-            "divisions table rebuild for bbox columns failed, keeping the "
-            "existing table (bbox lookups stay unavailable): %s", e,
-        )
-        return
+        t0 = time.time()
+        try:
+            # Resolved here rather than by the caller: a warm table must not so
+            # much as name the upstream dataset (see #215's
+            # test_fuzzy_pass_never_scans_upstream), and this is the one branch
+            # that genuinely needs it. _local_alt_names_table resolves it the
+            # same way, for the same reason.
+            _materialize_divisions_table(
+                path, overture.upstream_glob(theme="divisions", type_="division")
+            )
+        except (duckdb.Error, overture.UpstreamUnavailable) as e:
+            logger.warning(
+                "divisions table rebuild for bbox columns failed, keeping the "
+                "existing table (bbox lookups stay unavailable): %s", e,
+            )
+            return
     logger.info("divisions table rebuilt with bbox columns in %.1fs", time.time() - t0)
 
 
@@ -1319,7 +1338,11 @@ def _local_divisions_table() -> str | None:
     )
     t0 = time.time()
     try:
-        _materialize_divisions_table(path, glob)
+        with _blocking_build_lock:
+            # A parallel resolve may have finished the build while this
+            # thread waited on the lock.
+            if not path.exists():
+                _materialize_divisions_table(path, glob)
     except (duckdb.Error, overture.UpstreamUnavailable) as e:
         logger.warning(
             "local divisions table materialization failed, falling back to "
