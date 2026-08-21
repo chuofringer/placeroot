@@ -7,5 +7,6 @@
   "stanford shopping center": {"city": "Palo Alto", "lat": 37.443, "lon": -122.171},
   "notre dame": {"city": "Paris", "lat": 48.853, "lon": 2.3499},
   "harvard square": {"city": "Cambridge", "lat": 42.3736, "lon": -71.119},
-  "ebisu": {"city": "Tokyo", "lat": 35.6467, "lon": 139.7101}
+  "ebisu": {"city": "Tokyo", "lat": 35.6467, "lon": 139.7101},
+  "heathrow airport": {"city": "London", "lat": 51.4700, "lon": -0.4543}
 }
