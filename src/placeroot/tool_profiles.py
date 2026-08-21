@@ -48,6 +48,11 @@ PROFILES: dict[str, frozenset[str]] = {
         # internals. In core so a default install can answer "should I
         # live here" without loading the analysis profile.
         "neighborhood_verdict",
+        # Same trust-shaped compose, over listing claims instead of a
+        # life-context checklist: search + routing internals grading
+        # confirmed/stretched/false/unverifiable. In core alongside
+        # neighborhood_verdict for the same reason.
+        "verify_claims",
         # Optional first-session step: pre-cache a metro so the first
         # real question is fast. Lives in core because that is the
         # install-to-wow path (issue #314).
@@ -107,6 +112,8 @@ PROFILES: dict[str, frozenset[str]] = {
         "admin_lookup",
         # Same compose as core: a characterize-the-neighborhood question.
         "neighborhood_verdict",
+        # Same compose as core: a characterize-a-listing's-claims question.
+        "verify_claims",
     }),
     # Working on geometry the caller already has, and turning results into
     # something a human can look at.

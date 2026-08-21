@@ -156,6 +156,10 @@
       "description": "Life-decision neighborhood verdict, not a data dump."
     },
     {
+      "name": "verify_claims",
+      "description": "Grade spatial listing claims (travel time, nearby counts, distances) against real routing and places data."
+    },
+    {
       "name": "optimize_route",
       "description": "Best order to visit several stops: multi-stop route ordering (a small TSP)."
     },

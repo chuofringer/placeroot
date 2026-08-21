@@ -3,7 +3,7 @@
 The full tool catalog, workflow prompts, resources, and the `PLACEROOT_TOOLS`
 selection mechanism. For a quick overview, start with the [README](../README.md).
 
-## All 34 tools
+## All 35 tools
 
 Every tool returns a compact, budgeted answer. Several single-item tools have a
 `*_batch` sibling that collapses many calls into one round-trip.
@@ -38,6 +38,7 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `find_near` | Category near a named place or city — one hop for "coffee shops near the Eiffel Tower"; compact rows with `trust_note` |
 | `places_along_route` | Places on the way from A to B: corridor search along the route, with each result's detour and how far along it sits, compact trust notes on results, and a verify-before-going line for the weakest stops |
 | `neighborhood_verdict` | Should I live here? A ranked verdict from life context (household, mobility, priorities) — strengths, weak points, one thing to verify in person |
+| `verify_claims` | Grade a listing's spatial claims (travel time, nearby counts, distances) against real routing and places data — confirmed / stretched / false / unverifiable, claimed vs. measured |
 | `optimize_route` | Best order to visit 2–10 stops, solved exactly over the street graph — order, per-leg distance/duration, totals, an `export` object (Google/Apple Maps links, GPX, printable stop list), and `verify_before_going` when stops already carry confidence/operating_status |
 | `render_map` | Any result → a shareable one-pager (interactive map, verdict, stop list, and Overture/OSM attribution); optional `summary` for the verdict, otherwise a short fallback is composed from the payload |
 | `simplify_geometry` | Any geometry → simplified to fit a token budget |
@@ -77,7 +78,7 @@ before 2026-07-28, and the response they get is byte-identical to what it was.
 
 ## Workflow prompts
 
-Five MCP **prompts** ship with the server: canned multi-tool workflows that
+Six MCP **prompts** ship with the server: canned multi-tool workflows that
 encode which tool to call first, what to do with its output, and what the
 answer should look like. In Claude Code they appear as slash commands; Claude
 Desktop and Cursor surface them in their own prompt pickers.
@@ -89,6 +90,7 @@ Desktop and Cursor surface them in their own prompt pickers.
 | `/mcp__placeroot__plan_errands` | `stops`, `start` (optional) | `geocode_batch` → `distance_matrix` → `route` per leg → optional `places_along_route` → an ordered run with per-leg distance and duration, plus a verify-before-going line for the weakest 1–2 stops → `render_map()` so the user leaves with a file |
 | `/mcp__placeroot__should_i_live_here` | `location`, `context` (optional) | `geocode` (if needed) → `neighborhood_verdict` → a verdict, strengths, the weak point, and the one thing to verify in person |
 | `/mcp__placeroot__get_to_know_my_city` | `city` (optional) | `warmup_city` → pre-cache the metro so the first real question is fast |
+| `/mcp__placeroot__verify_listing_claims` | `location`, `claims` | `geocode_address`/`resolve_place` → decompose the listing text into structured checks → `verify_claims` → a claim-by-claim confirmed/stretched/false/unverifiable table |
 
 ```
 /mcp__placeroot__site_selection bike repair shop | Portland, Oregon
@@ -157,20 +159,20 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 34 | ~15,711 | — |
+| unset / `all` (default) | 35 | ~15,711 | — |
 | `search` | 15 | ~7,113 | 55% |
-| `core` | 15 | ~7,569 | 52% |
+| `core` | 16 | ~7,569 | 52% |
 | `routing` | 8 | ~3,941 | 75% |
-| `analysis` | 11 | ~3,933 | 75% |
+| `analysis` | 12 | ~3,933 | 75% |
 | `geometry` | 4 | ~1,265 | 92% |
-| `progressive` | 4 (all 34 reachable) | ~866 | 94% |
+| `progressive` | 4 (all 35 reachable) | ~866 | 94% |
 
-- **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `from_to`, `find_near`, `places_along_route`, `neighborhood_verdict`, `warmup_city`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
+- **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `from_to`, `find_near`, `places_along_route`, `neighborhood_verdict`, `verify_claims`, `warmup_city`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
 - **`search`** — the find/name/identify family: `find_places`, `find_near`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, `address_at`, `geocode_address`, `search_categories`, and `gers_lookup`.
 - **`routing`** — `route`, `from_to`, `isochrone`, `distance_matrix`, `within_distance`, `optimize_route`.
-- **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`, `neighborhood_verdict`.
+- **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`, `neighborhood_verdict`, `verify_claims`.
 - **`geometry`** — `simplify_geometry`, `render_map`.
-- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 34 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 15.7k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
+- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 35 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 15.7k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 
 `data_version` and `preferences` are registered under every profile.
 `data_version` is ~230 tokens and the only way an agent can tell which

@@ -58,6 +58,7 @@ from placeroot import (
     verdict,
     water,
 )
+from placeroot import claims as claim_checks
 from placeroot import geocode as geocoding
 from placeroot import (
     preferences as preference_store,
@@ -2060,6 +2061,83 @@ def neighborhood_verdict(
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
     return _with_degraded_fields(budget.apply_budget(result, "checklist"))
+
+
+@_tool("Verify listing claims")
+def verify_claims(lat: float, lon: float, claims: list[dict]) -> dict:
+    """Grade spatial listing claims ("8 min to the metro", "shops on the doorstep",
+    "green space nearby") against real routing and places data.
+
+    Free-text claim parsing needs an LLM — this tool takes already-decomposed
+    structured checks; the verify_listing_claims prompt teaches an agent how
+    to turn listing text into them. Each of claims (max 8; max 5 of kind
+    travel_time, since each costs a routed call) is one of:
+
+    - {"kind": "travel_time", "to_category": str|None, "to_name": str|None,
+      "mode": "walk"|"cycle"|"drive" (default walk), "claimed_minutes": number}
+      Finds the nearest place matching to_category (an Overture taxonomy
+      slug) and/or to_name (a substring match), then routes to it and
+      compares the routed minutes against claimed_minutes.
+    - {"kind": "count_nearby", "category": str|None, "name": str|None,
+      "radius_m": number (default 500, capped at 2000), "claimed_at_least": int}
+      Counts matching places within radius_m and compares against
+      claimed_at_least.
+    - {"kind": "distance", "to_category": str|None, "to_name": str|None,
+      "claimed_max_m": number}
+      Straight-line distance (haversine, not routed) to the nearest match,
+      compared against claimed_max_m.
+
+    Every kind needs at least one of its category/name fields (an
+    Overture taxonomy slug and/or a name substring, matched the same way
+    every other places lookup in this server does); giving neither is a
+    bad_request.
+
+    Verdict per claim: "confirmed" when the measured number is within the
+    claimed number x1.15 (count_nearby: measured count >= claimed),
+    "stretched" within x1.5 (count_nearby: count >= half the claim, floor
+    1), otherwise "false". A claim asserting a place exists at all, when
+    none is found within the search bound, is "false" with a note —
+    absence is a verdict, not an error. A travel_time claim whose place is
+    found but cannot be routed to (no street graph nearby, or the network
+    doesn't connect the two points) is "unverifiable" instead of "false":
+    an unroutable leg is not evidence the claim is wrong.
+
+    Returns {"results": [{"claim": <echo of the input>, "verdict":
+    "confirmed"|"stretched"|"false"|"unverifiable", "measured": {...
+    kind-appropriate minutes/count/distance_m, plus the matched place's id
+    and name when there is one}, "note": optional}, ...], "verdict_rule":
+    a one-line summary of the thresholds above}.
+
+    Returns a structured {"error": "bad_request", ...} for anything
+    malformed in claims (unknown/missing kind, more than 8 claims, more
+    than 5 travel_time claims, a missing or non-numeric claimed value,
+    neither target field given, or an unsupported mode), {"error":
+    "bad_request", ...} for invalid lat/lon, or a structured {"error": ...}
+    if the upstream dataset is unavailable or missing columns this tool
+    depends on.
+    """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
+    try:
+        result = claim_checks.verify_claims(lat, lon, claims)
+    except claim_checks.ClaimError as e:
+        return {"error": "bad_request", "detail": str(e)}
+    except routing.UnsupportedMode as e:
+        return {
+            "error": "unsupported_mode",
+            "detail": e.detail,
+            "supported": sorted(routing.MODE_CONFIG),
+        }
+    except routing.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except (routing.SchemaDegraded, overture.SchemaDegraded) as e:
+        return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
+    return _with_degraded_fields(budget.apply_budget(result, "results"))
 
 
 @_tool("Best visiting order for stops")

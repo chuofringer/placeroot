@@ -262,6 +262,50 @@ rent, crime, school quality, hours, or demographics — say so if asked.
 {_COMPACT}"""
 
 
+VERIFY_LISTING_CLAIMS_TOOLS = (
+    "geocode_address",
+    "resolve_place",
+    "verify_claims",
+)
+
+
+def _verify_listing_claims(location: str, claims: str) -> str:
+    location = _arg(location)
+    claims = _arg(claims)
+    return f"""Check the spatial claims in a listing for "{location}" against \
+the map, using the PlaceRoot tools. Listing text: "{claims}"
+
+1. Resolve the location to coordinates first: `geocode_address()` for a
+   street address, or `resolve_place()` for a named building, complex, or
+   neighborhood. Confirm it landed on the place the listing means.
+2. Read the listing text and pull out every spatial claim (skip anything
+   about rent, condition, or amenities inside the unit — the map cannot
+   check those), then turn each into one structured check for
+   `verify_claims()`:
+   - A travel-time claim ("8 minutes to the metro") becomes
+     {{"kind": "travel_time", "to_category": "train_station",
+     "claimed_minutes": 8, "mode": "walk"}}.
+   - A count claim ("shops on the doorstep") becomes {{"kind":
+     "count_nearby", "category": "shop", "radius_m": 200,
+     "claimed_at_least": 3}} — pick claimed_at_least and radius_m to match
+     what the listing implies, not an arbitrary number.
+   - A proximity claim ("steps from the park", "surrounded by green
+     space") becomes {{"kind": "distance", "to_category": "park",
+     "claimed_max_m": 150}}.
+3. Call `verify_claims()` once with every check in one list (max 8 claims,
+   max 5 of kind travel_time — trim the list to the claims that matter
+   most if the listing makes more than that).
+
+Then present a claim-by-claim table: the claim as written, the measured
+number, and the verdict (confirmed / stretched / false / unverifiable).
+Quote the tool's verdict_rule so the reader can see the bar each verdict
+cleared. Do not soften a false or unverifiable claim — say plainly which
+claims the listing overstated and by how much, and which could not be
+checked at all.
+
+{_COMPACT}"""
+
+
 GET_TO_KNOW_MY_CITY_TOOLS = (
     "warmup_city",
     "geocode",
@@ -341,6 +385,13 @@ PROMPTS: dict[str, tuple[Callable[..., str], str, tuple[str, ...]]] = {
         "graph or cache buildings.",
         GET_TO_KNOW_MY_CITY_TOOLS,
     ),
+    "verify_listing_claims": (
+        _verify_listing_claims,
+        "Check a listing's spatial claims (travel time, nearby counts, "
+        "distances) against real map data — confirmed / stretched / "
+        "false / unverifiable, claimed vs. measured.",
+        VERIFY_LISTING_CLAIMS_TOOLS,
+    ),
 }
 
 
@@ -386,4 +437,12 @@ def register(server: MCPServer, selected: set[str]) -> None:
     def get_to_know_my_city(city: str = "") -> str:
         return _get_to_know_my_city(city) + _profile_note(
             GET_TO_KNOW_MY_CITY_TOOLS, selected
+        )
+
+    @server.prompt(
+        name="verify_listing_claims", description=PROMPTS["verify_listing_claims"][1]
+    )
+    def verify_listing_claims(location: str, claims: str) -> str:
+        return _verify_listing_claims(location, claims) + _profile_note(
+            VERIFY_LISTING_CLAIMS_TOOLS, selected
         )
