@@ -1217,12 +1217,15 @@ def search_categories(query: str, limit: int = 8) -> dict:
     against a bundled snapshot of Overture's places taxonomy (pinned to
     schema v1.9.0). Ranks exact slug match > slug prefix > slug substring >
     a match on any taxonomy path segment, so close siblings like "cafe" vs
-    "coffee_shop" both surface rather than one silently winning. Returns
-    {"results": [{"slug", "path"}, ...]} — path is the root-to-leaf
-    taxonomy (e.g. ["eat_and_drink", "cafe", "coffee_shop"]), budgeted like
-    every other tool. An empty/whitespace query returns {"results": []}.
-    limit is clamped to 0-50, matching every other tool's limit handling
-    (out-of-range values are not an error).
+    "coffee_shop" both surface rather than one silently winning. If the
+    whole query matches nothing, falls back to a lexical phrase-intent
+    match against a curated synonym lexicon (e.g. "fix my cracked phone
+    screen" -> mobile_phone_repair). Returns {"results": [{"slug", "path",
+    "confidence"}, ...]} — path is the root-to-leaf taxonomy (e.g.
+    ["eat_and_drink", "cafe", "coffee_shop"]), confidence is 0-1 and
+    descending, budgeted like every other tool. An empty/whitespace query
+    returns {"results": []}. limit is clamped to 0-50, matching every
+    other tool's limit handling (out-of-range values are not an error).
     """
     limit = max(0, min(int(limit), 50))
     rows = categories.search_categories(query, limit)

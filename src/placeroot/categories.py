@@ -13,6 +13,12 @@ CSV format (semicolon-space delimited, UTF-8 with BOM):
 
 Each data row's second column is a bracketed, comma-separated taxonomy path
 from root to leaf (the row's own slug is always the last segment).
+
+A second bundled CSV (data/category_synonyms.csv, see data/README.md)
+curates ~100 rows of intent words per slug ("mobile_phone_repair; phone
+screen cracked repair fix cell smartphone") — it backs the token-based
+fallback below for phrase intents like "fix my cracked phone screen" that
+share no substring with any slug (#355).
 """
 
 import importlib.resources
@@ -22,6 +28,61 @@ import importlib.resources
 SCHEMA_VERSION = "v1.9.0"
 
 _CATEGORIES: list[dict] | None = None
+_SYNONYMS: dict[str, set[str]] | None = None
+
+# Dropped before tokenizing a query or row text — filler words common in
+# agent-phrased intents ("find me somewhere to get my phone fixed near
+# here") that would otherwise dilute token-coverage scoring. Content words
+# ("phone", "fixed") survive; this list is deliberately small so it never
+# eats a real category word.
+_STOPWORDS = {
+    "a",
+    "an",
+    "the",
+    "my",
+    "me",
+    "i",
+    "to",
+    "for",
+    "of",
+    "in",
+    "on",
+    "at",
+    "and",
+    "or",
+    "with",
+    "near",
+    "nearby",
+    "here",
+    "close",
+    "somewhere",
+    "some",
+    "any",
+    "place",
+    "places",
+    "spot",
+    "spots",
+    "get",
+    "go",
+    "find",
+    "want",
+    "need",
+    "looking",
+    "look",
+    "is",
+    "are",
+    "there",
+    "that",
+    "this",
+    "good",
+    "best",
+    "please",
+    "can",
+    "you",
+    "where",
+    "do",
+    "does",
+}
 
 
 def _load_categories() -> list[dict]:
@@ -55,6 +116,78 @@ def _load_categories() -> list[dict]:
 
     _CATEGORIES = rows
     return _CATEGORIES
+
+
+def _load_synonyms() -> dict[str, set[str]]:
+    """Parse and cache data/category_synonyms.csv: slug -> synonym word set.
+
+    Same traversal convention as _load_categories (see its comment) and
+    same encoding/delimiter as the taxonomy CSV. A slug with no lexicon row
+    simply has an empty synonym set; a lexicon row for a slug absent from
+    the taxonomy is silently skipped (the lexicon-validity test in
+    tests/test_search_categories_intent.py is what actually enforces every
+    row is real).
+    """
+    global _SYNONYMS
+    if _SYNONYMS is not None:
+        return _SYNONYMS
+
+    csv_path = importlib.resources.files("placeroot") / "data" / "category_synonyms.csv"
+    words: dict[str, set[str]] = {}
+    with csv_path.open("r", encoding="utf-8-sig") as f:
+        for i, line in enumerate(f):
+            line = line.strip()
+            if not line or i == 0:
+                continue
+            slug, _, synonyms = line.partition(";")
+            slug = slug.strip()
+            if not slug:
+                continue
+            words[slug] = set(_tokenize(synonyms))
+
+    _SYNONYMS = words
+    return _SYNONYMS
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase, split on runs of non-alphanumerics, drop stopwords.
+
+    Splits slug underscores into words too ("mobile_phone_repair" ->
+    "mobile", "phone", "repair"), so a query token can match a word buried
+    in a multi-word slug. Empty-after-stopwords input returns [].
+    """
+    words = []
+    current = []
+    for ch in text.lower():
+        if ch.isalnum():
+            current.append(ch)
+        elif current:
+            words.append("".join(current))
+            current = []
+    if current:
+        words.append("".join(current))
+    return [w for w in words if w not in _STOPWORDS]
+
+
+def _row_word_set(row: dict) -> set[str]:
+    """A row's matchable words: slug words + path-segment words + its
+    curated synonym words (data/category_synonyms.csv)."""
+    words = set(_tokenize(row["slug"]))
+    for seg in row["path"]:
+        words.update(_tokenize(seg))
+    words.update(_load_synonyms().get(row["slug"], set()))
+    return words
+
+
+def _document_frequencies(rows: list[dict]) -> dict[str, int]:
+    """How many rows' word sets contain each token — used to down-weight
+    tokens so common they'd surface half the taxonomy on their own (e.g.
+    "shop", "service", "store")."""
+    df: dict[str, int] = {}
+    for row in rows:
+        for word in _row_word_set(row):
+            df[word] = df.get(word, 0) + 1
+    return df
 
 
 def taxonomy_summary() -> dict:
@@ -122,22 +255,29 @@ def _match_rank(slug: str, query: str) -> int | None:
     return None
 
 
-def search_categories(query: str, limit: int = 8) -> list[dict]:
-    """Free text -> ranked {"slug", "path"} rows from the bundled taxonomy.
+# Whole-query tier -> confidence. Tier 0-2 are slug exact/prefix/substring,
+# tier 3 is a path-segment match — the same four tiers _match_rank and the
+# path-segment fallback have always produced, now surfaced as a number.
+_TIER_CONFIDENCE = {0: 1.0, 1: 0.9, 2: 0.75, 3: 0.6}
 
-    Case-insensitive. Ranked: exact slug match > slug prefix > slug
-    substring > query matches a path segment (root/mid tier, not the
-    slug itself) — e.g. "cafe" surfaces both the "cafe" mid-tier category
-    and slugs like "coffee_shop" that sit under it, disambiguating
-    siblings. Ties break by shorter slug, then alphabetically. Empty or
-    whitespace-only query returns [].
-    """
-    query = query.strip().lower()
-    if not query:
-        return []
+# A token that shows up in more than this fraction of rows' word sets
+# ("shop", "service", "store", ...) is too generic to carry a match on its
+# own; it still counts but at reduced weight (see _TOKEN_MATCH_BAND).
+_HIGH_DF_FRACTION = 0.10
+_HIGH_DF_WEIGHT = 0.3
 
+# Token-coverage confidence band for the phrase-intent fallback (#355):
+# a query matching none of its tokens never reaches this code path (see
+# search_categories), and full coverage tops out below the whole-query
+# tiers above so an exact/substring slug hit always outranks a synonym hit.
+_TOKEN_MATCH_MIN = 0.2
+_TOKEN_MATCH_MAX = 0.7
+
+
+def _whole_query_matches(query: str, rows: list[dict]) -> list[tuple]:
+    """Today's exact/prefix/substring/path-segment tiers, scored rows."""
     scored = []
-    for row in _load_categories():
+    for row in rows:
         rank = _match_rank(row["slug"], query)
         if rank is None:
             # No slug match — fall back to a path-segment match (tier 3).
@@ -145,7 +285,89 @@ def search_categories(query: str, limit: int = 8) -> list[dict]:
                 rank = 3
             else:
                 continue
-        scored.append((rank, len(row["slug"]), row["slug"], row))
+        scored.append((_TIER_CONFIDENCE[rank], len(row["slug"]), row["slug"], row))
+    return scored
 
-    scored.sort(key=lambda t: (t[0], t[1], t[2]))
-    return [{"slug": r["slug"], "path": r["path"]} for _, _, _, r in scored[:limit]]
+
+def _token_matches(query_tokens: list[str], rows: list[dict]) -> list[tuple]:
+    """Lexical phrase-intent fallback: score each row by weighted token
+    coverage against its slug/path/synonym words (see module docstring).
+
+    A row only qualifies if at least one matched token is not "high
+    document-frequency" (shared across a large slice of the taxonomy) —
+    otherwise a word like "shop" alone would surface half the taxonomy.
+
+    Plural queries fold to the singular the taxonomy uses: a token ending
+    in "s" (length > 3, so "gas" survives) also matches its bare stem, so
+    "coffee shops" scores 2/2 against coffee_shop's {coffee, shop} instead
+    of losing the "shops" token and tying with every other coffee-synonym
+    row.
+    """
+    rows_with_words = [(row, _row_word_set(row)) for row in rows]
+    df = _document_frequencies(rows)
+    threshold = _HIGH_DF_FRACTION * len(rows)
+
+    def _hit(token: str, words: set[str]) -> str | None:
+        if token in words:
+            return token
+        if len(token) > 3 and token.endswith("s") and token[:-1] in words:
+            return token[:-1]
+        return None
+
+    scored = []
+    for row, words in rows_with_words:
+        matched = [hit for t in query_tokens if (hit := _hit(t, words)) is not None]
+        if not matched:
+            continue
+        weights = [1.0 if df.get(t, 0) <= threshold else _HIGH_DF_WEIGHT for t in matched]
+        if all(df.get(t, 0) > threshold for t in matched):
+            # Every matched token is too generic on its own — drop the row
+            # rather than let it ride shared filler words into the results.
+            continue
+        coverage = sum(weights) / len(query_tokens)
+        coverage = min(coverage, 1.0)
+        confidence = _TOKEN_MATCH_MIN + coverage * (_TOKEN_MATCH_MAX - _TOKEN_MATCH_MIN)
+        scored.append((confidence, len(row["slug"]), row["slug"], row))
+    return scored
+
+
+def search_categories(query: str, limit: int = 8) -> list[dict]:
+    """Free text -> ranked {"slug", "path", "confidence"} rows from the
+    bundled taxonomy.
+
+    Case-insensitive. Tries today's whole-query tiers first: exact slug
+    match (confidence 1.0) > slug prefix (0.9) > slug substring (0.75) >
+    query matches a path segment, root/mid tier not the slug itself (0.6)
+    — e.g. "cafe" surfaces both the "cafe" mid-tier category and slugs
+    like "coffee_shop" that sit under it, disambiguating siblings.
+
+    If nothing matches the whole query, falls back to a lexical
+    phrase-intent match (#355): the query is tokenized (lowercased,
+    split on non-alphanumerics, stopwords dropped) and scored against
+    each row's slug words, path-segment words, and curated synonym words
+    (data/category_synonyms.csv) — e.g. "fix my cracked phone screen"
+    reaches mobile_phone_repair even though it shares no substring with
+    it. Confidence there is weighted token coverage scaled into 0.2-0.7,
+    always below the whole-query tiers; a token shared across a large
+    slice of the taxonomy ("shop", "service") counts for less, and a row
+    that only matched such tokens is dropped.
+
+    Ties break by shorter slug, then alphabetically. Empty, whitespace,
+    or stopword-only query returns [].
+    """
+    query = query.strip().lower()
+    if not query:
+        return []
+
+    rows = _load_categories()
+    scored = _whole_query_matches(query, rows)
+    if not scored:
+        query_tokens = _tokenize(query)
+        if query_tokens:
+            scored = _token_matches(query_tokens, rows)
+
+    scored.sort(key=lambda t: (-t[0], t[1], t[2]))
+    return [
+        {"slug": r["slug"], "path": r["path"], "confidence": round(conf, 2)}
+        for conf, _, _, r in scored[:limit]
+    ]
