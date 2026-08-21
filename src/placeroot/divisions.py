@@ -1,4 +1,5 @@
-"""Point -> containing admin hierarchy against Overture's divisions theme (issue #11).
+"""Point -> containing admin hierarchy, and polygon -> overlapping divisions,
+against Overture's divisions theme (issue #11, #348).
 
 Overture's divisions theme carries names/subtype directly on division_area
 rows (they're denormalized, not just on the paired type=division rows), so
@@ -24,6 +25,7 @@ problem later, the cache's theme-keyed design (it already takes theme as a
 parameter) would let it slot in without further plumbing.
 """
 
+import json
 import logging
 
 import duckdb
@@ -38,6 +40,13 @@ THEME = "divisions"
 # is no point-in-polygon test to run at all, unlike places' softer columns.
 REQUIRED_COLUMNS = ["id", "names", "subtype", "geometry", "bbox", "division_id"]
 ESSENTIAL_COLUMNS = {"geometry"}
+
+# divisions_in_polygon filters by subtype, so unlike admin_lookup (where a
+# missing subtype column just degrades a chain entry's "type" to NULL) a
+# missing subtype column here means the tool cannot honor its own contract
+# (a caller-chosen set of subtypes) at all — essential, not soft.
+POLYGON_REQUIRED_COLUMNS = ["id", "names", "subtype", "geometry", "bbox", "division_id"]
+POLYGON_ESSENTIAL_COLUMNS = {"geometry", "subtype"}
 
 
 def _ensure_spatial() -> None:
@@ -102,8 +111,7 @@ def admin_lookup(lat: float, lon: float, con=None) -> dict:
         or f"read_parquet('{upstream}', hive_partitioning=1)"
     )
     bbox_prefilter = (
-        "bbox.xmin <= $lon AND bbox.xmax >= $lon"
-        " AND bbox.ymin <= $lat AND bbox.ymax >= $lat AND "
+        "bbox.xmin <= $lon AND bbox.xmax >= $lon AND bbox.ymin <= $lat AND bbox.ymax >= $lat AND "
         if "bbox" not in missing
         else ""
     )
@@ -147,3 +155,128 @@ def admin_lookup(lat: float, lon: float, con=None) -> dict:
         seen.add(key)
         chain.append({"name": name, "type": type_, "id": id_})
     return {"chain": chain}
+
+
+def _polygon_bbox(coordinates: list) -> tuple[float, float, float, float]:
+    """(xmin, ymin, xmax, ymax) over every ring's vertices of a GeoJSON Polygon.
+
+    Holes are included too — they're a subset of the exterior ring's extent,
+    so folding them in is harmless and saves distinguishing ring 0 from the
+    rest.
+    """
+    xs = [pt[0] for ring in coordinates for pt in ring]
+    ys = [pt[1] for ring in coordinates for pt in ring]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def divisions_in_polygon(
+    polygon_geojson: dict,
+    subtypes: tuple[str, ...] = ("neighborhood", "locality"),
+    limit: int = 20,
+    con=None,
+) -> dict:
+    """Divisions of the given subtypes intersecting a GeoJSON polygon, by overlap.
+
+    Returns {"results": [{"id", "name", "subtype", "overlap_fraction"}, ...]},
+    ranked by overlap_fraction descending — the fraction of the DIVISION's
+    own area (not the input polygon's) that lies inside polygon_geojson,
+    rounded to 3 decimals. An empty results list (e.g. a polygon entirely
+    over open ocean) is a valid answer, not an error.
+
+    Raises ValueError for a malformed polygon_geojson or limit < 1;
+    SchemaDegraded if geometry or subtype is missing from the active
+    divisions dataset (mirrors admin_lookup for geometry; subtype is
+    additionally essential here because this tool's whole contract is
+    filtering by it); UpstreamUnavailable if the remote scan (or the
+    one-time spatial extension load) fails.
+    """
+    if (
+        not isinstance(polygon_geojson, dict)
+        or polygon_geojson.get("type") != "Polygon"
+        or not polygon_geojson.get("coordinates")
+    ):
+        raise ValueError("polygon_geojson must be a GeoJSON Polygon with coordinates")
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    if not subtypes:
+        return {"results": []}
+
+    _ensure_spatial()
+    upstream = overture._upstream_glob(THEME, type_="division_area")
+    missing = set(overture.missing_columns(upstream, POLYGON_REQUIRED_COLUMNS))
+    essential_missing = [c for c in missing if c in POLYGON_ESSENTIAL_COLUMNS]
+    if essential_missing:
+        raise overture.SchemaDegraded(essential_missing)
+
+    name_expr = "NULL" if "names" in missing else "names.primary"
+    if "division_id" not in missing:
+        id_expr = "coalesce(division_id, id)"
+    elif "id" not in missing:
+        id_expr = "id"
+    else:
+        id_expr = "NULL"
+    geom_expr = _geom_expr(upstream)
+
+    poly_xmin, poly_ymin, poly_xmax, poly_ymax = _polygon_bbox(polygon_geojson["coordinates"])
+    src = (
+        manifest.pruned_source_sql(upstream, (poly_xmin, poly_ymin, poly_xmax, poly_ymax))
+        or f"read_parquet('{upstream}', hive_partitioning=1)"
+    )
+    bbox_prefilter = (
+        "bbox.xmin <= $poly_xmax AND bbox.xmax >= $poly_xmin"
+        " AND bbox.ymin <= $poly_ymax AND bbox.ymax >= $poly_ymin AND "
+        if "bbox" not in missing
+        else ""
+    )
+
+    sql = f"""
+        SELECT
+            {id_expr}   AS id,
+            {name_expr} AS name,
+            subtype,
+            ST_Area(ST_Intersection({geom_expr}, ST_GeomFromGeoJSON($poly))) AS overlap_area,
+            ST_Area({geom_expr}) AS division_area
+        FROM {src}
+        WHERE {bbox_prefilter}subtype IN ({",".join(f"$subtype{i}" for i in range(len(subtypes)))})
+            AND ST_Intersects({geom_expr}, ST_GeomFromGeoJSON($poly))
+    """
+    params = {
+        "poly": json.dumps(polygon_geojson),
+        "poly_xmin": poly_xmin,
+        "poly_ymin": poly_ymin,
+        "poly_xmax": poly_xmax,
+        "poly_ymax": poly_ymax,
+    }
+    params.update({f"subtype{i}": s for i, s in enumerate(subtypes)})
+    try:
+        # Bounded: bbox prefilter + manifest pruning above keep this to the
+        # handful of division polygons near the input, not a global scan.
+        with trace.scan("divisions in polygon", bounded=True, source=src):
+            if con is not None:
+                rows = con.execute(sql, params).fetchall()
+            else:
+                with db.conn_lock:
+                    rows = db.shared_conn().execute(sql, params).fetchall()
+    except duckdb.Error as e:
+        raise overture.UpstreamUnavailable(str(e)) from e
+
+    # Overlap fraction, and the descending sort, happen here rather than in
+    # SQL for the same reason admin_lookup sorts client-side: an ORDER BY on
+    # a geometry-derived expression forces eager materialization of every
+    # row group's geometry, defeating late materialization.
+    by_id: dict = {}
+    for id_, name, subtype, overlap_area, division_area in rows:
+        fraction = round(overlap_area / division_area, 3) if division_area else 0.0
+        key = id_ if id_ is not None else (name, subtype)
+        # division_area carries multiple polygon rows per division (land and
+        # maritime variants) — keep the row with the larger overlap fraction.
+        existing = by_id.get(key)
+        if existing is None or fraction > existing["overlap_fraction"]:
+            by_id[key] = {
+                "id": id_,
+                "name": name,
+                "subtype": subtype,
+                "overlap_fraction": fraction,
+            }
+    results = sorted(by_id.values(), key=lambda r: r["overlap_fraction"], reverse=True)
+    return {"results": results[:limit]}
