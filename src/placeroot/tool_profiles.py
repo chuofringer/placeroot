@@ -90,6 +90,9 @@ PROFILES: dict[str, frozenset[str]] = {
         "optimize_route",
         # Named-place compose over route().
         "from_to",
+        # "Where should we meet" over the same routed-time machinery as
+        # distance_matrix/route, ranked by fairness rather than distance.
+        "meeting_point",
     }),
     # Characterizing an area rather than locating a thing in it.
     "analysis": frozenset({

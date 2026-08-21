@@ -46,6 +46,7 @@ from placeroot import (
     infrastructure,
     land_use,
     mapview,
+    meeting,
     overture,
     progress,
     prompts,
@@ -711,6 +712,204 @@ def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
         for di, (dlat, dlon) in enumerate(d_pts)
     ]
     return budget.apply_budget({"elements": elements}, "elements")
+
+
+# meeting_point's bounded radius around its computed center for candidate
+# venues — wide enough to usually find something without turning into an
+# unbounded scan; category narrows it further, same as find_places.
+_MEETING_SEARCH_RADIUS_M = 1500.0
+
+# Cap on (candidate venue, origin) routing pairs, so a 5-origin request
+# with a generous limit can't fan out into dozens of routed calls: at most
+# 8 candidates are ever routed against, however many `limit` asked for.
+_MEETING_MAX_CANDIDATES = 8
+
+
+def _meeting_travel_time_for(origin: tuple, dest_lat: float, dest_lon: float) -> dict | None:
+    """One origin -> candidate leg, routed. None if that leg is unroutable.
+
+    Mirrors route()'s own exception handling, but folds every failure mode
+    (unsupported mode already validated away, no usable street graph near
+    either end, too far apart, or two snapped points with nothing
+    connecting them) into "this candidate doesn't work for this origin"
+    rather than raising — meeting_point drops the candidate rather than
+    erroring the whole answer over one bad pair.
+    """
+    olat, olon, mode = origin
+    try:
+        result = routing.route(olat, olon, dest_lat, dest_lon, mode=mode)
+    except (
+        routing.UnsupportedMode,
+        routing.NoGraphNearby,
+        routing.RouteTooLong,
+        ValueError,
+    ):
+        return None
+    if "error" in result:  # no_route: both ends snapped, nothing connects them
+        return None
+    return {
+        "mode": mode,
+        "travel_time_min": round(result["duration_s"] / 60.0, 1),
+        "distance_m": round(result["distance_m"]),
+    }
+
+
+@_tool("Meeting point")
+def meeting_point(
+    origins: list[dict],
+    category: str | None = None,
+    limit: int = 3,
+) -> dict:
+    """Where several people should meet, fairly: candidate venues ranked by
+    equalized travel time, not geometric distance.
+
+    Fairness objective: minimize the MAXIMUM per-person travel time to the
+    venue ("no one gets screwed"), tie-broken by the smaller spread
+    (max - min across everyone), then by the smaller total. This is
+    deliberately not "minimize the average" — that objective can strand
+    one person with a long trip so two others get a short one.
+
+    origins is 2-5 {"lat": ..., "lon": ..., "mode": ...} points — mode is
+    "walk", "cycle", or "drive", defaulting to "walk" when omitted, and can
+    differ per person (e.g. one driving, one walking). category optionally
+    filters candidate venues to an Overture taxonomy slug (e.g.
+    'coffee_shop'); a wrong or unrecognized slug is a silent zero-match,
+    not an error.
+
+    Method: a seed center is computed from each origin's implied
+    straight-line travel time (not raw distance, so a walking participant
+    pulls the center toward them more than a driving one at the same
+    distance), venues are searched for near that seed, and each
+    candidate's real per-person times come from routing.route() — the
+    exact routed number, not the seed's approximation. At most 8 candidate
+    venues are ever routed against, regardless of `limit`.
+
+    Returns {"center": {"lat", "lon"}, "candidates": [{"id", "name",
+    "category", "lat", "lon", "per_person": [{"origin_idx", "mode",
+    "travel_time_min", "distance_m"}, ...], "max_travel_time_min",
+    "spread_min"}, ...]}, ranked fairest-first, capped at `limit` (default
+    3, max 5). per_person entries carry origin_idx aligned to the input
+    origins list, one entry per origin — a candidate that can't be routed
+    from every origin (no street graph nearby, or genuinely disconnected)
+    is dropped from the ranking entirely rather than ranked on a partial,
+    unfair comparison. An empty
+    "candidates" list is a valid answer (nothing matched the category
+    nearby, or nothing routed from every origin) — it carries a "note"
+    explaining which.
+
+    Returns a structured {"error": "bad_request", ...} if origins has
+    fewer than 2 or more than 5 points, a point is missing/non-numeric
+    lat or lon, or a mode isn't walk/cycle/drive; {"error": "bad_request",
+    ...} with the offending coordinate if lat/lon is out of range; or a
+    structured {"error": ...} if the upstream places dataset is
+    unavailable or missing columns this tool depends on.
+    """
+    if not isinstance(origins, list) or not (2 <= len(origins) <= 5):
+        got = len(origins) if isinstance(origins, list) else 0
+        return {
+            "error": "bad_request",
+            "detail": f"origins must hold between 2 and 5 points, got {got}",
+        }
+    parsed: list[tuple[float, float, str]] = []
+    for idx, o in enumerate(origins):
+        if not isinstance(o, dict):
+            return {
+                "error": "bad_request",
+                "detail": f"origins[{idx}] must be an object with lat and lon",
+            }
+        try:
+            olat, olon = float(o["lat"]), float(o["lon"])
+        except (KeyError, TypeError, ValueError) as e:
+            return {
+                "error": "bad_request",
+                "detail": f"origins[{idx}]: each origin needs numeric lat and lon: {e}",
+            }
+        coord_error = _invalid_coord(olat, olon)
+        if coord_error is not None:
+            coord_error["detail"] = f"origins[{idx}]: {coord_error['detail']}"
+            return coord_error
+        mode = o.get("mode", "walk")
+        if not isinstance(mode, str) or mode not in routing.MODE_CONFIG:
+            return {
+                "error": "bad_request",
+                "detail": (
+                    f"origins[{idx}]: mode must be one of "
+                    f"{sorted(routing.MODE_CONFIG)}, got {mode!r}"
+                ),
+                "supported": sorted(routing.MODE_CONFIG),
+            }
+        parsed.append((olat, olon, mode))
+
+    try:
+        limit = max(1, min(int(limit), 5))
+    except (TypeError, ValueError):
+        return {"error": "bad_request", "detail": f"limit must be an integer, got {limit!r}"}
+
+    center_lat, center_lon = meeting.find_center(parsed)
+
+    fetch_n = min(2 * limit + 2, _MEETING_MAX_CANDIDATES)
+    try:
+        rows = overture.find_places(
+            center_lat, center_lon, radius_m=_MEETING_SEARCH_RADIUS_M,
+            category=category, limit=fetch_n,
+        )
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+
+    payload = {"center": {"lat": center_lat, "lon": center_lon}, "candidates": []}
+    if not rows:
+        if category:
+            payload["note"] = (
+                f"no places matched category {category!r} near the fair meeting "
+                "point; if that may not be a valid Overture category slug, use "
+                "search_categories to find the right one, or drop the category filter."
+            )
+        else:
+            payload["note"] = (
+                "no places listed within "
+                f"{round(_MEETING_SEARCH_RADIUS_M)} m of the fair meeting point; "
+                "the center coordinate above is still the fair spot to meet near."
+            )
+        return payload
+
+    candidates = []
+    for row in rows[:_MEETING_MAX_CANDIDATES]:
+        per_person = []
+        routable = True
+        for origin_idx, origin in enumerate(parsed):
+            leg = _meeting_travel_time_for(origin, row["lat"], row["lon"])
+            if leg is None:
+                routable = False
+                break
+            per_person.append({"origin_idx": origin_idx, **leg})
+        if not routable:
+            continue
+        times = [p["travel_time_min"] for p in per_person]
+        candidates.append({
+            "id": row["id"],
+            "name": row["name"],
+            "category": row.get("category"),
+            "lat": row["lat"],
+            "lon": row["lon"],
+            "per_person": per_person,
+            "max_travel_time_min": max(times),
+            "spread_min": round(max(times) - min(times), 1),
+        })
+
+    candidates.sort(
+        key=lambda c: meeting.fairness_key([p["travel_time_min"] for p in c["per_person"]])
+    )
+    payload["candidates"] = candidates[:limit]
+    if not candidates:
+        payload["note"] = (
+            "found candidate venues near the fair meeting point, but none could be "
+            "routed to from every participant (no street graph nearby, or "
+            "genuinely disconnected for at least one origin)"
+        )
+        return payload
+    return budget.apply_budget(payload, "candidates")
 
 
 @_tool("Compare areas")
