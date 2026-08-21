@@ -3708,6 +3708,33 @@ def _match_label(row: dict, query: str) -> str:
     return _MATCH_TIER_LABELS[_match_tier(row["name"], query)]
 
 
+def _division_match_label(row: dict, query: str, search_query: str) -> str:
+    """A division candidate's match label in resolve_place (#344): the
+    better of its label against the full `query` and against the
+    city-stripped `search_query`.
+
+    Place candidates already retry against `search_query` when a match
+    against the full query is weak (see the `_place_match_label` call
+    sites below) — a query like "Times Square New York" strips its trailing
+    city hint before searching, and the landmark a caller means is judged
+    against what is actually left of their words, not against text a city
+    hint added back on. Divisions never got that retry: graded only against
+    the untouched original query, the *correct* "Times Square" division
+    read as a bare substring ("Times Square" is not a prefix of "Times
+    Square New York"), while an unrelated, coincidentally-named place
+    elsewhere could read as a stronger "prefix" match purely because places'
+    tiering already checks both directions. Kind-agnostic ranking (the
+    point of this merge) needs kind-consistent tiering, not just a
+    kind-agnostic sort key sitting on top of two different ones.
+    """
+    label = _match_label(row, query)
+    if search_query != query:
+        alt_label = _match_label(row, search_query)
+        if _MATCH_LABEL_RANK[alt_label] > _MATCH_LABEL_RANK[label]:
+            return alt_label
+    return label
+
+
 # resolve_place runs one find_places per significant token, each taking the
 # shared DuckDB connection lock — so an unbounded token count from a huge
 # query string is a lock-contention DoS against the whole server, not just a
@@ -3768,6 +3795,33 @@ def _place_match_label(name: str, query: str) -> str | None:
     if n_tokens & q_tokens:
         return "substring"
     return None
+
+
+# #344: subtypes a `city` hint is allowed to resolve to without falling
+# back to the top (population-ranked) hit. Deliberately narrower than
+# _SUBTYPE_WEIGHT's full ladder — a hint named "city" should not silently
+# resolve to a neighborhood, which is finer-grained than any caller means
+# by "the city".
+_CITY_HINT_SUBTYPES = frozenset({"locality", "localadmin"})
+
+
+def _pick_city_hint_row(hits: list[dict]) -> dict:
+    """Pick the row a `city` hint means, from geocode()'s ranked hits.
+
+    geocode()'s own ranking (_rank_key) orders same-named divisions by raw
+    population, which is the right call for a bare geocode() query — but a
+    `city` hint's whole meaning is "a city", and a state/region can share a
+    populous namesake with the city it was named after ("New York" the
+    state outranks New York City there). Preferring the first city-level
+    hit over a broader admin unit resolves that without touching geocode()'s
+    general ranking, which other callers (and the ranking corpus) depend on
+    exactly as it is. Falls back to the top hit when nothing at the city
+    level matched — the hint may genuinely name a country or region.
+    """
+    for hit in hits:
+        if hit.get("type") in _CITY_HINT_SUBTYPES:
+            return hit
+    return hits[0]
 
 
 def resolve_place(
@@ -3851,13 +3905,25 @@ def resolve_place(
     # behind every wrong-hemisphere answer this module has had. It is a
     # hint, never an answer: it bounds where the search looks, and every
     # row returned still comes from the data.
+    #
+    # #344: geocode()'s general ranking orders same-named divisions by raw
+    # population, which is right for a bare geocode() call but wrong here —
+    # "New York" the state (20.2M) outranks New York City (8.5M) there, and
+    # taking hits[0] anchored "Times Square New York" 200km away, on the
+    # state's geographic centroid, with the real Times Square outside the
+    # city-hint radius from it. A `city` hint's entire meaning is "a city";
+    # _pick_city_hint_row prefers the first locality/localadmin-level hit
+    # over a same-named region/country one, falling back to the top hit
+    # when nothing at that level matched (the hint may genuinely name a
+    # country or region and nothing finer).
     if city and near_lat is None and near_lon is None:
         try:
-            hits = geocode(city, limit=1)
+            hits = geocode(city, limit=5)
         except (overture.UpstreamUnavailable, overture.SchemaDegraded):
             hits = []
         if hits:
-            near_lat, near_lon = hits[0]["lat"], hits[0]["lon"]
+            pin = _pick_city_hint_row(hits)
+            near_lat, near_lon = pin["lat"], pin["lon"]
             city_bounded = True
         else:
             logger.info("resolve_place: city hint %r did not resolve; ignoring it", city)
@@ -3964,7 +4030,7 @@ def resolve_place(
             "lat": r["lat"], "lon": r["lon"],
             "type": r.get("type"),
             "admin_context": r["admin_context"],
-            "match": _match_label(r, query),
+            "match": _division_match_label(r, query, search_query),
             "_prominence": r["rank_score"],
         })
     for r in place_rows:
