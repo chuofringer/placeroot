@@ -9,6 +9,12 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Fixed
+- `resolve_place` city-hint resolution prefers a locality/localadmin over a
+  same-named region (so "Times Square New York" is not anchored on New York
+  *state*), and division candidates are graded against the better of the full
+  query and the city-stripped query. Famous landmarks with no divisions-theme
+  row keep using the bundled alias table (`Heathrow Airport` added).
+  `geocode()` general ranking is unchanged (placeroot #344, #345 / #346).
 - Routing to a POI centroid inside a large campus (an airport terminal, a
   park) no longer fails with `no_graph_nearby` when the real road network
   sits just past the snap radius: `snap_to_graph` makes one widened pass
