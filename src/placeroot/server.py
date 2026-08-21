@@ -713,8 +713,67 @@ def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
     return budget.apply_budget({"elements": elements}, "elements")
 
 
+# issue #304: priorities input cap and accepted "prefer" values.
+_MAX_PRIORITIES = 6
+_VALID_PREFER = ("more", "fewer")
+
+
+def _validate_priorities(priorities) -> dict | None:
+    """bad_request dict if priorities is malformed, else None."""
+    if not isinstance(priorities, list):
+        return {"error": "bad_request", "detail": "priorities must be a list"}
+    if len(priorities) > _MAX_PRIORITIES:
+        return {
+            "error": "bad_request",
+            "detail": f"priorities accepts at most {_MAX_PRIORITIES}, got {len(priorities)}",
+        }
+    for idx, p in enumerate(priorities):
+        if not isinstance(p, dict):
+            return {"error": "bad_request", "detail": f"priorities[{idx}] must be an object"}
+        label = p.get("label")
+        category = p.get("category")
+        prefer = p.get("prefer")
+        weight = p.get("weight", 1)
+        if not isinstance(label, str) or not label.strip():
+            return {
+                "error": "bad_request",
+                "detail": f"priorities[{idx}] needs a non-empty 'label'",
+            }
+        if not isinstance(category, str) or not category.strip():
+            return {
+                "error": "bad_request",
+                "detail": f"priorities[{idx}] needs a non-empty 'category'",
+            }
+        if prefer not in _VALID_PREFER:
+            return {
+                "error": "bad_request",
+                "detail": f"priorities[{idx}].prefer must be 'more' or 'fewer', got {prefer!r}",
+            }
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+            return {
+                "error": "bad_request",
+                "detail": f"priorities[{idx}].weight must be numeric, got {weight!r}",
+            }
+    return None
+
+
+def _normalize_priorities(priorities: list[dict]) -> list[dict]:
+    """Defaults applied, weight clamped to [0.1, 5] (issue #304)."""
+    return [
+        {
+            "label": p["label"],
+            "category": p["category"],
+            "prefer": p["prefer"],
+            "weight": max(0.1, min(5.0, float(p.get("weight", 1)))),
+        }
+        for p in priorities
+    ]
+
+
 @_tool("Compare areas")
-def compare_areas(areas: list[dict], radius_m: float = 1000) -> dict:
+def compare_areas(
+    areas: list[dict], radius_m: float = 1000, priorities: list[dict] | None = None
+) -> dict:
     """Compare 2-5 areas side by side: category mix, density, and what differs.
 
     areas is a list of {"lat": ..., "lon": ...} centers sharing one
@@ -726,6 +785,27 @@ def compare_areas(areas: list[dict], radius_m: float = 1000) -> dict:
     ...} if areas isn't 2-5 centers, or if upstream is unavailable or the
     dataset is missing columns this tool depends on for any area (a partial
     comparison is not returned).
+
+    priorities (optional, up to 6) turns the comparison into a scored
+    verdict: each entry is {"label": your own term for the criterion,
+    e.g. "competition"; "category": an Overture taxonomy slug, or
+    "__density__" for overall place density as a foot-traffic proxy;
+    "prefer": "more" | "fewer"; "weight": 0.1-5, default 1}. Each area's raw
+    measure per priority is that category's count (or density) within
+    radius_m, counted explicitly even for categories outside the top-10
+    alignment above; the per-priority winner is whichever area is better on
+    that raw measure (a tie has no winner for that priority); each area's
+    verdict score is the weight-summed share of each priority normalized
+    against the best area (max=1, inverted for "fewer", equal shares if
+    every area measures 0), and the highest score wins overall (a tie
+    leaves winner_idx null). Adds (never replaces) "verdict": {"winner_idx",
+    "scores", "reasons" (one sentence per priority), "margin", and a fixed
+    "measured_note"} — the note, always present when priorities are given,
+    states plainly that these are open-data place counts/density, never
+    revenue, rent, actual foot traffic, or demographics, and that
+    "__density__" is only a proxy. Returns bad_request for more than 6
+    priorities or a malformed one (missing label/category, an unrecognized
+    prefer, or a non-numeric weight).
     """
     try:
         centers = [(a["lat"], a["lon"]) for a in areas]
@@ -736,8 +816,14 @@ def compare_areas(areas: list[dict], radius_m: float = 1000) -> dict:
         if coord_error is not None:
             coord_error["detail"] = f"areas[{idx}]: {coord_error['detail']}"
             return coord_error
+    normalized_priorities = None
+    if priorities is not None:
+        priority_error = _validate_priorities(priorities)
+        if priority_error is not None:
+            return priority_error
+        normalized_priorities = _normalize_priorities(priorities)
     try:
-        result = overture.compare_areas(centers, radius_m)
+        result = overture.compare_areas(centers, radius_m, priorities=normalized_priorities)
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
     except overture.UpstreamUnavailable as e:

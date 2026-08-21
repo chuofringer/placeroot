@@ -1601,7 +1601,127 @@ def within_distance(
     }
 
 
-def compare_areas(areas: list[tuple[float, float]], radius_m: float = 1000) -> dict:
+def _count_places_in_radius(lat: float, lon: float, radius_m: float, category: str) -> int:
+    """Count of places within radius_m of (lat, lon) matching category.
+
+    Reuses the same bbox/distance/category-matching semantics as
+    find_places (issue #304's compare_areas priorities), so a requested
+    priority category is counted consistently with what find_places would
+    return for it even when it isn't one of compare_areas' own top-10
+    aligned categories.
+    """
+    upstream = _upstream_glob()
+    missing = set(_check_schema(upstream))
+    bbox_filter, distance_filter, params, bbox, _effective_radius_m = area_geometry(
+        lat, lon, radius_m
+    )
+    from_source, has_recreation = _places_source(bbox)
+    filters = [bbox_filter, distance_filter]
+    filters.extend(_name_filter(missing, has_recreation))
+    filters.extend(_place_category_name_filters(missing, category, None, params))
+    with_clause, from_clause, filters = _dedup_rows_sql(from_source, filters, has_recreation)
+    sql = f"""
+        {with_clause}
+        SELECT count(*) FROM {from_clause}
+        WHERE {" AND ".join(filters)}
+    """
+    try:
+        with _conn_lock:
+            row = _conn().execute(sql, params).fetchone()
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(str(e)) from e
+    return row[0] if row else 0
+
+
+# Special priority category value: measure overall place density instead of
+# a single category's count — a foot-traffic proxy (see _build_verdict's
+# measured_note), not a measurement of actual foot traffic.
+DENSITY_PRIORITY_CATEGORY = "__density__"
+
+
+def _priority_measure(
+    lat: float, lon: float, radius_m: float, category: str, density_per_km2: float
+) -> float:
+    if category == DENSITY_PRIORITY_CATEGORY:
+        return density_per_km2
+    return _count_places_in_radius(lat, lon, radius_m, category)
+
+
+def _extreme_idx(values: list[float], pick_max: bool) -> int | None:
+    """Index of the single max (or min) value, or None if it's tied."""
+    target = max(values) if pick_max else min(values)
+    idxs = [i for i, v in enumerate(values) if v == target]
+    return idxs[0] if len(idxs) == 1 else None
+
+
+def _priority_reason(label: str, prefer: str, measures: list[float], winner_idx: int | None) -> str:
+    measures_str = ", ".join(f"area {i}={m:g}" for i, m in enumerate(measures))
+    if winner_idx is None:
+        return f"{label}: {measures_str} — tied, no winner for this criterion."
+    verb = "more" if prefer == "more" else "fewer"
+    return f"{label}: {measures_str} — area {winner_idx} wins ({verb} is better)."
+
+
+def _build_verdict(
+    areas: list[tuple[float, float]],
+    per_area: list[dict],
+    radius_m: float,
+    priorities: list[dict],
+) -> dict:
+    """Weighted verdict across priorities (issue #304).
+
+    Per priority: raw measure = category count (or density for
+    "__density__") within radius_m; per-priority winner is whoever's
+    better on that raw measure, ties get no winner. Per-area score = sum
+    of weight * normalized share (measure / max across areas, inverted
+    for prefer="fewer"; every area 0 is treated as an equal share).
+    Overall winner is the highest score; a tie leaves winner_idx null.
+    """
+    n = len(areas)
+    reasons = []
+    totals = [0.0] * n
+    for p in priorities:
+        label, category, prefer, weight = p["label"], p["category"], p["prefer"], p["weight"]
+        measures = [
+            _priority_measure(lat, lon, radius_m, category, per_area[i]["density_per_km2"])
+            for i, (lat, lon) in enumerate(areas)
+        ]
+        winner_idx = _extreme_idx(measures, pick_max=(prefer == "more"))
+        max_val = max(measures)
+        if max_val == 0:
+            shares = [1.0 / n] * n
+        elif prefer == "more":
+            shares = [m / max_val for m in measures]
+        else:
+            shares = [1.0 - (m / max_val) for m in measures]
+        for i in range(n):
+            totals[i] += weight * shares[i]
+        reasons.append(_priority_reason(label, prefer, measures, winner_idx))
+
+    scores = [round(t, 3) for t in totals]
+    verdict = {
+        "winner_idx": _extreme_idx(scores, pick_max=True),
+        "scores": scores,
+        "reasons": reasons,
+        "measured_note": (
+            "Priority scores are built from open-data place counts (or place "
+            'density for "__density__") near each area\'s center — not '
+            "revenue, rent, actual foot traffic, or demographics. "
+            '"__density__" is a foot-traffic proxy, not a measurement of '
+            "real foot traffic."
+        ),
+    }
+    if n > 1:
+        top_two = sorted(scores, reverse=True)[:2]
+        verdict["margin"] = round(top_two[0] - top_two[1], 3)
+    return verdict
+
+
+def compare_areas(
+    areas: list[tuple[float, float]],
+    radius_m: float = 1000,
+    priorities: list[dict] | None = None,
+) -> dict:
     """Side-by-side category mix for 2-5 area centers sharing one radius_m.
 
     Reuses summarize_area per area, then aligns counts across areas for the
@@ -1609,6 +1729,11 @@ def compare_areas(areas: list[tuple[float, float]], radius_m: float = 1000) -> d
     area, and flags the categories with the largest relative difference
     between areas ("differentiators") — the most useful signal for "how is
     area A different from area B."
+
+    priorities (issue #304), if given, is a list of already-validated
+    {"label", "category", "prefer": "more"|"fewer", "weight"} dicts (see
+    server.compare_areas for the input contract and validation) and adds a
+    "verdict" key scoring the areas against them — see _build_verdict.
 
     Raises ValueError if areas isn't 2-5 centers. Propagates
     SchemaDegraded/UpstreamUnavailable from the first area whose
@@ -1650,8 +1775,11 @@ def compare_areas(areas: list[tuple[float, float]], radius_m: float = 1000) -> d
         })
     differentiators.sort(key=lambda d: d["relative_difference"], reverse=True)
 
-    return {
+    result = {
         "areas": per_area,
         "categories": top_categories,
         "differentiators": differentiators,
     }
+    if priorities:
+        result["verdict"] = _build_verdict(areas, per_area, effective_radius_m, priorities)
+    return result
