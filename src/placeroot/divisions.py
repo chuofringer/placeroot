@@ -48,6 +48,15 @@ ESSENTIAL_COLUMNS = {"geometry"}
 POLYGON_REQUIRED_COLUMNS = ["id", "names", "subtype", "geometry", "bbox", "division_id"]
 POLYGON_ESSENTIAL_COLUMNS = {"geometry", "subtype"}
 
+# Upper bound (degrees) on the input polygon's bbox span on either axis.
+# Derived from geo.MAX_QUERY_RADIUS_M — the same abuse guard every
+# point-radius tool applies — converted to a degree span (the diameter of
+# the largest circle those tools honor, ~9 degrees). A continent-sized (or
+# antimeridian-crossing, which shows up here as a near-360-degree longitude
+# span) polygon would otherwise degenerate the bbox prefilter into a
+# global scan.
+MAX_POLYGON_SPAN_DEG = 2 * geo.MAX_QUERY_RADIUS_M / 111_320.0
+
 
 def _ensure_spatial() -> None:
     """Load DuckDB's spatial extension on the shared connection, once.
@@ -169,6 +178,33 @@ def _polygon_bbox(coordinates: list) -> tuple[float, float, float, float]:
     return min(xs), min(ys), max(xs), max(ys)
 
 
+def _validate_rings(coordinates) -> None:
+    """Raise a clean ValueError unless coordinates is a list of valid rings.
+
+    A valid ring is a non-empty sequence of [lon, lat] pairs (numbers,
+    length >= 2). Without this, a malformed polygon (e.g. ring nesting
+    omitted: coordinates=[[-73.9, 40.7], ...]) surfaces as a TypeError or
+    an empty-sequence ValueError from _polygon_bbox instead of the
+    documented clean ValueError.
+    """
+    if not isinstance(coordinates, (list, tuple)):
+        raise ValueError("polygon_geojson coordinates must be a list of rings")
+    for ring in coordinates:
+        if not isinstance(ring, (list, tuple)) or not ring:
+            raise ValueError(
+                "polygon_geojson rings must be non-empty lists of [lon, lat] pairs"
+            )
+        for pt in ring:
+            if (
+                not isinstance(pt, (list, tuple))
+                or len(pt) < 2
+                or not all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in pt[:2])
+            ):
+                raise ValueError(
+                    "polygon_geojson ring vertices must be [lon, lat] numeric pairs"
+                )
+
+
 def divisions_in_polygon(
     polygon_geojson: dict,
     subtypes: tuple[str, ...] = ("neighborhood", "locality"),
@@ -180,10 +216,15 @@ def divisions_in_polygon(
     Returns {"results": [{"id", "name", "subtype", "overlap_fraction"}, ...]},
     ranked by overlap_fraction descending — the fraction of the DIVISION's
     own area (not the input polygon's) that lies inside polygon_geojson,
-    rounded to 3 decimals. An empty results list (e.g. a polygon entirely
-    over open ocean) is a valid answer, not an error.
+    rounded to 3 decimals (except that a truly positive overlap too small
+    to survive the rounding stays at its unrounded value, so a real
+    overlap is never reported as exactly 0.0). An empty results list
+    (e.g. a polygon entirely over open ocean) is a valid answer, not an
+    error. limit is clamped to overture.MAX_ROWS like every other tool.
 
-    Raises ValueError for a malformed polygon_geojson or limit < 1;
+    Raises ValueError for a malformed polygon_geojson (wrong type, bad
+    ring structure, or a bbox wider than MAX_POLYGON_SPAN_DEG on either
+    axis) or limit < 1;
     SchemaDegraded if geometry or subtype is missing from the active
     divisions dataset (mirrors admin_lookup for geometry; subtype is
     additionally essential here because this tool's whole contract is
@@ -196,8 +237,25 @@ def divisions_in_polygon(
         or not polygon_geojson.get("coordinates")
     ):
         raise ValueError("polygon_geojson must be a GeoJSON Polygon with coordinates")
+    _validate_rings(polygon_geojson["coordinates"])
     if limit < 1:
         raise ValueError("limit must be >= 1")
+    limit = min(int(limit), overture.MAX_ROWS)  # same response-size cap every other tool uses
+    poly_xmin, poly_ymin, poly_xmax, poly_ymax = _polygon_bbox(polygon_geojson["coordinates"])
+    lon_span = poly_xmax - poly_xmin
+    lat_span = poly_ymax - poly_ymin
+    if lon_span > MAX_POLYGON_SPAN_DEG or lat_span > MAX_POLYGON_SPAN_DEG:
+        hint = (
+            " (a longitude span over 180 degrees usually means the polygon crosses"
+            " the antimeridian; split it into two polygons instead)"
+            if lon_span > 180.0
+            else ""
+        )
+        raise ValueError(
+            f"polygon_geojson bbox spans {lon_span:.1f} x {lat_span:.1f} degrees; "
+            f"the maximum supported extent is {MAX_POLYGON_SPAN_DEG:.1f} degrees "
+            f"on either axis{hint}"
+        )
     if not subtypes:
         return {"results": []}
 
@@ -217,7 +275,6 @@ def divisions_in_polygon(
         id_expr = "NULL"
     geom_expr = _geom_expr(upstream)
 
-    poly_xmin, poly_ymin, poly_xmax, poly_ymax = _polygon_bbox(polygon_geojson["coordinates"])
     src = (
         manifest.pruned_source_sql(upstream, (poly_xmin, poly_ymin, poly_xmax, poly_ymax))
         or f"read_parquet('{upstream}', hive_partitioning=1)"
@@ -240,13 +297,20 @@ def divisions_in_polygon(
         WHERE {bbox_prefilter}subtype IN ({",".join(f"$subtype{i}" for i in range(len(subtypes)))})
             AND ST_Intersects({geom_expr}, ST_GeomFromGeoJSON($poly))
     """
-    params = {
-        "poly": json.dumps(polygon_geojson),
-        "poly_xmin": poly_xmin,
-        "poly_ymin": poly_ymin,
-        "poly_xmax": poly_xmax,
-        "poly_ymax": poly_ymax,
-    }
+    params = {"poly": json.dumps(polygon_geojson)}
+    if bbox_prefilter:
+        # Only when the prefilter is in the SQL — DuckDB rejects named
+        # parameters the statement doesn't reference, so passing these on a
+        # bbox-less schema would turn every query into a bogus
+        # UpstreamUnavailable.
+        params.update(
+            {
+                "poly_xmin": poly_xmin,
+                "poly_ymin": poly_ymin,
+                "poly_xmax": poly_xmax,
+                "poly_ymax": poly_ymax,
+            }
+        )
     params.update({f"subtype{i}": s for i, s in enumerate(subtypes)})
     try:
         # Bounded: bbox prefilter + manifest pruning above keep this to the
@@ -266,7 +330,12 @@ def divisions_in_polygon(
     # row group's geometry, defeating late materialization.
     by_id: dict = {}
     for id_, name, subtype, overlap_area, division_area in rows:
-        fraction = round(overlap_area / division_area, 3) if division_area else 0.0
+        raw = overlap_area / division_area if division_area else 0.0
+        fraction = round(raw, 3)
+        if fraction == 0.0 and raw > 0.0:
+            # A truly positive overlap must never print as 0.0 — keep the
+            # unrounded fraction for slivers below the 3-decimal resolution.
+            fraction = raw
         key = id_ if id_ is not None else (name, subtype)
         # division_area carries multiple polygon rows per division (land and
         # maritime variants) — keep the row with the larger overlap fraction.
