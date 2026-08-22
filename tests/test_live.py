@@ -4,7 +4,7 @@ pyproject.toml addopts); run explicitly with `uv run pytest -m live`.
 
 import pytest
 
-from placeroot import geocode, overture, routing
+from placeroot import changes, db, geo, geocode, overture, routing
 
 
 @pytest.mark.live
@@ -105,3 +105,80 @@ def test_geocode_address_folds_ordinals_to_nyc_spelling():
     result = geocode.geocode_address("350 5th Ave, New York")
     assert result["results"], result.get("note")
     assert any(r["street"].upper().startswith("5 AVE") for r in result["results"])
+
+
+@pytest.mark.live
+def test_gers_ids_are_stable_enough_across_releases_for_diff_places_to_be_meaningful():
+    """#376's precondition, checked against real data: diff_places's whole
+    premise is that a place keeps the same GERS id release to release, so a
+    disappearance/appearance is a real change and not id churn. This scans a
+    tiny bbox in central Paris (dense with places, small enough to keep the
+    live scan itself cheap) in both of the two live releases named in #376
+    and asserts most ids that show up in one release also show up in the
+    other.
+
+    Deliberately not asserting on appeared/disappeared/changed *content* --
+    that's what test_changes.py's offline fixtures cover. This is only the
+    id-overlap sanity check the issue calls out as a precondition for
+    trusting the tool at all: if it ever drops to <=0.5, the diff is mostly
+    measuring id churn rather than real changes, and #309 should be told to
+    stop rather than ship a misleading tool.
+
+    LIMIT is a few hundred rows per side (see changes.SCAN_LIMIT's docstring
+    for why the query-layer default is thousands; a live smoke test does not
+    need anywhere near that to measure an overlap ratio) and the bbox is
+    ~0.02 degrees square -- both kept small on purpose since this hits real
+    S3 twice.
+    """
+    bbox = (2.34, 48.85, 2.36, 48.87)  # central Paris, ~0.02 deg square
+    release_a, release_b = "2026-07-22.0", "2026-08-19.0"
+
+    bbox_filter, bbox_params = geo.bbox_filter_sql(*bbox)
+    ids_by_release = {}
+    for release in (release_a, release_b):
+        glob = overture.upstream_glob("places", "place", release=release)
+        # ORDER BY id is load-bearing: this bbox holds far more than 300
+        # places, and an unordered LIMIT takes an *arbitrary* 300 of them --
+        # two arbitrary subsets of different releases can share nothing at
+        # all even when the ids themselves are perfectly stable (measured:
+        # 0.000 overlap unordered vs 0.875 ordered, 2026-08-21). Sorting by
+        # id makes both sides take the same deterministic slice of the id
+        # space, so the ratio measures id stability, not sampling luck.
+        sql = f"""
+            SELECT id FROM read_parquet('{glob}', hive_partitioning=1)
+            WHERE {bbox_filter} AND id IS NOT NULL
+            ORDER BY id
+            LIMIT 300
+        """
+        with db.conn_lock:
+            rows = db.shared_conn().execute(sql, dict(bbox_params)).fetchall()
+        ids_by_release[release] = {r[0] for r in rows}
+
+    ids_a, ids_b = ids_by_release[release_a], ids_by_release[release_b]
+    assert ids_a and ids_b, "expected real place rows in both releases for this bbox"
+    overlap_ratio = len(ids_a & ids_b) / len(ids_a | ids_b)
+    print(
+        f"\nGERS id overlap {release_a} vs {release_b} over {bbox}: "
+        f"{overlap_ratio:.3f} ({len(ids_a & ids_b)} shared / {len(ids_a | ids_b)} total, "
+        f"{len(ids_a)} in {release_a}, {len(ids_b)} in {release_b})"
+    )
+    assert overlap_ratio > 0.5, (
+        f"GERS id overlap between {release_a} and {release_b} is only "
+        f"{overlap_ratio:.3f} -- ids are not stable enough for diff_places "
+        "to be meaningful; see #376/#309"
+    )
+
+
+@pytest.mark.live
+def test_diff_places_end_to_end_against_real_overture_releases():
+    """Smoke test for changes.diff_places itself (not just raw id overlap
+    above) against the same tiny Paris bbox and the same two live releases
+    -- proves the query layer actually runs against real S3 data, not just
+    fixtures."""
+    result = changes.diff_places(
+        (2.34, 48.85, 2.36, 48.87), "2026-07-22.0", "2026-08-19.0", limit=20
+    )
+    assert result["releases"] == {"from": "2026-07-22.0", "to": "2026-08-19.0"}
+    assert isinstance(result["counts"]["unchanged"], int)
+    for bucket in ("appeared", "disappeared", "changed"):
+        assert len(result[bucket]) <= 20
