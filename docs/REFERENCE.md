@@ -3,7 +3,7 @@
 The full tool catalog, workflow prompts, resources, and the `PLACEROOT_TOOLS`
 selection mechanism. For a quick overview, start with the [README](../README.md).
 
-## All 35 tools
+## All 36 tools
 
 Every tool returns a compact, budgeted answer. Several single-item tools have a
 `*_batch` sibling that collapses many calls into one round-trip.
@@ -185,7 +185,7 @@ Profiles may overlap, and a list may mix them with bare tool names —
 nor a tool **fails at startup** with the list of valid names, rather than
 quietly falling back to loading everything. The server logs one line at
 startup naming what it registered
-(`registered 15 of 35 tools (PLACEROOT_TOOLS=core)`), so a selection that
+(`registered 15 of 36 tools (PLACEROOT_TOOLS=core)`), so a selection that
 didn't apply — an empty value, a variable that never reached the process — is
 visible rather than silently the full 35.
 
@@ -209,7 +209,7 @@ env vars; see below.) The ones an operator is most likely to reach for:
 
 | Variable | Default | What it does |
 |---|---|---|
-| `PLACEROOT_TOOLS` | all 35 | Tool profile/subset — see the section above |
+| `PLACEROOT_TOOLS` | all 36 | Tool profile/subset — see the section above |
 | `PLACEROOT_TOKEN_BUDGET` | `2000` | Soft per-response token budget (chars/4 heuristic); rows are dropped lowest-ranked first, then optional fields, until a response fits |
 | `PLACEROOT_RECREATION_LAYER` | on | `0`/`false`/`no`/`off` disables the base-theme recreation layer ([docs/RECREATION.md](RECREATION.md)) |
 | `PLACEROOT_CACHE` | on | `off` disables the local tile cache entirely |
