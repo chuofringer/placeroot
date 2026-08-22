@@ -73,22 +73,53 @@ def parse_listing(xml_text: str) -> list[str]:
     return releases
 
 
-def _discover(timeout_s: float = 5.0) -> str | None:
-    """Best-effort: newest release name, or None if discovery fails."""
+def _numeric_patch_key(r: str) -> tuple[str, int]:
+    """Sort key for a release name: plain max() would rank "2026-07-22.9"
+    above "2026-07-22.10" (string comparison), so compare the date portion
+    as a string (it already sorts correctly) and the patch component as an
+    int."""
+    return (r[: r.rindex(".")], int(r[r.rindex(".") + 1 :]))
+
+
+def _fetch_listing(timeout_s: float = 5.0) -> list[str] | None:
+    """Best-effort: every live release name from the bucket listing, in
+    whatever order parse_listing() returns them, or None on any failure.
+
+    Shared by _discover() (wants the newest) and available_releases() (wants
+    the whole list) so there is exactly one place that talks to S3.
+    """
     try:
         with urllib.request.urlopen(LISTING_URL, timeout=timeout_s) as resp:  # noqa: S310
             xml_text = resp.read().decode("utf-8")
         releases = parse_listing(xml_text)
     except Exception as e:  # noqa: BLE001 - any failure here must fall back, never raise
-        logger.warning("Overture release discovery failed, using pinned release: %s", e)
+        logger.warning("Overture release listing failed: %s", e)
         return None
     if not releases:
-        logger.warning("Overture release discovery found no releases, using pinned release")
+        logger.warning("Overture release listing found no releases")
         return None
-    # Plain max() would sort "2026-07-22.9" above "2026-07-22.10"; compare
-    # the patch component numerically.
-    return max(releases, key=lambda r: (r[: r.rindex(".")], int(r[r.rindex(".") + 1 :])))
+    return releases
 
+
+def _discover(timeout_s: float = 5.0) -> str | None:
+    """Best-effort: newest release name, or None if discovery fails."""
+    releases = _fetch_listing(timeout_s)
+    if releases is None:
+        logger.warning("Overture release discovery failed, using pinned release")
+        return None
+    return max(releases, key=_numeric_patch_key)
+
+
+# available_releases()'s own cache — deliberately not sharing state with the
+# resolve-release cache below. It answers a different question ("what
+# releases exist") with none of resolve_release()'s wrinkles (no env
+# override, no artifact-pin trade, no pin-first/background-discovery dance,
+# no per-refresh generation bookkeeping), so folding it into that machinery
+# would just make the harder cache answer for the simpler one. reset_cache()
+# still clears both, so tests get one lever.
+_releases_lock = threading.Lock()
+_releases_cached: list[str] | None = None
+_releases_cached_at: float = 0.0
 
 DEFAULT_TTL_HOURS = 6.0
 DEFAULT_STALE_DAYS = 60
@@ -436,6 +467,37 @@ def resolve_release() -> str:
     return resolve_release_info()["release"]
 
 
+def available_releases() -> list[str]:
+    """Every live release name, ascending (oldest first).
+
+    For #309-style callers that need to query more than one release at once
+    (overture.upstream_glob(..., release=...)) or just want to show the
+    valid diff window (data_version). Best-effort like _discover(): a
+    network failure, a parse error, or an empty listing all come back as []
+    rather than raising — this is a convenience, never something the query
+    path depends on to answer a request.
+
+    TTL-cached (same PLACEROOT_RELEASE_TTL_HOURS as resolve_release()) but
+    in its own cache variable — see the comment above _releases_lock for
+    why this doesn't share resolve_release()'s cache/refresh machinery.
+    Sorted with the same numeric-patch-aware comparison _discover() uses
+    ("2026-07-22.9" must sort below "2026-07-22.10").
+    """
+    global _releases_cached, _releases_cached_at
+    with _releases_lock:
+        now = time.monotonic()
+        if _releases_cached is not None and now - _releases_cached_at < _ttl_s():
+            return list(_releases_cached)
+    releases = _fetch_listing()
+    if releases is None:
+        return []
+    ordered = sorted(releases, key=_numeric_patch_key)
+    with _releases_lock:
+        _releases_cached = ordered
+        _releases_cached_at = time.monotonic()
+    return list(ordered)
+
+
 def reset_cache() -> None:
     """Clear the TTL cache. Used by tests and rare hot-reload.
 
@@ -443,6 +505,7 @@ def reset_cache() -> None:
     is discarded rather than written over the next resolution.
     """
     global _cached, _cached_at, _refreshing, _generation, _ttl_warned, _override_warned
+    global _releases_cached, _releases_cached_at
     with _lock:
         _cached = None
         _cached_at = 0.0
@@ -450,3 +513,6 @@ def reset_cache() -> None:
         _generation += 1
         _ttl_warned = False
         _override_warned = None
+    with _releases_lock:
+        _releases_cached = None
+        _releases_cached_at = 0.0

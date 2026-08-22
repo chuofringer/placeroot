@@ -477,6 +477,142 @@ def test_bundled_artifact_release_is_read_from_the_shipped_files():
     assert release.bundled_artifact_release() == release.PINNED_RELEASE
 
 
+# --- #375: available_releases() ---------------------------------------------
+
+
+def test_available_releases_parses_the_listing_and_sorts_ascending(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return CANNED_LISTING.encode("utf-8")
+
+    monkeypatch.setattr(release.urllib.request, "urlopen", lambda *a, **k: FakeResponse())
+    assert release.available_releases() == [
+        "2026-05-21.0",
+        "2026-06-25.0",
+        "2026-07-22.0",
+        "2026-07-22.1",
+    ]
+
+
+def test_available_releases_sorts_patch_component_numerically(monkeypatch):
+    """Regression: plain string sort would rank "2026-07-22.9" above
+    "2026-07-22.10"."""
+    listing = """<?xml version="1.0"?>
+    <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+        <CommonPrefixes><Prefix>release/2026-07-22.10/</Prefix></CommonPrefixes>
+        <CommonPrefixes><Prefix>release/2026-07-22.9/</Prefix></CommonPrefixes>
+        <CommonPrefixes><Prefix>release/2026-06-25.0/</Prefix></CommonPrefixes>
+    </ListBucketResult>
+    """
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return listing.encode("utf-8")
+
+    monkeypatch.setattr(release.urllib.request, "urlopen", lambda *a, **k: FakeResponse())
+    assert release.available_releases() == ["2026-06-25.0", "2026-07-22.9", "2026-07-22.10"]
+
+
+def test_available_releases_returns_empty_list_on_network_failure(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("network unreachable")
+
+    monkeypatch.setattr(release.urllib.request, "urlopen", boom)
+    assert release.available_releases() == []
+
+
+def test_available_releases_returns_empty_list_on_empty_listing(monkeypatch):
+    empty = """<?xml version="1.0"?>
+    <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></ListBucketResult>
+    """
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return empty.encode("utf-8")
+
+    monkeypatch.setattr(release.urllib.request, "urlopen", lambda *a, **k: FakeResponse())
+    assert release.available_releases() == []
+
+
+def test_available_releases_is_cached_within_the_ttl(monkeypatch):
+    monkeypatch.delenv("PLACEROOT_RELEASE_TTL_HOURS", raising=False)
+    calls = []
+
+    def fake_urlopen(*a, **k):
+        calls.append(1)
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return CANNED_LISTING.encode("utf-8")
+
+        return FakeResponse()
+
+    monkeypatch.setattr(release.urllib.request, "urlopen", fake_urlopen)
+    first = release.available_releases()
+    second = release.available_releases()
+    assert (
+        first
+        == second
+        == [
+            "2026-05-21.0",
+            "2026-06-25.0",
+            "2026-07-22.0",
+            "2026-07-22.1",
+        ]
+    )
+    assert len(calls) == 1  # second call served from the TTL cache
+
+
+def test_reset_cache_clears_the_available_releases_cache(monkeypatch):
+    monkeypatch.setenv("PLACEROOT_RELEASE_TTL_HOURS", "6")
+    calls = []
+
+    def fake_urlopen(*a, **k):
+        calls.append(1)
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return CANNED_LISTING.encode("utf-8")
+
+        return FakeResponse()
+
+    monkeypatch.setattr(release.urllib.request, "urlopen", fake_urlopen)
+    release.available_releases()
+    release.reset_cache()
+    release.available_releases()
+    assert len(calls) == 2  # reset_cache() forced a re-fetch, not served from cache
+
+
 def test_bundled_artifact_release_requires_every_set_to_agree(monkeypatch, tmp_path):
     """A pin bump means running three separate generator scripts. Doing two of
     them must not report the third's acceleration as present: the release
