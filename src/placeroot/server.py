@@ -43,6 +43,7 @@ from placeroot import (
     errors,
     export,
     geo,
+    geometry_ops,
     gers,
     ground,
     honesty,
@@ -2315,6 +2316,177 @@ def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
         return simplify.simplify_geometry(geojson, max_tokens)
     except simplify.InvalidGeometry as e:
         return {"error": "invalid_geometry", "detail": e.detail}
+
+
+# op -> the geometry_op() params that op needs set. Single source of truth
+# for both the missing-params error message and the dispatch below, so the
+# two can't drift on what an op requires.
+_GEOMETRY_OP_REQUIRED: dict[str, tuple[str, ...]] = {
+    "distance": ("point", "point2"),
+    "bearing": ("point", "point2"),
+    "destination": ("point", "bearing_deg", "distance_m"),
+    "midpoint": ("point", "point2"),
+    "area": ("geometry",),
+    "length": ("geometry",),
+    "bbox": ("geometry",),
+    "centroid": ("geometry",),
+    "buffer": ("point", "radius_m"),
+    "convex_hull": ("points",),
+    "point_in_polygon": ("points", "geometry"),
+    "nearest_point": ("point", "points"),
+    "nearest_point_on_line": ("point", "geometry"),
+}
+
+
+def _point_coord_error(point, label: str) -> dict | None:
+    """bad_request dict if point isn't a well-formed, in-range {"lat","lon"}, else None."""
+    if not isinstance(point, dict):
+        return {
+            "error": "bad_request",
+            "detail": f"{label} must be a {{'lat': ..., 'lon': ...}} object",
+        }
+    try:
+        lat, lon = float(point.get("lat")), float(point.get("lon"))
+    except (TypeError, ValueError):
+        return {"error": "bad_request", "detail": f"{label} needs numeric 'lat' and 'lon'"}
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        coord_error["detail"] = f"{label}: {coord_error['detail']}"
+        return coord_error
+    return None
+
+
+def _points_list_coord_error(points, label: str) -> dict | None:
+    """bad_request dict if points isn't a non-empty, in-range, within-cap point list, else None."""
+    if not isinstance(points, list) or not points:
+        return {"error": "bad_request", "detail": f"{label} must be a non-empty list of points"}
+    if len(points) > geometry_ops.MAX_BATCH_POINTS:
+        return {
+            "error": "bad_request",
+            "detail": (
+                f"{label} accepts at most {geometry_ops.MAX_BATCH_POINTS} points, "
+                f"got {len(points)}"
+            ),
+        }
+    for i, p in enumerate(points):
+        coord_error = _point_coord_error(p, f"{label}[{i}]")
+        if coord_error is not None:
+            return coord_error
+    return None
+
+
+@_tool("Geometry operations")
+def geometry_op(
+    op: str,
+    point: dict | None = None,
+    point2: dict | None = None,
+    points: list[dict] | None = None,
+    geometry: dict | None = None,
+    bearing_deg: float | None = None,
+    distance_m: float | None = None,
+    radius_m: float | None = None,
+) -> dict:
+    """Offline geometry math and predicates — one tool, many ops, no upstream call.
+
+    `op` selects the operation; pass only the params it needs (points are
+    `{"lat": ..., "lon": ...}`; `geometry` is a GeoJSON object):
+
+    - `distance(point, point2)` -> `{"distance_m"}` (great-circle haversine distance)
+    - `bearing(point, point2)` -> `{"bearing_deg"}` (initial compass bearing)
+    - `destination(point, bearing_deg, distance_m)` -> `{"point"}`
+    - `midpoint(point, point2)` -> `{"point"}` (great-circle midpoint)
+    - `area(geometry)` -> `{"area_m2", "area_km2"}` (Polygon/MultiPolygon)
+    - `length(geometry)` -> `{"length_m"}` (LineString/MultiLineString)
+    - `bbox(geometry)` -> `{"bbox": [xmin, ymin, xmax, ymax]}` (any geometry)
+    - `centroid(geometry)` -> `{"point"}` (any geometry)
+    - `buffer(point, radius_m)` -> `{"geometry"}` (Polygon, ~32-vertex circle approximation)
+    - `convex_hull(points)` -> `{"geometry"}` (Polygon; points capped at 100)
+    - `point_in_polygon(points, geometry)` -> `{"results": [bool, ...]}` (Polygon/MultiPolygon,
+      holes honored; points capped at 100)
+    - `nearest_point(point, points)` -> `{"index", "distance_m"}` (points capped at 100)
+    - `nearest_point_on_line(point, geometry)` -> `{"point", "distance_m", "fraction"}` (LineString)
+
+    `buffer` and `convex_hull` are the only ops that return geometry; that
+    output is simplified to fit the same token budget `simplify_geometry`'s
+    own default targets, so there's no need to chain a second call.
+    `union`/`intersect`/`difference` are not implemented.
+
+    An unknown op returns `{"error": "bad_request", ...}` listing valid ops.
+    Missing/wrong-shaped params for the given op return `{"error":
+    "bad_request", ...}` naming exactly what that op needs, e.g. "op=buffer
+    needs point and radius_m". Point-like inputs are range-checked (lat in
+    [-90, 90], lon in [-180, 180]); `geometry` gets structural validation
+    only (right type, non-empty numeric coordinates) — see geometry_ops.py's
+    module docstring for the accuracy notes behind area/centroid (a local
+    meters projection, not a geodesic computation) and buffer/convex_hull
+    (planar approximations, fine at city/regional scale).
+    """
+    if op not in _GEOMETRY_OP_REQUIRED:
+        return {
+            "error": "bad_request",
+            "detail": f"unknown op {op!r}; valid ops: {', '.join(sorted(_GEOMETRY_OP_REQUIRED))}",
+        }
+    required = _GEOMETRY_OP_REQUIRED[op]
+    provided = {
+        "point": point,
+        "point2": point2,
+        "points": points,
+        "geometry": geometry,
+        "bearing_deg": bearing_deg,
+        "distance_m": distance_m,
+        "radius_m": radius_m,
+    }
+    if any(provided[name] is None for name in required):
+        return {"error": "bad_request", "detail": f"op={op} needs {' and '.join(required)}"}
+
+    if "point" in required:
+        coord_error = _point_coord_error(point, "point")
+        if coord_error is not None:
+            return coord_error
+    if "point2" in required:
+        coord_error = _point_coord_error(point2, "point2")
+        if coord_error is not None:
+            return coord_error
+    if "points" in required:
+        coord_error = _points_list_coord_error(points, "points")
+        if coord_error is not None:
+            return coord_error
+
+    try:
+        if op == "distance":
+            result = geometry_ops.distance(point, point2)
+        elif op == "bearing":
+            result = geometry_ops.bearing(point, point2)
+        elif op == "destination":
+            result = geometry_ops.destination(point, bearing_deg, distance_m)
+        elif op == "midpoint":
+            result = geometry_ops.midpoint(point, point2)
+        elif op == "area":
+            result = geometry_ops.area(geometry)
+        elif op == "length":
+            result = geometry_ops.length(geometry)
+        elif op == "bbox":
+            result = geometry_ops.bbox(geometry)
+        elif op == "centroid":
+            result = geometry_ops.centroid(geometry)
+        elif op == "buffer":
+            result = geometry_ops.buffer(point, radius_m)
+        elif op == "convex_hull":
+            result = geometry_ops.convex_hull(points)
+        elif op == "point_in_polygon":
+            result = geometry_ops.point_in_polygon(points, geometry)
+        elif op == "nearest_point":
+            result = geometry_ops.nearest_point(point, points)
+        else:  # nearest_point_on_line
+            result = geometry_ops.nearest_point_on_line(point, geometry)
+    except geometry_ops.InvalidGeometryOp as e:
+        return {"error": "bad_request", "detail": e.detail}
+    # point_in_polygon's "results" list is positional (one boolean per input
+    # point) and already bounded by geometry_ops.MAX_BATCH_POINTS, so it is
+    # never token-budgeted: truncating it would silently misalign results
+    # with the input points.
+    return result
+
 
 @_tool("Render map", annotations=_WRITES_A_FILE_ANNOTATIONS)
 def render_map(

@@ -129,6 +129,7 @@ PROFILES: dict[str, frozenset[str]] = {
     "geometry": frozenset({
         "simplify_geometry",
         "render_map",
+        "geometry_op",
     }),
 }
 
