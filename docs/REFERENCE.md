@@ -158,9 +158,9 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 35 | ~17,677 | — |
-| `search` | 15 | ~7,113 | 60% |
-| `core` | 15 | ~7,569 | 57% |
+| unset / `all` (default) | 35 | ~17,737 | — |
+| `search` | 15 | ~7,173 | 60% |
+| `core` | 15 | ~7,629 | 57% |
 | `routing` | 8 | ~3,941 | 78% |
 | `analysis` | 12 | ~5,899 | 67% |
 | `geometry` | 4 | ~1,265 | 93% |
