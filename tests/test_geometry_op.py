@@ -298,3 +298,61 @@ def test_malformed_geometry():
 def test_point_missing_lat_lon_fields():
     out = server.geometry_op("distance", point={"lat": 0.0}, point2=P(0.0, 0.0))
     assert out["error"] == "bad_request"
+
+
+# ---------------------------------------------------------------------------
+# Regressions from the #365 review
+# ---------------------------------------------------------------------------
+
+
+def _signed_ring_area(ring):
+    total = 0.0
+    for (x1, y1), (x2, y2) in zip(ring, ring[1:]):
+        total += x1 * y2 - x2 * y1
+    return total / 2.0
+
+
+def test_buffer_near_antimeridian_is_rejected_not_garbage():
+    out = server.geometry_op("buffer", point=P(0.0, 179.99), radius_m=5000.0)
+    assert out["error"] == "bad_request"
+    assert "antimeridian" in out["detail"]
+
+
+def test_buffer_radius_is_capped():
+    out = server.geometry_op("buffer", point=P(40.0, -73.0), radius_m=1e7)
+    assert out["error"] == "bad_request"
+    assert str(int(geometry_ops.MAX_BUFFER_RADIUS_M)) in out["detail"]
+    # At the cap itself (away from the antimeridian) the ring is still valid.
+    ok = server.geometry_op(
+        "buffer", point=P(0.0, 0.0), radius_m=geometry_ops.MAX_BUFFER_RADIUS_M
+    )
+    assert ok["geometry"]["type"] == "Polygon"
+
+
+def test_buffer_exterior_ring_is_counterclockwise():
+    out = server.geometry_op("buffer", point=P(40.0, -73.0), radius_m=500.0)
+    ring = out["geometry"]["coordinates"][0]
+    assert _signed_ring_area(ring) > 0  # CCW per RFC 7946, matching convex_hull
+    hull = server.geometry_op(
+        "convex_hull", points=[P(0, 0), P(0, 1), P(1, 1), P(1, 0)]
+    )["geometry"]["coordinates"][0]
+    assert _signed_ring_area(hull) > 0
+
+
+def test_geometry_inputs_respect_simplify_vertex_cap():
+    from placeroot import simplify
+
+    n = simplify.MAX_INPUT_POINTS + 1
+    line = {"type": "LineString", "coordinates": [[i * 1e-6, 0.0] for i in range(n)]}
+    out = server.geometry_op("bbox", geometry=line)
+    assert out["error"] == "bad_request"
+    assert str(simplify.MAX_INPUT_POINTS) in out["detail"]
+
+
+def test_point_in_polygon_results_are_never_budget_truncated(monkeypatch):
+    # A tiny token budget must not drop or misalign the positional booleans.
+    monkeypatch.setenv("PLACEROOT_TOKEN_BUDGET", "5")
+    square = _square_polygon()
+    points = [P(5, 5), P(50, 50)] * 50  # 100 points, alternating in/out
+    out = server.geometry_op("point_in_polygon", points=points, geometry=square)
+    assert out["results"] == [True, False] * 50

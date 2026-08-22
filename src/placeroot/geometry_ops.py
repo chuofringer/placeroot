@@ -49,14 +49,17 @@ Accuracy notes (worth reading before trusting a large-scale answer):
   centroid, holes subtracted). Adequate at city scale; not a substitute for
   a real geodesic centroid on a large/irregular shape.
 - buffer approximates the radius_m circle as a 32-vertex polygon built from
-  32 destination() calls at bearings 0, 11.25, 22.5, ... degrees. It is a
-  polygon *inscribed* in the true circle (slightly smaller near the
-  midpoints between vertices), not the circle itself.
+  32 destination() calls at descending bearings (counterclockwise exterior
+  ring, per RFC 7946). It is a polygon *inscribed* in the true circle
+  (slightly smaller near the midpoints between vertices), not the circle
+  itself. radius_m is capped at MAX_BUFFER_RADIUS_M, and a circle that
+  would cross the antimeridian is rejected rather than emitted as a
+  self-intersecting ring.
 - convex_hull runs the monotone-chain algorithm directly in lon/lat degree
   space. Fine at city scale; a hull spanning a large latitude range is not a
   true geodesic hull (a straight line in lon/lat is not a great-circle arc).
 - point_in_polygon uses an even-odd ray-casting test in lon/lat degree
-  space, ring by ring (odd ring index treated as a hole). Same
+  space, ring by ring (every ring after the first treated as a hole). Same
   small-extent caveat as convex_hull.
 - nearest_point_on_line projects the query point and each segment into the
   same local tangent-plane meters used by area/centroid, finds the closest
@@ -94,6 +97,12 @@ _ANY_TYPES = {"Point", "MultiPoint", "LineString", "MultiLineString", "Polygon",
 # work per call.
 BUFFER_VERTICES = 32
 MAX_BATCH_POINTS = 100
+
+# buffer() builds a planar ring in lon/lat space; past city/regional scale
+# that stops being a meaningful circle (and near the poles or antimeridian it
+# stops being a valid ring at all), so cap the radius where the local
+# tangent-plane approximation the rest of this module uses still holds.
+MAX_BUFFER_RADIUS_M = 1_000_000.0
 
 # The simplify_geometry MCP tool's own default budget (server.py); reused
 # here so a geometry-returning op (buffer, convex_hull) is capped the same
@@ -164,6 +173,14 @@ def _validate_geometry(geometry, allowed_types: set[str]) -> tuple[str, object]:
         raise InvalidGeometryOp("geometry is missing or has malformed 'coordinates'")
     try:
         n = simplify._count_points(gtype, coords)
+    except (TypeError, IndexError, KeyError) as e:
+        raise InvalidGeometryOp(f"malformed coordinates for {gtype}: {e}") from e
+    if n > simplify.MAX_INPUT_POINTS:
+        raise InvalidGeometryOp(
+            f"geometry has {n} points; the maximum supported is {simplify.MAX_INPUT_POINTS} "
+            "(simplify or split the geometry before sending it)"
+        )
+    try:
         lons = simplify._all_ordinates(gtype, coords, 0)
         lats = simplify._all_ordinates(gtype, coords, 1)
     except (TypeError, IndexError, KeyError) as e:
@@ -406,13 +423,32 @@ def _budget_simplify(geom: dict) -> dict:
 def buffer(point, radius_m) -> dict:
     if not _is_number(radius_m) or radius_m <= 0:
         raise InvalidGeometryOp("op=buffer needs a positive numeric radius_m")
+    if radius_m > MAX_BUFFER_RADIUS_M:
+        raise InvalidGeometryOp(
+            f"op=buffer radius_m must be at most {MAX_BUFFER_RADIUS_M:.0f} m; "
+            "beyond that scale a planar lon/lat ring is not a meaningful circle"
+        )
     lat, lon = _require_point(point, "point")
     ring = []
     for i in range(BUFFER_VERTICES):
-        b = 360.0 * i / BUFFER_VERTICES
+        # Descending bearings so the exterior ring winds counterclockwise
+        # (RFC 7946 exterior-ring winding, matching convex_hull's output).
+        b = (360.0 * (BUFFER_VERTICES - i) / BUFFER_VERTICES) % 360.0
         d = destination({"lat": lat, "lon": lon}, b, float(radius_m))["point"]
         ring.append([d["lon"], d["lat"]])
     ring.append(ring[0])
+    # destination() normalizes longitudes to [-180, 180), so a circle that
+    # crosses the antimeridian shows up as an adjacent-vertex lon jump of
+    # more than 180 degrees -- a self-intersecting ring that every planar op
+    # in this module (area, point_in_polygon, ...) would silently mismeasure.
+    # Reject it rather than return garbage.
+    for (lon1, _), (lon2, _) in zip(ring, ring[1:]):
+        if abs(lon2 - lon1) > 180.0:
+            raise InvalidGeometryOp(
+                "buffer crosses the antimeridian; this planar ring approximation "
+                "cannot represent it -- use a center farther from lon ±180 or a "
+                "smaller radius_m"
+            )
     return _budget_simplify({"type": "Polygon", "coordinates": [ring]})
 
 

@@ -1740,8 +1740,10 @@ def geometry_op(
             result = geometry_ops.nearest_point_on_line(point, geometry)
     except geometry_ops.InvalidGeometryOp as e:
         return {"error": "bad_request", "detail": e.detail}
-    if op == "point_in_polygon":
-        return budget.apply_budget(result, "results")
+    # point_in_polygon's "results" list is positional (one boolean per input
+    # point) and already bounded by geometry_ops.MAX_BATCH_POINTS, so it is
+    # never token-budgeted: truncating it would silently misalign results
+    # with the input points.
     return result
 
 
