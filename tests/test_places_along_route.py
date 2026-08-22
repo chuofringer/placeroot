@@ -255,7 +255,7 @@ def test_no_route_result_is_returned_when_nothing_connects(corridor_places, monk
     """A disconnected pair yields route()'s own structured no_route answer
     rather than a bare empty result set."""
     monkeypatch.setattr(
-        routing, "_shortest_path", lambda *a, **k: (routing.Graph(), None)
+        routing, "_shortest_path", lambda *a, **k: (routing.Graph(), None, {})
     )
     result = _corridor()
     assert result["error"] == "no_route"
@@ -275,9 +275,9 @@ def test_truncated_flag_when_graph_is_truncated(corridor_places, monkeypatch):
     real = routing._shortest_path
 
     def truncated_graph(*args, **kwargs):
-        graph, found = real(*args, **kwargs)
+        graph, found, meta = real(*args, **kwargs)
         graph.truncated = True
-        return graph, found
+        return graph, found, meta
 
     monkeypatch.setattr(routing, "_shortest_path", truncated_graph)
     result = _corridor()

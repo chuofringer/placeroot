@@ -117,7 +117,18 @@ from pathlib import Path
 
 import duckdb
 
-from placeroot import budget, cache, db, errors, geo, overture, progress, release, simplify
+from placeroot import (
+    budget,
+    cache,
+    db,
+    elevation,
+    errors,
+    geo,
+    overture,
+    progress,
+    release,
+    simplify,
+)
 from placeroot.errors import UpstreamUnavailable  # noqa: F401 - re-exported; see below
 
 logger = logging.getLogger(__name__)
@@ -324,6 +335,47 @@ ESTIMATED_DRIVE_SPEED_M_S = DRIVE_CLASS_SPEEDS_M_S["residential"]
 # above the float-summation noise that separates a symmetric matrix's mirror
 # tours (the same legs added in a different order).
 OPTIMIZE_TIE_EPSILON_S = 1e-6
+
+# Comfort-aware routing (#313): route()/from_to()'s prefer="flat" preference
+# and include_elevation profile.
+PREFER_FLAT = "flat"
+SUPPORTED_PREFERENCES = frozenset({PREFER_FLAT})
+# Elevation grade only changes how comfortable a route *feels*, not whether
+# it's physically passable the way a one-way restriction does — driving
+# doesn't get noticeably more or less "comfortable" over a grade the way
+# walking/cycling does, so prefer="flat" is scoped to those two modes. This
+# also keeps the reweighting math simple (see _dijkstra_path_to_target_flat):
+# walk/cycle graphs always store plain length_m edge weights (only drive
+# bakes per-edge time), so a climb penalty in meters composes with the base
+# weight before either is divided by speed.
+FLAT_PREFERENCE_MODES = frozenset({"walk", "cycle"})
+# How many extra meters of "distance" one meter of uphill climb costs when
+# ranking edges for prefer="flat" — the router will happily take a ~20x
+# longer detour to avoid a meter of climb. Chosen to make climb the dominant
+# factor for the modest grades city streets actually have (a few percent),
+# without being so large that a single unavoidable meter of climb near the
+# destination make the search behave as if that edge were disconnected.
+FLAT_CLIMB_PENALTY_M_PER_M = 20.0
+# Bounds the elevation-fetch cost of prefer="flat": at most this many of the
+# extracted subgraph's nodes get a Copernicus lookup (elevation.py's own
+# per-tile/per-block caching still applies on top, so a dense area pays for
+# each DEM tile once regardless). A graph with more nodes than this samples
+# an evenly-spaced, deterministic subset (see _node_elevations_for_flat);
+# edges touching an unsampled node are ranked by plain distance, same as
+# without the preference — never a fabricated elevation.
+FLAT_MAX_ELEVATION_NODES = 400
+
+# route(include_elevation=True): the elevation profile is sampled at up to
+# this many evenly-spaced points along the route's node path — a single
+# elevation.elevations_at() batch call (this cap sits under
+# elevation.MAX_BATCH_POINTS), regardless of how long the route is, so the
+# extra cost is bounded independent of distance_m.
+ELEVATION_PROFILE_MAX_SAMPLES = 40
+ELEVATION_PROFILE_MIN_SAMPLES = 2
+# Reserve for the "elevation" envelope (stats fields) around the "samples"
+# array, mirroring PATH_ENVELOPE_TOKENS/PATH_MIN_TOKENS below.
+ELEVATION_ENVELOPE_TOKENS = 16
+ELEVATION_MIN_TOKENS = 30
 
 # places_along_route (#171): how far off the route a place may sit and still
 # count as "on the way". CORRIDOR_MAX_DETOUR_M caps the caller's
@@ -2023,6 +2075,121 @@ def _dijkstra_path_to_target(
     return None
 
 
+def _node_elevations_for_flat(graph: Graph) -> tuple[dict[str, float], str | None]:
+    """(node_id -> elevation_m, hard-failure detail) for prefer="flat" on `graph`.
+
+    Fetches Copernicus GLO-30 elevations for up to FLAT_MAX_ELEVATION_NODES
+    of the graph's nodes (a deterministic, evenly-spaced subset — via
+    _sample_evenly over the sorted node ids — when there are more than
+    that), via elevation.elevations_at in chunks of its own
+    MAX_BATCH_POINTS. A node with no DEM coverage (ocean, excluded tile) or
+    outside the sampled subset simply has no entry in the returned dict —
+    _dijkstra_path_to_target_flat treats an edge touching such a node as
+    unpenalized (plain distance), never a fabricated elevation.
+
+    The result is cached as a plain attribute on `graph` itself (not part
+    of the Graph class, and never persisted to the on-disk graph pickle —
+    _persist_graph_to_disk runs before any caller ever reaches this
+    function), so a graph reused across several prefer="flat" route() calls
+    in the same process pays for the elevation fetch once.
+
+    The second return value is None on ordinary success (including partial
+    DEM coverage — that's not a failure, just fewer penalized edges); it is
+    an error detail string only when the elevation service itself could not
+    be reached at all (network/format failure on the very first chunk),
+    which route() surfaces as a note rather than failing the whole request.
+    """
+    cached = getattr(graph, "_flat_node_elev", None)
+    if cached is not None:
+        return cached, getattr(graph, "_flat_node_elev_error", None)
+
+    node_ids = _sample_evenly(sorted(graph.coords), FLAT_MAX_ELEVATION_NODES)
+    points = [graph.coords[node_id] for node_id in node_ids]
+    node_elev: dict[str, float] = {}
+    error: str | None = None
+    for i in range(0, len(points), elevation.MAX_BATCH_POINTS):
+        chunk_ids = node_ids[i : i + elevation.MAX_BATCH_POINTS]
+        chunk_points = points[i : i + elevation.MAX_BATCH_POINTS]
+        try:
+            results = elevation.elevations_at(chunk_points)
+        except (errors.UpstreamUnavailable, elevation.ElevationFormatError) as e:
+            error = str(e)
+            break
+        for node_id, r in zip(chunk_ids, results):
+            value = r.get("elevation_m")
+            if value is not None:
+                node_elev[node_id] = value
+
+    graph._flat_node_elev = node_elev
+    graph._flat_node_elev_error = error
+    return node_elev, error
+
+
+def _dijkstra_path_to_target_flat(
+    graph: Graph,
+    source: str,
+    target: str,
+    speed_m_s: float,
+    node_elev: dict[str, float],
+    climb_penalty_m_per_m: float = FLAT_CLIMB_PENALTY_M_PER_M,
+) -> tuple[float, float, list[tuple[str, float]]] | None:
+    """Like _dijkstra_path_to_target, but ranks edges by (length_m +
+    climb penalty) / speed instead of plain length_m / speed, so the search
+    trades distance for climb — see FLAT_CLIMB_PENALTY_M_PER_M.
+
+    The climb penalty applies only in the uphill direction of travel (a
+    descent costs nothing extra — prefer="flat" is about avoiding climbs,
+    not avoiding grade in general) and only when both endpoints of an edge
+    have a known elevation in `node_elev`; an edge touching an unannotated
+    node (outside FLAT_MAX_ELEVATION_NODES's sample, or no DEM coverage) is
+    ranked by plain distance, same as _dijkstra_path_to_target.
+
+    Three accumulators travel together per node, mirroring
+    _dijkstra_path_to_target's time/distance pair: `rank` (penalized —
+    used only to order the heap and decide what's "shortest"), `time`, and
+    `dist` (both true/unpenalized). The returned duration_s/distance_m are
+    the *true* costs of whatever path minimizes rank, never the penalized
+    numbers — a flat-preferring route still reports its real distance and
+    time, not an inflated one.
+    """
+    if source == target:
+        return 0.0, 0.0, [(source, 0.0)]
+    rank_to: dict[str, float] = {source: 0.0}
+    time_to: dict[str, float] = {source: 0.0}
+    dist_to: dict[str, float] = {source: 0.0}
+    prev: dict[str, str] = {}
+    heap = [(0.0, source)]
+    while heap:
+        r, node = heapq.heappop(heap)
+        if r > rank_to.get(node, math.inf):
+            continue
+        if node == target:
+            path: list[tuple[str, float]] = []
+            cur = node
+            while True:
+                path.append((cur, dist_to[cur]))
+                if cur == source:
+                    break
+                cur = prev[cur]
+            path.reverse()
+            return time_to[node], dist_to[node], path
+        elev_a = node_elev.get(node)
+        for neighbor, weight, length_m in graph.adjacency[node]:
+            climb_m = 0.0
+            if elev_a is not None:
+                elev_b = node_elev.get(neighbor)
+                if elev_b is not None:
+                    climb_m = max(0.0, elev_b - elev_a)
+            nr = r + (weight + climb_penalty_m_per_m * climb_m) / speed_m_s
+            if nr < rank_to.get(neighbor, math.inf):
+                rank_to[neighbor] = nr
+                time_to[neighbor] = time_to[node] + weight / speed_m_s
+                dist_to[neighbor] = dist_to[node] + length_m
+                prev[neighbor] = node
+                heapq.heappush(heap, (nr, neighbor))
+    return None
+
+
 # Decimal places kept on emitted path coordinates. 6 dp is ~0.11 m at the
 # equator — finer than any snapping or graph-node precision the router has —
 # and rounding *before* the simplify pass matters: simplify_geometry's
@@ -2130,6 +2297,133 @@ def _path_linestring(
     return geometry, simplified["max_deviation_m"] + shape_dropped_m
 
 
+def _interp_along_node_path(
+    graph: Graph, path: list[tuple[str, float]], target_m: float
+) -> tuple[float, float]:
+    """(lat, lon) at along-route distance `target_m`, interpolated along the
+    straight chords between `path`'s node coordinates.
+
+    This is a coarser approximation than _path_linestring's polyline — it
+    ignores each traversed edge's own shape vertices and just walks the
+    graph nodes — adequate for an elevation profile's sample points, which
+    don't need to trace the road's every curve.
+    """
+    if target_m <= path[0][1]:
+        return graph.coords[path[0][0]]
+    if target_m >= path[-1][1]:
+        return graph.coords[path[-1][0]]
+    i = 0
+    while i < len(path) - 2 and path[i + 1][1] < target_m:
+        i += 1
+    id_a, m_a = path[i]
+    id_b, m_b = path[i + 1]
+    lat_a, lon_a = graph.coords[id_a]
+    lat_b, lon_b = graph.coords[id_b]
+    span_m = m_b - m_a
+    frac = (target_m - m_a) / span_m if span_m > 0 else 0.0
+    return lat_a + frac * (lat_b - lat_a), lon_a + frac * (lon_b - lon_a)
+
+
+def _route_elevation_profile(
+    graph: Graph, path: list[tuple[str, float]], distance_m: float, max_tokens: int
+) -> dict | None:
+    """Elevation profile for a computed route (#313), or None if it can't fit max_tokens.
+
+    Samples up to ELEVATION_PROFILE_MAX_SAMPLES evenly-spaced points along
+    the route's node path (straight chords between nodes, via
+    _interp_along_node_path — not the traversed segments' own curved shape,
+    a coarser approximation than route(include_path=True)'s polyline but
+    adequate for a climb profile) and looks each one up through
+    elevation.elevations_at in a single batch call (the sample cap sits
+    under elevation.MAX_BATCH_POINTS), so the extra cost is bounded
+    independent of the route's length.
+
+    Returns a dict with "total_climb_m"/"total_descent_m"/"max_grade_pct" —
+    computed only over consecutive sample pairs that both had known
+    elevation, never faked as 0.0 for an unsampled stretch — plus "samples"
+    (an [at_m, elevation_m] list, elevation_m null where the DEM had no
+    coverage at that point), thinned further if needed to fit max_tokens,
+    and dropped (with "samples_omitted": true) if even the shortest version
+    doesn't fit. A "note" is added whenever coverage was partial (naming how
+    many of the sampled points were uncovered) or entirely absent (in which
+    case the climb/descent/grade keys are omitted rather than reported as
+    0.0), or whenever the elevation service itself couldn't be reached
+    (network/format failure), in which case only "note" is returned.
+
+    Returns None (route() then drops the profile with "elevation_omitted":
+    true) if max_tokens is too small to hold even the note-only form, or if
+    the route has no length to profile (path has under 2 nodes).
+    """
+    if max_tokens < ELEVATION_MIN_TOKENS or len(path) < 2 or distance_m <= 0:
+        return None
+
+    n = min(ELEVATION_PROFILE_MAX_SAMPLES, max(ELEVATION_PROFILE_MIN_SAMPLES, len(path)))
+    targets_m = [i / (n - 1) * distance_m for i in range(n)]
+    points = [_interp_along_node_path(graph, path, t) for t in targets_m]
+
+    elevations: list[float | None] = []
+    try:
+        for i in range(0, len(points), elevation.MAX_BATCH_POINTS):
+            chunk = points[i : i + elevation.MAX_BATCH_POINTS]
+            elevations.extend(r.get("elevation_m") for r in elevation.elevations_at(chunk))
+    except (errors.UpstreamUnavailable, elevation.ElevationFormatError) as e:
+        profile = {"note": f"elevation service unavailable: {e}"}
+        return profile if budget.estimate_tokens({"elevation": profile}) <= max_tokens else None
+
+    covered = sum(1 for e in elevations if e is not None)
+    profile: dict = {}
+    if covered == 0:
+        profile["note"] = (
+            f"{elevation._NO_COVERAGE_NOTE}; climb/descent/grade cannot be computed"
+        )
+    else:
+        total_climb_m = 0.0
+        total_descent_m = 0.0
+        max_grade_pct = 0.0
+        for i in range(n - 1):
+            e_a, e_b = elevations[i], elevations[i + 1]
+            if e_a is None or e_b is None:
+                continue
+            delta_m = e_b - e_a
+            if delta_m > 0:
+                total_climb_m += delta_m
+            else:
+                total_descent_m += -delta_m
+            seg_m = targets_m[i + 1] - targets_m[i]
+            if seg_m > 0:
+                max_grade_pct = max(max_grade_pct, abs(delta_m) / seg_m * 100.0)
+        profile["total_climb_m"] = round(total_climb_m, 1)
+        profile["total_descent_m"] = round(total_descent_m, 1)
+        profile["max_grade_pct"] = round(max_grade_pct, 1)
+        if covered < n:
+            profile["note"] = (
+                f"elevation coverage missing for {n - covered}/{n} sampled points; "
+                "climb/descent/grade reflect only the covered stretches"
+            )
+
+    samples = [
+        [round(t, 1), (round(e, 1) if e is not None else None)]
+        for t, e in zip(targets_m, elevations)
+    ]
+    profile["samples"] = samples
+    if budget.estimate_tokens({"elevation": profile}) <= max_tokens:
+        return profile
+
+    # Thin the samples array to fit; the stats above are cheap and already
+    # final, so only the raw sample list shrinks.
+    for keep_n in (20, 10, 5, ELEVATION_PROFILE_MIN_SAMPLES):
+        if keep_n >= len(samples):
+            continue
+        profile["samples"] = _sample_evenly(samples, keep_n)
+        if budget.estimate_tokens({"elevation": profile}) <= max_tokens:
+            return profile
+
+    # Even the shortest sample list doesn't fit: drop it, keep the stats.
+    del profile["samples"]
+    profile["samples_omitted"] = True
+    return profile if budget.estimate_tokens({"elevation": profile}) <= max_tokens else None
+
+
 def route(
     from_lat: float,
     from_lon: float,
@@ -2137,6 +2431,8 @@ def route(
     to_lon: float,
     mode: str = "drive",
     include_path: bool = False,
+    include_elevation: bool = False,
+    prefer: str | None = None,
 ) -> dict:
     """Shortest-path distance + duration between two points, by mode; geometry on request (#161).
 
@@ -2195,9 +2491,50 @@ def route(
     are derived from the same edges along the same min-time path); for
     drive, duration_s comes from baked per-edge time weights while
     distance_m is summed length_m independently, so no such identity holds.
+
+    prefer="flat" (#313) reweights the search to trade distance for climb —
+    see _dijkstra_path_to_target_flat and FLAT_CLIMB_PENALTY_M_PER_M — using
+    per-node elevations fetched for the extracted subgraph (bounded to
+    FLAT_MAX_ELEVATION_NODES lookups; see _node_elevations_for_flat). Only
+    supported for mode="walk"/"cycle" (drive raises ValueError with
+    prefer="flat"; grade doesn't change a drive's comfort the way it does on
+    foot or a bike). If the elevation service can't be reached, or has no
+    DEM coverage at all in the extraction area, the result falls back to a
+    plain-distance route and carries "prefer_note" explaining why — it never
+    silently claims a flat preference it didn't apply. When honored, the
+    result still reports the path's *true* distance_m/duration_s, not a
+    penalized number.
+
+    IMPORTANT — what prefer="flat" does NOT guarantee: it minimizes
+    elevation *grade*, nothing else. Overture's transportation schema, as
+    read by this router (class, connectors, speed_limits,
+    access_restrictions — see build_graph), carries no step-count,
+    kerb-ramp, or surface attributes, so a class="steps" segment is
+    classified exactly like any other footway and can still appear on a
+    "flat" route if it happens to be short and roughly level in elevation.
+    This is not a step-free, stroller-, or wheelchair-accessible mode —
+    only a real accessibility dataset could support that claim honestly,
+    and this one doesn't have it.
+
+    include_elevation=True (#313) additionally returns "elevation", a
+    compact climb profile from elevation.py's Copernicus GLO-30 reader —
+    see _route_elevation_profile for its total_climb_m/total_descent_m/
+    max_grade_pct/samples fields and how missing DEM coverage is reported
+    honestly (never a fake 0.0). Off by default, fitted to whatever of the
+    token budget the rest of the response leaves; if even the note-only
+    form doesn't fit, the response carries "elevation_omitted": true.
     """
-    graph, found = _shortest_path(
-        from_lat, from_lon, to_lat, to_lon, mode, want_shapes=include_path
+    if prefer is not None and prefer not in SUPPORTED_PREFERENCES:
+        raise ValueError(
+            f"unsupported prefer={prefer!r}; supported: {sorted(SUPPORTED_PREFERENCES)}"
+        )
+    if prefer == PREFER_FLAT and mode not in FLAT_PREFERENCE_MODES:
+        raise ValueError(
+            f"prefer='flat' is only supported for mode in {sorted(FLAT_PREFERENCE_MODES)}, "
+            f"got mode={mode!r}"
+        )
+    graph, found, meta = _shortest_path(
+        from_lat, from_lon, to_lat, to_lon, mode, want_shapes=include_path, prefer=prefer
     )
     if found is None:
         return _no_route_result(from_lat, from_lon, to_lat, to_lon, mode)
@@ -2210,6 +2547,10 @@ def route(
         "from": {"lat": from_lat, "lon": from_lon},
         "to": {"lat": to_lat, "lon": to_lon},
     }
+    if prefer is not None:
+        result["prefer"] = prefer
+    if meta.get("prefer_flat_note"):
+        result["prefer_note"] = meta["prefer_flat_note"]
     if graph.truncated:
         result["truncated"] = True
         result["note"] = (
@@ -2242,6 +2583,24 @@ def route(
             geometry, deviation_m = line
             result["path"] = geometry
             result["path_max_deviation_m"] = round(deviation_m, 2)
+    if include_elevation:
+        # Same budget-fitting shape as include_path above: whatever the rest
+        # of the response (path included, if both were requested) leaves is
+        # what the elevation profile gets.
+        max_tokens = budget.token_budget()
+        base_tokens = budget.estimate_tokens(result)
+        elevation_tokens = max_tokens - base_tokens - ELEVATION_ENVELOPE_TOKENS
+        profile = (
+            _route_elevation_profile(graph, path, distance_m, elevation_tokens)
+            if elevation_tokens >= ELEVATION_MIN_TOKENS
+            else None
+        )
+        if profile is None:
+            candidate = {**result, "elevation_omitted": True}
+            if budget.estimate_tokens(candidate) <= max_tokens:
+                result = candidate
+        else:
+            result["elevation"] = profile
     return result
 
 
@@ -2266,8 +2625,9 @@ def _shortest_path(
     to_lon: float,
     mode: str,
     want_shapes: bool = False,
-) -> tuple[Graph, tuple[float, float, list[tuple[str, float]]] | None]:
-    """(graph, (duration_s, distance_m, path)) for the A->B min-time path.
+    prefer: str | None = None,
+) -> tuple[Graph, tuple[float, float, list[tuple[str, float]]] | None, dict]:
+    """(graph, (duration_s, distance_m, path), meta) for the A->B min-time path.
 
     want_shapes asks the extraction for per-edge shape vertices; only
     route(include_path=True) needs them (_path_linestring). places_along_route
@@ -2282,6 +2642,16 @@ def _shortest_path(
     no_route answer (_no_route_result). Every error case (UnsupportedMode,
     ValueError, RouteTooLong, NoGraphNearby) raises exactly as route()'s
     docstring describes.
+
+    prefer="flat" (#313, route()-only — places_along_route never passes it)
+    switches the path search to _dijkstra_path_to_target_flat, ranking edges
+    by distance plus a climb penalty instead of plain distance. `meta` is {}
+    unless prefer="flat" degraded to plain-distance routing (no DEM coverage
+    in the extraction area, or the elevation service couldn't be reached),
+    in which case it carries "prefer_flat_note" explaining why — route()
+    surfaces that as "prefer_note" rather than silently ignoring the ask.
+    Validating that mode supports prefer="flat" is the caller's job (route()
+    does it before calling here); this function assumes it's already valid.
     """
     if mode not in MODE_CONFIG:
         raise UnsupportedMode(mode)
@@ -2326,6 +2696,7 @@ def _shortest_path(
     # falling through to no_route).
     found = None
     graph = None
+    meta: dict = {}
     snapped_both = False
     for i, radius_m in enumerate(radii_m):
         is_last = i == len(radii_m) - 1
@@ -2354,7 +2725,26 @@ def _shortest_path(
 
         snapped_both = True
         speed = 1.0 if graph.weight_is_time else const_speed
-        found = _dijkstra_path_to_target(graph, source, target, speed)
+        if prefer == PREFER_FLAT:
+            node_elev, elev_error = _node_elevations_for_flat(graph)
+            if elev_error is not None:
+                meta.setdefault(
+                    "prefer_flat_note",
+                    f"could not honor prefer='flat' ({elev_error}); "
+                    "routed by plain distance instead",
+                )
+                found = _dijkstra_path_to_target(graph, source, target, speed)
+            elif not node_elev:
+                meta.setdefault(
+                    "prefer_flat_note",
+                    "no Copernicus GLO-30 elevation coverage in this area; "
+                    "routed by plain distance instead",
+                )
+                found = _dijkstra_path_to_target(graph, source, target, speed)
+            else:
+                found = _dijkstra_path_to_target_flat(graph, source, target, speed, node_elev)
+        else:
+            found = _dijkstra_path_to_target(graph, source, target, speed)
         if found is not None:
             break
 
@@ -2365,7 +2755,7 @@ def _shortest_path(
     # *later*, larger retry radius then failed to snap, that later failure
     # just `continue`s rather than raising and clobbering this — the
     # accurate answer is no_route, not NoGraphNearby).
-    return graph, found
+    return graph, found, meta
 
 
 def _sample_evenly(items: list, count: int) -> list:
@@ -2608,7 +2998,7 @@ def places_along_route(
         )
     limit = max(0, min(int(limit), overture.MAX_ROWS))
 
-    graph, found = _shortest_path(from_lat, from_lon, to_lat, to_lon, mode)
+    graph, found, _meta = _shortest_path(from_lat, from_lon, to_lat, to_lon, mode)
     if found is None:
         return _no_route_result(from_lat, from_lon, to_lat, to_lon, mode)
     duration_s, distance_m, path = found
