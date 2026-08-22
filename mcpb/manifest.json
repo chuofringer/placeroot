@@ -72,6 +72,10 @@
       "description": "Compare 2-5 areas side by side: category mix, density, and what differs."
     },
     {
+      "name": "suggest_areas",
+      "description": "Where within reach: neighborhoods ranked by travel budget and amenity requirements."
+    },
+    {
       "name": "admin_lookup",
       "description": "Containing admin hierarchy for a point: neighborhood up to country."
     },

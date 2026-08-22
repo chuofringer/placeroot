@@ -102,7 +102,7 @@ Then ask your agent something spatial:
 
 ## What it can do
 
-**41 tools**, grouped into four families — every answer fits in a couple of thousand tokens:
+**42 tools**, grouped into four families — every answer fits in a couple of thousand tokens:
 
 | Family | Tools | Answers questions like |
 |---|---|---|
