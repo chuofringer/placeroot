@@ -32,9 +32,9 @@ STANDING_COST_CEILING = 1500
 # placeroot_capabilities' answer is read once per conversation that uses it,
 # so it is budgeted like a response, not like documentation. A new tool
 # that doesn't fit under this belongs in a shorter one-liner, not a raised
-# ceiling. 36 tools (changes_in_area, elevation_at joining #336's 34) sit
-# just over the old 1150 line.
-CATALOG_CEILING = 1200
+# ceiling. 37 tools (changes_in_area, elevation_at, ground_location
+# joining #336's 34) sit just over the old 1150 line.
+CATALOG_CEILING = 1250
 
 # The subset note's opening words, rendered by the renderer itself rather than
 # retyped here. A phrase typed from memory can drift from what prompts.py
