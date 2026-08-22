@@ -504,6 +504,49 @@ def test_render_map_classless_input_is_unaffected_by_legend_support(tmp_path):
     assert all("cls" not in p for p in data["points"])
 
 
+def test_render_map_class_color_uses_inline_style_not_fill_attribute(tmp_path):
+    # The stylesheet rule `.marker circle { fill: var(--marker); }` outranks
+    # SVG presentation attributes, so class colors must be applied as an
+    # inline style — the only mechanism that actually wins the cascade.
+    payload = {"results": _classed_rows(["open"])}
+    legend = {"open": {"label": "Open now", "color": "#009e73"}}
+    result = mapview.export_report(payload, legend=legend, out_dir=tmp_path)
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    assert "c.style.fill = LEGEND[p.cls].color" in doc
+    assert 'setAttribute("fill"' not in doc
+
+
+def test_render_map_classed_points_without_legend_render_as_before(tmp_path):
+    # Omitting `legend` must render exactly as before #367: no legend box,
+    # no cls annotations, and no "unknown class" note for classed points.
+    payload = {"results": _classed_rows(["open", "mystery"])}
+    result = mapview.export_report(payload, title="No legend", out_dir=tmp_path)
+    assert "note" not in result
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    assert 'class="legend"' not in doc
+    data = _embedded_data(doc)
+    assert "legend" not in data
+    assert all("cls" not in p for p in data["points"])
+
+
+def test_render_map_auto_palette_skips_colors_claimed_explicitly(tmp_path):
+    # Explicit colors claim their palette slots — case-insensitively and with
+    # #rgb expanded — so an auto-colored class never duplicates them.
+    payload = {"results": _classed_rows(["auto", "upper", "short"])}
+    legend = {
+        "upper": {"label": "Upper", "color": "#E69F00"},  # palette[0], uppercased
+        "short": {"label": "Short", "color": "#999"},  # palette[-1], #rgb form
+        "auto": {"label": "Auto"},  # no color: assigned from the palette
+    }
+    result = mapview.export_report(payload, legend=legend, out_dir=tmp_path)
+    assert "note" not in result
+    data = _embedded_data(Path(result["path"]).read_text(encoding="utf-8"))
+    auto_color = data["legend"]["auto"]["color"].lower()
+    assert auto_color not in {"#e69f00", "#999999", "#999"}
+    # First palette entry not claimed by an explicit color.
+    assert auto_color == "#56b4e9"
+
+
 def test_render_map_tool_accepts_legend_and_returns_note(tmp_path, monkeypatch):
     monkeypatch.setenv("PLACEROOT_ARTIFACT_DIR", str(tmp_path))
     result = server.render_map(

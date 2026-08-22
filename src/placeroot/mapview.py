@@ -771,7 +771,10 @@ _JS = """
     var c = document.createElementNS(SVGNS, "circle");
     c.setAttribute("cx", xy[0]); c.setAttribute("cy", xy[1]); c.setAttribute("r", 6);
     if (p.cls && LEGEND[p.cls] && LEGEND[p.cls].color) {
-      c.setAttribute("fill", LEGEND[p.cls].color);
+      // Inline style, not the "fill" presentation attribute: the stylesheet's
+      // `.marker circle { fill: var(--marker); }` rule outranks presentation
+      // attributes, so an attribute-set class color would never render.
+      c.style.fill = LEGEND[p.cls].color;
     }
     g.appendChild(c);
     if (p.name) {
@@ -1265,6 +1268,14 @@ def _valid_hex_color(value) -> bool:
     return isinstance(value, str) and bool(_HEX_COLOR_RE.fullmatch(value))
 
 
+def _expand_hex(color: str) -> str:
+    """Canonical form for comparing hex colors: lowercase #rrggbb."""
+    color = color.lower()
+    if len(color) == 4:  # "#abc" -> "#aabbcc"
+        color = "#" + "".join(ch * 2 for ch in color[1:])
+    return color
+
+
 def _feature_class(item: dict) -> str | None:
     """A point/shape's props["class"], or None if absent/not a string."""
     props = item.get("props") or {}
@@ -1277,8 +1288,11 @@ def _normalize_legend(legend: dict | None) -> tuple[dict[str, dict[str, str]], l
 
     - A missing/blank label falls back to the class name itself.
     - A missing color is assigned from _LEGEND_PALETTE, walked in
-      sorted-class-name order — deterministic regardless of dict insertion
-      order or which entries already have an explicit color.
+      sorted-class-name order, skipping palette entries already claimed by
+      an explicit color (compared case-insensitively with #rgb expanded to
+      #rrggbb) so an auto-colored class never collides with an explicit
+      one. Deterministic for a given legend regardless of dict insertion
+      order.
     - An invalid color (anything but #rgb/#rrggbb hex) is dropped rather
       than trusted into the SVG/HTML output; a palette color is assigned
       instead and the class name comes back in `notes` (never the raw
@@ -1291,7 +1305,8 @@ def _normalize_legend(legend: dict | None) -> tuple[dict[str, dict[str, str]], l
     class_names = sorted(k for k in legend if isinstance(k, str))
     resolved: dict[str, dict[str, str]] = {}
     invalid_color_classes: list[str] = []
-    palette_i = 0
+    needs_palette: list[str] = []
+    claimed: set[str] = set()
     for cls in class_names:
         entry = legend.get(cls)
         label = cls
@@ -1304,12 +1319,21 @@ def _normalize_legend(legend: dict | None) -> tuple[dict[str, dict[str, str]], l
             if raw_color is not None:
                 if _valid_hex_color(raw_color):
                     color = raw_color
+                    claimed.add(_expand_hex(color))
                 else:
                     invalid_color_classes.append(cls)
-        if color is None:
-            color = _LEGEND_PALETTE[palette_i % len(_LEGEND_PALETTE)]
-            palette_i += 1
         resolved[cls] = {"label": label, "color": color}
+        if color is None:
+            needs_palette.append(cls)
+
+    # Auto-color pass: palette entries already claimed by an explicit color
+    # are skipped so two classes never share a fill (until the free palette
+    # itself runs out and has to wrap).
+    available = [c for c in _LEGEND_PALETTE if _expand_hex(c) not in claimed]
+    if not available:
+        available = list(_LEGEND_PALETTE)
+    for palette_i, cls in enumerate(needs_palette):
+        resolved[cls]["color"] = available[palette_i % len(available)]
 
     notes = []
     if invalid_color_classes:
@@ -1578,7 +1602,12 @@ def write_artifact(
     path.write_bytes(encoded)
 
     resolved_legend, color_notes = _normalize_legend(legend)
-    _legend_present, unknown_class_count = _classify_features(points, resolved_legend)
+    if resolved_legend:
+        _legend_present, unknown_class_count = _classify_features(points, resolved_legend)
+    else:
+        # No legend supplied: props["class"] is inert (renders exactly as
+        # before #367), so it must not be reported as an "unknown class".
+        unknown_class_count = 0
     note = _legend_note(unknown_class_count, color_notes)
 
     result = {
