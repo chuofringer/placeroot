@@ -76,11 +76,11 @@ Generated 2026-08-22 by `uv run python benchmarks/token_efficiency.py --write`.
 
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-08-19.0`
-- Tools registered: **41**
-- Total schema surface: **23427 tokens** (93771 chars, 94033 bytes)
-- Schema cost per tool: min 158, median 498, max 1459 tokens
+- Tools registered: **42**
+- Total schema surface: **24410 tokens** (97703 chars, 97975 bytes)
+- Schema cost per tool: min 158, median 503, max 1459 tokens
 - Median scenario response: **208 tokens** (range 87-811)
-- Break-even: the schema surface costs about as much as **113 median answers**
+- Break-even: the schema surface costs about as much as **117 median answers**
 
 ### Schema surface (paid once per conversation)
 
@@ -90,6 +90,7 @@ Generated 2026-08-22 by `uv run python benchmarks/token_efficiency.py --write`.
 | `find_places` | 1072 | 296 | **1448** | 5793 |
 | `route` | 1177 | 170 | **1433** | 5732 |
 | `meeting_point` | 902 | 99 | **1080** | 4323 |
+| `suggest_areas` | 803 | 100 | **983** | 3932 |
 | `verify_claims` | 781 | 68 | **933** | 3733 |
 | `compare_areas` | 754 | 98 | **922** | 3689 |
 | `geometry_op` | 559 | 221 | **848** | 3394 |
@@ -127,7 +128,7 @@ Generated 2026-08-22 by `uv run python benchmarks/token_efficiency.py --write`.
 | `data_version` | 166 | 16 | **231** | 926 |
 | `reverse_geocode` | 111 | 42 | **205** | 820 |
 | `summarize_area` | 53 | 57 | **158** | 635 |
-| **all 41 tools** | 16914 | 3966 | **23427** | 93771 |
+| **all 42 tools** | 17717 | 4066 | **24410** | 97703 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 
