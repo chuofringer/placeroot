@@ -3849,14 +3849,17 @@ def resolve_place(
 
     Each candidate: {"id" (GERS), "kind": "division" | "place", "name",
     "lat", "lon", "match": "exact" | "prefix" | "substring" | "fuzzy", plus
-    "admin_context" (division) or "category" (place)}. "fuzzy" (#215,
-    divisions only) means the name doesn't contain the query at all and was
-    reached by close spelling instead — the caller asked for one string and
-    is being handed the answer to another, so it ranks below every literal
-    label. Ranked by match tier first — kind-agnostic, an exact place beats
-    a prefix-matched division — then by prominence (division rank_score /
-    place confidence, both roughly 0-1 scales), then id for determinism.
-    Never more than `limit` results.
+    "admin_context" (division) or "category" (place)}. "fuzzy" (#215 for
+    divisions, #373 for places) means the name doesn't contain the query at
+    all and was reached by close spelling instead — the caller asked for
+    one string and is being handed the answer to another, so it ranks below
+    every literal label. A place candidate reached through #373's fallback
+    tiers (an alt-spelling or fuzzy match on the underlying find_places
+    call) additionally carries "matched_by": "alt_name" | "fuzzy", absent
+    on an ordinary literal match. Ranked by match tier first — kind-agnostic,
+    an exact place beats a prefix-matched division — then by prominence
+    (division rank_score / place confidence, both roughly 0-1 scales), then
+    id for determinism. Never more than `limit` results.
 
     No match is a valid answer, not an error: an unresolvable query returns
     an empty list. Raises overture.UpstreamUnavailable if a remote scan
@@ -4036,22 +4039,35 @@ def resolve_place(
     for r in place_rows:
         if not r["id"] or r["id"] in seen_ids or not r["name"]:
             continue
-        label = _place_match_label(r["name"], query)
-        if label is None:
-            for alt in _alias_names_for(query) + ([search_query] if search_query != query else []):
-                label = _place_match_label(r["name"], alt)
-                if label is not None:
-                    break
+        # #373: a row overture.find_places already tagged as an alt-name/
+        # fuzzy fallback hit was matched against this exact token by
+        # construction, even though its name (the corrected spelling)
+        # doesn't contain the typo the caller typed and would otherwise be
+        # dropped as unrelated by _place_match_label's containment check.
+        if r.get("matched_by"):
+            label = "fuzzy"
+        else:
+            label = _place_match_label(r["name"], query)
+            if label is None:
+                for alt in _alias_names_for(query) + (
+                    [search_query] if search_query != query else []
+                ):
+                    label = _place_match_label(r["name"], alt)
+                    if label is not None:
+                        break
         if label is None:
             continue
         seen_ids.add(r["id"])
-        candidates.append({
+        candidate = {
             "id": r["id"], "kind": "place", "name": r["name"],
             "lat": r["lat"], "lon": r["lon"],
             "category": r["category"],
             "match": label,
             "_prominence": r.get("confidence") or 0.0,
-        })
+        }
+        if r.get("matched_by"):
+            candidate["matched_by"] = r["matched_by"]
+        candidates.append(candidate)
     # geocode() can resolve a place on its own — its anchored fallback
     # handles "Shibuya Crossing Tokyo" by splitting the trailing city off
     # and searching places around it. Discarding those hits (the previous

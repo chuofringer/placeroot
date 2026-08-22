@@ -26,6 +26,7 @@ import math
 import os
 import struct
 import threading
+import unicodedata
 
 import duckdb
 
@@ -542,6 +543,184 @@ def _place_category_name_filters(
     return filters
 
 
+# --- #373: typo/alt-spelling fallback tiers for POI name search -----------
+#
+# Mirrors geocode.py's #214 (names.common alternates) and #215 (jaro_winkler
+# fuzzy) tiers on the divisions theme, scaled to a bboxed radius query
+# instead of a locally materialized whole-theme table: places has no local
+# index the way divisions does (#43), so both fallback tiers here run
+# strictly INSIDE the same bbox/distance/category/attribute pruning the
+# tier-1 ILIKE scan already applies — a bounded LIMIT'd scan, never an
+# unbounded one. Tier 1 (names.primary ILIKE) always runs first and, when it
+# yields any row, these tiers never run at all.
+#
+# The fold is a simpler, independent copy of geocode.py's — lower() plus
+# accent-stripping, no unfolded-letter table (ß/ø/ł/...) — since overture.py
+# is imported BY geocode.py and can't import back from it, and Overture
+# business names are overwhelmingly Latin-script-plus-diacritics; widening
+# this fold to match geocode.py's exonym table has its own regressions to
+# measure and is left for a follow-up if POI data turns out to need it.
+_POI_FUZZY_SIMILARITY_THRESHOLD = 0.92  # mirrors geocode._FUZZY_SIMILARITY_THRESHOLD (#215)
+
+# Bounded candidate pool tier 3 scores jaro_winkler over — nearest-first,
+# within the query's own bbox/radius, never a theme-wide scan. Sized like
+# geocode.py's CHECKLIST_MAX_CANDIDATES-class caps: generous for a single
+# radius query, small enough that scoring it in SQL is free.
+_POI_FUZZY_POOL_SIZE = 500
+
+
+def _fold_poi_name(s: str) -> str:
+    """Casefold + diacritic-strip a POI name/query for tier-2/3 comparison.
+
+    Must stay in step with _fold_poi_name_sql, which folds the stored
+    column the same way — the two only ever meet as an equality/similarity
+    comparison.
+    """
+    return "".join(
+        c for c in unicodedata.normalize("NFD", s) if not unicodedata.combining(c)
+    ).lower()
+
+
+def _fold_poi_name_sql(expr: str) -> str:
+    """SQL twin of _fold_poi_name over `expr`."""
+    return f"lower(strip_accents({expr}))"
+
+
+def _find_places_name_fallback(
+    from_source: str,
+    base_filters: list[str],
+    params: dict,
+    has_recreation: bool,
+    exprs: dict[str, str],
+    name: str,
+    limit: int,
+) -> list[dict]:
+    """Tiers 2 (alt-name) and 3 (fuzzy) of the #373 POI name fallback.
+
+    Only called when tier 1's ILIKE substring search came back empty and a
+    name filter was given. `base_filters` is every find_places filter
+    EXCEPT the name clause (bbox, distance, category, attribute, presence)
+    — both tiers stay inside that same pruning, just swap the name
+    predicate for a looser one.
+
+    Tries tier 2 (names.common alternate spellings) first; if that finds
+    nothing, falls through to tier 3 (fuzzy). Returns [] if neither tier
+    finds anything — an honest empty answer, not an error.
+
+    Rows carry "matched_by": "alt_name" | "fuzzy" so a caller (and
+    resolve_place, which reads it to relabel its own match field) can tell
+    a correction from a literal hit; see find_places' docstring for the
+    honesty convention this mirrors from geocode.py's #214/#215.
+    """
+    select_cols = f"""
+        {exprs["id"]} AS id,
+        {exprs["name"]} AS name,
+        {exprs["category"]} AS category,
+        {exprs["basic_category"]} AS basic_category,
+        {exprs["operating_status"]} AS operating_status,
+        {exprs["confidence"]} AS confidence,
+        {exprs["brand"]} AS brand,
+        {exprs["has_website"]} AS has_website,
+        {exprs["has_phone"]} AS has_phone,
+        round(bbox.ymin, 6) AS lat,
+        round(bbox.xmin, 6) AS lon,
+        round({_DISTANCE_EXPR}, 0) AS distance_m
+    """
+    cols = [
+        "id", "name", "category", "basic_category", "operating_status",
+        "confidence", "brand", "has_website", "has_phone", "lat", "lon", "distance_m",
+    ]
+
+    # --- tier 2: names.common alternate spellings ---------------------
+    #
+    # names.common is an optional nested field probe_schema can't see (it
+    # only inspects top-level columns), so a dataset without it — or one
+    # whose `names` struct simply has no "common" key, like every fixture
+    # in this repo — fails the query itself at bind time. Caught and
+    # swallowed here, same convention as
+    # geocode._materialize_divisions_table's alt-name half: losing this
+    # tier is a much smaller loss than raising, so a miss falls straight
+    # through to tier 3 rather than failing the call.
+    with_clause, from_clause, dedup_filters = _dedup_rows_sql(
+        from_source, base_filters, has_recreation
+    )
+    folded_name = _fold_poi_name(name)
+    base_params = {k: v for k, v in params.items() if k != "name"}
+    alt_params = dict(base_params, _folded_name=folded_name)
+    alt_sql = f"""
+        {with_clause}
+        SELECT {select_cols}, _alt_spelling AS matched_alt
+        FROM {from_clause}, UNNEST(map_values(names.common)) AS _u(_alt_spelling)
+        WHERE {' AND '.join(dedup_filters)}
+          AND {_fold_poi_name_sql("_alt_spelling")} = $_folded_name
+        ORDER BY distance_m
+        LIMIT {limit}
+    """
+    try:
+        with trace.scan("places alt-name scan", bounded=True, source=from_clause), _conn_lock:
+            rows = _conn().execute(alt_sql, alt_params).fetchall()
+    except duckdb.Error:
+        rows = []
+    if rows:
+        results = [dict(zip([*cols, "matched_alt"], r)) for r in rows]
+        for d in results:
+            d["matched_by"] = "alt_name"
+            d.pop("matched_alt")
+        return results
+
+    # --- tier 3: fuzzy (jaro_winkler) on names.primary -----------------
+    #
+    # Bounded pool first (nearest _POI_FUZZY_POOL_SIZE within the same
+    # bbox/distance/category/attribute filters), THEN score similarity over
+    # that pool in SQL — never an unbounded scan. Empty when the query
+    # folds to the empty string, same guard as
+    # geocode._query_divisions_fuzzy and for the same reason: DuckDB scores
+    # jaro_winkler_similarity(name, '') above the threshold, which would
+    # otherwise answer a nonsense query with the nearest places, dressed up
+    # as spelling corrections.
+    if not folded_name:
+        return []
+    with_clause, from_clause, dedup_filters = _dedup_rows_sql(
+        from_source, base_filters, has_recreation
+    )
+    fuzzy_params = dict(base_params, _folded_name=folded_name)
+    # _dedup_rows_sql's with_clause (when the recreation layer is in play)
+    # already opens its own "WITH _candidate_rows AS (...)" — chaining a
+    # second CTE onto it is a comma, not a second WITH keyword. When there's
+    # no recreation layer, with_clause is "" and this pool CTE opens its own.
+    pool_cte = (
+        f"_pool AS MATERIALIZED ("
+        f"SELECT {select_cols}, names.primary AS _primary_name "
+        f"FROM {from_clause} WHERE {' AND '.join(dedup_filters)} "
+        f"ORDER BY distance_m LIMIT {_POI_FUZZY_POOL_SIZE})"
+    )
+    if with_clause:
+        pool_with_clause = f"{with_clause}, {pool_cte}"
+    else:
+        pool_with_clause = f"WITH {pool_cte}"
+    fuzzy_sql = f"""
+        {pool_with_clause}
+        SELECT {', '.join(cols)},
+               jaro_winkler_similarity({_fold_poi_name_sql('_primary_name')}, $_folded_name)
+                   AS similarity
+        FROM _pool
+        WHERE jaro_winkler_similarity({_fold_poi_name_sql('_primary_name')}, $_folded_name)
+              >= {_POI_FUZZY_SIMILARITY_THRESHOLD}
+        ORDER BY similarity DESC, distance_m
+        LIMIT {limit}
+    """
+    try:
+        with trace.scan("places fuzzy scan", bounded=True, source=from_clause), _conn_lock:
+            rows = _conn().execute(fuzzy_sql, fuzzy_params).fetchall()
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(str(e)) from e
+    results = [dict(zip([*cols, "similarity"], r)) for r in rows]
+    for d in results:
+        d["matched_by"] = "fuzzy"
+        d.pop("similarity")
+    return results
+
+
 def _expand_need_slugs(slugs: list[str]) -> list[str]:
     """Self plus bundled-taxonomy descendants, de-duplicated.
 
@@ -721,6 +900,18 @@ def find_places(
     tool can't answer at all without it), or UpstreamUnavailable if the
     remote scan fails after retries. Non-essential columns missing from the
     dataset come back as None in their field — see degraded_fields().
+
+    #373: when `name` is given and the literal ILIKE substring search comes
+    back empty, two fallback tiers run in order, both staying inside this
+    same bbox/category/attribute pruning (never an unbounded scan): a
+    names.common alternate-spelling match ("Munich" -> a place named
+    "München"), then a jaro_winkler fuzzy match over a bounded nearest-first
+    candidate pool ("Startbucks" -> "Starbucks"). Rows found either way
+    carry "matched_by": "alt_name" | "fuzzy" (absent on an ordinary tier-1
+    row) — a caller reading that field can tell a spelling correction from
+    a literal hit. names.common missing from the dataset silently skips the
+    alt-name tier; the fuzzy tier always runs (jaro_winkler is a built-in
+    DuckDB function).
     """
     # int() before interpolating into the SQL LIMIT clause: the MCP layer
     # already type-validates this arg, but the cast makes the query layer
@@ -731,15 +922,17 @@ def find_places(
     missing = set(_check_schema(upstream))
     bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(lat, lon, radius_m)
     from_source, has_recreation = _places_source(bbox)
-    filters = [bbox_filter, distance_filter]
-    filters.extend(_name_filter(missing, has_recreation))
-    filters.extend(_place_category_name_filters(missing, category, name, params))
-    filters.extend(
+    base_filters = [bbox_filter, distance_filter]
+    base_filters.extend(_name_filter(missing, has_recreation))
+    base_filters.extend(_place_category_name_filters(missing, category, None, params))
+    base_filters.extend(
         _place_attribute_filters(missing, min_confidence, operating_status, params)
     )
-    filters.extend(
+    base_filters.extend(
         _place_presence_filters(missing, brand, has_website, has_phone, params)
     )
+    name_filters = _place_category_name_filters(missing, None, name, params)
+    filters = base_filters + name_filters
 
     exprs = _place_select_exprs(missing)
     with_clause, from_clause, filters = _dedup_rows_sql(from_source, filters, has_recreation)
@@ -776,6 +969,16 @@ def find_places(
         "confidence", "brand", "has_website", "has_phone", "lat", "lon", "distance_m",
     ]
     results = [dict(zip(cols, r)) for r in rows]
+    if not results and name and "names" not in missing:
+        # #373: tier 1 (the ILIKE substring search above) found nothing —
+        # try the alt-name/fuzzy fallback tiers before giving up. Skipped
+        # outright when `name` wasn't given (nothing to fall back from) or
+        # "names" is missing from the dataset (tier 1 already degraded to
+        # a no-op in that case, and there's no primary/alternate name
+        # column to fall back to either).
+        results = _find_places_name_fallback(
+            from_source, base_filters, params, has_recreation, exprs, name, limit
+        )
     for d in results:
         _annotate_place(d)
     return results

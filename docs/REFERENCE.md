@@ -10,7 +10,7 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 
 | Tool | Answers |
 |---|---|
-| `find_places` | Named places near a point **or inside a named area / division polygon**, nearest first — filter by category, brand, confidence, operating status, or has-website / has-phone; each result carries a compact trust note |
+| `find_places` | Named places near a point **or inside a named area / division polygon**, nearest first — filter by category, brand, confidence, operating status, or has-website / has-phone; each result carries a compact trust note; a `name` filter with no literal match falls back to an alt-spelling then a typo-tolerant fuzzy match, tagging the row and noting the correction |
 | `summarize_area` | What's in an area: total places and top categories |
 | `compare_areas` | 2–5 areas side by side: category mix, density, and what differs most |
 | `within_distance` | Is the nearest matching place within N meters of a point? |
@@ -24,7 +24,7 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `water_near` | Water near a point, nearest first — is this waterfront, how far to the nearest river/canal/lake; filter by `subtype`/`water_class` |
 | `geocode` | Free-text place name → ranked candidates with coordinates and admin context (`geocode_batch` for many at once) |
 | `geocode_batch` | Many free-text place names → one best match each, one round-trip |
-| `resolve_place` | Free-text place reference → stable ids an agent can hold onto across turns |
+| `resolve_place` | Free-text place reference → stable ids an agent can hold onto across turns; a place name with no literal match falls back to `find_places`' alt-spelling/fuzzy tiers, same corrective note |
 | `resolve_place_batch` | Many GERS ids → compact place rows (batched `place_details`), one round-trip |
 | `reverse_geocode` | Point → nearest address plus its containing admin areas (`reverse_geocode_batch`) |
 | `reverse_geocode_batch` | Many points → nearest address plus containing admin areas, one round-trip |

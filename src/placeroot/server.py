@@ -307,6 +307,28 @@ def _with_category_hint(payload: dict, category: str | None, widen_hint: str) ->
     return payload
 
 
+def _with_name_fallback_note(payload: dict, name: str | None) -> dict:
+    """Add a non-fatal "note" when a result came from #373's alt-name/fuzzy
+    fallback tiers rather than a literal name match.
+
+    overture.find_places (and, through it, resolve_place) tags a fallback
+    row with "matched_by": "alt_name" | "fuzzy" but has no top-level object
+    of its own to carry a note on — this is where that note gets attached,
+    mirroring _with_category_hint's join-not-clobber convention so an
+    existing truncation/category note survives alongside it.
+    """
+    rows = payload.get("results") or []
+    fallback = next((r for r in rows if r.get("matched_by")), None)
+    if fallback is not None:
+        via = (
+            "an alternate spelling" if fallback["matched_by"] == "alt_name"
+            else "the closest spelling match"
+        )
+        hint = f"no exact match for name {name!r}; showing {fallback['name']!r} via {via}."
+        payload["note"] = "; ".join(filter(None, [payload.get("note"), hint]))
+    return payload
+
+
 def _resolve_named_place(query: str) -> dict:
     """A free-text name -> compact {name, lat, lon, id, type} or an error.
 
@@ -468,6 +490,14 @@ def find_places(
     no-op (not an error) if the column it needs (confidence /
     operating_status / brand / websites / phones) is absent from the active
     dataset — see degraded_fields() on the response.
+
+    name has two fallback tiers (point + radius mode only, #373) for when
+    the literal substring search finds nothing: an alternate-spelling match
+    ("Munich" -> a place named "München") then a typo-tolerant fuzzy match
+    ("Startbucks" -> "Starbucks"). A row found either way carries
+    "matched_by": "alt_name" | "fuzzy" (absent on an ordinary match), and a
+    top-level "note" names the spelling actually matched.
+
     Returns {"results": [...]}, plus truncated/omitted_count if the answer
     didn't fit the token budget. Returns a structured {"error": "bad_request",
     ...} if no mode's inputs are given (or more than one is), {"error":
@@ -551,6 +581,7 @@ def find_places(
     except overture.SchemaDegraded as e:
         return _schema_error(e)
     payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
+    payload = _with_name_fallback_note(payload, name)
     return _with_category_hint(payload, category, widen_hint="widen radius_m")
 
 
@@ -1267,10 +1298,12 @@ def resolve_place(
     Returns {"results": [{"id" (GERS), "kind": "division" | "place",
     "name", "lat", "lon", "match": "exact" | "prefix" | "substring" |
     "fuzzy", plus "admin_context" for a division or "category" for a
-    place}, ...]}, ranked by match tier then prominence ("fuzzy" — a
-    division reached by close spelling rather than by containing the query
-    at all, #215 — ranking below every literal match), budgeted like every
-    other tool.
+    place}, ...]}, ranked by match tier then prominence ("fuzzy" — reached
+    by close spelling rather than by containing the query at all, #215 for
+    divisions and #373 for places — ranking below every literal match).
+    A place found through #373's alt-spelling/typo fallback additionally
+    carries "matched_by": "alt_name" | "fuzzy", and a top-level "note"
+    names the spelling actually matched. Budgeted like every other tool.
     An unresolvable query returns {"results": []} — not an error. Returns a
     structured {"error": ...} instead of raising if the remote scan fails
     or the places dataset is missing columns this tool depends on.
@@ -1288,6 +1321,7 @@ def resolve_place(
     except overture.SchemaDegraded as e:
         return _schema_error(e)
     payload: dict = {"results": rows}
+    payload = _with_name_fallback_note(payload, query)
     if not rows and city is None and near_lat is None:
         # Machine-actionable instead of prose: the caller can retry without
         # parsing a sentence, and the thing it should add is the one thing
