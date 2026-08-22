@@ -1781,6 +1781,41 @@ def graph_is_cached(
     return True
 
 
+def isochrone_graph_is_cached(
+    lat: float,
+    lon: float,
+    minutes: float,
+    mode: str,
+    speed_m_s: float | None = None,
+    radius_m: float | None = None,
+) -> bool:
+    """True if isochrone(lat, lon, minutes, mode, ...) would reuse a cached graph.
+
+    Mirrors isochrone()'s own extraction-radius derivation (auto_radius,
+    capped at the mode's max_radius_m) so a caller can cheaply check "would
+    this need a cold build" without running the Dijkstra search itself —
+    issue #350's per-anchor confirm gate for suggest_areas. A bad mode or
+    non-finite/non-positive minutes is False, not an error (mirrors
+    graph_is_cached/route_graph_is_cached).
+    """
+    if mode not in MODE_CONFIG:
+        return False
+    if not _is_finite_number(lat) or not _is_finite_number(lon):
+        return False
+    if not _is_finite_number(minutes) or minutes <= 0:
+        return False
+    config = MODE_CONFIG[mode]
+    max_radius_m = config["max_radius_m"]
+    max_seconds = minutes * 60
+    const_speed = speed_m_s if speed_m_s is not None else config["default_speed_m_s"]
+    buffer_speed = const_speed if const_speed is not None else DRIVE_FASTEST_CLASS_SPEED_M_S
+    auto_radius = min(max_seconds * buffer_speed * RADIUS_BUFFER, max_radius_m)
+    extraction_radius = radius_m if radius_m is not None else auto_radius
+    if extraction_radius > max_radius_m:
+        return False
+    return graph_is_cached(lat, lon, mode, radius_m=extraction_radius, speed_m_s=speed_m_s)
+
+
 def route_graph_is_cached(
     from_lat: float,
     from_lon: float,

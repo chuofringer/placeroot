@@ -130,6 +130,12 @@ PROFILES: dict[str, frozenset[str]] = {
         "changes_in_area",
         # Same compose as core: a characterize-a-listing's-claims question.
         "verify_claims",
+        # The inverse of every other tool in this profile: instead of
+        # characterizing a named area, finds candidate areas from anchors +
+        # budgets + requirements (#350). Composes routing.isochrone,
+        # divisions_in_polygon, and score_locality — an analysis question
+        # ("where should I look"), not a search-for-a-named-thing one.
+        "suggest_areas",
     }),
     # Working on geometry the caller already has, and turning results into
     # something a human can look at.

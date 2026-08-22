@@ -32,6 +32,8 @@ from pydantic import ValidationError
 
 from placeroot import (
     addresses,
+    area_score,
+    area_suggest,
     budget,
     buildings,
     cache,
@@ -1195,6 +1197,274 @@ def travel_time_matrix(
     except routing.NoGraphNearby as e:
         return {"error": "no_graph_nearby", "detail": e.detail}
     return budget.apply_budget(result, "elements")
+
+
+def _anchor_summary(a: dict) -> dict:
+    return {"lat": a["lat"], "lon": a["lon"], "mode": a["mode"], "minutes": a["minutes"]}
+
+
+@_tool("Suggest areas")
+def suggest_areas(
+    anchors: list[dict],
+    requirements: list[str],
+    limit: int = 5,
+    confirm: bool = False,
+) -> dict:
+    """Where within reach: neighborhoods ranked by travel budget + amenities.
+
+    The inverse of every other area tool — instead of "describe this place",
+    "find me a place". anchors is 1-3 {"lat", "lon", "mode"?, "minutes"?}
+    points (mode: walk/cycle/drive, default from stored preferences;
+    minutes: default 15). requirements is 1-8 free-text amenity/character
+    strings, scored the same way as area_score.score_locality — "parks",
+    "groceries", "coffee shop" resolve against the Overture taxonomy;
+    a subjective phrase ("quiet streets", "safe neighborhood", "good
+    schools") comes back {"measurable": false} rather than a guessed score
+    (see "honesty" in the response).
+
+    Method: the same street-graph reach analysis behind PlaceRoot's other
+    travel-time tools computes each anchor's reachable shed; with more than
+    one anchor, the sheds are intersected (a candidate must be reachable
+    within EVERY anchor's own time budget, not just one — "office" and
+    "gym" both mean both). divisions.divisions_in_polygon (#348) partitions
+    the (intersected) shed into candidate neighborhoods/localities; each
+    candidate is scored against requirements the same way
+    area_score.score_locality (#349) does. Returns {"anchors": [...],
+    "results": [{"division_id", "name", "subtype", "overlap_fraction",
+    "lat", "lon", "travel": [{"anchor_idx", "mode", "minutes_budget",
+    "travel_time_min", "distance_m"} or {..., "note": "unroutable"/
+    "no_graph_nearby"/...}, ...], "requirements": [...], "overall_score",
+    "reason"}, ...], "honesty"}, ranked by overall_score (unmeasurable-only
+    candidates sort last, never dropped) then overlap_fraction, capped at
+    `limit` (1-10, default 5). division_id is a stable GERS id — chain a
+    result into admin_lookup or summarize_area for more detail without
+    re-running the search. No polygons in the response by default.
+
+    An empty "results" list is a valid answer (e.g. two anchors' sheds don't
+    overlap at all, or nothing in the reachable area is a neighborhood/
+    locality) with a "note" saying which. A per-anchor travel leg that can't
+    be routed (the polygon-approximated shed boundary occasionally includes
+    a point routing itself can't reach) gets "note" instead of a time,
+    without dropping the whole candidate.
+
+    confirm=true after the user agreed to wait for a first-time street-graph
+    build (about 5-25 seconds per anchor that needs one). Every anchor is
+    checked before any graph is built, so a fan-out never starts some
+    anchors and then stalls needing confirm on the next. Omit confirm
+    unless you just asked and they said yes.
+
+    Returns a structured {"error": "bad_request", ...} if anchors isn't 1-3
+    points, a point is missing/non-numeric lat, lon, or minutes, minutes is
+    not > 0, or a mode isn't walk/cycle/drive; likewise if requirements
+    isn't 1-8 non-empty strings. Propagates the same structured errors as
+    the underlying reach analysis (unsupported_mode, no_graph_nearby,
+    radius_too_large) and divisions_in_polygon/score_locality (upstream_unavailable,
+    schema_degraded) — a partial shortlist from a failed anchor or scan is
+    never returned.
+    """
+    if not isinstance(anchors, list) or not (1 <= len(anchors) <= area_suggest.MAX_ANCHORS):
+        got = len(anchors) if isinstance(anchors, list) else 0
+        return {
+            "error": "bad_request",
+            "detail": (
+                f"anchors must hold between 1 and {area_suggest.MAX_ANCHORS} points, got {got}"
+            ),
+        }
+    parsed_anchors: list[dict] = []
+    for idx, a in enumerate(anchors):
+        if not isinstance(a, dict):
+            return {"error": "bad_request", "detail": f"anchors[{idx}] must be an object"}
+        try:
+            alat, alon = float(a["lat"]), float(a["lon"])
+        except (KeyError, TypeError, ValueError) as e:
+            return {
+                "error": "bad_request",
+                "detail": f"anchors[{idx}]: needs numeric lat and lon: {e}",
+            }
+        coord_error = _invalid_coord(alat, alon)
+        if coord_error is not None:
+            coord_error["detail"] = f"anchors[{idx}]: {coord_error['detail']}"
+            return coord_error
+        mode = preference_store.resolve_mode(a.get("mode"), preference_store.DEFAULT_MODE_ISOCHRONE)
+        if mode not in routing.MODE_CONFIG:
+            return {
+                "error": "bad_request",
+                "detail": (
+                    f"anchors[{idx}]: mode must be one of "
+                    f"{sorted(routing.MODE_CONFIG)}, got {mode!r}"
+                ),
+                "supported": sorted(routing.MODE_CONFIG),
+            }
+        minutes = a.get("minutes", 15)
+        try:
+            minutes = float(minutes)
+        except (TypeError, ValueError):
+            return {
+                "error": "bad_request",
+                "detail": f"anchors[{idx}]: minutes must be numeric, got {minutes!r}",
+            }
+        if not math.isfinite(minutes) or minutes <= 0:
+            return {
+                "error": "bad_request",
+                "detail": f"anchors[{idx}]: minutes must be greater than 0",
+            }
+        parsed_anchors.append({"lat": alat, "lon": alon, "mode": mode, "minutes": minutes})
+
+    if not isinstance(requirements, list) or not requirements:
+        return {
+            "error": "bad_request",
+            "detail": "requirements must be a non-empty list of strings",
+        }
+    if len(requirements) > area_score.MAX_REQUIREMENTS:
+        return {
+            "error": "bad_request",
+            "detail": (
+                f"requirements accepts at most {area_score.MAX_REQUIREMENTS}, "
+                f"got {len(requirements)}"
+            ),
+        }
+    for req in requirements:
+        if not isinstance(req, str) or not req.strip():
+            return {
+                "error": "bad_request",
+                "detail": "every requirement must be a non-empty string",
+            }
+
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        return {"error": "bad_request", "detail": f"limit must be an integer, got {limit!r}"}
+    limit = max(area_suggest.MIN_LIMIT, min(limit, area_suggest.MAX_LIMIT))
+
+    # Same cheap-reject-before-any-build gate as meeting_point (#336): check
+    # every anchor before extracting any graph, so a multi-anchor call never
+    # builds anchor 0's graph and then stalls needing confirm on anchor 1.
+    if not confirm:
+        for a in parsed_anchors:
+            if not routing.isochrone_graph_is_cached(a["lat"], a["lon"], a["minutes"], a["mode"]):
+                return _needs_confirm_graph(a["mode"])
+
+    sheds = []
+    for idx, a in enumerate(parsed_anchors):
+        try:
+            iso = routing.isochrone(a["lat"], a["lon"], minutes=a["minutes"], mode=a["mode"])
+        except routing.UnsupportedMode as e:
+            return {
+                "error": "unsupported_mode",
+                "detail": e.detail,
+                "supported": sorted(routing.MODE_CONFIG),
+            }
+        except routing.UpstreamUnavailable as e:
+            return _upstream_error(e)
+        except routing.SchemaDegraded as e:
+            return _schema_error(e)
+        except routing.NoGraphNearby as e:
+            return {"error": "no_graph_nearby", "detail": f"anchors[{idx}]: {e.detail}"}
+        except routing.RadiusTooLarge as e:
+            return {
+                "error": "radius_too_large",
+                "detail": e.detail,
+                "max_radius_m": e.max_radius_m,
+            }
+        except ValueError as e:
+            return {"error": "bad_request", "detail": f"anchors[{idx}]: {e}"}
+        sheds.append(iso["polygon"])
+
+    parts = area_suggest.intersect_sheds(sheds)
+    anchor_payload = [_anchor_summary(a) for a in parsed_anchors]
+    if not parts:
+        note = (
+            "anchors' reachable sheds do not overlap at all within their given "
+            "time budgets"
+            if len(parsed_anchors) > 1
+            else "the reachable shed has no area to search"
+        )
+        return {"anchors": anchor_payload, "results": [], "note": note}
+
+    candidate_fetch = min(max(limit * 3, 10), overture.MAX_ROWS)
+    by_id: dict[str, dict] = {}
+    for part in parts:
+        try:
+            part_result = divisions.divisions_in_polygon(part, limit=candidate_fetch)
+        except overture.UpstreamUnavailable as e:
+            return _upstream_error(e)
+        except overture.SchemaDegraded as e:
+            return _schema_error(e)
+        except ValueError as e:
+            return {"error": "bad_request", "detail": str(e)}
+        for row in part_result["results"]:
+            existing = by_id.get(row["id"])
+            if existing is None or row["overlap_fraction"] > existing["overlap_fraction"]:
+                by_id[row["id"]] = row
+
+    if not by_id:
+        return {
+            "anchors": anchor_payload,
+            "results": [],
+            "note": "no neighborhood/locality divisions intersect the reachable area",
+        }
+
+    candidates = sorted(
+        by_id.values(), key=lambda r: r["overlap_fraction"], reverse=True
+    )[:candidate_fetch]
+
+    near_lat = sum(a["lat"] for a in parsed_anchors) / len(parsed_anchors)
+    near_lon = sum(a["lon"] for a in parsed_anchors) / len(parsed_anchors)
+
+    scored: list[dict] = []
+    for cand in candidates:
+        try:
+            score = area_score.score_locality(
+                requirements, division_id=cand["id"], near_lat=near_lat, near_lon=near_lon,
+            )
+        except area_score.LocalityNotFound:
+            continue
+        except overture.UpstreamUnavailable as e:
+            return _upstream_error(e)
+        except overture.SchemaDegraded as e:
+            return _schema_error(e)
+        except ValueError:
+            continue
+
+        loc = score["locality"]
+        travel = []
+        for anchor_idx, a in enumerate(parsed_anchors):
+            leg = _meeting_travel_time_for((a["lat"], a["lon"], a["mode"]), loc["lat"], loc["lon"])
+            entry = {"anchor_idx": anchor_idx, "mode": a["mode"], "minutes_budget": a["minutes"]}
+            if isinstance(leg, str):
+                entry["note"] = leg
+            else:
+                entry.update(leg)
+            travel.append(entry)
+
+        scored.append({
+            "division_id": cand["id"],
+            "name": cand["name"],
+            "subtype": cand["subtype"],
+            "overlap_fraction": cand["overlap_fraction"],
+            "lat": loc["lat"],
+            "lon": loc["lon"],
+            "travel": travel,
+            "requirements": score["requirements"],
+            "overall_score": score["overall_score"],
+            "reason": area_suggest.build_reason(score["requirements"]),
+        })
+
+    scored.sort(
+        key=lambda r: (
+            r["overall_score"] if r["overall_score"] is not None else -1.0,
+            r["overlap_fraction"],
+        ),
+        reverse=True,
+    )
+    payload = {
+        "anchors": anchor_payload,
+        "results": scored[:limit],
+        "honesty": area_score.HONESTY,
+    }
+    if not payload["results"]:
+        payload["note"] = "no candidate locality could be scored"
+    return budget.apply_budget(payload, "results")
 
 
 @_tool("Compare areas")
