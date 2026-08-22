@@ -8,6 +8,14 @@ fixing behavior is patch.
 
 ## [Unreleased]
 
+### Added
+- `travel_time_matrix`: routed travel time and distance between every
+  origin and every destination (up to 5x5) in one call, by mode — a shared
+  cached street graph with one Dijkstra per origin when the points fit one
+  extraction circle, a per-pair `route()` fallback when they don't.
+  Unroutable pairs come back as null cells with a note instead of failing
+  the matrix (#360).
+
 ### Fixed
 - `resolve_place` city-hint resolution prefers a locality/localadmin over a
   same-named region (so "Times Square New York" is not anchored on New York
