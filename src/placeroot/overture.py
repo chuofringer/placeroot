@@ -111,7 +111,17 @@ def set_data_path(
     two fixtures need to stay distinguishable by release; conversely a
     release-keyed override never answers a plain (no-release) query, so
     existing single-release callers are unaffected either way.
+
+    release requires type_: a release-keyed override without a type_ would
+    register under a key _upstream_glob() can never build (an explicit
+    release is only ever asked for alongside a theme+type), so it would be
+    silently ignored — raise instead.
     """
+    if release is not None and type_ is None:
+        raise ValueError(
+            "set_data_path(release=...) requires type_: a release-keyed "
+            "override without a type_ can never be looked up"
+        )
     key = _override_key(theme, type_, release)
     if path is None:
         _data_path_overrides.pop(key, None)
@@ -151,7 +161,7 @@ def _upstream_glob(theme: str = THEME, type_: str = "place", release_: str | Non
     # active right now" — diffing release A against release B needs both
     # gloms live at once, which resolve_release()'s single active-release
     # cache can't express.
-    if release_ is not None and not release._RELEASE_RE.match(release_):
+    if release_ is not None and not release._RELEASE_RE.fullmatch(release_):
         # release_ becomes a path/glob segment below (…/release_/theme=…),
         # so validate it the same way release.py validates
         # PLACEROOT_OVERTURE_RELEASE — a stray "../" or other junk here would
@@ -165,16 +175,28 @@ def _upstream_glob(theme: str = THEME, type_: str = "place", release_: str | Non
         # two different local fixtures — so a bare override must not capture
         # an explicit-release call, or the two fixtures couldn't be told
         # apart. Falls straight through to the live glob below when no
-        # release-keyed override is registered; it deliberately does NOT
-        # consult PLACEROOT_DATA_PATH[_<THEME>] either, since that env var
-        # names one single dataset (no release dimension of its own) — an
-        # explicit-release request bypasses it and reads straight from the
-        # upstream base at that release, which is the only way to honor
-        # "give me release X" when the env override doesn't know what
-        # release its own dataset is.
+        # release-keyed override is registered.
         keyed = _override_key(theme, type_, release_)
         if keyed in _data_path_overrides:
             return _data_path_overrides[keyed]
+        # A plain override/env pin (dataset_is_pinned) names one single
+        # dataset with no release dimension of its own, so it cannot answer
+        # "give me release X" for an arbitrary X — but it must not be
+        # silently bypassed either: on a pinned/air-gapped install that
+        # would send an explicit-release query straight to live S3, exactly
+        # what the pin exists to prevent. So: when the requested release IS
+        # the one the deployment resolves to, the pinned dataset is that
+        # release's data — serve it; for any other release, raise rather
+        # than silently going upstream.
+        if dataset_is_pinned(theme, type_):
+            if release_ == release.resolve_release():
+                return _upstream_glob(theme, type_)
+            raise UpstreamUnavailable(
+                f"no dataset for release {release_} in this deployment: "
+                f"{theme}/{type_} is pinned to a local dataset "
+                f"(PLACEROOT_DATA_PATH or an override) that serves release "
+                f"{release.resolve_release()} only"
+            )
         return f"{_upstream_base()}/{release_}/theme={theme}/type={type_}/*"
     specific_key = _override_key(theme, type_)
     if specific_key in _data_path_overrides:

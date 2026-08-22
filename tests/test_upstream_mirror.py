@@ -104,6 +104,10 @@ def test_invalid_release_string_raises_value_error():
         overture.upstream_glob("places", "place", release="../etc/passwd")
     with pytest.raises(ValueError):
         overture._upstream_glob("places", "place", release_="not-a-release")
+    # fullmatch, not match: ^...$ with .match() would accept a trailing
+    # newline, which would flow straight into an S3 glob (#378).
+    with pytest.raises(ValueError):
+        overture.upstream_glob("places", "place", release="2026-07-22.0\n")
 
 
 def test_per_release_fixture_override_wins_over_the_live_glob(tmp_path):
@@ -122,31 +126,60 @@ def test_per_release_fixture_override_wins_over_the_live_glob(tmp_path):
         overture.set_data_path(None, "places", "place", release="2026-08-19.0")
 
 
-def test_theme_only_override_does_not_capture_an_explicit_release_call(tmp_path):
-    """A plain (release-less) theme:type_ override exists for single-release
-    call sites; it must not silently answer an explicit-release query, or
-    two 'releases' pointed at two fixtures via the release-keyed override
-    could never be told apart from a bare one."""
+def test_theme_only_override_serves_only_its_own_release(monkeypatch, tmp_path):
+    """A plain (release-less) theme:type_ override pins one dataset — the
+    resolved release's data. An explicit-release query for THAT release is
+    served from it (the pin must not be silently bypassed toward live S3);
+    a query for any OTHER release raises rather than reaching upstream —
+    the pinned deployment has no dataset for it."""
+    monkeypatch.setenv("PLACEROOT_OVERTURE_RELEASE", "2026-07-22.0")
     fixture = tmp_path / "fixture.parquet"
     overture.set_data_path(str(fixture), "places", "place")
     try:
         glob = overture.upstream_glob("places", "place", release="2026-07-22.0")
-        assert glob != str(fixture)
-        assert glob == "s3://overturemaps-us-west-2/release/2026-07-22.0/theme=places/type=place/*"
+        assert glob == str(fixture)
+        with pytest.raises(overture.UpstreamUnavailable, match="2026-08-19.0"):
+            overture.upstream_glob("places", "place", release="2026-08-19.0")
     finally:
         overture.set_data_path(None, "places", "place")
 
 
-def test_explicit_release_bypasses_the_plain_data_path_env_override(monkeypatch, tmp_path):
-    """PLACEROOT_DATA_PATH names one single dataset with no release
-    dimension of its own, so it cannot answer "give me release X" — an
-    explicit-release query bypasses it and reads straight from the upstream
-    base at that release instead."""
+def test_explicit_release_honors_the_plain_data_path_env_pin(monkeypatch, tmp_path):
+    """PLACEROOT_DATA_PATH pins the deployment to one dataset (the resolved
+    release's). An explicit-release query must not silently reach live S3
+    on such an install: the resolved release is served from the pin, any
+    other release is a clear error (#378)."""
     overture.set_data_path(None, "places", "place")
+    monkeypatch.setenv("PLACEROOT_OVERTURE_RELEASE", "2026-07-22.0")
     monkeypatch.setenv("PLACEROOT_DATA_PATH", str(tmp_path / "env_fixture.parquet"))
     monkeypatch.delenv("PLACEROOT_UPSTREAM_BASE", raising=False)
     glob = overture.upstream_glob("places", "place", release="2026-07-22.0")
-    assert glob == "s3://overturemaps-us-west-2/release/2026-07-22.0/theme=places/type=place/*"
+    assert glob == str(tmp_path / "env_fixture.parquet")
+    with pytest.raises(overture.UpstreamUnavailable, match="no dataset for release"):
+        overture.upstream_glob("places", "place", release="2026-08-19.0")
+
+
+def test_release_keyed_override_still_wins_over_a_bare_pin(monkeypatch, tmp_path):
+    """The release-keyed override is checked before the pin logic, so a test
+    pointing two 'releases' at two fixtures keeps working even when a bare
+    theme:type_ override is also registered."""
+    monkeypatch.setenv("PLACEROOT_OVERTURE_RELEASE", "2026-07-22.0")
+    bare = tmp_path / "bare.parquet"
+    keyed = tmp_path / "keyed.parquet"
+    overture.set_data_path(str(bare), "places", "place")
+    overture.set_data_path(str(keyed), "places", "place", release="2026-08-19.0")
+    try:
+        assert overture.upstream_glob("places", "place", release="2026-08-19.0") == str(keyed)
+    finally:
+        overture.set_data_path(None, "places", "place")
+        overture.set_data_path(None, "places", "place", release="2026-08-19.0")
+
+
+def test_set_data_path_release_without_type_raises():
+    """A release-keyed override without a type_ registers a key
+    _upstream_glob can never build — silently ignored, so it raises."""
+    with pytest.raises(ValueError, match="type_"):
+        overture.set_data_path("/tmp/x.parquet", "places", release="2026-07-22.0")
 
 
 # --- Endpoint/region wiring into the DuckDB connection --------------------
