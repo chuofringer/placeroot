@@ -24,6 +24,21 @@ releases.
 | `buildings` | `summarize_buildings`, `buildings_at`, `gers_lookup` | Mixed per-feature (OSM/ODbL, Esri/Microsoft ML footprints, others) | Check the `sources` array on results you redistribute |
 | `base` (land use, water, infrastructure) | `land_use_at`, `water_near`, `infrastructure_at` | Substantially OSM-derived: **ODbL 1.0** | Same as `divisions` |
 
+## Elevation (not Overture)
+
+`elevation_at` is the one tool that doesn't read the Overture release at
+all: it reads the [Copernicus GLO-30 DEM](https://registry.opendata.aws/copernicus-dem/)
+directly from its own AWS Open Data bucket (`s3://copernicus-dem-30m`,
+public and keyless). The data is © DLR/ESA, licensed for free reuse
+(including commercial) under the
+[Copernicus data terms](https://spacedata.copernicus.eu/data-offer/lp-vertigo/data-terms),
+which ask for attribution:
+
+> Copernicus DEM © DLR/ESA, accessed via AWS Open Data.
+
+This is separate from — and does not carry — the ODbL/CDLA obligations
+above, since it isn't OSM- or Overture-derived data.
+
 ## The optional recreation layer
 
 `PLACEROOT_RECREATION_LAYER` (see [RECREATION.md](RECREATION.md)) makes the
