@@ -148,6 +148,10 @@
       "description": "Route: shortest-path distance and duration between two points, by mode."
     },
     {
+      "name": "elevation_at",
+      "description": "Ground elevation in meters at a point, from Copernicus GLO-30 (~30 m resolution)."
+    },
+    {
       "name": "gers_lookup",
       "description": "Resolve any GERS id to its entity \u2014 place, division, or building \u2014 across Overture themes."
     },

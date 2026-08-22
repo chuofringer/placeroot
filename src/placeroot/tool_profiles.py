@@ -90,6 +90,10 @@ PROFILES: dict[str, frozenset[str]] = {
         "optimize_route",
         # Named-place compose over route().
         "from_to",
+        # Ground elevation at a point (#358) — routing comfort ("is this
+        # walk hilly", "how high is the pass"), not a street-graph query,
+        # but the same "getting between points" family this profile is.
+        "elevation_at",
     }),
     # Characterizing an area rather than locating a thing in it.
     "analysis": frozenset({
