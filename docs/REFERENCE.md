@@ -78,7 +78,7 @@ PlaceRoot also speaks the MCP 2026-07-28 revision's listing cache hints:
 `tools/list` (and the prompt and resource listings) come back with
 `ttlMs: 86400000` and `cacheScope: "public"`. The listings are frozen at build
 time — nothing at runtime can change them — so a client is free to reuse them
-for a day instead of re-reading a ~23.2k-token schema surface every session.
+for a day instead of re-reading a ~23.4k-token schema surface every session.
 Clients that speak an older revision are unaffected: those fields did not exist
 before 2026-07-28, and the response they get is byte-identical to what it was.
 
@@ -142,8 +142,8 @@ without them registered.
 
 ## Loading fewer tools (`PLACEROOT_TOOLS`)
 
-All 41 tool schemas cost roughly **23.2k tokens** of every conversation's
-context, paid before the agent asks anything — about the cost of 112 median
+All 41 tool schemas cost roughly **23.4k tokens** of every conversation's
+context, paid before the agent asks anything — about the cost of 113 median
 answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS`
 selects which tools get registered. Unselected tools are never registered and
 never appear in `tools/list`.
@@ -165,11 +165,11 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 41 | ~23,192 | — |
-| `search` | 15 | ~7,340 | 68% |
+| unset / `all` (default) | 41 | ~23,427 | — |
+| `search` | 15 | ~7,340 | 69% |
 | `core` | 17 | ~9,801 | 58% |
-| `routing` | 11 | ~6,628 | 71% |
-| `analysis` | 13 | ~6,832 | 71% |
+| `routing` | 11 | ~6,735 | 71% |
+| `analysis` | 13 | ~6,960 | 70% |
 | `geometry` | 5 | ~2,435 | 90% |
 | `progressive` | 4 (all 41 reachable) | ~866 | 95% |
 
@@ -178,14 +178,14 @@ union of everything named:
 - **`routing`** — `route`, `from_to`, `isochrone`, `distance_matrix`, `travel_time_matrix`, `within_distance`, `optimize_route`.
 - **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`, `neighborhood_verdict`.
 - **`geometry`** — `simplify_geometry`, `render_map`.
-- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 41 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 23.2k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
+- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 41 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 23.4k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 - **`geometry`** — `simplify_geometry`, `render_map`, `geometry_op`.
-- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 41 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 23.2k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
-| unset / `all` (default) | 41 | ~23,192 | — |
-| `search` | 15 | ~7,340 | 68% |
+- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 41 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 23.4k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
+| unset / `all` (default) | 41 | ~23,427 | — |
+| `search` | 15 | ~7,340 | 69% |
 | `core` | 17 | ~9,801 | 58% |
-| `routing` | 11 | ~6,628 | 71% |
-| `analysis` | 13 | ~6,832 | 71% |
+| `routing` | 11 | ~6,735 | 71% |
+| `analysis` | 13 | ~6,960 | 70% |
 | `geometry` | 5 | ~2,435 | 90% |
 | `progressive` | 4 (all 41 reachable) | ~866 | 95% |
 
@@ -194,7 +194,7 @@ union of everything named:
 - **`routing`** — `route`, `from_to`, `isochrone`, `distance_matrix`, `within_distance`, `optimize_route`.
 - **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`, `neighborhood_verdict`, `verify_claims`.
 - **`geometry`** — `simplify_geometry`, `render_map`.
-- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 41 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 23.2k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
+- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 41 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 23.4k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 
 `data_version` and `preferences` are registered under every profile.
 `data_version` is ~230 tokens and the only way an agent can tell which
