@@ -88,6 +88,9 @@ PROFILES: dict[str, frozenset[str]] = {
         "route",
         "isochrone",
         "distance_matrix",
+        # Routed counterpart to distance_matrix, over the same street
+        # graph route() uses.
+        "travel_time_matrix",
         "within_distance",
         # Multi-stop ordering over the same street graph route() uses.
         "optimize_route",

@@ -64,6 +64,10 @@
       "description": "Straight-line (great-circle) distance in meters between every origin and destination."
     },
     {
+      "name": "travel_time_matrix",
+      "description": "Routed travel time and distance between every origin and destination, by mode."
+    },
+    {
       "name": "compare_areas",
       "description": "Compare 2-5 areas side by side: category mix, density, and what differs."
     },
