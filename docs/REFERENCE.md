@@ -12,7 +12,7 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 |---|---|
 | `find_places` | Named places near a point **or inside a named area / division polygon**, nearest first — filter by category, brand, confidence, operating status, or has-website / has-phone; each result carries a compact trust note |
 | `summarize_area` | What's in an area: total places and top categories |
-| `compare_areas` | 2–5 areas side by side: category mix, density, and what differs most |
+| `compare_areas` | 2–5 areas side by side: category mix, density, and what differs most — optional weighted `priorities` add a scored verdict with reasons |
 | `within_distance` | Is the nearest matching place within N meters of a point? |
 | `distance_matrix` | Straight-line distances between many origins and destinations at once |
 | `place_details` | One place in full: addresses, contacts, brand, sources, confidence, and a compact before-you-go trust note |

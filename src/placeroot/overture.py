@@ -638,7 +638,7 @@ def _expand_need_slugs(slugs: list[str]) -> list[str]:
 
 
 def _place_categories_or_filter(
-    missing: set[str], slugs: list[str], params: dict
+    missing: set[str], slugs: list[str], params: dict, prefix: str = "cat"
 ) -> list[str]:
     """OR of several category slugs — exact / hierarchy, never substring.
 
@@ -647,6 +647,10 @@ def _place_categories_or_filter(
     driving_school. Each need slug is expanded to {self + descendants}
     via the bundled taxonomy, then matched by equality on
     basic_category / taxonomy.primary or list_contains on alternates.
+
+    prefix namespaces the bound parameter names so several calls (one per
+    counted category, as _count_places_by_category makes) can share one
+    params dict without colliding.
     """
     clauses = []
     for i, slug in enumerate(_expand_need_slugs(slugs)):
@@ -655,14 +659,14 @@ def _place_categories_or_filter(
         parts = []
         exact = slug.lower()
         if "basic_category" not in missing:
-            parts.append(f"lower(basic_category) = $cat{i}_exact")
+            parts.append(f"lower(basic_category) = ${prefix}{i}_exact")
         if "taxonomy" not in missing:
-            parts.append(f"lower(taxonomy.primary) = $cat{i}_exact")
-            parts.append(f"list_contains(taxonomy.alternates, $cat{i}_raw)")
+            parts.append(f"lower(taxonomy.primary) = ${prefix}{i}_exact")
+            parts.append(f"list_contains(taxonomy.alternates, ${prefix}{i}_raw)")
         if parts:
             clauses.append(f"({' OR '.join(parts)})")
-            params[f"cat{i}_exact"] = exact
-            params[f"cat{i}_raw"] = slug
+            params[f"{prefix}{i}_exact"] = exact
+            params[f"{prefix}{i}_raw"] = slug
     if not clauses:
         return []
     return [f"({' OR '.join(clauses)})"]
@@ -1677,7 +1681,164 @@ def within_distance(
     }
 
 
-def compare_areas(areas: list[tuple[float, float]], radius_m: float = 1000) -> dict:
+def _count_places_by_category(
+    lat: float, lon: float, radius_m: float, categories: list[str]
+) -> dict[str, int] | None:
+    """Counts of places within radius_m of (lat, lon), one per category.
+
+    One scan per area for all counted categories at once via
+    count(*) FILTER (issue #354) rather than one full parquet scan per
+    (area x category). Category matching is exact / hierarchy via
+    _place_categories_or_filter, never substring ILIKE — "park" must not
+    count parking garages, "bank" must not count food banks. Unnamed
+    places are counted (no _name_filter) so these counts describe the
+    same population as summarize_area's category_counts in the same
+    compare_areas response.
+
+    Returns None when the category predicates can't be built at all (both
+    basic_category and taxonomy degraded/missing) — an unfiltered count
+    of every place in the radius would fabricate a confident verdict.
+    """
+    if not categories:
+        return {}
+    upstream = _upstream_glob()
+    missing = set(_check_schema(upstream))
+    bbox_filter, distance_filter, params, bbox, _effective_radius_m = area_geometry(
+        lat, lon, radius_m
+    )
+    from_source, has_recreation = _places_source(bbox)
+    filters = [bbox_filter, distance_filter]
+    predicates = []
+    for j, category in enumerate(categories):
+        pred = _place_categories_or_filter(missing, [category], params, prefix=f"p{j}cat")
+        if not pred:
+            return None
+        predicates.append(pred[0])
+    with_clause, from_clause, filters = _dedup_rows_sql(from_source, filters, has_recreation)
+    select_list = ", ".join(
+        f"count(*) FILTER (WHERE {pred}) AS c{j}" for j, pred in enumerate(predicates)
+    )
+    sql = f"""
+        {with_clause}
+        SELECT {select_list} FROM {from_clause}
+        WHERE {" AND ".join(filters)}
+    """
+    try:
+        with _conn_lock:
+            row = _conn().execute(sql, params).fetchone()
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(str(e)) from e
+    return {c: (row[j] if row else 0) for j, c in enumerate(categories)}
+
+
+# Special priority category value: measure overall place density instead of
+# a single category's count — a foot-traffic proxy (see _build_verdict's
+# measured_note), not a measurement of actual foot traffic.
+DENSITY_PRIORITY_CATEGORY = "__density__"
+
+
+def _extreme_idx(values: list[float], pick_max: bool) -> int | None:
+    """Index of the single max (or min) value, or None if it's tied."""
+    target = max(values) if pick_max else min(values)
+    idxs = [i for i, v in enumerate(values) if v == target]
+    return idxs[0] if len(idxs) == 1 else None
+
+
+def _priority_reason(label: str, prefer: str, measures: list[float], winner_idx: int | None) -> str:
+    measures_str = ", ".join(f"area {i}={m:g}" for i, m in enumerate(measures))
+    if winner_idx is None:
+        return f"{label}: {measures_str} — tied, no winner for this criterion."
+    verb = "more" if prefer == "more" else "fewer"
+    return f"{label}: {measures_str} — area {winner_idx} wins ({verb} is better)."
+
+
+def _build_verdict(
+    areas: list[tuple[float, float]],
+    per_area: list[dict],
+    radius_m: float,
+    priorities: list[dict],
+) -> dict:
+    """Weighted verdict across priorities (issue #304).
+
+    Per priority: raw measure = category count (or density for
+    "__density__") within radius_m; per-priority winner is whoever's
+    better on that raw measure, ties get no winner. Per-area score = sum
+    of weight * normalized share against the best area — measure/max for
+    prefer="more", min/measure for prefer="fewer" — so the best area on a
+    priority always gets share 1.0; when every area measures 0 all shares
+    are 1.0 (equally tied). Overall winner is the highest score; a tie
+    leaves winner_idx null.
+
+    Category counts are made honestly or not at all: when the dataset's
+    category columns are all degraded (see _count_places_by_category) a
+    count-based priority can't be measured, and the verdict comes back
+    with winner_idx/scores null and "degraded": True instead of scoring
+    every place in the radius as if it matched (issue #354).
+    """
+    n = len(areas)
+    count_categories = list(dict.fromkeys(
+        p["category"] for p in priorities if p["category"] != DENSITY_PRIORITY_CATEGORY
+    ))
+    counts_per_area = [
+        _count_places_by_category(lat, lon, radius_m, count_categories)
+        for lat, lon in areas
+    ]
+    if any(counts is None for counts in counts_per_area):
+        return {
+            "winner_idx": None,
+            "scores": None,
+            "reasons": [],
+            "degraded": True,
+            "measured_note": (
+                "The active dataset's category columns are degraded/missing, "
+                "so the count-based priorities cannot be measured and no "
+                "verdict was scored — an unfiltered place count would have "
+                "fabricated one."
+            ),
+        }
+    reasons = []
+    totals = [0.0] * n
+    for p in priorities:
+        label, category, prefer, weight = p["label"], p["category"], p["prefer"], p["weight"]
+        if category == DENSITY_PRIORITY_CATEGORY:
+            measures = [per_area[i]["density_per_km2"] for i in range(n)]
+        else:
+            measures = [counts_per_area[i][category] for i in range(n)]
+        winner_idx = _extreme_idx(measures, pick_max=(prefer == "more"))
+        if prefer == "more":
+            max_val = max(measures)
+            shares = [1.0 if max_val == 0 else m / max_val for m in measures]
+        else:
+            min_val = min(measures)
+            shares = [1.0 if m == min_val else min_val / m for m in measures]
+        for i in range(n):
+            totals[i] += weight * shares[i]
+        reasons.append(_priority_reason(label, prefer, measures, winner_idx))
+
+    scores = [round(t, 3) for t in totals]
+    verdict = {
+        "winner_idx": _extreme_idx(scores, pick_max=True),
+        "scores": scores,
+        "reasons": reasons,
+        "measured_note": (
+            "Priority scores are built from open-data place counts (or place "
+            'density for "__density__") near each area\'s center — not '
+            "revenue, rent, actual foot traffic, or demographics. "
+            '"__density__" is a foot-traffic proxy, not a measurement of '
+            "real foot traffic."
+        ),
+    }
+    if n > 1:
+        top_two = sorted(scores, reverse=True)[:2]
+        verdict["margin"] = round(top_two[0] - top_two[1], 3)
+    return verdict
+
+
+def compare_areas(
+    areas: list[tuple[float, float]],
+    radius_m: float = 1000,
+    priorities: list[dict] | None = None,
+) -> dict:
     """Side-by-side category mix for 2-5 area centers sharing one radius_m.
 
     Reuses summarize_area per area, then aligns counts across areas for the
@@ -1685,6 +1846,11 @@ def compare_areas(areas: list[tuple[float, float]], radius_m: float = 1000) -> d
     area, and flags the categories with the largest relative difference
     between areas ("differentiators") — the most useful signal for "how is
     area A different from area B."
+
+    priorities (issue #304), if given, is a list of already-validated
+    {"label", "category", "prefer": "more"|"fewer", "weight"} dicts (see
+    server.compare_areas for the input contract and validation) and adds a
+    "verdict" key scoring the areas against them — see _build_verdict.
 
     Raises ValueError if areas isn't 2-5 centers. Propagates
     SchemaDegraded/UpstreamUnavailable from the first area whose
@@ -1726,8 +1892,11 @@ def compare_areas(areas: list[tuple[float, float]], radius_m: float = 1000) -> d
         })
     differentiators.sort(key=lambda d: d["relative_difference"], reverse=True)
 
-    return {
+    result = {
         "areas": per_area,
         "categories": top_categories,
         "differentiators": differentiators,
     }
+    if priorities:
+        result["verdict"] = _build_verdict(areas, per_area, effective_radius_m, priorities)
+    return result
