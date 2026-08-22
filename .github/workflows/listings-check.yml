@@ -1,0 +1,93 @@
+name: Listings Check
+
+# Quarterly maintenance rule from #254: "Listing once and drifting is the
+# failure mode." Once a listing exists, nothing forces it to stay correct —
+# the page can 404, the registry entry can go stale behind a release, or the
+# one-line install command can quietly stop working. This probes the
+# listings #254 actually landed and the install path they all point at, then
+# files (or refreshes) an issue when any of them drift.
+#
+# Checked:
+#   - official MCP registry entry (io.github.chuofringer/placeroot) resolves
+#     and its latest published version is not older than this repo's
+#   - https://glama.ai/mcp/servers/chuofringer/placeroot resolves (tier-2
+#     aggregator pickup)
+#   - https://placeroot.dev/why-placeroot resolves (motivation page)
+#   - https://placeroot.dev resolves (the site)
+#   - the published install command (uvx placeroot) actually runs
+#
+# The issue is opened, refreshed AND closed from here, same as the Overture
+# canary: a watch nobody has to tidy up by hand is one that keeps being
+# trusted.
+on:
+  schedule:
+    # 1st of Jan/Apr/Jul/Oct, 09:23 UTC — offset to dodge cron rushes
+    - cron: '23 9 1 1,4,7,10 *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  listings-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CHECK_TITLE: 'Quarterly listings check failed'
+      GH_TOKEN: ${{ github.token }}
+      # gh infers the repo from the checkout; naming it here keeps the issue
+      # steps working even when the failure being reported is the checkout.
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d  # v10.0.0
+        with:
+          enable-cache: true
+
+      - name: Run the listings check
+        id: check
+        run: |
+          set -o pipefail
+          bash scripts/check_listings.sh | tee listings-report.md
+
+      - name: Find the open listings-check issue
+        id: existing
+        if: ${{ !cancelled() }}
+        run: |
+          NUMBER=$(gh issue list --state open --limit 100 \
+            --search "in:title \"$CHECK_TITLE\"" --json number,title \
+            | jq -r --arg t "$CHECK_TITLE" '[.[] | select(.title == $t)] | .[0].number // empty')
+          echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Open or refresh the listings-check issue
+        if: ${{ !cancelled() && (steps.check.conclusion == 'failure' || steps.check.conclusion == '') }}
+        env:
+          EXISTING: ${{ steps.existing.outputs.number }}
+        run: |
+          if [ -s listings-report.md ]; then
+            BODY="$(cat listings-report.md)"
+          else
+            BODY="The check produced no report: it failed before probing anything (checkout, uv setup, or an unhandled error in scripts/check_listings.sh). This is an infrastructure failure, not a finding about any listing — the quarterly listings watch did NOT run this cycle."
+          fi
+          # printf, not a literal newline in the source: an un-indented
+          # continuation line would terminate this block scalar mid-script.
+          BODY="$(printf '%s\n\nWorkflow run: %s\n' "$BODY" "$RUN_URL")"
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create --title "$CHECK_TITLE" --label bug --body "$BODY"
+          fi
+
+      - name: Close the listings-check issue once the run is clean
+        if: ${{ !cancelled() && steps.check.conclusion == 'success' && steps.existing.outputs.number != '' }}
+        env:
+          EXISTING: ${{ steps.existing.outputs.number }}
+        run: |
+          COMMENT="$(printf '%s\n\nWorkflow run: %s\n' \
+            "Listings check is clean again: every watched listing resolves, the registry entry is not behind the repo's version, and the published install command still works." \
+            "$RUN_URL")"
+          gh issue close "$EXISTING" --comment "$COMMENT"
