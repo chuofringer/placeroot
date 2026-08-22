@@ -379,6 +379,180 @@ def test_export_report_empty_payload(tmp_path):
     assert not _EXTERNAL_REF_RE.search(doc)
 
 
+# --- shape style roles, labels, callouts (#368) -----------------------------
+
+_OUTER_RING = [
+    [CENTER_LON - 0.01, CENTER_LAT - 0.01],
+    [CENTER_LON + 0.01, CENTER_LAT - 0.01],
+    [CENTER_LON + 0.01, CENTER_LAT + 0.01],
+    [CENTER_LON - 0.01, CENTER_LAT + 0.01],
+    [CENTER_LON - 0.01, CENTER_LAT - 0.01],
+]
+
+
+def _polygon_feature(props: dict) -> dict:
+    return {
+        "type": "Feature",
+        "properties": props,
+        "geometry": {"type": "Polygon", "coordinates": [_OUTER_RING]},
+    }
+
+
+def test_shed_role_gets_dashed_low_opacity_fill_styling(tmp_path):
+    payload = {"features": [_polygon_feature({"name": "5-min shed", "role": "shed"})]}
+    result = mapview.export_report(payload, title="Shed", out_dir=tmp_path)
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    _parse(doc)
+    assert "role-shed" in doc
+    assert "fill-opacity: 0.15" in doc
+    assert "stroke-dasharray" in doc
+    data = _embedded_data(doc)
+    assert data["shapes"][0]["role"] == "shed"
+
+
+def test_outline_role_gets_no_fill_strong_edge_styling(tmp_path):
+    payload = {"features": [_polygon_feature({"name": "Compared area", "role": "outline"})]}
+    result = mapview.export_report(payload, title="Outline", out_dir=tmp_path)
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    _parse(doc)
+    assert "role-outline" in doc
+    assert ".shape-polygon.role-outline { fill: none;" in doc
+    data = _embedded_data(doc)
+    assert data["shapes"][0]["role"] == "outline"
+
+
+def test_unknown_role_falls_back_to_default_style_silently(tmp_path):
+    payload = {"features": [_polygon_feature({"name": "Mystery", "role": "sparkle"})]}
+    result = mapview.export_report(payload, title="Unknown role", out_dir=tmp_path)
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    _parse(doc)
+    assert "role-sparkle" not in doc
+    data = _embedded_data(doc)
+    # Not carried onto the render entry at all — same envelope as no role.
+    assert "role" not in data["shapes"][0]
+    assert result["features_rendered"] == 1
+    assert result["skipped_features"] == 0
+
+
+def test_undecorated_shape_is_unchanged_by_role_label_callout_support(tmp_path):
+    """No regression (#368): a shape with no role/label/callout still
+    serializes to exactly today's shape dict and default styling."""
+    payload = {"features": [_polygon_feature({"name": "Plain park"})]}
+    result = mapview.export_report(payload, title="Plain", out_dir=tmp_path)
+    assert set(result) == {"path", "bytes", "features_rendered", "skipped_features"}
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    data = _embedded_data(doc)
+    assert len(data["shapes"]) == 1
+    assert data["shapes"][0] == {
+        "kind": "polygon",
+        "name": "Plain park",
+        "props": {"name": "Plain park"},
+        "rings": [_OUTER_RING],
+    }
+    assert "role-" not in doc.split("<style>", 1)[1].split("</style>", 1)[0].replace(
+        ".role-shed", ""
+    ).replace(".role-outline", "")
+
+
+def test_shape_label_and_callout_rendered_as_data_not_html(tmp_path):
+    payload = {
+        "features": [
+            _polygon_feature(
+                {
+                    "name": "Walkshed",
+                    "role": "shed",
+                    "label": "15-min shed",
+                    "callout": "Covers the whole block",
+                }
+            )
+        ]
+    }
+    result = mapview.export_report(payload, title="Labeled shed", out_dir=tmp_path)
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    _parse(doc)
+    data = _embedded_data(doc)
+    assert data["shapes"][0]["label"] == "15-min shed"
+    assert data["shapes"][0]["callout"] == "Covers the whole block"
+    # Rendered via textContent in JS (same convention as marker names, #34),
+    # not spliced into server-rendered HTML markup.
+    assert "shape-label-name" in doc
+    assert "shape-label-callout" in doc
+
+
+def test_shape_label_and_callout_cannot_break_out_of_script_tag(tmp_path):
+    payload = {
+        "features": [
+            _polygon_feature(
+                {
+                    "name": "Danger",
+                    "label": "</script><script>alert(1)</script>",
+                    "callout": "</script><script>alert(2)</script>",
+                }
+            )
+        ]
+    }
+    result = mapview.export_report(payload, title="XSS shape", out_dir=tmp_path)
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    assert "</script><script>alert(1)</script>" not in doc
+    assert "</script><script>alert(2)</script>" not in doc
+    data = _embedded_data(doc)
+    assert "<script>" in data["shapes"][0]["label"]  # carried as data, not stripped
+
+
+def test_shape_label_and_callout_truncated_at_caps(tmp_path):
+    long_label = "x" * 60
+    long_callout = "y" * 120
+    payload = {
+        "features": [
+            _polygon_feature(
+                {"name": "Shed A", "role": "shed", "label": long_label, "callout": long_callout}
+            )
+        ]
+    }
+    result = mapview.export_report(payload, title="Cap test", out_dir=tmp_path)
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    data = _embedded_data(doc)
+    label = data["shapes"][0]["label"]
+    callout = data["shapes"][0]["callout"]
+    assert len(label) == mapview.SHAPE_LABEL_MAX_CHARS + 1  # +1 for the ellipsis
+    assert label.endswith("…")
+    assert long_label not in doc
+    assert len(callout) == mapview.SHAPE_CALLOUT_MAX_CHARS + 1
+    assert callout.endswith("…")
+    assert long_callout not in doc
+
+
+def test_draw_order_sheds_render_before_outlines_and_points(tmp_path):
+    doc = mapview.render_html([], title="Order")
+    shapes_idx = doc.index('id="shapes"')
+    markers_idx = doc.index('id="markers"')
+    assert shapes_idx < markers_idx
+    # The shapes group is drawn before the markers group (points never get
+    # covered by a shape fill); within shapes, sheds render before outlines
+    # so a soft translucent fill never sits over a strong-edged boundary.
+    assert "shedShapes.concat(otherShapes, outlineShapes)" in doc
+
+
+def test_vertex_cap_still_applies_to_labeled_shapes(monkeypatch, tmp_path):
+    monkeypatch.setattr(mapview, "MAX_RENDER_VERTICES", 4)
+    payload = {
+        "features": [
+            _polygon_feature(
+                {
+                    "name": "Big shed",
+                    "role": "shed",
+                    "label": "Shed",
+                    "callout": "Reachable in 15 min",
+                }
+            )
+        ]
+    }
+    result = mapview.write_artifact(payload, title="Cap", out_dir=tmp_path)
+    assert result["truncated"] is True
+    assert result["features_rendered"] == 0
+    assert result["skipped_features"] == 1
+
+
 def test_export_report_shapes_only(tmp_path):
     payload = {
         "type": "FeatureCollection",

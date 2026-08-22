@@ -71,6 +71,18 @@ MAX_RENDER_VERTICES = 50_000
 # file stays sendable.
 SUMMARY_MAX_CHARS = 8_000
 
+# Shape style roles (#368): a shape feature's props may carry "role": "shed"
+# (travel-time shed) or "role": "outline" (compared-area boundary) to switch
+# its SVG styling; any other value (or none) keeps today's default style.
+_SHAPE_ROLES = ("shed", "outline")
+
+# Shape "label"/"callout" props are a short name + one-line verdict rendered
+# as an SVG text chip over the shape (#368) — capped like SUMMARY_MAX_CHARS
+# caps the verdict, so a caller can't turn a shape annotation into a wall of
+# text on the map.
+SHAPE_LABEL_MAX_CHARS = 40
+SHAPE_CALLOUT_MAX_CHARS = 80
+
 _ARTIFACT_DIRNAME = "artifacts"
 
 
@@ -577,6 +589,26 @@ header .count { color: var(--muted); font-size: 0.85rem; }
   fill: none; stroke: var(--line-stroke); stroke-width: 2.5;
   stroke-linejoin: round; stroke-linecap: round; cursor: pointer;
 }
+/* Shape style roles (#368): "shed" = travel-time shed, a soft translucent
+   fill with a dashed edge so several can overlap and stay readable. */
+.shape-polygon.role-shed {
+  fill-opacity: 0.15;
+  stroke-dasharray: 8 5;
+}
+.shape-line.role-shed { stroke-dasharray: 8 5; }
+/* "outline" = a compared-area boundary: no fill (so it never hides what's
+   under it), a strong 2px edge. */
+.shape-polygon.role-outline { fill: none; stroke-width: 2; }
+.shape-line.role-outline { stroke-width: 3; }
+.shape-label-chip {
+  fill: var(--panel-bg); stroke: var(--border); stroke-width: 1; rx: 5;
+  pointer-events: none;
+}
+.shape-label-name, .shape-label-callout {
+  text-anchor: middle; pointer-events: none; fill: var(--text);
+}
+.shape-label-name { font-size: 11px; font-weight: 700; }
+.shape-label-callout { font-size: 10.5px; fill: var(--muted); }
 .panel {
   position: absolute; top: 12px; right: 12px;
   display: flex; flex-direction: column; gap: 4px;
@@ -632,6 +664,7 @@ _JS = """
   var viewport = document.getElementById("viewport");
   var shapesGroup = document.getElementById("shapes");
   var markersGroup = document.getElementById("markers");
+  var labelsGroup = document.getElementById("labels");
   var popup = document.getElementById("popup");
   var scaleFill = document.getElementById("scale-fill");
   var scaleLabel = document.getElementById("scale-label");
@@ -713,14 +746,65 @@ _JS = """
     return [cx / n, cy / n];
   }
 
-  SHAPES.forEach(function (s) {
+  // bbox (in projected px) of every vertex a shape draws, used to anchor its
+  // label/callout chip at the shape's center-top (#368).
+  function bboxTopCenter(vertexLists) {
+    var minX = Infinity, maxX = -Infinity, minY = Infinity;
+    vertexLists.forEach(function (vl) {
+      vl.forEach(function (c) {
+        var xy = project(c[1], c[0]);
+        if (xy[0] < minX) minX = xy[0];
+        if (xy[0] > maxX) maxX = xy[0];
+        if (xy[1] < minY) minY = xy[1];
+      });
+    });
+    return [(minX + maxX) / 2, minY];
+  }
+
+  var LABEL_LINE_H = 14, LABEL_PAD = 6;
+  function addShapeLabel(s, vertexLists) {
+    if (!s.label && !s.callout) return;
+    var lines = [];
+    if (s.label) lines.push({ text: s.label, cls: "shape-label-name" });
+    if (s.callout) lines.push({ text: s.callout, cls: "shape-label-callout" });
+    var top = bboxTopCenter(vertexLists);
+    var cx = top[0], topY = top[1];
+    // Width is estimated from character count (no live text measurement
+    // before layout) rather than measured precisely — good enough for a
+    // legibility chip, not meant to hug the glyphs exactly.
+    var maxLen = Math.max.apply(null, lines.map(function (l) { return l.text.length; }));
+    var boxW = Math.min(Math.max(maxLen * 5.6 + 16, 40), 260);
+    var boxH = lines.length * LABEL_LINE_H + LABEL_PAD * 2 - 2;
+    var boxY = topY - boxH - 8;
+    var g = document.createElementNS(SVGNS, "g");
+    g.setAttribute("class", "shape-label");
+    var rect = document.createElementNS(SVGNS, "rect");
+    rect.setAttribute("x", cx - boxW / 2);
+    rect.setAttribute("y", boxY);
+    rect.setAttribute("width", boxW);
+    rect.setAttribute("height", boxH);
+    rect.setAttribute("rx", 5);
+    rect.setAttribute("class", "shape-label-chip");
+    g.appendChild(rect);
+    lines.forEach(function (l, i) {
+      var t = document.createElementNS(SVGNS, "text");
+      t.setAttribute("x", cx);
+      t.setAttribute("y", boxY + LABEL_PAD + LABEL_LINE_H * (i + 1) - 4);
+      t.setAttribute("class", l.cls);
+      t.textContent = l.text;
+      g.appendChild(t);
+    });
+    labelsGroup.appendChild(g);
+  }
+
+  function renderShape(s) {
     if (s.kind === "polygon" && s.rings && s.rings.length) {
       var d = "";
       s.rings.forEach(function (ring) { d += pathFromRing(ring); });
       var path = document.createElementNS(SVGNS, "path");
       path.setAttribute("d", d.trim());
       path.setAttribute("fill-rule", "evenodd");
-      path.setAttribute("class", "shape-polygon");
+      path.setAttribute("class", "shape-polygon" + (s.role ? " role-" + s.role : ""));
       var c0 = centroidOf(s.rings[0]);
       var entity = { name: s.name, props: s.props || {}, _x: c0[0], _y: c0[1] };
       path.addEventListener("click", function (ev) {
@@ -728,6 +812,7 @@ _JS = """
         showPopup(entity);
       });
       shapesGroup.appendChild(path);
+      addShapeLabel(s, s.rings);
     } else if (s.kind === "line" && s.lines && s.lines.length) {
       s.lines.forEach(function (line) {
         var parts = line.map(function (c, idx) {
@@ -736,7 +821,7 @@ _JS = """
         });
         var path = document.createElementNS(SVGNS, "path");
         path.setAttribute("d", parts.join(" "));
-        path.setAttribute("class", "shape-line");
+        path.setAttribute("class", "shape-line" + (s.role ? " role-" + s.role : ""));
         var c0 = centroidOf(line);
         var entity = { name: s.name, props: s.props || {}, _x: c0[0], _y: c0[1] };
         path.addEventListener("click", function (ev) {
@@ -745,8 +830,24 @@ _JS = """
         });
         shapesGroup.appendChild(path);
       });
+      addShapeLabel(s, s.lines);
     }
+  }
+
+  // Stacking (#368): sheds (soft translucent fill) render first, then
+  // shapes with no/unknown role (today's default styling), then outlines
+  // (no fill, so order relative to sheds barely matters visually) — all of
+  // it under the markers group, which stays last in the DOM so fills never
+  // cover a marker dot. A shed/outline-free SHAPES array (the common case)
+  // collapses to a single "other" bucket in original order, so undecorated
+  // input renders in exactly its original order.
+  var shedShapes = [], outlineShapes = [], otherShapes = [];
+  SHAPES.forEach(function (s) {
+    if (s.role === "shed") shedShapes.push(s);
+    else if (s.role === "outline") outlineShapes.push(s);
+    else otherShapes.push(s);
   });
+  shedShapes.concat(otherShapes, outlineShapes).forEach(renderShape);
 
   POINTS.forEach(function (p, i) {
     var xy = project(p.lat, p.lon);
@@ -923,6 +1024,7 @@ _DOC = """<!doctype html>
       <g id="viewport">
         <g id="shapes"></g>
         <g id="markers"></g>
+        <g id="labels"></g>
       </g>
     </svg>
     <div id="empty-msg">No places to show.</div>
@@ -1028,6 +1130,24 @@ def _clip_summary(text: str | None) -> str:
     if len(clipped) <= SUMMARY_MAX_CHARS:
         return clipped
     return clipped[:SUMMARY_MAX_CHARS].rstrip() + "…"
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    clipped = text.strip()
+    if len(clipped) <= max_chars:
+        return clipped
+    return clipped[:max_chars].rstrip() + "…"
+
+
+def _shape_role(props: dict) -> str | None:
+    """props["role"] if it's a recognized style role, else None (default style).
+
+    Anything else — absent, or a value we don't recognize — falls through to
+    today's default shape styling silently rather than erroring; render_map
+    degrades gracefully the same way malformed geometry does.
+    """
+    role = props.get("role")
+    return role if role in _SHAPE_ROLES else None
 
 
 # Props worth putting on a stop row. Nested objects (addresses lists,
@@ -1249,11 +1369,33 @@ def render_html(
     ]
     shapes_for_js = []
     for s in shapes:
-        entry = {"kind": s.get("kind"), "name": s.get("name"), "props": s.get("props") or {}}
+        entry = {"kind": s.get("kind"), "name": s.get("name")}
         if s.get("kind") == "polygon":
             entry["rings"] = s.get("rings") or []
         else:
             entry["lines"] = s.get("lines") or []
+        # Role/label/callout are optional style/annotation hints (#368) — only
+        # set the key when there's something to say, so undecorated input
+        # (the overwhelming common case) serializes to exactly the same JSON
+        # as before this feature existed. label/callout are truncated in
+        # props too (not just the render entry) so the click popup — which
+        # lists every prop verbatim — can't be used to smuggle the untruncated
+        # text back onto the page.
+        props = dict(s.get("props") or {})
+        role = _shape_role(props)
+        if role:
+            entry["role"] = role
+        label = props.get("label")
+        if isinstance(label, str) and label.strip():
+            label = _truncate(label, SHAPE_LABEL_MAX_CHARS)
+            entry["label"] = label
+            props["label"] = label
+        callout = props.get("callout")
+        if isinstance(callout, str) and callout.strip():
+            callout = _truncate(callout, SHAPE_CALLOUT_MAX_CHARS)
+            entry["callout"] = callout
+            props["callout"] = callout
+        entry["props"] = props
         shapes_for_js.append(entry)
 
     # Antimeridian handling (#137): unwrap longitudes onto a continuous

@@ -1588,8 +1588,14 @@ def render_map(
     vector markers with labels and click popups, polygon/line shapes
     including reachability output shaped {"polygon": ..., "stats": {...}}),
     a composed verdict, per-stop details, a scale bar, and required
-    attribution. No CDN, no tile server, no API key, zero network requests
-    when opened — a local file the user can send as-is. Pass `summary` for
+    attribution. A shape feature's properties may carry "role": "shed"
+    (soft translucent fill, dashed edge — for travel-time sheds) or
+    "role": "outline" (no fill, strong edge — for a compared-area boundary);
+    any other/absent role keeps the default style. Properties may also carry
+    a short "label" and one-line "callout", rendered as a text chip over the
+    shape (capped ~40/~80 chars). No CDN, no tile server, no API key, zero
+    network requests when opened — a local file the user can send as-is.
+    Pass `summary` for
     the verdict you want on the page (the sentence you'd tell a spouse,
     co-founder, or landlord); when omitted a short fallback is composed
     from the payload. Written to PLACEROOT_ARTIFACT_DIR (default: alongside

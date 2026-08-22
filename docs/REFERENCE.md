@@ -39,7 +39,7 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `places_along_route` | Places on the way from A to B: corridor search along the route, with each result's detour and how far along it sits, compact trust notes on results, and a verify-before-going line for the weakest stops |
 | `neighborhood_verdict` | Should I live here? A ranked verdict from life context (household, mobility, priorities) — strengths, weak points, one thing to verify in person |
 | `optimize_route` | Best order to visit 2–10 stops, solved exactly over the street graph — order, per-leg distance/duration, totals, an `export` object (Google/Apple Maps links, GPX, printable stop list), and `verify_before_going` when stops already carry confidence/operating_status |
-| `render_map` | Any result → a shareable one-pager (interactive map, verdict, stop list, and Overture/OSM attribution); optional `summary` for the verdict, otherwise a short fallback is composed from the payload |
+| `render_map` | Any result → a shareable one-pager (interactive map, verdict, stop list, and Overture/OSM attribution); optional `summary` for the verdict, otherwise a short fallback is composed from the payload; shape `role: "shed"`/`"outline"` styles it, `label`/`callout` chip a note onto it |
 | `simplify_geometry` | Any geometry → simplified to fit a token budget |
 | `warmup_city` | Pre-cache a city's places and transportation tiles so later place searches over it read locally — does not build the street graph or cache buildings. A first tile COPY without `confirm` returns `needs_confirm` |
 | `data_version` | Which Overture release the answers are drawn from |
