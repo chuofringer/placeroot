@@ -49,6 +49,7 @@ from placeroot import (
     honesty,
     infrastructure,
     land_use,
+    mapexplain,
     mapview,
     meeting,
     overture,
@@ -938,6 +939,13 @@ def meeting_point(
     "needs_confirm"} instead of silently blocking. Omit confirm unless you
     just asked and they said yes.
 
+    A non-empty result also carries "map" (#369) — a render-ready payload,
+    keyword-splattable straight into this server's map-rendering tool (its
+    keys are exactly that tool's keyword arguments): pins every origin, the
+    fairest candidate picked out by class, the rest, and the fairness seed
+    center, plus a one-line summary naming the fairest venue and its
+    numbers. Absent when "candidates" is empty.
+
     Returns a structured {"error": "bad_request", ...} if origins has
     fewer than 2 or more than 5 points, a point is missing/non-numeric
     lat or lon, or a mode isn't walk/cycle/drive; {"error": "bad_request",
@@ -1098,7 +1106,11 @@ def meeting_point(
             "truncated) — those travel times may be based on a suboptimal or "
             "incomplete route"
         )
-    return budget.apply_budget(payload, "candidates")
+    payload = budget.apply_budget(payload, "candidates")
+    map_payload = mapexplain.from_meeting_point_result(payload, origins)
+    if map_payload is not None:
+        payload["map"] = map_payload
+    return payload
 @_tool("Travel time matrix")
 def travel_time_matrix(
     origins: list[dict], destinations: list[dict], mode: str = "walk"
@@ -1226,6 +1238,14 @@ def compare_areas(
     scores plus "degraded": true rather than a fabricated score. Returns
     bad_request for more than 6 priorities or a malformed one (missing
     label/category, an unrecognized prefer, or a non-numeric weight).
+
+    When priorities produced a verdict, the response also carries "map"
+    (#369) — a render-ready payload, keyword-splattable straight into this
+    server's map-rendering tool (its keys are exactly that tool's keyword
+    arguments): a pin per area (the winner picked out by class), a cheap
+    circle outline per area (radius_m, not a real boundary) labeled with
+    its score, and a one-line summary restating the winner. Absent when
+    priorities weren't given, or a verdict couldn't be scored.
     """
     try:
         centers = [(a["lat"], a["lon"]) for a in areas]
@@ -1250,7 +1270,12 @@ def compare_areas(
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
         return _schema_error(e)
-    return _with_degraded_fields(budget.apply_budget(result, "differentiators"))
+    result = _with_degraded_fields(budget.apply_budget(result, "differentiators"))
+    if "verdict" in result:
+        map_payload = mapexplain.from_compare_areas_result(result, radius_m)
+        if map_payload is not None:
+            result["map"] = map_payload
+    return result
 
 
 @_tool("Admin hierarchy lookup")
