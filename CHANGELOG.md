@@ -9,6 +9,19 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `route`/`from_to`: comfort-aware routing (#313). `include_elevation`
+  attaches a compact climb profile (`total_climb_m`, `total_descent_m`,
+  `max_grade_pct`, a downsampled `samples` array) sampled from the
+  Copernicus GLO-30 reader (#358), bounded to at most 40 lookups per route
+  and fitted to the token budget; missing DEM coverage is reported as an
+  honest note, never a fake 0.0. `prefer="flat"` (walk/cycle only)
+  reweights the search to trade distance for climb, using per-node
+  elevations fetched for the extracted subgraph (bounded to 400 lookups);
+  it falls back to plain-distance routing with a note when elevation data
+  isn't reachable. Documented explicitly: `prefer="flat"` minimizes grade
+  only — it is not a step-free, stroller-, or wheelchair-accessible mode,
+  since Overture's transportation schema carries no step-count or
+  kerb-ramp attributes to support that claim honestly.
 - `travel_time_matrix`: routed travel time and distance between every
   origin and every destination (up to 5x5) in one call, by mode — a shared
   cached street graph with one Dijkstra per origin when the points fit one
