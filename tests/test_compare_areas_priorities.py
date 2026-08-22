@@ -1,16 +1,17 @@
 """Issue #304: compare_areas' optional weighted `priorities` -> scored verdict.
 
 Uses the same NYC-cluster-vs-Arctic fixture centers as test_compare_areas.py.
-Ground truth within radius_m=1000 (via overture._count_places_in_radius):
+Ground truth within radius_m=1000 (via overture._count_places_by_category):
 bank nyc=23/arctic=5, gym nyc=22/arctic=0, coffee_shop nyc=23/arctic=0,
 novelty_shop nyc=2/arctic=0; density_per_km2 nyc=64.3/arctic=1.59.
 """
 
+import duckdb
 import pytest
 
 from placeroot import overture, server
 
-from .conftest import CENTER_LAT, CENTER_LON
+from .conftest import CENTER_LAT, CENTER_LON, FIXTURE_PATH
 
 AREAS = [{"lat": CENTER_LAT, "lon": CENTER_LON}, {"lat": 78.0, "lon": 15.0}]
 CENTERS = [(CENTER_LAT, CENTER_LON), (78.0, 15.0)]
@@ -47,6 +48,115 @@ def test_prefer_fewer_inverts_the_winner():
     # Arctic (idx 1) has fewer banks (5) than NYC (23), so fewer-is-better
     # flips the winner relative to a raw count comparison.
     assert verdict["winner_idx"] == 1
+    # Issue #354: prefer="fewer" normalizes as min/measure, so the best
+    # area gets 1.0 (not 1 - min/max) and the other gets min/measure.
+    assert verdict["scores"] == [round(5 / 23, 3), 1.0]
+
+
+def test_prefer_fewer_all_zero_measures_share_full_credit():
+    """Every area at 0 on a fewer-is-better priority is fully tied at 1.0
+    each — not 1/n — so a criterion nobody fails doesn't drag every
+    score down (issue #354)."""
+    per_area = [
+        {"center": {"lat": 78.0, "lon": 15.0}, "density_per_km2": 1.59, "category_counts": {}},
+        {"center": {"lat": 78.0, "lon": 15.0}, "density_per_km2": 1.59, "category_counts": {}},
+    ]
+    priorities = [{"label": "gyms", "category": "gym", "prefer": "fewer", "weight": 1}]
+    verdict = overture._build_verdict(
+        [(78.0, 15.0), (78.0, 15.0)], per_area, 1000, priorities
+    )
+    assert verdict["scores"] == [1.0, 1.0]
+    assert verdict["winner_idx"] is None
+
+
+def test_priority_count_is_exact_not_substring(tmp_path):
+    """Issue #354: the verdict count must not ILIKE-substring-match — a
+    dataset whose bank rows are actually food_banks must count 0 for a
+    "bank" priority, not 23."""
+    mutated = tmp_path / "food_banks.parquet"
+    con = duckdb.connect()
+    con.execute(
+        f"""COPY (
+            SELECT * REPLACE (
+                CASE WHEN basic_category = 'bank' THEN 'food_bank'
+                     ELSE basic_category END AS basic_category,
+                CASE WHEN taxonomy."primary" = 'bank'
+                     THEN struct_pack("primary" := 'food_bank',
+                                      alternates := taxonomy.alternates)
+                     ELSE taxonomy END AS taxonomy
+            ) FROM read_parquet('{FIXTURE_PATH}')
+        ) TO '{mutated}' (FORMAT PARQUET)"""
+    )
+    overture.set_data_path(str(mutated))
+    try:
+        result = overture.compare_areas(
+            CENTERS,
+            radius_m=1000,
+            priorities=[
+                {"label": "banks", "category": "bank", "prefer": "more", "weight": 1}
+            ],
+        )
+        assert "area 0=0" in result["verdict"]["reasons"][0]
+        assert "area 1=0" in result["verdict"]["reasons"][0]
+    finally:
+        overture.set_data_path(None)
+
+
+def test_priority_count_includes_unnamed_places(tmp_path):
+    """Issue #354: verdict counts describe the same population as
+    summarize_area's category_counts, which include unnamed rows — so
+    stripping every bank's name must not change the bank count."""
+    unnamed = tmp_path / "unnamed_banks.parquet"
+    con = duckdb.connect()
+    con.execute(
+        f"""COPY (
+            SELECT * REPLACE (
+                CASE WHEN basic_category = 'bank'
+                     THEN struct_pack("primary" := CAST(NULL AS VARCHAR))
+                     ELSE names END AS names
+            ) FROM read_parquet('{FIXTURE_PATH}')
+        ) TO '{unnamed}' (FORMAT PARQUET)"""
+    )
+    overture.set_data_path(str(unnamed))
+    try:
+        result = overture.compare_areas(
+            CENTERS,
+            radius_m=1000,
+            priorities=[
+                {"label": "banks", "category": "bank", "prefer": "more", "weight": 1}
+            ],
+        )
+        assert "area 0=23" in result["verdict"]["reasons"][0]
+    finally:
+        overture.set_data_path(None)
+
+
+def test_degraded_category_columns_mean_degraded_verdict_not_fabrication(tmp_path):
+    """Issue #354: with both category columns gone, a count-based priority
+    cannot be measured — the verdict says so explicitly instead of
+    silently counting every place in the radius."""
+    degraded = tmp_path / "no_category_columns.parquet"
+    con = duckdb.connect()
+    con.execute(
+        f"COPY (SELECT * EXCLUDE (basic_category, taxonomy) "
+        f"FROM read_parquet('{FIXTURE_PATH}')) TO '{degraded}' (FORMAT PARQUET)"
+    )
+    overture.set_data_path(str(degraded))
+    try:
+        result = overture.compare_areas(
+            CENTERS,
+            radius_m=1000,
+            priorities=[
+                {"label": "banks", "category": "bank", "prefer": "more", "weight": 1}
+            ],
+        )
+        verdict = result["verdict"]
+        assert verdict["degraded"] is True
+        assert verdict["winner_idx"] is None
+        assert verdict["scores"] is None
+        assert "degraded" in verdict["measured_note"]
+    finally:
+        overture.set_data_path(None)
 
 
 def test_weight_change_flips_the_verdict():

@@ -792,20 +792,25 @@ def compare_areas(
     "__density__" for overall place density as a foot-traffic proxy;
     "prefer": "more" | "fewer"; "weight": 0.1-5, default 1}. Each area's raw
     measure per priority is that category's count (or density) within
-    radius_m, counted explicitly even for categories outside the top-10
-    alignment above; the per-priority winner is whichever area is better on
-    that raw measure (a tie has no winner for that priority); each area's
-    verdict score is the weight-summed share of each priority normalized
-    against the best area (max=1, inverted for "fewer", equal shares if
-    every area measures 0), and the highest score wins overall (a tie
-    leaves winner_idx null). Adds (never replaces) "verdict": {"winner_idx",
-    "scores", "reasons" (one sentence per priority), "margin", and a fixed
-    "measured_note"} — the note, always present when priorities are given,
-    states plainly that these are open-data place counts/density, never
-    revenue, rent, actual foot traffic, or demographics, and that
-    "__density__" is only a proxy. Returns bad_request for more than 6
-    priorities or a malformed one (missing label/category, an unrecognized
-    prefer, or a non-numeric weight).
+    radius_m — matched exactly against the category taxonomy (slug plus its
+    descendants, so "park" never counts parking garages) and counted
+    explicitly even for categories outside the top-10 alignment above; the
+    per-priority winner is whichever area is better on that raw measure (a
+    tie has no winner for that priority); each area's verdict score is the
+    weight-summed share of each priority normalized against the best area
+    (measure/max for "more", min/measure for "fewer" — the best area always
+    gets 1.0, and every area measuring 0 makes all shares 1.0), and the
+    highest score wins overall (a tie leaves winner_idx null). Adds (never
+    replaces) "verdict": {"winner_idx", "scores", "reasons" (one sentence
+    per priority), "margin", and a fixed "measured_note"} — the note,
+    always present when priorities are given, states plainly that these are
+    open-data place counts/density, never revenue, rent, actual foot
+    traffic, or demographics, and that "__density__" is only a proxy. If
+    the dataset's category columns are all degraded, count-based priorities
+    can't be measured and the verdict comes back with null winner_idx and
+    scores plus "degraded": true rather than a fabricated score. Returns
+    bad_request for more than 6 priorities or a malformed one (missing
+    label/category, an unrecognized prefer, or a non-numeric weight).
     """
     try:
         centers = [(a["lat"], a["lon"]) for a in areas]
