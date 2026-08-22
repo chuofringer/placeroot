@@ -2611,6 +2611,8 @@ def route(
     to_lon: float,
     mode: str | None = None,
     include_path: bool = False,
+    include_elevation: bool = False,
+    prefer: str | None = None,
     confirm: bool = False,
 ) -> dict:
     """Route: shortest-path distance and duration between two points, by mode.
@@ -2655,6 +2657,33 @@ def route(
     simplified line won't fit, you get "path_omitted": true instead of a
     line that stops short of the destination.
 
+    include_elevation=true adds "elevation": a compact climb profile from
+    the same keyless Copernicus GLO-30 DEM reader as point elevation lookups
+    use, sampled along the route —
+    "total_climb_m", "total_descent_m", "max_grade_pct", and a small
+    "samples" array of [distance_along_m, elevation_m] points, thinned to
+    fit the token budget. Off by default. Where the DEM has no coverage
+    along part or all of the route, the affected numbers are never faked as
+    0.0 — you get a "note" saying so instead (and no climb/descent/grade
+    keys at all if there's no coverage anywhere on the route). If even the
+    note-only form can't fit the budget, you get "elevation_omitted": true.
+
+    prefer="flat" asks the router to trade distance for climb — steeper
+    detours cost more than gentler ones, so a longer-but-gentler path can
+    win over a shorter-but-steeper one. Only meaningful for mode="walk" or
+    "cycle" (returns {"error": "bad_request"} for mode="drive"); needs
+    per-node elevations for the extracted street graph, fetched from the
+    same Copernicus source (bounded — see routing.FLAT_MAX_ELEVATION_NODES),
+    so if that data isn't reachable or has no coverage here, the route falls
+    back to plain-distance routing and says so in "prefer_note" rather than
+    silently ignoring the preference. IMPORTANT: prefer="flat" minimizes
+    elevation grade only — it is NOT a step-free, stroller-, or
+    wheelchair-accessible mode. Overture's transportation data (as read
+    here) carries no step-count, kerb-ramp, or surface attributes, so a
+    flight of stairs classified as ordinary walkway geometry can still
+    appear on a "flat" route if it's short and roughly level. Don't offer
+    this as an accessibility guarantee to the user; it isn't one.
+
     confirm=true after the user agreed to wait for a first-time street-graph
     build (about 5–25 seconds). Pass it only after a needs_confirm reply
     and they said yes. A warm or cached graph never needs it.
@@ -2670,6 +2699,22 @@ def route(
             "error": "unsupported_mode",
             "detail": f"unsupported mode {mode!r}; supported: {sorted(routing.MODE_CONFIG)}",
             "supported": sorted(routing.MODE_CONFIG),
+        }
+    if prefer is not None and prefer not in routing.SUPPORTED_PREFERENCES:
+        return {
+            "error": "bad_request",
+            "detail": (
+                f"unsupported prefer={prefer!r}; supported: "
+                f"{sorted(routing.SUPPORTED_PREFERENCES)}"
+            ),
+        }
+    if prefer == routing.PREFER_FLAT and mode not in routing.FLAT_PREFERENCE_MODES:
+        return {
+            "error": "bad_request",
+            "detail": (
+                "prefer='flat' is only supported for mode in "
+                f"{sorted(routing.FLAT_PREFERENCE_MODES)}, got mode={mode!r}"
+            ),
         }
     straight_m = routing._haversine_m(from_lat, from_lon, to_lat, to_lon)
     cap_m = routing.ROUTE_MAX_STRAIGHT_LINE_M[mode]
@@ -2693,6 +2738,7 @@ def route(
         result = _run_route(
             from_lat, from_lon, to_lat, to_lon,
             mode=mode, include_path=include_path,
+            include_elevation=include_elevation, prefer=prefer,
             cap_confirm_build=confirm and not cached,
         )
     except routing.UnsupportedMode as e:
@@ -2753,7 +2799,15 @@ def elevation_at(lat: float, lon: float) -> dict:
 
 
 @_tool("Named-place route")
-def from_to(from_: str, to: str, mode: str = "walk", confirm: bool = False) -> dict:
+def from_to(
+    from_: str,
+    to: str,
+    mode: str = "walk",
+    include_path: bool = False,
+    include_elevation: bool = False,
+    prefer: str | None = None,
+    confirm: bool = False,
+) -> dict:
     """Shortest-path walk, cycle, or drive between two named places.
 
     Pass the user's place names as from and to. Do not call geocode(),
@@ -2771,6 +2825,11 @@ def from_to(from_: str, to: str, mode: str = "walk", confirm: bool = False) -> d
     An unresolvable name returns {"error": "not_found"}; empty names
     return {"error": "bad_request"}. mode is "walk", "cycle", or "drive"
     (default walk).
+
+    include_path, include_elevation, and prefer pass straight through to
+    route() — see that tool's docstring for what each returns/means
+    ("elevation" climb profile, prefer="flat" grade-avoiding preference and
+    its honest step-free/accessibility caveats).
 
     confirm=true after the user agreed to wait for a first-time street-graph
     build (about 5–25 seconds). Pass it only after a needs_confirm reply
@@ -2809,7 +2868,9 @@ def from_to(from_: str, to: str, mode: str = "walk", confirm: bool = False) -> d
             "mode": mode,
         }
     result = route(
-        origin["lat"], origin["lon"], dest["lat"], dest["lon"], mode=mode, confirm=confirm
+        origin["lat"], origin["lon"], dest["lat"], dest["lon"], mode=mode,
+        include_path=include_path, include_elevation=include_elevation, prefer=prefer,
+        confirm=confirm,
     )
     for key, place in (("from", origin), ("to", dest)):
         point = result.get(key)
@@ -3365,12 +3426,15 @@ def _run_route(
     *,
     mode: str,
     include_path: bool,
+    include_elevation: bool = False,
+    prefer: str | None = None,
     cap_confirm_build: bool,
 ) -> dict:
     """routing.route, with a 2x-ETA cap on a confirmed cold graph build."""
     if not cap_confirm_build:
         return routing.route(
-            from_lat, from_lon, to_lat, to_lon, mode=mode, include_path=include_path
+            from_lat, from_lon, to_lat, to_lon, mode=mode, include_path=include_path,
+            include_elevation=include_elevation, prefer=prefer,
         )
     limit_s = _confirm_graph_cap_s()
     # Install a log list before copy so worker report() appends are visible
@@ -3384,6 +3448,7 @@ def _run_route(
             routing.route,
             from_lat, from_lon, to_lat, to_lon,
             mode=mode, include_path=include_path,
+            include_elevation=include_elevation, prefer=prefer,
         )
         try:
             return fut.result(timeout=limit_s)

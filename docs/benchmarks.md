@@ -77,10 +77,10 @@ Generated 2026-08-22 by `uv run python benchmarks/token_efficiency.py --write`.
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-08-19.0`
 - Tools registered: **41**
-- Total schema surface: **22618 tokens** (90533 chars, 90779 bytes)
-- Schema cost per tool: min 158, median 476, max 1459 tokens
+- Total schema surface: **23192 tokens** (92828 chars, 93086 bytes)
+- Schema cost per tool: min 158, median 498, max 1459 tokens
 - Median scenario response: **208 tokens** (range 87-811)
-- Break-even: the schema surface costs about as much as **109 median answers**
+- Break-even: the schema surface costs about as much as **112 median answers**
 
 ### Schema surface (paid once per conversation)
 
@@ -88,9 +88,9 @@ Generated 2026-08-22 by `uv run python benchmarks/token_efficiency.py --write`.
 |---|---:|---:|---:|---:|
 | `changes_in_area` | 1161 | 212 | **1459** | 5836 |
 | `find_places` | 1072 | 296 | **1448** | 5793 |
+| `route` | 1177 | 170 | **1433** | 5732 |
 | `meeting_point` | 797 | 99 | **973** | 3893 |
 | `verify_claims` | 781 | 68 | **933** | 3733 |
-| `route` | 729 | 128 | **928** | 3713 |
 | `geometry_op` | 559 | 221 | **848** | 3394 |
 | `optimize_route` | 647 | 99 | **822** | 3291 |
 | `render_map` | 597 | 136 | **801** | 3206 |
@@ -105,9 +105,9 @@ Generated 2026-08-22 by `uv run python benchmarks/token_efficiency.py --write`.
 | `isochrone` | 387 | 122 | **568** | 2273 |
 | `address_at` | 427 | 54 | **541** | 2164 |
 | `gers_lookup` | 385 | 74 | **519** | 2079 |
+| `from_to` | 374 | 69 | **503** | 2014 |
 | `ground_location` | 361 | 77 | **498** | 1993 |
 | `place_details` | 265 | 158 | **476** | 1906 |
-| `from_to` | 307 | 69 | **434** | 1738 |
 | `distance_matrix` | 246 | 78 | **380** | 1522 |
 | `neighborhood_verdict` | 200 | 123 | **378** | 1512 |
 | `land_use_at` | 274 | 41 | **373** | 1493 |
@@ -127,7 +127,7 @@ Generated 2026-08-22 by `uv run python benchmarks/token_efficiency.py --write`.
 | `data_version` | 166 | 16 | **231** | 926 |
 | `reverse_geocode` | 111 | 42 | **205** | 820 |
 | `summarize_area` | 53 | 57 | **158** | 635 |
-| **all 41 tools** | 16168 | 3924 | **22618** | 90533 |
+| **all 41 tools** | 16683 | 3966 | **23192** | 92828 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 
