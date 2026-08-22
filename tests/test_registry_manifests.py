@@ -16,6 +16,7 @@ offline; they do not validate against the remote JSON schemas.
 
 import asyncio
 import json
+import re
 import tomllib
 from pathlib import Path
 
@@ -99,6 +100,16 @@ def test_mcpb_manifest_entry_point_exists():
     assert entry_point.is_file(), (
         f"mcpb/manifest.json entry_point {doc['server']['entry_point']!r} does "
         f"not exist at {entry_point}."
+    )
+
+
+def test_server_json_description_is_count_free():
+    doc = _load(SERVER_JSON)
+    description = doc["description"]
+    assert not re.search(r"\d+\s*tools", description), (
+        f"server.json description {description!r} names a tool count — "
+        "it isn't guarded and will go stale as tools are added (#366). "
+        "Keep the description count-free instead."
     )
 
 
