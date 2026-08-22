@@ -97,6 +97,9 @@ PROFILES: dict[str, frozenset[str]] = {
         # walk hilly", "how high is the pass"), not a street-graph query,
         # but the same "getting between points" family this profile is.
         "elevation_at",
+        # "Where should we meet" over the same routed-time machinery as
+        # distance_matrix/route, ranked by fairness rather than distance.
+        "meeting_point",
     }),
     # Characterizing an area rather than locating a thing in it.
     "analysis": frozenset({
