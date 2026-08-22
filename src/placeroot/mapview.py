@@ -321,6 +321,19 @@ def _shape_from_isochrone_result(data: dict) -> dict | None:
     stats = data.get("stats")
     if isinstance(stats, dict):
         props.update(stats)
+    # Style/annotation hints (#368) survive the props rebuild: an agent
+    # decorating routing.isochrone() output — the exact payload role/label/
+    # callout were designed for — can set them at the payload's top level or
+    # on the polygon's "properties" (top level wins). Validation/truncation
+    # happen downstream in render_html like for any other shape.
+    polygon_props = geometry.get("properties")
+    sources = [data] + ([polygon_props] if isinstance(polygon_props, dict) else [])
+    for key in ("role", "label", "callout"):
+        for source in sources:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                props[key] = value
+                break
     shape["props"] = props
     return shape
 
@@ -595,6 +608,10 @@ header .count { color: var(--muted); font-size: 0.85rem; }
   fill-opacity: 0.15;
   stroke-dasharray: 8 5;
 }
+/* Same specificity as the base rule above, so declared after it: sheds keep
+   hover feedback (softer than the generic 0.85 so overlapping sheds stay
+   readable while hovered). */
+.shape-polygon.role-shed:hover { fill-opacity: 0.4; }
 .shape-line.role-shed { stroke-dasharray: 8 5; }
 /* "outline" = a compared-area boundary: no fill (so it never hides what's
    under it), a strong 2px edge. */
@@ -762,11 +779,36 @@ _JS = """
   }
 
   var LABEL_LINE_H = 14, LABEL_PAD = 6;
+  // A callout can run to SHAPE_CALLOUT_MAX_CHARS (~80) but the chip caps at
+  // 260px wide (~43 chars at the 5.6px/char estimate below), so wrap it
+  // into chip-width lines — growing boxH — instead of overflowing the rect.
+  var CALLOUT_WRAP_CHARS = 43;
+  function wrapCallout(text) {
+    var words = String(text).split(/\\s+/).filter(Boolean);
+    var lines = [], cur = "";
+    words.forEach(function (w) {
+      while (w.length > CALLOUT_WRAP_CHARS) { // unbreakable run: hard-split
+        if (cur) { lines.push(cur); cur = ""; }
+        lines.push(w.slice(0, CALLOUT_WRAP_CHARS));
+        w = w.slice(CALLOUT_WRAP_CHARS);
+      }
+      if (!cur) cur = w;
+      else if (cur.length + 1 + w.length <= CALLOUT_WRAP_CHARS) cur += " " + w;
+      else { lines.push(cur); cur = w; }
+    });
+    if (cur) lines.push(cur);
+    return lines;
+  }
   function addShapeLabel(s, vertexLists) {
     if (!s.label && !s.callout) return;
     var lines = [];
     if (s.label) lines.push({ text: s.label, cls: "shape-label-name" });
-    if (s.callout) lines.push({ text: s.callout, cls: "shape-label-callout" });
+    if (s.callout) {
+      wrapCallout(s.callout).forEach(function (line) {
+        lines.push({ text: line, cls: "shape-label-callout" });
+      });
+    }
+    if (!lines.length) return;
     var top = bboxTopCenter(vertexLists);
     var cx = top[0], topY = top[1];
     // Width is estimated from character count (no live text measurement
@@ -837,8 +879,10 @@ _JS = """
   // Stacking (#368): sheds (soft translucent fill) render first, then
   // shapes with no/unknown role (today's default styling), then outlines
   // (no fill, so order relative to sheds barely matters visually) — all of
-  // it under the markers group, which stays last in the DOM so fills never
-  // cover a marker dot. A shed/outline-free SHAPES array (the common case)
+  // it under the labels group (chips only need to sit above shapes) which
+  // in turn sits under the markers group; markers stay last in the DOM so
+  // neither a shape fill nor an opaque label chip ever covers a marker
+  // dot. A shed/outline-free SHAPES array (the common case)
   // collapses to a single "other" bucket in original order, so undecorated
   // input renders in exactly its original order.
   var shedShapes = [], outlineShapes = [], otherShapes = [];
@@ -1023,8 +1067,8 @@ _DOC = """<!doctype html>
     <svg id="map" viewBox="0 0 1000 640" preserveAspectRatio="xMidYMid meet">
       <g id="viewport">
         <g id="shapes"></g>
-        <g id="markers"></g>
         <g id="labels"></g>
+        <g id="markers"></g>
       </g>
     </svg>
     <div id="empty-msg">No places to show.</div>

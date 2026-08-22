@@ -1593,7 +1593,9 @@ def render_map(
     "role": "outline" (no fill, strong edge — for a compared-area boundary);
     any other/absent role keeps the default style. Properties may also carry
     a short "label" and one-line "callout", rendered as a text chip over the
-    shape (capped ~40/~80 chars). No CDN, no tile server, no API key, zero
+    shape (capped ~40/~80 chars); for the reachability payload, set
+    role/label/callout at the payload's top level. No CDN, no tile server,
+    no API key, zero
     network requests when opened — a local file the user can send as-is.
     Pass `summary` for
     the verdict you want on the page (the sentence you'd tell a spouse,

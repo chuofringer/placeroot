@@ -406,6 +406,10 @@ def test_shed_role_gets_dashed_low_opacity_fill_styling(tmp_path):
     assert "role-shed" in doc
     assert "fill-opacity: 0.15" in doc
     assert "stroke-dasharray" in doc
+    # The 0.15 rule shares specificity with the generic .shape-polygon:hover
+    # rule and is declared later, so sheds need their own hover override to
+    # keep hover feedback.
+    assert ".shape-polygon.role-shed:hover { fill-opacity: 0.4; }" in doc
     data = _embedded_data(doc)
     assert data["shapes"][0]["role"] == "shed"
 
@@ -525,12 +529,55 @@ def test_shape_label_and_callout_truncated_at_caps(tmp_path):
 def test_draw_order_sheds_render_before_outlines_and_points(tmp_path):
     doc = mapview.render_html([], title="Order")
     shapes_idx = doc.index('id="shapes"')
+    labels_idx = doc.index('id="labels"')
     markers_idx = doc.index('id="markers"')
-    assert shapes_idx < markers_idx
-    # The shapes group is drawn before the markers group (points never get
-    # covered by a shape fill); within shapes, sheds render before outlines
-    # so a soft translucent fill never sits over a strong-edged boundary.
+    # Shapes under labels under markers: label chips sit above shape fills,
+    # and markers stay last so neither a fill nor an opaque chip ever covers
+    # a marker dot.
+    assert shapes_idx < labels_idx < markers_idx
+    # Within shapes, sheds render before outlines so a soft translucent fill
+    # never sits over a strong-edged boundary.
     assert "shedShapes.concat(otherShapes, outlineShapes)" in doc
+
+
+def test_callout_text_wraps_to_chip_width_instead_of_overflowing(tmp_path):
+    # SHAPE_CALLOUT_MAX_CHARS (~80) exceeds what the 260px-capped chip can
+    # hold on one line (~43 chars at the 5.6px/char estimate), so the JS
+    # wraps the callout into chip-width lines rather than overflowing.
+    doc = mapview.render_html([], title="Wrap")
+    assert "var CALLOUT_WRAP_CHARS = 43;" in doc
+    assert "wrapCallout(s.callout)" in doc
+    # The wrap width stays consistent with the chip's width formula.
+    assert 43 * 5.6 + 16 <= 260
+    assert (43 + 1) * 5.6 + 16 > 260
+
+
+def test_isochrone_payload_carries_role_label_and_callout(tmp_path):
+    """#371: role/label/callout must survive _shape_from_isochrone_result's
+    props rebuild for the exact payload the feature was designed for."""
+    payload = {
+        "center": {"lat": CENTER_LAT, "lon": CENTER_LON},
+        "minutes": 15,
+        "mode": "walk",
+        "role": "shed",
+        "label": "15-min walkshed",
+        "callout": "x" * 120,  # still truncated downstream like any shape
+        "polygon": {"type": "Polygon", "coordinates": [_OUTER_RING]},
+        "stats": {"area_km2": 0.62},
+    }
+    result = mapview.export_report(payload, title="Iso shed", out_dir=tmp_path)
+    assert result["features_rendered"] == 1
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    _parse(doc)
+    data = _embedded_data(doc)
+    shape = data["shapes"][0]
+    assert shape["role"] == "shed"
+    assert shape["label"] == "15-min walkshed"
+    assert len(shape["callout"]) == mapview.SHAPE_CALLOUT_MAX_CHARS + 1
+    assert shape["callout"].endswith("…")
+    # Stats/params flattening still works alongside the annotations.
+    assert shape["props"]["area_km2"] == 0.62
+    assert shape["props"]["minutes"] == 15
 
 
 def test_vertex_cap_still_applies_to_labeled_shapes(monkeypatch, tmp_path):
