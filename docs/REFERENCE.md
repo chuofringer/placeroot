@@ -3,7 +3,7 @@
 The full tool catalog, workflow prompts, resources, and the `PLACEROOT_TOOLS`
 selection mechanism. For a quick overview, start with the [README](../README.md).
 
-## All 34 tools
+## All 35 tools
 
 Every tool returns a compact, budgeted answer. Several single-item tools have a
 `*_batch` sibling that collapses many calls into one round-trip.
@@ -15,6 +15,7 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `compare_areas` | 2–5 areas side by side: category mix, density, and what differs most |
 | `within_distance` | Is the nearest matching place within N meters of a point? |
 | `distance_matrix` | Straight-line distances between many origins and destinations at once |
+| `travel_time_matrix` | Routed travel time and distance between many origins and destinations at once, by mode |
 | `place_details` | One place in full: addresses, contacts, brand, sources, confidence, and a compact before-you-go trust note |
 | `admin_lookup` | The admin hierarchy containing a point: neighborhood up to country |
 | `summarize_buildings` | Building stock in an area: count, footprint area, height and use mix |
@@ -134,7 +135,7 @@ without them registered.
 
 ## Loading fewer tools (`PLACEROOT_TOOLS`)
 
-All 34 tool schemas cost roughly **15.7k tokens** of every conversation's
+All 35 tool schemas cost roughly **16.4k tokens** of every conversation's
 context, paid before the agent asks anything — about the cost of 77 median
 answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS`
 selects which tools get registered. Unselected tools are never registered and
@@ -157,20 +158,20 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 34 | ~15,711 | — |
-| `search` | 15 | ~7,113 | 55% |
-| `core` | 15 | ~7,569 | 52% |
-| `routing` | 8 | ~3,941 | 75% |
-| `analysis` | 11 | ~3,933 | 75% |
+| unset / `all` (default) | 35 | ~16,421 | — |
+| `search` | 15 | ~7,113 | 57% |
+| `core` | 15 | ~7,569 | 54% |
+| `routing` | 9 | ~4,651 | 72% |
+| `analysis` | 11 | ~3,933 | 76% |
 | `geometry` | 4 | ~1,265 | 92% |
-| `progressive` | 4 (all 34 reachable) | ~866 | 94% |
+| `progressive` | 4 (all 35 reachable) | ~866 | 95% |
 
 - **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `from_to`, `find_near`, `places_along_route`, `neighborhood_verdict`, `warmup_city`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
 - **`search`** — the find/name/identify family: `find_places`, `find_near`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, `address_at`, `geocode_address`, `search_categories`, and `gers_lookup`.
-- **`routing`** — `route`, `from_to`, `isochrone`, `distance_matrix`, `within_distance`, `optimize_route`.
+- **`routing`** — `route`, `from_to`, `isochrone`, `distance_matrix`, `travel_time_matrix`, `within_distance`, `optimize_route`.
 - **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`, `neighborhood_verdict`.
 - **`geometry`** — `simplify_geometry`, `render_map`.
-- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 34 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 15.7k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
+- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 35 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 16.4k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 
 `data_version` and `preferences` are registered under every profile.
 `data_version` is ~230 tokens and the only way an agent can tell which
@@ -183,9 +184,9 @@ Profiles may overlap, and a list may mix them with bare tool names —
 nor a tool **fails at startup** with the list of valid names, rather than
 quietly falling back to loading everything. The server logs one line at
 startup naming what it registered
-(`registered 15 of 34 tools (PLACEROOT_TOOLS=core)`), so a selection that
+(`registered 15 of 35 tools (PLACEROOT_TOOLS=core)`), so a selection that
 didn't apply — an empty value, a variable that never reached the process — is
-visible rather than silently the full 34.
+visible rather than silently the full 35.
 
 ## What it deliberately does not do
 
@@ -207,7 +208,7 @@ env vars; see below.) The ones an operator is most likely to reach for:
 
 | Variable | Default | What it does |
 |---|---|---|
-| `PLACEROOT_TOOLS` | all 34 | Tool profile/subset — see the section above |
+| `PLACEROOT_TOOLS` | all 35 | Tool profile/subset — see the section above |
 | `PLACEROOT_TOKEN_BUDGET` | `2000` | Soft per-response token budget (chars/4 heuristic); rows are dropped lowest-ranked first, then optional fields, until a response fits |
 | `PLACEROOT_RECREATION_LAYER` | on | `0`/`false`/`no`/`off` disables the base-theme recreation layer ([docs/RECREATION.md](RECREATION.md)) |
 | `PLACEROOT_CACHE` | on | `off` disables the local tile cache entirely |

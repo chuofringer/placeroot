@@ -661,7 +661,8 @@ def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
     calculation, not a routed distance or travel time, so it's cheap but it
     is NOT what Google/Mapbox distance-matrix APIs return: no roads, no
     turns, no travel time. For "how far can I get in N minutes" use
-    isochrone() instead.
+    isochrone() instead; for actual routed times/distances between several
+    points use travel_time_matrix().
 
     Returns {"elements": [{"origin_idx": 0, "dest_idx": 0, "distance_m":
     812}, ...]}, flat and origin-major (all destinations for origin 0,
@@ -711,6 +712,90 @@ def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
         for di, (dlat, dlon) in enumerate(d_pts)
     ]
     return budget.apply_budget({"elements": elements}, "elements")
+
+
+@_tool("Travel time matrix")
+def travel_time_matrix(
+    origins: list[dict], destinations: list[dict], mode: str = "walk"
+) -> dict:
+    """Routed travel time + distance between every origin and destination, by mode.
+
+    origins and destinations are each a list of {"lat": ..., "lon": ...}
+    points, capped at 5 each (25 pairs max). Unlike distance_matrix's plain
+    haversine, this is a real shortest-path search over Overture's open
+    street graph — roads, one-ways, and each mode's own speed model, the
+    same cost model route() uses for a single pair. mode is "walk"
+    (default), "cycle", or "drive", one mode per call.
+
+    Reuses a single cached street graph across every origin and
+    destination when they all fit inside one mode-capped extraction circle
+    (the bounding circle of every point in the call), running one Dijkstra
+    per origin against every destination at once rather than a search per
+    pair — for a same-city matrix this costs about what a single
+    isochrone does, not one route() call per pair. When the points are too
+    spread out for one shared graph, falls back to a route() call per pair
+    (up to 25).
+
+    Returns {"mode", "elements": [{"origin_idx", "dest_idx", "duration_min",
+    "distance_m"}, ...], "durations_note"}, flat and origin-major like
+    distance_matrix. durations_note says these are speed-model estimates
+    over the open street graph, not live traffic. An unroutable pair (off
+    the street network, or on a disconnected fragment of it) gets
+    {"duration_min": null, "distance_m": null, "note": "unroutable"}
+    instead of failing the whole call; if every pair in the matrix is
+    unroutable the response also carries a top-level "note" saying so.
+    Empty origins or destinations returns {"elements": []}.
+
+    Returns a structured {"error": "bad_request", ...} instead of raising
+    if either list exceeds 5 points, a point is missing/non-numeric lat or
+    lon, or mode isn't walk/cycle/drive. If no street graph exists
+    anywhere near every point in the matrix, returns {"error":
+    "no_graph_nearby"} — the same top-level failure route() and
+    optimize_route() give when nothing in the area is on the mapped
+    network, rather than a matrix of nulls.
+    """
+    if len(origins) > 5 or len(destinations) > 5:
+        if len(origins) > 5 and len(destinations) > 5:
+            detail = (
+                "origins and destinations each accept at most 5 points, "
+                f"got {len(origins)} origins and {len(destinations)} destinations"
+            )
+        elif len(origins) > 5:
+            detail = f"origins accepts at most 5 points, got {len(origins)}"
+        else:
+            detail = f"destinations accepts at most 5 points, got {len(destinations)}"
+        return {"error": "bad_request", "detail": detail}
+    if mode not in routing.MODE_CONFIG:
+        return {
+            "error": "bad_request",
+            "detail": f"mode={mode!r} is not supported; use walk, cycle, or drive",
+        }
+    if not origins or not destinations:
+        return {"elements": []}
+    try:
+        o_pts = [(float(p["lat"]), float(p["lon"])) for p in origins]
+        d_pts = [(float(p["lat"]), float(p["lon"])) for p in destinations]
+    except (KeyError, TypeError, ValueError) as e:
+        return {"error": "bad_request", "detail": f"each point needs numeric lat and lon: {e}"}
+    for idx, (plat, plon) in enumerate(o_pts):
+        coord_error = _invalid_coord(plat, plon)
+        if coord_error is not None:
+            coord_error["detail"] = f"origins[{idx}]: {coord_error['detail']}"
+            return coord_error
+    for idx, (plat, plon) in enumerate(d_pts):
+        coord_error = _invalid_coord(plat, plon)
+        if coord_error is not None:
+            coord_error["detail"] = f"destinations[{idx}]: {coord_error['detail']}"
+            return coord_error
+    try:
+        result = routing.travel_time_matrix(o_pts, d_pts, mode=mode)
+    except routing.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except routing.SchemaDegraded as e:
+        return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
+    except routing.NoGraphNearby as e:
+        return {"error": "no_graph_nearby", "detail": e.detail}
+    return budget.apply_budget(result, "elements")
 
 
 @_tool("Compare areas")

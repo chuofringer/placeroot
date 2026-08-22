@@ -3267,3 +3267,243 @@ def optimize_route(
             True,
         )
     return final
+
+
+# Speed-model honesty line every travel_time_matrix response carries (#360):
+# these are the same posted-speed / constant-speed numbers route() and
+# optimize_route() already use, not measured or live traffic times.
+_TRAVEL_TIME_MATRIX_DURATIONS_NOTE = (
+    "durations are speed-model estimates over the open street graph (walk "
+    "1.4 m/s, cycle 4.2 m/s, drive from Overture's speed_limits or a "
+    "class-based default) — not live traffic"
+)
+
+
+def _od_matrix(
+    graph: Graph,
+    origin_nodes: list[str | None],
+    dest_nodes: list[str | None],
+    mode: str,
+) -> tuple[list[list[tuple[float, float] | None]], int]:
+    """(elements grid, unroutable_count) of (seconds, distance_m) per (origin, dest).
+
+    The rectangular counterpart to _cost_matrices: one target-less Dijkstra
+    per origin (_dijkstra_costs_to_targets), settling every destination
+    node at once, instead of one target-terminated search per pair — an
+    m x n matrix costs m searches, not m x n. Unlike _cost_matrices, an
+    unroutable cell (snap failure on either endpoint, or nothing connects
+    them) is recorded as None rather than an estimated straight-line
+    fallback: a caller reading "duration_min"/"distance_m" off this matrix
+    expects a routed number or an honest "unroutable", never a value
+    dressed up as routed when it wasn't.
+    """
+    const_speed = MODE_CONFIG[mode]["default_speed_m_s"]
+    speed = 1.0 if graph.weight_is_time else const_speed
+    targets_all = {node for node in dest_nodes if node is not None}
+    grid: list[list[tuple[float, float] | None]] = []
+    unroutable = 0
+    for src in origin_nodes:
+        row: list[tuple[float, float] | None] = [None] * len(dest_nodes)
+        if src is None:
+            unroutable += len(dest_nodes)
+            grid.append(row)
+            continue
+        reached = (
+            _dijkstra_costs_to_targets(graph, src, targets_all, speed) if targets_all else {}
+        )
+        for j, dst in enumerate(dest_nodes):
+            if dst is None:
+                unroutable += 1
+                continue
+            cost = reached.get(dst)
+            if cost is None:
+                unroutable += 1
+            else:
+                row[j] = cost
+        grid.append(row)
+    return grid, unroutable
+
+
+def _travel_time_matrix_shared_graph(
+    origins: list[tuple[float, float]],
+    destinations: list[tuple[float, float]],
+    mode: str,
+) -> tuple[list[list[tuple[float, float] | None]], int] | None:
+    """One shared-graph attempt covering every origin and destination, or None.
+
+    Reuses optimize_route's own extraction-geometry and widen-and-retry
+    machinery (_stops_extraction_geometry / _stops_radius_cap_m /
+    _get_or_build_graph) over the combined origins+destinations point set —
+    that geometry only cares about the set's span and enclosing circle, not
+    which points are sources and which are targets, so it generalizes to
+    the origin/destination split for free.
+
+    Returns None when the combined set's span exceeds the mode's
+    straight-line cap (_stops_extraction_geometry raises RouteTooLong in
+    that case) — travel_time_matrix falls back to a route() call per pair.
+
+    Raises NoGraphNearby only when nothing in the combined set ever snaps
+    to a usable graph node at any tried radius, matching route()'s and
+    optimize_route()'s own top-level failure for "no street data anywhere
+    near here". A partial snap — some points on real streets, one point
+    off the network entirely — folds that point's pairs into the
+    unroutable count instead of raising, the same "still return a matrix"
+    spirit as distance_matrix.
+    """
+    combined = list(origins) + list(destinations)
+    n_origins = len(origins)
+    try:
+        center_lat, center_lon, base_radius_m = _stops_extraction_geometry(combined, mode)
+    except RouteTooLong:
+        return None
+
+    max_radius_m = _stops_radius_cap_m(combined, mode)
+    radii_m = [base_radius_m]
+    retry_radius_m = min(base_radius_m * ROUTE_RADIUS_RETRY_FACTOR, max_radius_m)
+    if retry_radius_m > base_radius_m:
+        radii_m.append(retry_radius_m)
+
+    best: tuple[list[list[tuple[float, float] | None]], int] | None = None
+    for i, radius_m in enumerate(radii_m):
+        is_last = i == len(radii_m) - 1
+        graph = _get_or_build_graph(
+            center_lat, center_lon, radius_m, mode, speed_m_s=None, radius_cap_m=max_radius_m
+        )
+        if graph.node_count() == 0:
+            if is_last and best is None:
+                raise NoGraphNearby(center_lat, center_lon, radius_m, mode=mode)
+            continue
+        nodes = [snap_to_graph(graph, lat, lon) for lat, lon in combined]
+        if all(node is None for node in nodes):
+            if is_last and best is None:
+                raise NoGraphNearby(center_lat, center_lon, radius_m, mode=mode)
+            continue
+        grid, unroutable = _od_matrix(graph, nodes[:n_origins], nodes[n_origins:], mode)
+        if unroutable == 0:
+            return grid, unroutable
+        if best is None or unroutable < best[1]:
+            best = (grid, unroutable)
+    if best is None:  # pragma: no cover - the last radius returns, records, or raises
+        raise AssertionError("unreachable: the last radius returns, records, or raises")
+    return best
+
+
+def _travel_time_matrix_fallback(
+    origins: list[tuple[float, float]],
+    destinations: list[tuple[float, float]],
+    mode: str,
+) -> list[list[tuple[float, float] | None]]:
+    """Per-pair route() fallback for a point set too spread out for one shared graph.
+
+    There is no single extraction circle covering every origin and
+    destination at once (see _travel_time_matrix_shared_graph), so each
+    (origin, destination) pair is answered exactly as route() would answer
+    it standalone — up to 25 calls for the 5x5 cap. A pair that comes back
+    RouteTooLong, NoGraphNearby, or a structured no_route result folds to
+    an unroutable (None) cell rather than failing the whole matrix.
+    """
+    grid: list[list[tuple[float, float] | None]] = []
+    for olat, olon in origins:
+        row: list[tuple[float, float] | None] = []
+        for dlat, dlon in destinations:
+            try:
+                result = route(olat, olon, dlat, dlon, mode=mode)
+            except (RouteTooLong, NoGraphNearby):
+                row.append(None)
+                continue
+            if "error" in result:
+                row.append(None)
+            else:
+                row.append((result["duration_s"], result["distance_m"]))
+        grid.append(row)
+    return grid
+
+
+def travel_time_matrix(
+    origins: list[tuple[float, float]],
+    destinations: list[tuple[float, float]],
+    mode: str = "walk",
+) -> dict:
+    """Routed duration + distance between every origin and every destination (#360).
+
+    The routed counterpart to a plain haversine distance matrix: origins
+    and destinations are each a list of (lat, lon) points, and every
+    element comes from a real shortest-path search over Overture's street
+    graph (route()'s own cost model), not a straight-line guess.
+
+    When every origin and destination fits inside one mode-capped
+    extraction circle (the bounding circle of the whole combined point
+    set), builds ONE shared, cached street graph, snaps every point into
+    it once, and fills the matrix with one target-less Dijkstra per origin
+    against every destination at once (_travel_time_matrix_shared_graph) —
+    the same reuse idea optimize_route uses for its cost matrix, just
+    rectangular instead of square. When the points are too spread out for
+    one shared graph, falls back to a route() call per pair
+    (_travel_time_matrix_fallback, <=25 calls for the 5x5 cap).
+
+    An unroutable pair — a snap failure on either endpoint, a disconnected
+    fragment, or (fallback mode only) a pair whose straight-line distance
+    alone exceeds route()'s cap — does not fail the call: that element's
+    duration_min/distance_m come back None with a "note": "unroutable",
+    and the matrix still returns. Raises NoGraphNearby only when nothing in
+    the combined point set ever snaps to a usable street node anywhere —
+    the shared-graph area (or, in fallback mode, every single pair) has no
+    usable street data at all — matching route()'s own top-level failure
+    rather than a matrix of nulls; the caller (server.travel_time_matrix)
+    turns that into a structured {"error": "no_graph_nearby"}, same as
+    route() and optimize_route() do.
+
+    Returns {"mode", "elements": [{"origin_idx", "dest_idx", "duration_min",
+    "distance_m"}, ...], "durations_note"}, flat and origin-major (all
+    destinations for origin 0, then origin 1, ...) like distance_matrix.
+    If every pair in the matrix is unroutable, the response also carries a
+    top-level "note" saying so.
+    """
+    if mode not in MODE_CONFIG:
+        raise UnsupportedMode(mode)
+    for label, points in (("origins", origins), ("destinations", destinations)):
+        for idx, point in enumerate(points):
+            for value in point:
+                if not _is_finite_number(value):
+                    raise ValueError(f"{label}[{idx}]: lat and lon must be finite numbers")
+
+    outcome = _travel_time_matrix_shared_graph(origins, destinations, mode)
+    if outcome is None:
+        matrix = _travel_time_matrix_fallback(origins, destinations, mode)
+        unroutable = sum(cell is None for row in matrix for cell in row)
+    else:
+        matrix, unroutable = outcome
+
+    elements = []
+    for oi, row in enumerate(matrix):
+        for di, cell in enumerate(row):
+            if cell is None:
+                elements.append(
+                    {
+                        "origin_idx": oi,
+                        "dest_idx": di,
+                        "duration_min": None,
+                        "distance_m": None,
+                        "note": "unroutable",
+                    }
+                )
+            else:
+                seconds, distance_m = cell
+                elements.append(
+                    {
+                        "origin_idx": oi,
+                        "dest_idx": di,
+                        "duration_min": round(seconds / 60.0, 2),
+                        "distance_m": round(distance_m, 1),
+                    }
+                )
+
+    result = {
+        "mode": mode,
+        "elements": elements,
+        "durations_note": _TRAVEL_TIME_MATRIX_DURATIONS_NOTE,
+    }
+    total = len(origins) * len(destinations)
+    if unroutable and unroutable == total:
+        result["note"] = "no pair in this matrix could be routed"
+    return result
