@@ -2087,20 +2087,23 @@ def verify_claims(lat: float, lon: float, claims: list[dict]) -> dict:
       Straight-line distance (haversine, not routed) to the nearest match,
       compared against claimed_max_m.
 
-    Every kind needs at least one of its category/name fields (an
-    Overture taxonomy slug and/or a name substring, matched the same way
-    every other places lookup in this server does); giving neither is a
-    bad_request.
+    Every kind needs at least one of its category/name fields; giving
+    neither is a bad_request. A category is an Overture taxonomy slug,
+    matched exactly (including its taxonomy descendants), never as a
+    substring — "park" does not match a parking garage; a name is a
+    substring match.
 
     Verdict per claim: "confirmed" when the measured number is within the
     claimed number x1.15 (count_nearby: measured count >= claimed),
     "stretched" within x1.5 (count_nearby: count >= half the claim, floor
     1), otherwise "false". A claim asserting a place exists at all, when
     none is found within the search bound, is "false" with a note —
-    absence is a verdict, not an error. A travel_time claim whose place is
-    found but cannot be routed to (no street graph nearby, or the network
-    doesn't connect the two points) is "unverifiable" instead of "false":
-    an unroutable leg is not evidence the claim is wrong.
+    absence is a verdict, not an error. A claim the measurement cannot
+    decide is "unverifiable" instead of "false": a travel_time claim whose
+    place is found but cannot be routed to (no street graph nearby, or the
+    network doesn't connect the two points), or whose failing measurement
+    came from a size-cap-truncated street graph, and a count_nearby claim
+    whose claimed_at_least exceeds the row cap the count stopped at.
 
     Returns {"results": [{"claim": <echo of the input>, "verdict":
     "confirmed"|"stretched"|"false"|"unverifiable", "measured": {...

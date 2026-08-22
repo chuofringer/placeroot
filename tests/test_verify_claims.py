@@ -42,22 +42,34 @@ def _row(distance_m, **extra):
 
 
 def _patch_find_places(monkeypatch, rows_by_call=None, rows=None):
-    """Stub overture.find_places. rows_by_call pops one list per call if given.
+    """Stub the overture places lookups claims.py uses.
 
-    radius_m is claims.py's third positional argument (matching find_places'
-    own signature and the rest of the codebase's call convention, e.g.
-    within_distance) — captured positionally here rather than assuming a
-    kwarg so a call recorded here reflects the real call shape.
+    Patches both find_places (name-only matches, count_nearby) and
+    find_places_for_categories (the exact/hierarchy matcher category claims
+    go through). Each recorded call carries which function it hit.
+    rows_by_call pops one list per call if given.
+
+    radius_m is claims.py's third positional argument (matching both
+    functions' own signatures and the rest of the codebase's call
+    convention, e.g. within_distance) — captured positionally here rather
+    than assuming a kwarg so a call recorded here reflects the real call
+    shape.
     """
     calls = []
 
-    def fake(*args, **kwargs):
-        calls.append({"args": args, "kwargs": kwargs, "radius_m": args[2]})
-        if rows_by_call is not None:
-            return rows_by_call.pop(0)
-        return rows if rows is not None else []
+    def _fake(fn_name):
+        def fake(*args, **kwargs):
+            calls.append({"fn": fn_name, "args": args, "kwargs": kwargs, "radius_m": args[2]})
+            if rows_by_call is not None:
+                return rows_by_call.pop(0)
+            return rows if rows is not None else []
 
-    monkeypatch.setattr(overture, "find_places", fake)
+        return fake
+
+    monkeypatch.setattr(overture, "find_places", _fake("find_places"))
+    monkeypatch.setattr(
+        overture, "find_places_for_categories", _fake("find_places_for_categories")
+    )
     return calls
 
 
@@ -166,6 +178,96 @@ def test_travel_time_no_route_result_is_unverifiable(monkeypatch):
     assert result["results"][0]["verdict"] == "unverifiable"
 
 
+def test_travel_time_category_uses_exact_matcher_not_substring(monkeypatch):
+    calls = _patch_find_places(monkeypatch, rows=[_row(WALK_DISTANCE_M)])
+    claims.verify_claims(
+        ORIGIN_LAT,
+        ORIGIN_LON,
+        [{"kind": "travel_time", "to_category": "park", "claimed_minutes": 4}],
+    )
+    assert calls[0]["fn"] == "find_places_for_categories"
+    assert calls[0]["args"][3] == ["park"]
+
+
+def test_travel_time_name_only_still_uses_find_places(monkeypatch):
+    calls = _patch_find_places(monkeypatch, rows=[_row(WALK_DISTANCE_M)])
+    claims.verify_claims(
+        ORIGIN_LAT,
+        ORIGIN_LON,
+        [{"kind": "travel_time", "to_name": "match", "claimed_minutes": 4}],
+    )
+    assert calls[0]["fn"] == "find_places"
+
+
+def test_category_plus_name_filters_exact_matches_by_name(monkeypatch):
+    rows = [
+        _row(50, name="Central Parking"),
+        _row(80, name="Riverside Park"),
+    ]
+    _patch_find_places(monkeypatch, rows=rows)
+    result = claims.verify_claims(
+        ORIGIN_LAT,
+        ORIGIN_LON,
+        [
+            {
+                "kind": "distance",
+                "to_category": "park",
+                "to_name": "Riverside",
+                "claimed_max_m": 100,
+            }
+        ],
+    )
+    row = result["results"][0]
+    assert row["measured"]["match"]["name"] == "Riverside Park"
+    assert row["measured"]["distance_m"] == 80
+
+
+def test_travel_time_truncated_route_failing_threshold_is_unverifiable(monkeypatch):
+    _patch_find_places(monkeypatch, rows=[_row(WALK_DISTANCE_M)])
+
+    def truncated_route(*_a, **_k):
+        return {
+            "distance_m": 3000.0,
+            "duration_s": 3000.0 / routing.DEFAULT_SPEED_M_S,
+            "mode": "walk",
+            "truncated": True,
+            "note": "the street graph hit its size cap",
+        }
+
+    monkeypatch.setattr(routing, "route", truncated_route)
+    result = claims.verify_claims(
+        ORIGIN_LAT,
+        ORIGIN_LON,
+        [{"kind": "travel_time", "to_category": "coffee_shop", "claimed_minutes": 4}],
+    )
+    row = result["results"][0]
+    assert row["verdict"] == "unverifiable"
+    assert "size cap" in row["note"]
+
+
+def test_travel_time_truncated_route_that_still_confirms_stays_confirmed(monkeypatch):
+    _patch_find_places(monkeypatch, rows=[_row(WALK_DISTANCE_M)])
+
+    def truncated_route(*_a, **_k):
+        return {
+            "distance_m": WALK_DISTANCE_M,
+            "duration_s": WALK_DISTANCE_M / routing.DEFAULT_SPEED_M_S,
+            "mode": "walk",
+            "truncated": True,
+            "note": "the street graph hit its size cap",
+        }
+
+    monkeypatch.setattr(routing, "route", truncated_route)
+    result = claims.verify_claims(
+        ORIGIN_LAT,
+        ORIGIN_LON,
+        [{"kind": "travel_time", "to_category": "coffee_shop", "claimed_minutes": 4}],
+    )
+    row = result["results"][0]
+    assert row["verdict"] == "confirmed"
+    assert "size cap" in row["note"]
+
+
 # --- count_nearby --------------------------------------------------------
 
 
@@ -231,6 +333,31 @@ def test_count_nearby_zero_count_is_false(monkeypatch):
     assert row["measured"]["count"] == 0
 
 
+def test_count_nearby_capped_result_with_larger_claim_is_unverifiable(monkeypatch):
+    _patch_find_places(monkeypatch, rows=[_row(50)] * overture.MAX_ROWS)
+    result = claims.verify_claims(
+        ORIGIN_LAT,
+        ORIGIN_LON,
+        [{"kind": "count_nearby", "category": "restaurant", "claimed_at_least": 40}],
+    )
+    row = result["results"][0]
+    assert row["verdict"] == "unverifiable"
+    assert row["measured"]["count"] == overture.MAX_ROWS
+    assert "capped" in row["note"]
+
+
+def test_count_nearby_capped_result_meeting_claim_stays_confirmed(monkeypatch):
+    _patch_find_places(monkeypatch, rows=[_row(50)] * overture.MAX_ROWS)
+    result = claims.verify_claims(
+        ORIGIN_LAT,
+        ORIGIN_LON,
+        [{"kind": "count_nearby", "category": "restaurant", "claimed_at_least": 20}],
+    )
+    row = result["results"][0]
+    assert row["verdict"] == "confirmed"
+    assert "capped" in row["note"]
+
+
 # --- distance --------------------------------------------------------
 
 
@@ -256,6 +383,20 @@ def test_distance_no_match_is_false_with_note(monkeypatch):
     assert "Riverside Park" in row["note"]
 
 
+def test_distance_search_radius_is_capped(monkeypatch):
+    calls = _patch_find_places(monkeypatch, rows=[])
+    result = claims.verify_claims(
+        ORIGIN_LAT,
+        ORIGIN_LON,
+        [{"kind": "distance", "to_category": "airport", "claimed_max_m": 250000}],
+    )
+    assert calls[0]["radius_m"] == claims.MAX_DISTANCE_SEARCH_RADIUS_M
+    # The not-found note reports the radius actually searched, not the
+    # uncapped 2x-claim bound.
+    note = result["results"][0]["note"]
+    assert f"{int(claims.MAX_DISTANCE_SEARCH_RADIUS_M)}m" in note
+
+
 # --- shared shape ----------------------------------------------------
 
 
@@ -268,7 +409,7 @@ def test_claim_is_echoed_intact(monkeypatch):
 
 def test_verdict_rule_is_present_and_nonempty():
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(overture, "find_places", lambda *_a, **_k: [_row(50)])
+        mp.setattr(overture, "find_places_for_categories", lambda *_a, **_k: [_row(50)])
         result = claims.verify_claims(
             ORIGIN_LAT,
             ORIGIN_LON,
@@ -382,7 +523,7 @@ def test_server_upstream_failure_is_structured(monkeypatch):
     def boom(*_a, **_k):
         raise overture.UpstreamUnavailable("scan failed")
 
-    monkeypatch.setattr(overture, "find_places", boom)
+    monkeypatch.setattr(overture, "find_places_for_categories", boom)
     result = server.verify_claims(
         ORIGIN_LAT,
         ORIGIN_LON,
@@ -392,7 +533,7 @@ def test_server_upstream_failure_is_structured(monkeypatch):
 
 
 def test_server_returns_results_and_verdict_rule(monkeypatch):
-    monkeypatch.setattr(overture, "find_places", lambda *_a, **_k: [_row(50)])
+    monkeypatch.setattr(overture, "find_places_for_categories", lambda *_a, **_k: [_row(50)])
     result = server.verify_claims(
         ORIGIN_LAT,
         ORIGIN_LON,

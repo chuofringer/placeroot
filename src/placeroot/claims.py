@@ -8,8 +8,12 @@ already-decomposed structured checks (the verify_listing_claims MCP prompt
 teaches an agent how to turn listing text into these) and grades each one
 against real routing and places data.
 
-Three claim kinds, each built from internals this codebase already has:
-- travel_time: nearest matching place (overture.find_places) + a routed
+Three claim kinds, each built from internals this codebase already has.
+Category targets go through the exact/hierarchy matcher
+(overture.find_places_for_categories) rather than find_places' substring
+ILIKE — a "park" claim must not be graded against a parking garage;
+name-only targets use find_places' name substring match.
+- travel_time: nearest matching place + a routed
   leg (routing.route()) -> measured minutes vs claimed_minutes.
 - count_nearby: how many matching places fall within radius_m
   (overture.find_places, capped at MAX_COUNT_RADIUS_M) -> measured count
@@ -54,6 +58,10 @@ MAX_COUNT_RADIUS_M = 2000.0
 _SEARCH_BUFFER = 3.0
 _MIN_SEARCH_RADIUS_M = 300.0
 _DISTANCE_SEARCH_MULT = 2.0  # same "search out to 2x the cap" convention as within_distance
+# distance claims are straight-line "steps from X" checks; cap the padded
+# search bound (mirroring count_nearby's MAX_COUNT_RADIUS_M) so a huge
+# claimed_max_m cannot trigger an unbounded-scale scan.
+MAX_DISTANCE_SEARCH_RADIUS_M = 10000.0
 
 VALID_KINDS = frozenset({"travel_time", "count_nearby", "distance"})
 VALID_MODES = ("walk", "cycle", "drive")
@@ -61,8 +69,12 @@ VALID_MODES = ("walk", "cycle", "drive")
 VERDICT_RULE = (
     "confirmed: measured <= claimed x 1.15 (count_nearby: count >= claimed); "
     "stretched: measured <= claimed x 1.5 (count_nearby: count >= claimed/2, floor 1); "
-    "else false. A travel_time claim that cannot be routed at all (no street "
-    "graph nearby, or the network doesn't connect) is unverifiable instead."
+    "else false. A claim the measurement cannot decide is unverifiable "
+    "instead: a travel_time claim that cannot be routed at all (no street "
+    "graph nearby, or the network doesn't connect) or whose failing "
+    "measurement came from a size-cap-truncated street graph, and a "
+    "count_nearby claim asking for more matches than the row cap the scan "
+    "stopped at."
 )
 
 
@@ -76,7 +88,22 @@ def _mode_speed_m_s(mode: str) -> float:
 
 
 def _nearest_match(lat: float, lon: float, radius_m: float, category, name) -> dict | None:
-    rows = overture.find_places(lat, lon, radius_m, category=category, name=name, limit=1)
+    if category:
+        # Exact/hierarchy category matching (same matcher as
+        # neighborhood_verdict), never find_places' substring ILIKE —
+        # a "park" claim must not be confirmed by a parking garage.
+        rows = overture.find_places_for_categories(
+            lat,
+            lon,
+            radius_m,
+            [category],
+            limit=overture.CHECKLIST_MAX_CANDIDATES if name else 1,
+        )
+        if name:
+            needle = str(name).lower()
+            rows = [r for r in rows if needle in (r.get("name") or "").lower()]
+        return rows[0] if rows else None
+    rows = overture.find_places(lat, lon, radius_m, name=name, limit=1)
     return rows[0] if rows else None
 
 
@@ -173,14 +200,26 @@ def _check_travel_time(lat: float, lon: float, claim: dict, index: int) -> dict:
             "note": f"could not route to {place.get('name') or 'the match'}: {routed['detail']}",
         }
     measured_minutes = routed["duration_s"] / 60.0
-    return {
+    verdict = _grade(measured_minutes, claimed_minutes)
+    result = {
         "claim": claim,
-        "verdict": _grade(measured_minutes, claimed_minutes),
+        "verdict": verdict,
         "measured": {
             "minutes": round(measured_minutes, 1),
             "match": _compact_place(place),
         },
     }
+    if routed.get("truncated"):
+        # The street graph hit its size cap, so the measured time is an
+        # upper bound over a partial graph — it can only overstate. A
+        # measurement that still clears the claimed threshold confirms
+        # honestly; one that fails it is not evidence the claim is false.
+        note = routed.get("note") or "the street graph hit its size cap"
+        if verdict != "confirmed":
+            result["verdict"] = "unverifiable"
+            note += "; the measured time may overstate, so a failed threshold is not conclusive"
+        result["note"] = note
+    return result
 
 
 def _check_count_nearby(lat: float, lon: float, claim: dict, index: int) -> dict:
@@ -204,10 +243,21 @@ def _check_count_nearby(lat: float, lon: float, claim: dict, index: int) -> dict
         "measured": {"count": count, "radius_m": radius_m},
     }
     if count >= overture.MAX_ROWS:
-        result["note"] = (
-            f"count capped at {overture.MAX_ROWS} matches within {int(radius_m)}m; "
-            "the true count may be higher"
-        )
+        if claimed_at_least > count:
+            # The scan stopped at the row cap, so the true count may be
+            # anything >= count — a claim asking for more than the cap can
+            # neither be confirmed nor denied from this measurement.
+            result["verdict"] = "unverifiable"
+            result["note"] = (
+                f"count capped at {overture.MAX_ROWS} matches within {int(radius_m)}m; "
+                f"claimed at least {claimed_at_least} exceeds the cap, so the claim "
+                "cannot be confirmed or denied"
+            )
+        else:
+            result["note"] = (
+                f"count capped at {overture.MAX_ROWS} matches within {int(radius_m)}m; "
+                "the true count may be higher"
+            )
     return result
 
 
@@ -217,7 +267,10 @@ def _check_distance(lat: float, lon: float, claim: dict, index: int) -> dict:
     if claimed_max_m < 0:
         raise ClaimError(f"claims[{index}]: claimed_max_m must be non-negative")
 
-    search_radius_m = max(claimed_max_m * _DISTANCE_SEARCH_MULT, _MIN_SEARCH_RADIUS_M)
+    search_radius_m = min(
+        max(claimed_max_m * _DISTANCE_SEARCH_MULT, _MIN_SEARCH_RADIUS_M),
+        MAX_DISTANCE_SEARCH_RADIUS_M,
+    )
     place = _nearest_match(lat, lon, search_radius_m, to_category, to_name)
     if place is None:
         return {
