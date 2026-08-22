@@ -64,6 +64,7 @@ def test_core_profile():
         "warmup_city",
         "from_to",
         "find_near",
+        "ground_location",
         "data_version",
         "preferences",
     }

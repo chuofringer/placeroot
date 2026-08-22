@@ -186,6 +186,10 @@
     {
       "name": "find_near",
       "description": "Places of a category near a named place or city."
+    },
+    {
+      "name": "ground_location",
+      "description": "One-hop location grounding: where, surroundings, reach, and notable nearby places in a single call."
     }
   ],
   "tools_generated": false,

@@ -56,6 +56,9 @@ PROFILES: dict[str, frozenset[str]] = {
         # "X near Y" so the agent cannot triple-geocode (#328).
         "from_to",
         "find_near",
+        # Single-hop point compose: where/surroundings/reach/notable in
+        # one call, the install-to-wow "orient me here" question (#362).
+        "ground_location",
     }),
     # Find/name/identify, including the batch siblings and the category
     # lookup that makes find_places' category filter usable.
