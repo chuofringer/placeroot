@@ -79,7 +79,7 @@ def _tiff_short(value: int) -> bytes:
     return struct.pack("<H", value) + b"\x00\x00"
 
 
-def build_synthetic_cog() -> bytes:
+def build_synthetic_cog(pixel_value=_pixel_value, predictor=3) -> bytes:
     """A classic little-endian tiled TIFF matching the real GLO-30 COG shape."""
     n_tiles = TILES_ACROSS * (IMAGE_LENGTH // TILE_LENGTH)
     assert n_tiles == 2
@@ -94,10 +94,13 @@ def build_synthetic_cog() -> bytes:
                 row_vals = []
                 for c in range(TILE_WIDTH):
                     global_col = tile_col * TILE_WIDTH + c
-                    row_vals.append(_pixel_value(global_row, global_col))
+                    row_vals.append(pixel_value(global_row, global_col))
                 rows.append(row_vals)
-            predicted = _encode_float_predictor(rows, TILE_WIDTH, TILE_LENGTH)
-            tile_blocks.append(zlib.compress(predicted, 6))
+            if predictor == 3:
+                encoded = _encode_float_predictor(rows, TILE_WIDTH, TILE_LENGTH)
+            else:  # predictor 1: raw samples in the file's (little-endian) order
+                encoded = b"".join(struct.pack("<f", v) for row in rows for v in row)
+            tile_blocks.append(zlib.compress(encoded, 6))
 
     # --- Tag table (sorted by tag id, as real TIFFs are) ---
     # (tag, type, count, inline_bytes_or_None)
@@ -118,7 +121,7 @@ def build_synthetic_cog() -> bytes:
     add_inline(257, 3, 1, _tiff_short(IMAGE_LENGTH))  # ImageLength
     add_inline(258, 3, 1, _tiff_short(32))  # BitsPerSample
     add_inline(259, 3, 1, _tiff_short(8))  # Compression = DEFLATE
-    add_inline(317, 3, 1, _tiff_short(3))  # Predictor = floating point
+    add_inline(317, 3, 1, _tiff_short(predictor))  # Predictor
     add_inline(322, 3, 1, _tiff_short(TILE_WIDTH))  # TileWidth
     add_inline(323, 3, 1, _tiff_short(TILE_LENGTH))  # TileLength
     add_array(324, 4, [0] * n_tiles, "I")  # TileOffsets (patched below)
@@ -311,6 +314,91 @@ def test_404_returns_null_coverage_answer(monkeypatch):
     _install_fetcher(monkeypatch, fetcher)
     result = elevation.elevation_at(0.0, -140.0)
     assert result == {"elevation_m": None, "note": elevation._NO_COVERAGE_NOTE}
+
+
+def test_404_no_coverage_is_negatively_cached(monkeypatch):
+    """A missing tile must not be re-fetched on every ocean-point query."""
+    calls = []
+
+    def fetcher(url, start, end):
+        calls.append(url)
+        raise elevation._TileNotFound(url)
+
+    _install_fetcher(monkeypatch, fetcher)
+    elevation.elevation_at(0.0, -140.0)
+    calls_after_first = len(calls)
+    assert calls_after_first > 0
+    elevation.elevation_at(0.0, -140.0)
+    assert len(calls) == calls_after_first, "404 result was not cached; tile re-fetched"
+
+
+def test_lon_180_maps_to_w180_tile(monkeypatch):
+    """lon == 180.0 is valid input but has no E180 tile; it must normalize
+    to the W180 tile instead of silently answering 'no coverage'."""
+    urls = []
+
+    def fetcher(url, start, end):
+        urls.append(url)
+        raise elevation._TileNotFound(url)
+
+    _install_fetcher(monkeypatch, fetcher)
+    elevation.elevation_at(-16.8, 180.0)
+    assert urls, "no fetch attempted"
+    assert all("W180" in u for u in urls), urls
+    assert not any("E180" in u for u in urls), urls
+
+
+def test_block_404_returns_no_coverage_not_traceback(monkeypatch):
+    """_TileNotFound raised by the BLOCK fetch (header succeeded) must come
+    out as the no-coverage answer, not escape as a raw exception."""
+
+    def fetcher(url, start, end):
+        if start == 0:  # header reads start at byte 0
+            return FIXTURE_BYTES[start : end + 1]
+        raise elevation._TileNotFound(url)
+
+    _install_fetcher(monkeypatch, fetcher)
+    lat, lon = _lonlat_for_pixel(10, 10)
+    result = elevation.elevation_at(lat, lon)
+    assert result == {"elevation_m": None, "note": elevation._NO_COVERAGE_NOTE}
+
+
+def test_void_fill_value_returns_no_coverage(monkeypatch):
+    """GLO-30 voids (-32767 fill) must answer null coverage, not -32767.0 m."""
+
+    def pixel_value(row, col):
+        if (row, col) == (10, 10):
+            return -32767.0
+        return _pixel_value(row, col)
+
+    fixture = build_synthetic_cog(pixel_value=pixel_value)
+    _install_fetcher(monkeypatch, _CountingFetcher(data=fixture))
+    lat, lon = _lonlat_for_pixel(10, 10)
+    result = elevation.elevation_at(lat, lon)
+    assert result == {"elevation_m": None, "note": elevation._NO_COVERAGE_NOTE}
+    # A neighboring normal pixel in the same fixture still answers.
+    lat2, lon2 = _lonlat_for_pixel(11, 11)
+    assert elevation.elevation_at(lat2, lon2)["elevation_m"] == pytest.approx(
+        _pixel_value(11, 11), abs=0.15
+    )
+
+
+def test_nan_sample_returns_no_coverage(monkeypatch):
+    """A non-finite cell must not leak NaN into the (JSON) answer."""
+    _install_fetcher(monkeypatch, _CountingFetcher())
+    monkeypatch.setattr(elevation, "_sample_value", lambda *a: float("nan"))
+    lat, lon = _lonlat_for_pixel(10, 10)
+    result = elevation.elevation_at(lat, lon)
+    assert result == {"elevation_m": None, "note": elevation._NO_COVERAGE_NOTE}
+
+
+def test_predictor_1_decodes(monkeypatch):
+    """Predictor=1 (none) is accepted and read in the file's own byte order."""
+    fixture = build_synthetic_cog(predictor=1)
+    _install_fetcher(monkeypatch, _CountingFetcher(data=fixture))
+    lat, lon = _lonlat_for_pixel(10, 20)
+    result = elevation.elevation_at(lat, lon)
+    assert result["elevation_m"] == pytest.approx(_pixel_value(10, 20), abs=0.15)
 
 
 def test_http_error_raises_upstream_unavailable(monkeypatch):

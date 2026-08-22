@@ -31,9 +31,10 @@ than these files actually use):
   - ModelPixelScaleTag (33550) + ModelTiepointTag (33922) give an affine
     lon/lat -> pixel mapping directly; no need to parse GeoKeyDirectory.
 
-Only this exact combination is supported. Anything else (BigTIFF, LZW,
-predictor 1/2, integer samples) raises a clear "unsupported ..." error
-naming what was actually found, rather than guessing.
+Only this exact combination is supported (plus predictor 1 = none, which
+is trivial to read). Anything else (BigTIFF, LZW, predictor 2, integer
+samples) raises a clear "unsupported ..." error naming what was actually
+found, rather than guessing.
 
 Nearest-neighbor sampling only (no bilinear interpolation) — adequate at
 ~30 m cells for the "what's the elevation here" questions this tool
@@ -64,6 +65,7 @@ import urllib.error
 import urllib.request
 import zlib
 from collections import OrderedDict
+from itertools import accumulate
 
 from placeroot.errors import UpstreamUnavailable
 
@@ -101,6 +103,11 @@ _TAG_SAMPLE_FORMAT = 339
 _TAG_PREDICTOR = 317
 _TAG_MODEL_PIXEL_SCALE = 33550
 _TAG_MODEL_TIEPOINT = 33922
+_TAG_GDAL_NODATA = 42113
+
+# Values at or below this are treated as DEM voids (GLO-30 uses -32767),
+# alongside any per-file GDAL_NODATA tag value and non-finite samples.
+_VOID_THRESHOLD = -9999.0
 
 _TIFF_TYPE_SIZES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8}
 
@@ -190,6 +197,7 @@ class _TileIFD:
         "predictor",
         "pixel_scale",
         "tiepoint",
+        "nodata",
     )
 
     def __init__(self, **kw):
@@ -298,6 +306,13 @@ def _parse_classic_tiff_ifd0(data: bytes) -> _TileIFD:
     predictor = optional(_TAG_PREDICTOR, [1])[0]
     pixel_scale = require(_TAG_MODEL_PIXEL_SCALE, "ModelPixelScaleTag")
     tiepoint = require(_TAG_MODEL_TIEPOINT, "ModelTiepointTag")
+    nodata_raw = optional(_TAG_GDAL_NODATA, None)
+    nodata = None
+    if isinstance(nodata_raw, str):
+        try:
+            nodata = float(nodata_raw.strip())
+        except ValueError:
+            nodata = None
 
     if compression != COMPRESSION_DEFLATE:
         raise ElevationFormatError(
@@ -337,6 +352,7 @@ def _parse_classic_tiff_ifd0(data: bytes) -> _TileIFD:
         predictor=predictor,
         pixel_scale=pixel_scale,
         tiepoint=tiepoint,
+        nodata=nodata,
     )
 
 
@@ -357,7 +373,9 @@ def _fetch_header(url: str) -> bytes:
 
 
 _ifd_cache_lock = threading.Lock()
-_ifd_cache: OrderedDict[str, _TileIFD] = OrderedDict()
+# Value None is a negative entry: the tile 404'd (no coverage). Cached so
+# ocean points don't re-fetch the same missing tile on every call.
+_ifd_cache: OrderedDict[str, _TileIFD | None] = OrderedDict()
 
 _block_cache_lock = threading.Lock()
 _block_cache: OrderedDict[tuple[str, int], bytes] = OrderedDict()
@@ -366,17 +384,17 @@ _block_cache: OrderedDict[tuple[str, int], bytes] = OrderedDict()
 def _get_ifd(tile_name: str) -> _TileIFD | None:
     """Parsed IFD for `tile_name`, or None if the tile doesn't exist (404)."""
     with _ifd_cache_lock:
-        cached = _ifd_cache.get(tile_name)
-        if cached is not None:
+        if tile_name in _ifd_cache:  # `in`, not .get(): None is a cached 404
             _ifd_cache.move_to_end(tile_name)
-            return cached
+            return _ifd_cache[tile_name]
 
     url = _tile_url(tile_name)
     try:
         header = _fetch_header(url)
     except _TileNotFound:
-        return None
-    ifd = _parse_classic_tiff_ifd0(header)
+        ifd = None
+    else:
+        ifd = _parse_classic_tiff_ifd0(header)
 
     with _ifd_cache_lock:
         _ifd_cache[tile_name] = ifd
@@ -395,10 +413,9 @@ def _undo_horizontal_diff_bytes(buf: bytearray, num_rows: int, row_len: int) -> 
     """In place: each row's bytes are cumulative differences; undo to absolutes (mod 256)."""
     for r in range(num_rows):
         base = r * row_len
-        prev = buf[base]
-        for i in range(base + 1, base + row_len):
-            prev = (prev + buf[i]) & 0xFF
-            buf[i] = prev
+        buf[base : base + row_len] = bytes(
+            accumulate(buf[base : base + row_len], lambda prev, b: (prev + b) & 0xFF)
+        )
 
 
 def _undo_float_predictor(data: bytes, width: int, height: int, bytes_per_sample: int) -> bytes:
@@ -492,6 +509,10 @@ def _pixel_for_lonlat(ifd: _TileIFD, lat: float, lon: float) -> tuple[int, int]:
 
 def _elevation_at_one(lat: float, lon: float) -> float | None:
     """None means no Copernicus coverage (ocean, or a tile excluded from release)."""
+    # The antimeridian is the same meridian from both sides: lon 180.0 is
+    # valid input but there is no E180 tile — it's covered by W180.
+    if lon == 180.0:
+        lon = -180.0
     lat_floor = math.floor(lat)
     lon_floor = math.floor(lon)
     tile_name = _tile_name(lat_floor, lon_floor)
@@ -506,8 +527,21 @@ def _elevation_at_one(lat: float, lon: float) -> float | None:
     row_in_tile = row % ifd.tile_length
     col_in_tile = col % ifd.tile_width
 
-    block = _decode_tile_block(tile_name, tile_index, ifd)
-    return _sample_value(block, ifd, row_in_tile, col_in_tile)
+    try:
+        block = _decode_tile_block(tile_name, tile_index, ifd)
+    except _TileNotFound:
+        # The object existed for the header read but 404'd for the block
+        # read (deleted/replaced between requests): treat as no coverage
+        # rather than letting the internal exception escape.
+        return None
+    value = _sample_value(block, ifd, row_in_tile, col_in_tile)
+    # DEM voids: non-finite samples, the file's declared GDAL_NODATA value,
+    # or the conventional large-negative fill (-32767) — all "no coverage".
+    if not math.isfinite(value) or value <= _VOID_THRESHOLD:
+        return None
+    if ifd.nodata is not None and value == ifd.nodata:
+        return None
+    return value
 
 
 _NO_COVERAGE_NOTE = (
