@@ -19,10 +19,21 @@ curates ~100 rows of intent words per slug ("mobile_phone_repair; phone
 screen cracked repair fix cell smartphone") — it backs the token-based
 fallback below for phrase intents like "fix my cracked phone screen" that
 share no substring with any slug (#355).
+
+A third bundled artifact (data/category_embeddings.bin, see
+data/README.md and embeddings.py) extends the tail past what the lexicon
+covers: a static hashed-n-gram vector per row, cosine-ranked against the
+query at a confidence strictly below every lexical band (_EMBED_MATCH_MAX
+< _TOKEN_MATCH_MIN), so it only ever fills slots the lexical tiers left
+empty — never outranks or displaces a lexical hit (#356). No model, no
+network, no key; a missing artifact silently degrades to today's
+lexical-only behavior.
 """
 
 import importlib.resources
 import math
+
+from placeroot import embeddings
 
 # Overture schema tag the bundled CSV was taken from; see data/README.md,
 # which is the thing to update in lockstep when the snapshot is refreshed.
@@ -298,6 +309,16 @@ _CARRY_WEIGHT_MIN = 0.5
 _TOKEN_MATCH_MIN = 0.2
 _TOKEN_MATCH_MAX = 0.55
 
+# Embeddings tail-extension band (#356): strictly below every lexical band
+# above (including the token fallback's floor), so an embeddings hit can
+# only ever fill a slot the lexical tiers left empty — it never outranks
+# or bumps a lexical result. A row must clear _EMBED_SIM_FLOOR cosine
+# similarity to be surfaced at all; below that it is noise, not a
+# long-tail hit, and is dropped rather than padded in to fill `limit`.
+_EMBED_MATCH_MIN = 0.05
+_EMBED_MATCH_MAX = 0.19
+_EMBED_SIM_FLOOR = 0.28
+
 
 def _token_weight(token: str, df: dict[str, int], n_rows: int) -> float:
     """IDF-style weight in (0, 1]: 1.0 for a token unique to one row,
@@ -388,6 +409,44 @@ def _token_matches(query_tokens: list[str], rows: list[dict]) -> list[tuple]:
     return scored
 
 
+def _embedding_matches(
+    query_tokens: list[str], rows: list[dict], exclude: set[str], max_results: int
+) -> list[tuple]:
+    """Embeddings tail extension (#356): fills up to `max_results` slots the
+    lexical tiers above left empty, from src/placeroot/data/category_embeddings.bin
+    (see embeddings.py). [] whenever the artifact is missing/unreadable — a
+    property of embeddings.embedding_similarities, not checked here — so a
+    stripped/corrupt install silently degrades to lexical-only.
+
+    Same tuple shape as _whole_query_matches/_token_matches so it merges
+    into the same sort; slug_word_miss is fixed at 1 (never 0) so an
+    embeddings hit can never win a tie against a real slug-word match at
+    the same confidence — moot in practice since _EMBED_MATCH_MAX already
+    sits below every lexical band, but keeps the tie-break honest.
+    """
+    if max_results <= 0:
+        return []
+    sims = embeddings.embedding_similarities(query_tokens)
+    if not sims:
+        return []
+
+    by_slug = {row["slug"]: row for row in rows}
+    candidates = [
+        (slug, sim) for slug, sim in sims
+        if slug not in exclude and sim >= _EMBED_SIM_FLOOR and slug in by_slug
+    ]
+    candidates.sort(key=lambda t: -t[1])
+
+    scored = []
+    span = max(1.0 - _EMBED_SIM_FLOOR, 1e-9)
+    for slug, sim in candidates[:max_results]:
+        frac = min(max((sim - _EMBED_SIM_FLOOR) / span, 0.0), 1.0)
+        confidence = _EMBED_MATCH_MIN + frac * (_EMBED_MATCH_MAX - _EMBED_MATCH_MIN)
+        row = by_slug[slug]
+        scored.append((confidence, 1, len(slug), slug, row))
+    return scored
+
+
 def search_categories(query: str, limit: int = 8) -> list[dict]:
     """Free text -> ranked {"slug", "path", "confidence"} rows from the
     bundled taxonomy.
@@ -409,6 +468,16 @@ def search_categories(query: str, limit: int = 8) -> list[dict]:
     large slice of the taxonomy ("shop", "store", "service") counts for
     less, and a row that only matched such tokens is dropped.
 
+    If the lexical tiers above (whole-query + token fallback) leave fewer
+    than `limit` rows, an offline embeddings backend (#356; see
+    embeddings.py) fills the remaining slots: a static hashed n-gram
+    vector per row, cosine-ranked against the query, at confidence
+    0.05-0.19 — always below every lexical band, so it only ever extends
+    the tail (a phrase sharing no word or synonym with any row, e.g.
+    "somewhere calm to read for an hour") and never bumps a lexical hit.
+    Silently contributes nothing if its bundled artifact
+    (data/category_embeddings.bin) is missing or unreadable.
+
     Ties break by matches on the row's own slug words over inherited
     path/synonym words, then by shorter slug, then alphabetically. Empty,
     whitespace, or stopword-only query returns [].
@@ -419,10 +488,18 @@ def search_categories(query: str, limit: int = 8) -> list[dict]:
 
     rows = _load_categories()
     scored = _whole_query_matches(query, rows)
+    query_tokens = None
     if not scored:
         query_tokens = _tokenize(query)
         if query_tokens:
             scored = _token_matches(query_tokens, rows)
+
+    if len(scored) < limit:
+        if query_tokens is None:
+            query_tokens = _tokenize(query)
+        if query_tokens:
+            have = {t[3] for t in scored}
+            scored = scored + _embedding_matches(query_tokens, rows, have, limit - len(scored))
 
     scored.sort(key=lambda t: (-t[0], t[1], t[2], t[3]))
     return [
