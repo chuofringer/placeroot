@@ -72,15 +72,15 @@ ceiling.
 
 <!-- BEGIN GENERATED: benchmarks/token_efficiency.py -->
 
-Generated 2026-08-19 by `uv run python benchmarks/token_efficiency.py --write`.
+Generated 2026-08-21 by `uv run python benchmarks/token_efficiency.py --write`.
 
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-07-22.0`
-- Tools registered: **34**
-- Total schema surface: **15711 tokens** (62896 chars, 63060 bytes)
+- Tools registered: **35**
+- Total schema surface: **16559 tokens** (66290 chars, 66458 bytes)
 - Schema cost per tool: min 158, median 373, max 1335 tokens
-- Median scenario response: **205 tokens** (range 87-811)
-- Break-even: the schema surface costs about as much as **77 median answers**
+- Median scenario response: **208 tokens** (range 87-811)
+- Break-even: the schema surface costs about as much as **80 median answers**
 
 ### Schema surface (paid once per conversation)
 
@@ -88,6 +88,7 @@ Generated 2026-08-19 by `uv run python benchmarks/token_efficiency.py --write`.
 |---|---:|---:|---:|---:|
 | `find_places` | 965 | 296 | **1335** | 5342 |
 | `route` | 729 | 128 | **928** | 3713 |
+| `geometry_op` | 559 | 221 | **848** | 3394 |
 | `optimize_route` | 647 | 99 | **822** | 3291 |
 | `places_along_route` | 522 | 173 | **759** | 3037 |
 | `resolve_place` | 550 | 112 | **733** | 2935 |
@@ -120,7 +121,7 @@ Generated 2026-08-19 by `uv run python benchmarks/token_efficiency.py --write`.
 | `data_version` | 166 | 16 | **231** | 926 |
 | `reverse_geocode` | 111 | 42 | **205** | 820 |
 | `summarize_area` | 53 | 57 | **158** | 635 |
-| **all 34 tools** | 10678 | 3047 | **15711** | 62896 |
+| **all 35 tools** | 11237 | 3268 | **16559** | 66290 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 
@@ -131,8 +132,8 @@ Generated 2026-08-19 by `uv run python benchmarks/token_efficiency.py --write`.
 | `geocode` | Where is 'Brooklyn'? | **87** | 348 |
 | `place_details` | Tell me about the place named 'Roastery' near the fixture center. | **147** | 588 |
 | `summarize_area` | What's in this 1km area? | **113** | 453 |
-| `route (walk)` | How do I walk from one grid corner to another? | **436** | 1747 |
-| `isochrone (15min walk)` | How far can I walk in 15 minutes from here? | **205** | 822 |
+| `route (walk)` | How do I walk from one grid corner to another? | **436** | 1746 |
+| `isochrone (15min walk)` | How far can I walk in 15 minutes from here? | **208** | 832 |
 
 <!-- END GENERATED -->
 
