@@ -229,3 +229,135 @@ def test_same_release_on_both_sides_rejected(diff_fixtures):
 def test_invalid_release_string_rejected(diff_fixtures):
     with pytest.raises(ValueError):
         changes.diff_places(BBOX, "not-a-release", RELEASE_B)
+
+
+# --- changes_digest (issue #377) --------------------------------------------
+#
+# Pure-function tests: changes_digest() takes a diff_places()-shaped dict and
+# reshapes it, so these build that dict by hand rather than paying for a
+# fixture scan -- diff_places' own tests above already cover how that dict
+# gets produced.
+
+
+def _fake_row(id_, name, category, confidence=0.5):
+    return {
+        "id": id_,
+        "name": name,
+        "category": category,
+        "confidence": confidence,
+        "lat": 0.0,
+        "lon": 0.0,
+    }
+
+
+def _fake_changed_row(id_, old_category, new_category):
+    return {
+        "id": id_,
+        "old_name": "Old",
+        "new_name": "New",
+        "old_category": old_category,
+        "new_category": new_category,
+        "confidence": 0.5,
+        "lat": 0.0,
+        "lon": 0.0,
+    }
+
+
+def _fake_diff(appeared=(), disappeared=(), changed=(), unchanged=0, truncated=False):
+    return {
+        "appeared": list(appeared),
+        "disappeared": list(disappeared),
+        "changed": list(changed),
+        "counts": {
+            "appeared": len(appeared),
+            "disappeared": len(disappeared),
+            "changed": len(changed),
+            "unchanged": unchanged,
+        },
+        "truncated": truncated,
+        "releases": {"from": RELEASE_A, "to": RELEASE_B},
+    }
+
+
+def test_digest_carries_exact_counts_and_releases():
+    diff = _fake_diff(appeared=[_fake_row("a1", "A", "cafe")], unchanged=3)
+    digest = changes.changes_digest(diff)
+    assert digest["counts"] == {"appeared": 1, "disappeared": 0, "changed": 0, "unchanged": 3}
+    assert digest["releases"] == {"from": RELEASE_A, "to": RELEASE_B}
+
+
+def test_digest_caps_each_bucket_at_top_n():
+    appeared = [_fake_row(f"a{i}", f"Place {i}", "cafe") for i in range(20)]
+    digest = changes.changes_digest(_fake_diff(appeared=appeared), top_n=8)
+    assert len(digest["appeared"]) == 8
+    assert digest["counts"]["appeared"] == 20  # exact count, never capped by top_n
+
+
+def test_digest_truncated_when_top_n_cuts_a_bucket_diff_did_not_truncate():
+    appeared = [_fake_row(f"a{i}", f"Place {i}", "cafe") for i in range(20)]
+    diff = _fake_diff(appeared=appeared, truncated=False)
+    digest = changes.changes_digest(diff, top_n=8)
+    assert digest["truncated"] is True
+
+
+def test_digest_truncated_propagates_from_diff():
+    diff = _fake_diff(appeared=[_fake_row("a1", "A", "cafe")], truncated=True)
+    digest = changes.changes_digest(diff)
+    assert digest["truncated"] is True
+
+
+def test_digest_not_truncated_when_nothing_was_cut():
+    diff = _fake_diff(appeared=[_fake_row("a1", "A", "cafe")], truncated=False)
+    digest = changes.changes_digest(diff, top_n=8)
+    assert digest["truncated"] is False
+
+
+def test_digest_delisting_note_present_whenever_disappeared_gt_zero():
+    diff = _fake_diff(disappeared=[_fake_row("d1", "D", "shop")])
+    digest = changes.changes_digest(diff)
+    assert any("delist" in n.lower() or "closed" in n.lower() for n in digest["notes"])
+
+
+def test_digest_newly_mapped_note_present_whenever_appeared_gt_zero():
+    diff = _fake_diff(appeared=[_fake_row("a1", "A", "cafe")])
+    digest = changes.changes_digest(diff)
+    assert any("newly" in n.lower() or "mapped" in n.lower() for n in digest["notes"])
+
+
+def test_digest_both_notes_present_when_both_buckets_nonempty():
+    diff = _fake_diff(
+        appeared=[_fake_row("a1", "A", "cafe")],
+        disappeared=[_fake_row("d1", "D", "shop")],
+    )
+    digest = changes.changes_digest(diff)
+    assert len(digest["notes"]) == 2
+
+
+def test_digest_no_notes_when_nothing_appeared_or_disappeared():
+    diff = _fake_diff(changed=[_fake_changed_row("c1", "shop", "bakery")], unchanged=5)
+    digest = changes.changes_digest(diff)
+    assert "notes" not in digest
+
+
+def test_digest_by_category_ranks_and_caps():
+    appeared = [_fake_row(f"cafe{i}", f"Cafe {i}", "cafe") for i in range(3)] + [
+        _fake_row(f"shop{i}", f"Shop {i}", "shop") for i in range(1)
+    ]
+    digest = changes.changes_digest(_fake_diff(appeared=appeared))
+    assert digest["appeared_by_category"]["cafe"] == 3
+    assert digest["appeared_by_category"]["shop"] == 1
+    # cafe (3) ranks ahead of shop (1).
+    assert list(digest["appeared_by_category"]) == ["cafe", "shop"]
+
+
+def test_digest_changed_by_category_uses_new_category():
+    changed = [_fake_changed_row("c1", "shop", "bakery")]
+    digest = changes.changes_digest(_fake_diff(changed=changed))
+    assert digest["changed_by_category"] == {"bakery": 1}
+
+
+def test_digest_empty_diff_has_no_notes_and_empty_buckets():
+    digest = changes.changes_digest(_fake_diff())
+    assert digest["appeared"] == digest["disappeared"] == digest["changed"] == []
+    assert "notes" not in digest
+    assert digest["truncated"] is False

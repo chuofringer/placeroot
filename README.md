@@ -102,16 +102,16 @@ Then ask your agent something spatial:
 
 ## What it can do
 
-**34 tools**, grouped into four families — every answer fits in a couple of thousand tokens:
+**35 tools**, grouped into four families — every answer fits in a couple of thousand tokens:
 
 | Family | Tools | Answers questions like |
 |---|---|---|
 | 🔍 **Search & identify** | `find_places`, `find_near`, `geocode`, `reverse_geocode`, `place_details`, `search_categories`, `warmup_city`, … | What cafés are near this point? Coffee near the Eiffel Tower? |
-| 📊 **Area analysis** | `summarize_area`, `compare_areas`, `neighborhood_verdict`, `summarize_buildings`, `land_use_at`, … | What's in this neighborhood, should I live here, and how does it differ from that one? |
+| 📊 **Area analysis** | `summarize_area`, `compare_areas`, `neighborhood_verdict`, `summarize_buildings`, `land_use_at`, `changes_in_area`, … | What's in this neighborhood, should I live here, how does it differ from that one, and what's opened or closed since spring? |
 | 🚴 **Routing** | `route`, `from_to`, `isochrone`, `optimize_route`, `places_along_route`, `distance_matrix` | How far to walk from A to B? What's reachable in 15 minutes? Best order for 6 stops? |
 | 🗺️ **Geometry & maps** | `render_map`, `simplify_geometry` | Show me this result as an interactive map |
 
-It also ships five **workflow prompts** (site selection, neighborhood comparison, errand planning, should I live here, get to know my city) and three attachable **resources** — and a `PLACEROOT_TOOLS` setting to load only the tool profiles you need, cutting schema overhead by up to 94%.
+It also ships five **workflow prompts** (site selection, neighborhood comparison, errand planning, should I live here, get to know my city) and three attachable **resources** — and a `PLACEROOT_TOOLS` setting to load only the tool profiles you need, cutting schema overhead by up to 95%.
 
 📚 **[Full tool catalog, prompts, resources & configuration → docs/REFERENCE.md](docs/REFERENCE.md)**
 

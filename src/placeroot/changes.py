@@ -5,10 +5,12 @@ scan a small bbox in release A and release B, join the two scans on GERS
 `id`, and classify every id as appeared (only in B), disappeared (only in
 A), or changed (in both, but its primary name or category differs).
 
-This module deliberately has no MCP tool wired to it yet (that's #377) — it
-is a pure query-layer function so the RAM-discipline requirements (bounded
-bbox, bounded scans, bounded output) can be reviewed and tested in
-isolation from any tool-surface concerns.
+changes_digest() (issue #377) shapes diff_places()'s output into the compact,
+ranked digest the `changes_in_area` MCP tool (server.py) actually returns:
+headline counts, a top-N slice per bucket, a small category breakdown per
+bucket, and the honest-framing notes issue #309's owner asked for
+(disappearing is not the same claim as closing; appearing is not the same
+claim as opening).
 
 RAM discipline (this machine is memory-limited, issue #376's hard
 requirement): every knob here exists to keep a single diff_places() call
@@ -135,8 +137,16 @@ def _scan_release(
     bbox_filter: str,
     bbox_params: dict,
     category: str | None,
-) -> tuple[list[dict], bool]:
-    """Bounded (rows, hit_scan_limit) for one release's places within bbox.
+) -> tuple[list[dict], bool, set[str]]:
+    """Bounded (rows, hit_scan_limit, missing_nonessential) for one
+    release's places within bbox.
+
+    missing_nonessential is the set of non-essential _REQUIRED_COLUMNS
+    absent from this glob's schema -- those fields came back NULL in every
+    row, so a compare against the other release on them is vacuous.
+    diff_places surfaces the union of both sides as "degraded_fields"
+    rather than letting e.g. an old, schema-drifted release silently
+    classify every id as "changed".
 
     Rows carry only id/name/category/confidence/lat/lon -- never a full
     place row -- and the SELECT itself carries SCAN_LIMIT, so the cap is
@@ -191,7 +201,7 @@ def _scan_release(
         raise UpstreamUnavailable(str(e)) from e
     cols = ["id", "name", "category", "confidence", "lat", "lon"]
     results = [dict(zip(cols, r)) for r in rows]
-    return results, len(results) >= SCAN_LIMIT
+    return results, len(results) >= SCAN_LIMIT, missing - _ESSENTIAL_COLUMNS
 
 
 def _sort_key(row: dict) -> tuple[float, str]:
@@ -239,9 +249,17 @@ def diff_places(
             "disappeared":  [...same shape, from release_a...],
             "changed":      [{"id","old_name","new_name","old_category",
                                "new_category","confidence","lat","lon"}, ...],
+            "appeared_by_category":    {category: count, ...} (top
+                _BY_CATEGORY_TOP_N, computed over the FULL pre-`limit`
+                list, so the denominator matches "counts"),
+            "disappeared_by_category": ...,
+            "changed_by_category":     ...,
             "counts": {"appeared": n, "disappeared": n, "changed": n, "unchanged": n},
             "truncated": bool,
             "releases": {"from": release_a, "to": release_b},
+            "degraded_fields": sorted non-essential columns missing from
+                EITHER release's schema (those fields were NULL in the
+                compare) -- key omitted entirely when nothing is missing,
         }
 
     Every list is capped at `limit` (ranked by confidence desc, then name);
@@ -276,8 +294,8 @@ def diff_places(
     glob_a = overture.upstream_glob(overture.THEME, "place", release=release_a)
     glob_b = overture.upstream_glob(overture.THEME, "place", release=release_b)
 
-    rows_a, capped_a = _scan_release(glob_a, bbox_filter, dict(bbox_params), category)
-    rows_b, capped_b = _scan_release(glob_b, bbox_filter, dict(bbox_params), category)
+    rows_a, capped_a, missing_a = _scan_release(glob_a, bbox_filter, dict(bbox_params), category)
+    rows_b, capped_b, missing_b = _scan_release(glob_b, bbox_filter, dict(bbox_params), category)
 
     by_a = {r["id"]: r for r in rows_a}
     by_b = {r["id"]: r for r in rows_b}
@@ -324,11 +342,158 @@ def diff_places(
         or len(disappeared_full) > limit
         or len(changed_full) > limit
     )
-    return {
+    result = {
         "appeared": appeared_full[:limit],
         "disappeared": disappeared_full[:limit],
         "changed": changed_full[:limit],
+        # Breakdowns over the FULL pre-`limit` lists (they're already in
+        # memory), so their denominators match "counts" -- a breakdown of a
+        # limit-capped slice presented next to exact counts would quietly
+        # be about a different population.
+        "appeared_by_category": _by_category(appeared_full),
+        "disappeared_by_category": _by_category(disappeared_full),
+        "changed_by_category": _by_category(changed_full),
         "counts": counts,
         "truncated": truncated,
         "releases": {"from": release_a, "to": release_b},
     }
+    degraded = sorted(missing_a | missing_b)
+    if degraded:
+        # A column missing on EITHER side NULLed that field out of the
+        # comparison (a name/category compare against NULL is vacuous) --
+        # surfaced so a schema-drifted release can't silently classify
+        # everything as changed with no signal.
+        result["degraded_fields"] = degraded
+    return result
+
+
+# Default top-N per bucket for changes_digest -- deliberately small. This is
+# a headline digest ("12 new, 5 no longer listed, 3 changed, here are the
+# most confident ones"), never the full diff; a caller that wants the full
+# (still `limit`-capped) lists calls diff_places directly.
+DEFAULT_DIGEST_TOP_N = 8
+
+# How many categories changes_digest's per-bucket breakdown shows. Small on
+# purpose -- it's headline color ("mostly cafes and shops"), not a full
+# category table.
+_BY_CATEGORY_TOP_N = 5
+
+_DELISTING_NOTE = (
+    "A place no longer showing up between releases may mean it closed, but "
+    "it can just as easily mean Overture delisted it, merged a duplicate, or "
+    "cleaned up a stale entry -- this diff has no way to tell those apart "
+    "from the id/name/category columns alone."
+)
+
+_NEWLY_MAPPED_NOTE = (
+    "A place appearing for the first time may be newly opened, or it may "
+    "simply be newly mapped -- Overture's coverage of a real-world opening "
+    "can lag it by months, so a fresh id is not proof of a fresh business."
+)
+
+
+def _row_category(row: dict) -> str:
+    """The category a digest row should be grouped by.
+
+    appeared/disappeared rows carry "category"; changed rows carry
+    old_category/new_category instead (see diff_places) -- new_category
+    wins there since it's the category the place carries as of the newer
+    release, which is what a "what's here now, grouped by category" reading
+    of the digest wants. Falls back to "uncategorized" rather than dropping
+    the row from every bucket's breakdown, matching find_places' NULL ->
+    degraded-but-present convention elsewhere in this codebase.
+    """
+    category = row.get("category")
+    if category is None:
+        category = row.get("new_category") or row.get("old_category")
+    return category or "uncategorized"
+
+
+def _by_category(rows: list[dict]) -> dict[str, int]:
+    """Category -> count for `rows`, ranked desc and capped at
+    _BY_CATEGORY_TOP_N -- headline color, not a full breakdown. diff_places
+    calls it over the FULL pre-`limit` lists (in memory anyway), so the
+    per-category counts share "counts"' denominator -- everything the scans
+    saw, not a limit-capped slice.
+    """
+    counts: dict[str, int] = {}
+    for row in rows:
+        category = _row_category(row)
+        counts[category] = counts.get(category, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return dict(ranked[:_BY_CATEGORY_TOP_N])
+
+
+def changes_digest(diff: dict, top_n: int = DEFAULT_DIGEST_TOP_N) -> dict:
+    """Shape a diff_places() result into a compact, ranked, honest digest.
+
+    `diff` is exactly diff_places()'s return value. `top_n` caps how many
+    rows each of appeared/disappeared/changed carries here -- independent
+    of (and normally smaller than) the `limit` diff_places itself was
+    called with, since a digest is meant to be skimmed, not read in full.
+
+    Returns:
+        {
+            "counts": {"appeared", "disappeared", "changed", "unchanged"} (exact,
+                same object as diff["counts"] -- never capped by top_n),
+            "appeared":     top_n rows, ranked (see diff_places' _sort_key),
+            "disappeared":  top_n rows, ranked,
+            "changed":      top_n rows, ranked,
+            "appeared_by_category":    {category: count, ...} up to
+                _BY_CATEGORY_TOP_N entries -- diff_places' own breakdown,
+                computed over the full pre-`limit` lists so it shares
+                "counts"' denominator, passed through unchanged,
+            "disappeared_by_category": ...,
+            "changed_by_category":     ...,
+            "degraded_fields": passed through from diff when present,
+            "releases": diff["releases"],
+            "truncated": True if diff itself was truncated (scan or `limit`
+                capped) OR top_n cut a bucket diff_places did return in full,
+            "notes": [ _DELISTING_NOTE ] if counts["disappeared"] > 0,
+                    + [ _NEWLY_MAPPED_NOTE ] if counts["appeared"] > 0,
+                    omitted entirely if neither applies (e.g. an all-unchanged
+                    diff, or category filtered everything out of both buckets),
+        }
+
+    A disappearance is never silently read as a closure, and an appearance
+    is never silently read as a new opening (issue #309's owner requirement)
+    -- see _DELISTING_NOTE / _NEWLY_MAPPED_NOTE for the exact wording.
+    """
+    top_n = max(0, int(top_n))
+    counts = diff["counts"]
+
+    appeared_full = diff["appeared"]
+    disappeared_full = diff["disappeared"]
+    changed_full = diff["changed"]
+
+    truncated = bool(diff["truncated"]) or any(
+        len(bucket) > top_n for bucket in (appeared_full, disappeared_full, changed_full)
+    )
+
+    notes = []
+    if counts["disappeared"] > 0:
+        notes.append(_DELISTING_NOTE)
+    if counts["appeared"] > 0:
+        notes.append(_NEWLY_MAPPED_NOTE)
+
+    digest = {
+        "counts": counts,
+        "appeared": appeared_full[:top_n],
+        "disappeared": disappeared_full[:top_n],
+        "changed": changed_full[:top_n],
+        # Prefer diff_places' own breakdowns (computed over the full
+        # pre-limit lists, sharing counts' denominator); fall back to
+        # computing over the rows we have for a hand-built diff dict.
+        "appeared_by_category": diff.get("appeared_by_category", _by_category(appeared_full)),
+        "disappeared_by_category": diff.get(
+            "disappeared_by_category", _by_category(disappeared_full)
+        ),
+        "changed_by_category": diff.get("changed_by_category", _by_category(changed_full)),
+        "releases": diff["releases"],
+        "truncated": truncated,
+    }
+    if "degraded_fields" in diff:
+        digest["degraded_fields"] = diff["degraded_fields"]
+    if notes:
+        digest["notes"] = notes
+    return digest

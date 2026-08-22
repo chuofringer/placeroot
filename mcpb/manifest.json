@@ -72,6 +72,10 @@
       "description": "Containing admin hierarchy for a point: neighborhood up to country."
     },
     {
+      "name": "changes_in_area",
+      "description": "What's opened or closed around here since a past Overture release."
+    },
+    {
       "name": "summarize_buildings",
       "description": "Summarize building footprints in an area: count, footprint area, height/floor coverage, mix."
     },
