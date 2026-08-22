@@ -9,6 +9,64 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `suggest_areas`: inverse area search (#305 — #348/#349/#350). "Where
+  within 25 min by bike of my office has parks and groceries?" — each
+  anchor's isochrone shed, intersected when there are several (an area
+  reachable from only one anchor is excluded), partitioned into candidate
+  localities (`divisions_in_polygon`) and scored against free-text amenity
+  requirements: exact/hierarchy category matching (never substring),
+  0-1 scores with one-line reasons, and subjective asks ("quiet", "safe")
+  returned `measurable: false` instead of silently scored. Stable GERS ids
+  in results chain into `admin_lookup`/`summarize_area`; the same
+  confirm/`needs_confirm` gate as `route` protects cold graph builds.
+- `changes_in_area`: what opened and closed here between two Overture
+  releases (#309 — #375/#376/#377). Live release enumeration, a GERS
+  id-diff core (appeared / disappeared / changed places), and a ranked
+  compact digest with honest framing that a disappearance may be
+  delisting or dataset cleanup, not a closure.
+- `verify_claims` + the `verify_listing_claims` prompt (#316): grade a
+  listing's spatial claims ("8 min to the metro", "shops on the doorstep")
+  against real routing and places data — confirmed / stretched / false /
+  unverifiable, claimed vs measured. Category targets match exact
+  taxonomy (with descendants), never substring — "park" does not confirm
+  off a parking garage.
+- `meeting_point`: travel-time-fair meeting spot for 2-5 people, each with
+  their own mode — minimizes the worst-off participant's routed time,
+  tie-broken by spread then total, returning ranked candidate venues with
+  per-person times (#306).
+- `elevation_at`: keyless ground elevation from Copernicus GLO-30 (~30 m),
+  read straight from public cloud COGs — null with a note where there is
+  no coverage (#358).
+- `ground_location`: single-hop point grounding — where (reverse geocode),
+  surroundings (500 m area summary), reach (isochrone stats), and the
+  nearest named places, each section degrading independently to a note
+  (#362).
+- `geometry_op`: the offline geometry toolkit as one compact tool —
+  buffer, centroid, area/length, point-in-polygon and friends over
+  caller-supplied geometry, antimeridian- and pole-safe (#361).
+- `render_map` explains, not just plots: point `class` + `legend` give
+  pins contrasting colors and an on-page legend box (#367); shape
+  `role: "shed"/"outline"`, `label`, and `callout` style and annotate
+  polygons (#368); and composed tools now emit that vocabulary
+  themselves — `compare_areas` (verdict mode) and `meeting_point` attach
+  a `map` payload mirroring `render_map`'s own arguments, so
+  `render_map(**result["map"])` renders the tool's argument in one call
+  (#369).
+- `compare_areas` priorities: weight the comparison by stated criteria
+  ("parks matter double") and get an honest verdict — exact/hierarchy
+  category counts, never substring, and a null verdict when the data is
+  too degraded to score (#304).
+- `search_categories` understands phrase intents ("fix my cracked phone
+  screen" -> `mobile_phone_repair`): a curated synonym lexicon plus a
+  token-coverage lexical fallback, every row carrying `confidence` (#355).
+- Typo-tolerant and alt-spelling POI name search: fuzzy matching
+  (Jaro-Winkler-gated) and locale alternate names extend `find_places` /
+  `geocode` name lookups without leaking fuzzy rows into plain geocode
+  results (#373).
+- Quarterly listings-health check: a scheduled workflow probing the MCP
+  registry entry (and that its version is not behind the repo), the
+  directory listings, and that `uvx placeroot` still installs — filing or
+  refreshing an issue on drift, closing it when clean (#254).
 - `route`/`from_to`: comfort-aware routing (#313). `include_elevation`
   attaches a compact climb profile (`total_climb_m`, `total_descent_m`,
   `max_grade_pct`, a downsampled `samples` array) sampled from the
@@ -70,6 +128,17 @@ fixing behavior is patch.
   cache hits stay uncapped.
 
 ### Changed
+- Pinned Overture release bumped to `2026-08-19.0`; all three bundled
+  artifact sets (file manifests, geocode index, land-cover grid)
+  regenerated against it — no schema drift (#372).
+- The tool surface grew 34 -> 42 across this release's features; every
+  count and schema-token figure in `docs/REFERENCE.md`, the READMEs, and
+  the site was remeasured from the live registry (42 tools, ~24.4k
+  schema-token full surface — subset profiles and `progressive` keep the
+  same savings story).
+- `server.json`'s registry description is count-free ("Grounds AI agents
+  in Overture Maps open data — compact answers, no API key.") and a guard
+  test keeps any tool count from rotting in it again (#366).
 - Profile token table in `docs/REFERENCE.md` remeasured after #336 confirm fields: all 34 tools stay ~15,711; subset rows follow the same ruler (search ~7,113, core ~7,569). Catalog rows for `route`, `from_to`, and `warmup_city` now name `confirm` / `needs_confirm`, plus `status`/`progress` on long answers.
 - Question-gate route ids go through `server.route` / `from_to` so a
   valid `needs_confirm` is outcome `ask`, not a 15s fail and not a
