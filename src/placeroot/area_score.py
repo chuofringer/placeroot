@@ -161,6 +161,14 @@ def _resolve_category(text: str) -> dict | None:
         matches = categories.search_categories(candidate, limit=1)
         if matches and (best is None or matches[0]["confidence"] > best["confidence"]):
             best = matches[0]
+    # A graded score must not ride on a guess: search_categories' embeddings
+    # tail (#356) matches almost any text at a confidence strictly below the
+    # lexical bands (_EMBED_MATCH_MAX < _TOKEN_MATCH_MIN), which is fine for
+    # an interactive shortlist but not for scoring — here a sub-lexical match
+    # is treated as no match, so the requirement comes back measurable: false
+    # instead of scored off an embedding hunch.
+    if best is not None and best["confidence"] < categories._TOKEN_MATCH_MIN:
+        return None
     return best
 
 
