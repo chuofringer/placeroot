@@ -39,6 +39,7 @@ import html
 import json
 import math
 import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -603,6 +604,19 @@ header .count { color: var(--muted); font-size: 0.85rem; }
   border-radius: 6px; padding: 4px 10px; box-shadow: var(--shadow);
   font-size: 11px; color: var(--muted);
 }
+.legend {
+  position: absolute; left: 12px; top: 12px;
+  display: flex; flex-direction: column; gap: 4px;
+  background: var(--panel-bg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 10px; box-shadow: var(--shadow);
+  font-size: 11px; color: var(--text); max-width: 200px;
+}
+.legend-row { display: flex; align-items: center; gap: 6px; }
+.legend-swatch {
+  width: 10px; height: 10px; flex: none; border-radius: 50%;
+  border: 1px solid var(--marker-stroke);
+}
+.legend-label { word-break: break-word; }
 .popup {
   position: absolute; transform: translate(-50%, calc(-100% - 14px));
   background: var(--panel-bg); border: 1px solid var(--border);
@@ -627,6 +641,7 @@ _JS = """
   var DATA = __DATA_JSON__;
   var POINTS = DATA.points || [];
   var SHAPES = DATA.shapes || [];
+  var LEGEND = DATA.legend || {};
   var SVGNS = "http://www.w3.org/2000/svg";
   var svg = document.getElementById("map");
   var viewport = document.getElementById("viewport");
@@ -755,6 +770,12 @@ _JS = """
     g.setAttribute("class", "marker");
     var c = document.createElementNS(SVGNS, "circle");
     c.setAttribute("cx", xy[0]); c.setAttribute("cy", xy[1]); c.setAttribute("r", 6);
+    if (p.cls && LEGEND[p.cls] && LEGEND[p.cls].color) {
+      // Inline style, not the "fill" presentation attribute: the stylesheet's
+      // `.marker circle { fill: var(--marker); }` rule outranks presentation
+      // attributes, so an attribute-set class color would never render.
+      c.style.fill = LEGEND[p.cls].color;
+    }
     g.appendChild(c);
     if (p.name) {
       var t = document.createElementNS(SVGNS, "text");
@@ -937,7 +958,7 @@ _DOC = """<!doctype html>
       </svg>
       <span id="scale-label">&nbsp;</span>
     </div>
-    <div class="attribution">@@ATTRIBUTION@@</div>
+    <div class="attribution">@@ATTRIBUTION@@</div>@@LEGEND@@
     <div class="popup" id="popup" style="display:none"></div>
   </div>
   <aside id="stops">
@@ -1217,11 +1238,178 @@ def _unique_slot(*blobs: str) -> str:
     raise RuntimeError("could not allocate a collision-proof template token")
 
 
+# --- pin classes + legend (#367) --------------------------------------------
+# A feature (caller GeoJSON properties, or a find_places/summarize_area row)
+# may carry props["class"] — a caller-chosen name, not an Overture field.
+# `legend` maps that name to a label + optional color so markers of the same
+# class get a contrasting fill and a legend box explains what's what.
+
+# Okabe-Ito, minus black (a black dot would read as "no class" against the
+# default marker color): deterministic, color-blind-safe fills assigned to
+# any legend entry that didn't specify its own color.
+_LEGEND_PALETTE = (
+    "#e69f00",
+    "#56b4e9",
+    "#009e73",
+    "#f0e442",
+    "#0072b2",
+    "#d55e00",
+    "#cc79a7",
+    "#999999",
+)
+
+# A legend color lands directly inside an SVG fill attribute and an HTML
+# style attribute, so it is restricted to plain #rgb/#rrggbb hex — never
+# trusted verbatim, which would otherwise be a CSS/attribute injection point.
+_HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+
+
+def _valid_hex_color(value) -> bool:
+    return isinstance(value, str) and bool(_HEX_COLOR_RE.fullmatch(value))
+
+
+def _expand_hex(color: str) -> str:
+    """Canonical form for comparing hex colors: lowercase #rrggbb."""
+    color = color.lower()
+    if len(color) == 4:  # "#abc" -> "#aabbcc"
+        color = "#" + "".join(ch * 2 for ch in color[1:])
+    return color
+
+
+def _feature_class(item: dict) -> str | None:
+    """A point/shape's props["class"], or None if absent/not a string."""
+    props = item.get("props") or {}
+    cls = props.get("class")
+    return cls if isinstance(cls, str) and cls else None
+
+
+def _normalize_legend(legend: dict | None) -> tuple[dict[str, dict[str, str]], list[str]]:
+    """Validate/complete a caller-supplied legend into {class: {label, color}}.
+
+    - A missing/blank label falls back to the class name itself.
+    - A missing color is assigned from _LEGEND_PALETTE, walked in
+      sorted-class-name order, skipping palette entries already claimed by
+      an explicit color (compared case-insensitively with #rgb expanded to
+      #rrggbb) so an auto-colored class never collides with an explicit
+      one. Deterministic for a given legend regardless of dict insertion
+      order.
+    - An invalid color (anything but #rgb/#rrggbb hex) is dropped rather
+      than trusted into the SVG/HTML output; a palette color is assigned
+      instead and the class name comes back in `notes` (never the raw
+      invalid string, so a hostile color value never reaches the page).
+
+    legend=None or {} (or any non-dict) resolves to no legend at all.
+    """
+    if not isinstance(legend, dict) or not legend:
+        return {}, []
+    class_names = sorted(k for k in legend if isinstance(k, str))
+    resolved: dict[str, dict[str, str]] = {}
+    invalid_color_classes: list[str] = []
+    needs_palette: list[str] = []
+    claimed: set[str] = set()
+    for cls in class_names:
+        entry = legend.get(cls)
+        label = cls
+        color = None
+        if isinstance(entry, dict):
+            raw_label = entry.get("label")
+            if isinstance(raw_label, str) and raw_label.strip():
+                label = raw_label
+            raw_color = entry.get("color")
+            if raw_color is not None:
+                if _valid_hex_color(raw_color):
+                    color = raw_color
+                    claimed.add(_expand_hex(color))
+                else:
+                    invalid_color_classes.append(cls)
+        resolved[cls] = {"label": label, "color": color}
+        if color is None:
+            needs_palette.append(cls)
+
+    # Auto-color pass: palette entries already claimed by an explicit color
+    # are skipped so two classes never share a fill (until the free palette
+    # itself runs out and has to wrap).
+    available = [c for c in _LEGEND_PALETTE if _expand_hex(c) not in claimed]
+    if not available:
+        available = list(_LEGEND_PALETTE)
+    for palette_i, cls in enumerate(needs_palette):
+        resolved[cls]["color"] = available[palette_i % len(available)]
+
+    notes = []
+    if invalid_color_classes:
+        noun = "class" if len(invalid_color_classes) == 1 else "classes"
+        notes.append(
+            f"legend color for {noun} {', '.join(invalid_color_classes)} was not a valid "
+            "#rgb/#rrggbb hex string and was replaced with a palette color."
+        )
+    return resolved, notes
+
+
+def _classify_features(
+    points: list[dict], resolved_legend: dict[str, dict[str, str]]
+) -> tuple[dict[str, dict[str, str]], int]:
+    """Match each point's props["class"] against a resolved legend.
+
+    Only points are classified — the legend controls marker dot fill
+    (#367); shapes keep their existing fill/stroke regardless of any
+    "class" in their props.
+
+    Returns (legend_present, unknown_count): legend_present holds only the
+    classes actually carried by a point, in sorted-class-name order (so
+    the on-page legend box lists classes deterministically); unknown_count
+    is how many points carried a class that isn't in the legend — they
+    render with the default marker dot instead.
+    """
+    present: set[str] = set()
+    unknown = 0
+    for p in points:
+        cls = _feature_class(p)
+        if cls is None:
+            continue
+        if cls in resolved_legend:
+            present.add(cls)
+        else:
+            unknown += 1
+    return {cls: resolved_legend[cls] for cls in sorted(present)}, unknown
+
+
+def _legend_note(unknown_count: int, color_notes: list[str]) -> str | None:
+    parts = list(color_notes)
+    if unknown_count:
+        noun = "feature" if unknown_count == 1 else "features"
+        parts.append(
+            f"{unknown_count} {noun} carried a class not present in the legend and "
+            "rendered with the default marker."
+        )
+    return " ".join(parts) if parts else None
+
+
+def _legend_html(legend_present: dict[str, dict[str, str]]) -> str:
+    """The on-page legend box: one swatch + label per class actually present.
+
+    Empty input renders to "" (no box at all) rather than an empty
+    container, so classless documents are unaffected.
+    """
+    if not legend_present:
+        return ""
+    rows = []
+    for entry in legend_present.values():
+        label = html.escape(str(entry["label"]))
+        color = entry["color"]  # _normalize_legend already restricted this to hex
+        rows.append(
+            '<div class="legend-row"><span class="legend-swatch" '
+            f'style="background:{color}"></span>'
+            f'<span class="legend-label">{label}</span></div>'
+        )
+    return '<div class="legend">' + "".join(rows) + "</div>"
+
+
 def render_html(
     points: list[dict],
     title: str | None = None,
     shapes: list[dict] | None = None,
     summary: str | None = None,
+    legend: dict | None = None,
 ) -> str:
     """Render points + shapes (as produced by extract_points/extract_features) into one HTML doc.
 
@@ -1229,6 +1417,16 @@ def render_html(
     dealt with points (extract_points()) keep working unchanged. `summary`
     is the composed verdict on the one-pager; when omitted a short fallback
     is composed from the extracted features (#310).
+
+    `legend` optionally maps a point's props["class"] to
+    {"label": str, "color": str?} (#367): classed points get a
+    contrasting marker fill and a legend box is drawn listing label +
+    swatch for each class actually present. A missing color is assigned
+    from a fixed color-blind-safe palette; an invalid one (not #rgb/
+    #rrggbb hex) is dropped rather than trusted into the SVG. A point
+    whose class isn't a legend key keeps the default marker dot. legend
+    input without any classed points, or omitted entirely, renders exactly
+    as it always has — see mapview._normalize_legend/_classify_features.
     """
     shapes = shapes or []
     if summary is None:
@@ -1243,10 +1441,21 @@ def render_html(
         label_parts.append(f"{shape_count} shape{'s' if shape_count != 1 else ''}")
     count_label = " · ".join(label_parts)
 
-    points_for_js = [
-        {"lat": p["lat"], "lon": p["lon"], "name": p.get("name"), "props": p.get("props") or {}}
-        for p in points
-    ]
+    resolved_legend, _color_notes = _normalize_legend(legend)
+    legend_present, _unknown_class_count = _classify_features(points, resolved_legend)
+
+    points_for_js = []
+    for p in points:
+        entry = {
+            "lat": p["lat"],
+            "lon": p["lon"],
+            "name": p.get("name"),
+            "props": p.get("props") or {},
+        }
+        cls = _feature_class(p)
+        if cls in legend_present:
+            entry["cls"] = cls
+        points_for_js.append(entry)
     shapes_for_js = []
     for s in shapes:
         entry = {"kind": s.get("kind"), "name": s.get("name"), "props": s.get("props") or {}}
@@ -1264,9 +1473,12 @@ def render_html(
 
     # default=str: props may carry values (e.g. Decimal-ish) json can't natively
     # serialize; "</script>" guard prevents the embedded JSON from closing the tag early.
-    data_json = json.dumps(
-        {"points": points_for_js, "shapes": shapes_for_js}, default=str
-    ).replace("</", "<\\/")
+    data_payload = {"points": points_for_js, "shapes": shapes_for_js}
+    if legend_present:
+        # Only added when a class actually resolved, so classless/legend-less
+        # input keeps producing exactly the DATA payload it always has.
+        data_payload["legend"] = legend_present
+    data_json = json.dumps(data_payload, default=str).replace("</", "<\\/")
 
     stops_label, stops_html = _stops_html(points, shapes)
     # Swap every @@TOKEN@@ for a unique slot first so a place named
@@ -1280,6 +1492,7 @@ def render_html(
         "STOPS_LABEL": html.escape(stops_label),
         "STOPS": stops_html,
         "ATTRIBUTION": html.escape(ATTRIBUTION),
+        "LEGEND": _legend_html(legend_present),
     }
     known = [data_json, _JS, _DOC, *replacements.values()]
     slots: dict[str, str] = {}
@@ -1348,13 +1561,15 @@ def write_artifact(
     inline: bool = False,
     out_dir: Path | None = None,
     summary: str | None = None,
+    legend: dict | None = None,
 ) -> dict:
     """Extract points/shapes from data, render the HTML artifact, and write it to disk.
 
     Returns {"path": str, "bytes": int, "features_rendered": int,
     "skipped_features": int}, plus "html" when inline=True and the document
-    is under INLINE_MAX_BYTES, and "truncated": True when the input exceeded
-    MAX_RENDER_VERTICES. skipped_features counts rows/features present in
+    is under INLINE_MAX_BYTES, "truncated": True when the input exceeded
+    MAX_RENDER_VERTICES, and "note" when `legend` triggered something worth
+    flagging (see below). skipped_features counts rows/features present in
     `data` that couldn't be rendered — either malformed/unsupported geometry
     (extract_features) or dropped for exceeding MAX_RENDER_VERTICES
     (_cap_vertices) — render_map degrades rather than failing or writing an
@@ -1362,6 +1577,14 @@ def write_artifact(
 
     `summary` is the composed verdict on the one-pager (#310). When omitted,
     compose_summary() writes a short fallback from the payload itself.
+
+    `legend` optionally maps a point's props["class"] to
+    {"label": str, "color": str?} (#367) — see render_html's docstring for
+    the full contract. "note" in the response reports anything the legend
+    resolution had to paper over: an invalid color string (replaced with a
+    palette color) or points whose class wasn't a legend key (rendered with
+    the default marker dot) — never present when `legend` is omitted and no
+    point carries a "class".
     """
     extracted = extract_features(data)
     points, shapes, dropped = _cap_vertices(
@@ -1369,7 +1592,7 @@ def write_artifact(
     )
     if summary is None:
         summary = compose_summary(data, points, shapes)
-    doc = render_html(points, title=title, shapes=shapes, summary=summary)
+    doc = render_html(points, title=title, shapes=shapes, summary=summary, legend=legend)
     encoded = doc.encode("utf-8")
 
     directory = out_dir if out_dir is not None else artifact_dir()
@@ -1377,6 +1600,15 @@ def write_artifact(
     filename = f"map_{int(time.time() * 1000)}_{_slug(title)}.html"
     path = directory / filename
     path.write_bytes(encoded)
+
+    resolved_legend, color_notes = _normalize_legend(legend)
+    if resolved_legend:
+        _legend_present, unknown_class_count = _classify_features(points, resolved_legend)
+    else:
+        # No legend supplied: props["class"] is inert (renders exactly as
+        # before #367), so it must not be reported as an "unknown class".
+        unknown_class_count = 0
+    note = _legend_note(unknown_class_count, color_notes)
 
     result = {
         "path": str(path),
@@ -1386,6 +1618,8 @@ def write_artifact(
     }
     if dropped:
         result["truncated"] = True
+    if note:
+        result["note"] = note
     if inline and len(encoded) <= INLINE_MAX_BYTES:
         result["html"] = doc
     return result
@@ -1397,14 +1631,16 @@ def export_report(
     summary: str | None = None,
     inline: bool = False,
     out_dir: Path | None = None,
+    legend: dict | None = None,
 ) -> dict:
     """Write a shareable one-pager: map + verdict + stop list + attribution.
 
     Same envelope as write_artifact. `summary` is the verdict you would tell
     a spouse, co-founder, or landlord; when omitted a short fallback is
     composed from the payload. The file is dependency-free and opens at
-    file:// with no network.
+    file:// with no network. `legend` is passed through to write_artifact
+    unchanged — see its docstring.
     """
     return write_artifact(
-        data, title=title, inline=inline, out_dir=out_dir, summary=summary
+        data, title=title, inline=inline, out_dir=out_dir, summary=summary, legend=legend
     )
