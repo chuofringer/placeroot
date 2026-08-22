@@ -74,11 +74,19 @@ ESSENTIAL_COLUMNS = {"bbox"}
 _data_path_overrides: dict[str, str] = {}
 
 
-def _override_key(theme: str, type_: str | None) -> str:
-    return theme if type_ is None else f"{theme}:{type_}"
+def _override_key(theme: str, type_: str | None, release: str | None = None) -> str:
+    # release, when given, makes the key even more specific than theme:type_
+    # (e.g. "places:place@2026-07-22.0") — see set_data_path()'s docstring.
+    # release without type_ isn't a supported combination (an explicit
+    # release is only ever asked for alongside a theme+type in
+    # _upstream_glob), so it isn't given its own key shape here.
+    key = theme if type_ is None else f"{theme}:{type_}"
+    return key if release is None else f"{key}@{release}"
 
 
-def set_data_path(path: str | None, theme: str = THEME, type_: str | None = None) -> None:
+def set_data_path(
+    path: str | None, theme: str = THEME, type_: str | None = None, release: str | None = None
+) -> None:
     """Point the query layer at a local dataset instead of live S3.
 
     Pass None to restore the default (env var, then discovered release) for
@@ -92,8 +100,29 @@ def set_data_path(path: str | None, theme: str = THEME, type_: str | None = None
     divisions now does (type=division for geocode.py, type=division_area
     for divisions.py) — that overrides just that type, leaving a bare-theme
     override (or the live default) in place for the others.
+
+    release (#375) narrows the override further, to one explicit release of
+    one theme:type_ — e.g. set_data_path(fixture_a, "places", "place",
+    release="2026-07-22.0") and set_data_path(fixture_b, "places", "place",
+    release="2026-08-19.0") let a test point two "releases" at two local
+    parquet fixtures. A release-keyed override is checked only by an
+    _upstream_glob() call that itself passes that release — an explicit
+    theme:type_ (no release) override does NOT catch those calls, since the
+    two fixtures need to stay distinguishable by release; conversely a
+    release-keyed override never answers a plain (no-release) query, so
+    existing single-release callers are unaffected either way.
+
+    release requires type_: a release-keyed override without a type_ would
+    register under a key _upstream_glob() can never build (an explicit
+    release is only ever asked for alongside a theme+type), so it would be
+    silently ignored — raise instead.
     """
-    key = _override_key(theme, type_)
+    if release is not None and type_ is None:
+        raise ValueError(
+            "set_data_path(release=...) requires type_: a release-keyed "
+            "override without a type_ can never be looked up"
+        )
+    key = _override_key(theme, type_, release)
     if path is None:
         _data_path_overrides.pop(key, None)
     else:
@@ -126,7 +155,49 @@ def _upstream_base() -> str:
 _TRANSPORTATION_LEGACY_ENV_VAR = "PLACEROOT_TRANSPORTATION_DATA_PATH"
 
 
-def _upstream_glob(theme: str = THEME, type_: str = "place") -> str:
+def _upstream_glob(theme: str = THEME, type_: str = "place", release_: str | None = None) -> str:
+    # release_ (#375): an explicit-release query, for callers (changes_in_area,
+    # #309) that need a *specific* Overture release rather than "whatever is
+    # active right now" — diffing release A against release B needs both
+    # gloms live at once, which resolve_release()'s single active-release
+    # cache can't express.
+    if release_ is not None and not release._RELEASE_RE.fullmatch(release_):
+        # release_ becomes a path/glob segment below (…/release_/theme=…),
+        # so validate it the same way release.py validates
+        # PLACEROOT_OVERTURE_RELEASE — a stray "../" or other junk here would
+        # otherwise flow straight into an S3 glob.
+        raise ValueError(f"not a release (YYYY-MM-DD.N): {release_!r}")
+    if release_ is not None:
+        # Only the release-keyed override answers an explicit-release query.
+        # A plain theme:type_ (or bare-theme) override exists to point a
+        # *single* release-less call site at one fixture, and #375 needs
+        # tests to point two different "releases" of the same theme:type_ at
+        # two different local fixtures — so a bare override must not capture
+        # an explicit-release call, or the two fixtures couldn't be told
+        # apart. Falls straight through to the live glob below when no
+        # release-keyed override is registered.
+        keyed = _override_key(theme, type_, release_)
+        if keyed in _data_path_overrides:
+            return _data_path_overrides[keyed]
+        # A plain override/env pin (dataset_is_pinned) names one single
+        # dataset with no release dimension of its own, so it cannot answer
+        # "give me release X" for an arbitrary X — but it must not be
+        # silently bypassed either: on a pinned/air-gapped install that
+        # would send an explicit-release query straight to live S3, exactly
+        # what the pin exists to prevent. So: when the requested release IS
+        # the one the deployment resolves to, the pinned dataset is that
+        # release's data — serve it; for any other release, raise rather
+        # than silently going upstream.
+        if dataset_is_pinned(theme, type_):
+            if release_ == release.resolve_release():
+                return _upstream_glob(theme, type_)
+            raise UpstreamUnavailable(
+                f"no dataset for release {release_} in this deployment: "
+                f"{theme}/{type_} is pinned to a local dataset "
+                f"(PLACEROOT_DATA_PATH or an override) that serves release "
+                f"{release.resolve_release()} only"
+            )
+        return f"{_upstream_base()}/{release_}/theme={theme}/type={type_}/*"
     specific_key = _override_key(theme, type_)
     if specific_key in _data_path_overrides:
         return _data_path_overrides[specific_key]
@@ -169,15 +240,20 @@ def probe_schema(glob: str) -> frozenset | None:
     return db.probe_schema(glob)
 
 
-def upstream_glob(theme: str = THEME, type_: str = "place") -> str:
+def upstream_glob(theme: str = THEME, type_: str = "place", release: str | None = None) -> str:
     """Public wrapper: the resolved glob/path for theme (fixture override, env, or live S3).
 
     type_ has no per-theme default beyond "place" — callers querying a
     theme other than places (geocode.py's divisions/addresses queries,
     divisions.py's division_area queries) must pass their own type_
     explicitly, the same way divisions.py already does.
+
+    release (#375) asks for one specific Overture release instead of
+    "whatever's active" — see _upstream_glob()'s docstring/comments for the
+    override-precedence and env-bypass rules. None (the default) is
+    byte-identical to the pre-#375 behavior.
     """
-    return _upstream_glob(theme, type_)
+    return _upstream_glob(theme, type_, release_=release)
 
 
 # Deprecated: import db directly instead. Kept as thin aliases so existing

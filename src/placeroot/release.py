@@ -68,27 +68,69 @@ def parse_listing(xml_text: str) -> list[str]:
     releases = []
     for prefix in prefixes:
         name = (prefix.text or "").removeprefix("release/").rstrip("/")
-        if _RELEASE_RE.match(name):
+        if _RELEASE_RE.fullmatch(name):
             releases.append(name)
     return releases
 
 
-def _discover(timeout_s: float = 5.0) -> str | None:
-    """Best-effort: newest release name, or None if discovery fails."""
+def _numeric_patch_key(r: str) -> tuple[str, int]:
+    """Sort key for a release name: plain max() would rank "2026-07-22.9"
+    above "2026-07-22.10" (string comparison), so compare the date portion
+    as a string (it already sorts correctly) and the patch component as an
+    int."""
+    return (r[: r.rindex(".")], int(r[r.rindex(".") + 1 :]))
+
+
+def _fetch_listing(timeout_s: float = 5.0) -> list[str] | None:
+    """Best-effort: every live release name from the bucket listing, in
+    whatever order parse_listing() returns them, or None on any failure.
+
+    Shared by _discover() (wants the newest) and available_releases() (wants
+    the whole list) so there is exactly one place that talks to S3.
+    """
     try:
         with urllib.request.urlopen(LISTING_URL, timeout=timeout_s) as resp:  # noqa: S310
             xml_text = resp.read().decode("utf-8")
         releases = parse_listing(xml_text)
     except Exception as e:  # noqa: BLE001 - any failure here must fall back, never raise
-        logger.warning("Overture release discovery failed, using pinned release: %s", e)
+        logger.warning("Overture release listing failed: %s", e)
         return None
     if not releases:
-        logger.warning("Overture release discovery found no releases, using pinned release")
+        logger.warning("Overture release listing found no releases")
         return None
-    # Plain max() would sort "2026-07-22.9" above "2026-07-22.10"; compare
-    # the patch component numerically.
-    return max(releases, key=lambda r: (r[: r.rindex(".")], int(r[r.rindex(".") + 1 :])))
+    return releases
 
+
+def _discover(timeout_s: float = 5.0) -> str | None:
+    """Best-effort: newest release name, or None if discovery fails."""
+    releases = _fetch_listing(timeout_s)
+    if releases is None:
+        logger.warning("Overture release discovery failed, using pinned release")
+        return None
+    return max(releases, key=_numeric_patch_key)
+
+
+# available_releases()'s own cache — deliberately not sharing state with the
+# resolve-release cache below. It answers a different question ("what
+# releases exist") with none of resolve_release()'s wrinkles (no env
+# override, no artifact-pin trade, no pin-first/background-discovery dance,
+# no per-refresh generation bookkeeping), so folding it into that machinery
+# would just make the harder cache answer for the simpler one. reset_cache()
+# still clears both, so tests get one lever.
+_releases_lock = threading.Lock()
+_releases_cached: list[str] | None = None
+_releases_cached_at: float = 0.0
+# Single-flight claim, mirroring resolve_release_info()'s _refreshing: one
+# caller pays for the (up to 5s) listing fetch while concurrent callers get
+# the previous answer (or []) immediately instead of stampeding S3.
+_releases_refreshing = False
+# Negative cache: when the last fetch failed, don't re-attempt on every call
+# — an unreachable listing endpoint must not put a 5s block on each one.
+_releases_failed_at: float = 0.0
+_RELEASES_FAILURE_TTL_S = 60.0
+# One warning per process when the listing is consulted under a mirror base
+# (see available_releases()'s docstring).
+_mirror_listing_warned = False
 
 DEFAULT_TTL_HOURS = 6.0
 DEFAULT_STALE_DAYS = 60
@@ -225,12 +267,12 @@ def bundled_artifact_release() -> str:
 
         data = resources.files("placeroot") / "data"
         per_set = [
-            {p.name for p in (data / "manifests").iterdir() if _RELEASE_RE.match(p.name)},
-            {p.name for p in (data / "geocode-index").iterdir() if _RELEASE_RE.match(p.name)},
+            {p.name for p in (data / "manifests").iterdir() if _RELEASE_RE.fullmatch(p.name)},
+            {p.name for p in (data / "geocode-index").iterdir() if _RELEASE_RE.fullmatch(p.name)},
             {
                 p.name[: -len(".parquet")]
                 for p in (data / "land-cover-grid").iterdir()
-                if p.name.endswith(".parquet") and _RELEASE_RE.match(p.name[: -len(".parquet")])
+                if p.name.endswith(".parquet") and _RELEASE_RE.fullmatch(p.name[: -len(".parquet")])
             },
         ]
         complete = set.intersection(*per_set)
@@ -309,7 +351,7 @@ def resolve_release_info() -> dict:
         # discovery path already enforces — a stray "../" or other junk here
         # would otherwise flow straight into an S3 glob. Not agent-reachable
         # today (no tool takes a release arg), but cheap defense in depth.
-        if _RELEASE_RE.match(env_release):
+        if _RELEASE_RE.fullmatch(env_release):
             info = {"release": env_release, "source": "env-override"}
             # An operator can pin an ancient vintage too, and it is the case
             # least likely to be noticed (nothing is failing) — so this path
@@ -436,6 +478,87 @@ def resolve_release() -> str:
     return resolve_release_info()["release"]
 
 
+def available_releases() -> list[str]:
+    """Every live release name, ascending (oldest first).
+
+    For #309-style callers that need to query more than one release at once
+    (overture.upstream_glob(..., release=...)) or just want to show the
+    valid diff window (data_version). Best-effort like _discover(): a
+    network failure, a parse error, or an empty listing all come back as []
+    rather than raising — this is a convenience, never something the query
+    path depends on to answer a request.
+
+    TTL-cached (same PLACEROOT_RELEASE_TTL_HOURS as resolve_release()) but
+    in its own cache variables — see the comment above _releases_lock for
+    why this doesn't share resolve_release()'s cache/refresh machinery. It
+    does mirror that machinery's shape where the same hazards apply: a
+    single-flight claim (one caller fetches, concurrent callers keep the
+    previous answer), a short negative-result TTL (an unreachable listing
+    endpoint must not cost 5s per call), and the shared _generation guard
+    (a fetch in flight across a reset_cache() is discarded rather than
+    written back, per reset_cache()'s contract).
+    Sorted with the same numeric-patch-aware comparison _discover() uses
+    ("2026-07-22.9" must sort below "2026-07-22.10").
+
+    Mirror caveat: the listing always comes from the public Overture
+    bucket (LISTING_URL). PLACEROOT_UPSTREAM_BASE redirects the *data*
+    globs to a mirror but there is no generic way to enumerate releases
+    under an arbitrary base, so under a mirror this list can name releases
+    the mirror doesn't hold. Warned once per process below; deployments
+    that must not touch the public bucket, or whose mirror holds a
+    different release set, should pin PLACEROOT_OVERTURE_RELEASE (see
+    docs/MIRROR.md) and treat this listing as advisory.
+    """
+    global _releases_cached, _releases_cached_at, _releases_refreshing
+    global _releases_failed_at, _mirror_listing_warned
+    with _releases_lock:
+        now = time.monotonic()
+        if _releases_cached is not None and now - _releases_cached_at < _ttl_s():
+            return list(_releases_cached)
+        if _releases_refreshing or (
+            _releases_failed_at and now - _releases_failed_at < _RELEASES_FAILURE_TTL_S
+        ):
+            # Someone else is fetching, or the last fetch just failed:
+            # serve the previous (possibly expired) answer rather than
+            # blocking on — or stampeding — the listing endpoint.
+            return list(_releases_cached) if _releases_cached is not None else []
+        _releases_refreshing = True
+        generation = _generation
+        if not _mirror_listing_warned and os.environ.get("PLACEROOT_UPSTREAM_BASE"):
+            _mirror_listing_warned = True
+            logger.warning(
+                "available_releases() lists the public Overture bucket even "
+                "though PLACEROOT_UPSTREAM_BASE points elsewhere — the list "
+                "may include releases your mirror doesn't hold. Pin "
+                "PLACEROOT_OVERTURE_RELEASE if this deployment must not "
+                "consult the public bucket (docs/MIRROR.md)."
+            )
+    try:
+        releases = _fetch_listing()
+    except BaseException:
+        # _fetch_listing() swallows Exception, but not e.g. KeyboardInterrupt
+        # in its urlopen — release the claim rather than pinning it forever.
+        with _releases_lock:
+            if generation == _generation:
+                _releases_refreshing = False
+        raise
+    ordered = sorted(releases, key=_numeric_patch_key) if releases is not None else None
+    with _releases_lock:
+        if generation != _generation:
+            # reset_cache() ran while we were fetching and already released
+            # the claim; our result predates the reset, so hand it to this
+            # caller without installing it.
+            return list(ordered) if ordered is not None else []
+        _releases_refreshing = False
+        if ordered is None:
+            _releases_failed_at = time.monotonic()
+            return list(_releases_cached) if _releases_cached is not None else []
+        _releases_failed_at = 0.0
+        _releases_cached = ordered
+        _releases_cached_at = time.monotonic()
+    return list(ordered)
+
+
 def reset_cache() -> None:
     """Clear the TTL cache. Used by tests and rare hot-reload.
 
@@ -443,6 +566,8 @@ def reset_cache() -> None:
     is discarded rather than written over the next resolution.
     """
     global _cached, _cached_at, _refreshing, _generation, _ttl_warned, _override_warned
+    global _releases_cached, _releases_cached_at, _releases_refreshing
+    global _releases_failed_at, _mirror_listing_warned
     with _lock:
         _cached = None
         _cached_at = 0.0
@@ -450,3 +575,9 @@ def reset_cache() -> None:
         _generation += 1
         _ttl_warned = False
         _override_warned = None
+    with _releases_lock:
+        _releases_cached = None
+        _releases_cached_at = 0.0
+        _releases_refreshing = False
+        _releases_failed_at = 0.0
+        _mirror_listing_warned = False
