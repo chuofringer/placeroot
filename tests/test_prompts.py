@@ -40,6 +40,12 @@ SAMPLES: dict[str, list[dict[str, str]]] = {
         {"city": "Palo Alto"},
         {"city": ""},
     ],
+    "verify_listing_claims": [
+        {
+            "location": "123 Main St, Austin, TX",
+            "claims": "8 minutes to the metro, shops on the doorstep",
+        },
+    ],
 }
 
 
@@ -90,6 +96,7 @@ def test_each_prompt_has_a_description(name):
         ("plan_errands", {"stops": True, "start": False}),
         ("should_i_live_here", {"location": True, "context": False}),
         ("get_to_know_my_city", {"city": False}),
+        ("verify_listing_claims", {"location": True, "claims": True}),
     ],
 )
 def test_argument_schemas(name, expected):
