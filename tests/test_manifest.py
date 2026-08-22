@@ -82,9 +82,9 @@ def test_unknown_release_falls_back(monkeypatch):
 def test_bundled_manifests_load_and_prune_for_real():
     """The wheel-bundled data for the pinned release is present and useful:
     a city-sized box over the biggest theme keeps only a few files."""
-    m = manifest._load("2026-07-22.0", "buildings", "building")
+    m = manifest._load("2026-08-19.0", "buildings", "building")
     assert m is not None and len(m["files"]) == 512
-    glob = "s3://overturemaps-us-west-2/release/2026-07-22.0/theme=buildings/type=building/*"
+    glob = "s3://overturemaps-us-west-2/release/2026-08-19.0/theme=buildings/type=building/*"
     sql = manifest.pruned_source_sql(glob, BOX)
     assert sql is not None
     kept = sql.count(".parquet")
