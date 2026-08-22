@@ -137,7 +137,9 @@ def test_unknown_name_reports_every_bad_entry_at_once():
 def test_env_var_drives_the_selection(monkeypatch):
     monkeypatch.setenv("PLACEROOT_TOOLS", "geometry")
     registered = {t.name for t in asyncio.run(server.build_server().list_tools())}
-    assert registered == {"simplify_geometry", "render_map", "data_version", "preferences"}
+    assert registered == {
+        "simplify_geometry", "render_map", "geometry_op", "data_version", "preferences",
+    }
 
 
 def test_env_var_unset_is_the_full_surface(monkeypatch):

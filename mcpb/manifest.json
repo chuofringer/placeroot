@@ -140,6 +140,10 @@
       "description": "Simplify a GeoJSON geometry to fit a token budget, reporting what was lost."
     },
     {
+      "name": "geometry_op",
+      "description": "Offline geometry math and predicates (distance, bearing, area, buffer, point-in-polygon, and more), one tool with an `op` catalog."
+    },
+    {
       "name": "render_map",
       "description": "Render find_places/summarize_area JSON (or caller-supplied GeoJSON) as a map."
     },

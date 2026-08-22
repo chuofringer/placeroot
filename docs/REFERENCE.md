@@ -46,6 +46,7 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `meeting_point` | Travel-time-fair meeting point for 2–5 people (walk/cycle/drive per person): minimizes the worst-off participant's routed time, tie-broken by spread then total, and returns ranked candidate venues with per-person times |
 | `render_map` | Any result → a shareable one-pager (interactive map, verdict, stop list, and Overture/OSM attribution); optional `summary` for the verdict, otherwise a short fallback is composed from the payload |
 | `simplify_geometry` | Any geometry → simplified to fit a token budget |
+| `geometry_op` | Offline geometry math and predicates behind one `op` catalog: point distance/bearing/destination/midpoint, area/length/bbox/centroid, buffer/convex hull (returns geometry), point-in-polygon, nearest point, nearest point on a line |
 | `warmup_city` | Pre-cache a city's places and transportation tiles so later place searches over it read locally — does not build the street graph or cache buildings. A first tile COPY without `confirm` returns `needs_confirm` |
 | `data_version` | Which Overture release the answers are drawn from |
 | `preferences` | Read or update local travel/household defaults (mode, pace, dog, …). Nothing leaves the machine |
@@ -176,6 +177,8 @@ union of everything named:
 - **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`, `neighborhood_verdict`.
 - **`geometry`** — `simplify_geometry`, `render_map`.
 - **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 39 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 20.5k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
+- **`geometry`** — `simplify_geometry`, `render_map`, `geometry_op`.
+- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 35 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 16.6k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 
 `data_version` and `preferences` are registered under every profile.
 `data_version` is ~230 tokens and the only way an agent can tell which
