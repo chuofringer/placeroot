@@ -36,6 +36,7 @@ from placeroot import (
     buildings,
     cache,
     categories,
+    changes,
     db,
     divisions,
     errors,
@@ -769,6 +770,235 @@ def admin_lookup(lat: float, lon: float) -> dict:
     except overture.SchemaDegraded as e:
         return _schema_error(e)
     return budget.apply_budget(result, "chain")
+
+
+@_tool("Changes in area")
+def changes_in_area(
+    place: str | None = None,
+    min_lon: float | None = None,
+    min_lat: float | None = None,
+    max_lon: float | None = None,
+    max_lat: float | None = None,
+    category: str | None = None,
+    from_release: str | None = None,
+    to_release: str | None = None,
+    limit: int = changes.DEFAULT_DIGEST_TOP_N,
+) -> dict:
+    """What's opened or closed around here since a past Overture release.
+
+    Use this for "what's new around here", "what's closed since spring",
+    or any question with a time dimension — every other tool here answers
+    against a single, current snapshot of the data; this is the only tool
+    that compares two.
+
+    Area, exactly one of:
+    - place: a free-text area name ("Palo Alto"), resolved with this
+      server's usual free-text area matching (prominence-ranked, "City,
+      ST" suffix aware). The resolved division is echoed back as "area"
+      on the response. A name
+      matching several equally-ranked divisions returns {"error":
+      "ambiguous_area", "candidates": [...]} rather than silently picking
+      one; an unresolvable name returns {"error": "not_found"}. If the
+      resolved division is too large to diff (bigger than this tool's
+      per-side degree cap — countries, large regions), returns a
+      {"error": "bad_request"} naming the area and suggesting a smaller
+      one (a neighborhood or district instead of a whole city/region) or
+      an explicit bbox.
+    - min_lon/min_lat/max_lon/max_lat: an explicit bbox (all four
+      together, or none) — for when the caller already has coordinates
+      rather than a name. Same size cap as the named-area path.
+
+    category, when given, filters both releases' scans identically before
+    diffing — see diff_places; a place that changed OUT of the category
+    between releases reads as "disappeared" from this filtered view, which
+    is the correct reading of "restaurants that changed", not a bug.
+
+    from_release/to_release: Overture release strings (YYYY-MM-DD.N). Omit
+    both to diff the previous release against the ACTIVE one — to_release
+    defaults to release.resolve_release(), the same release every other
+    tool in this conversation queries (env pins included), and
+    from_release defaults to the newest listed release older than it: an
+    adjacent, recent window. Not the oldest release Overture still serves
+    — years-old releases are schema-drifted enough that most compared
+    columns NULL out and everything reads as "changed"; pass explicit
+    releases for a wider window, and check "degraded_fields" on the
+    response when you do. Pass both to pick a
+    specific window; passing only one is a {"error": "bad_request"}. When
+    the release listing is reachable, an explicit release not in it is
+    also a {"error": "bad_request"} rather than a silent typo'd diff; when
+    the listing itself is unreachable (network trouble), explicit releases
+    are tried directly instead — they may still resolve even though the
+    list couldn't be built.
+
+    If neither release is given and no listed release is older than the
+    active one (a listing failure, or a world with only one live release),
+    this returns a structured {"error": "upstream_unavailable"} naming
+    whatever releases WERE found — never an empty diff that would read as
+    "nothing changed here" when the real answer is "the window couldn't be
+    built".
+
+    limit caps how many ranked rows each of appeared/disappeared/changed
+    carries (default 8, hard cap 25 — the same per-answer row bound every
+    other tool here uses); "counts" and the "*_by_category" breakdowns are
+    never reduced by it.
+
+    Returns a compact digest, not the full diff: headline "counts"
+    (appeared/disappeared/changed/unchanged, always exact within the
+    scanned bound), a `limit`-capped ranked slice of each of
+    appeared/disappeared/changed (id, name, category, confidence, lat,
+    lon — changed rows carry old_name/new_name and
+    old_category/new_category instead of name/category), a small
+    per-bucket "*_by_category" breakdown computed over everything the
+    scans saw (same denominator as "counts", not the limit-capped slice),
+    the "releases" window actually used, "degraded_fields" when either
+    release's schema is missing a compared column (that field was NULL on
+    that side, so treat "changed" with suspicion), and
+    "truncated"/"omitted_count" when more exists than fits
+    (omitted_count sums omissions across the three lists).
+
+    Honest framing (issue #309): a "notes" list is attached whenever it
+    applies — a disappearance may be delisting or data cleanup, not a
+    closure; an appearance may be newly-mapped, not newly-opened. Neither
+    claim is inferable from this data alone, so the digest says so rather
+    than implying otherwise.
+
+    Returns a structured {"error": ...} if upstream is unavailable or the
+    active places dataset is missing the id/bbox columns this tool depends
+    on, for either release.
+    """
+    place_given = place is not None
+    bbox_fields = (min_lon, min_lat, max_lon, max_lat)
+    any_bbox = any(v is not None for v in bbox_fields)
+    all_bbox = all(v is not None for v in bbox_fields)
+    if any_bbox and not all_bbox:
+        return {
+            "error": "bad_request",
+            "detail": "pass all four of min_lon/min_lat/max_lon/max_lat together, or none",
+        }
+    modes_given = sum([place_given, all_bbox])
+    if modes_given == 0:
+        return {
+            "error": "bad_request",
+            "detail": "pass either place or all four of min_lon/min_lat/max_lon/max_lat",
+        }
+    if modes_given == 2:
+        return {
+            "error": "bad_request",
+            "detail": "pass exactly one of place or a bbox, not both",
+        }
+
+    resolved_area = None
+    if place_given:
+        if not isinstance(place, str) or not place.strip():
+            return {"error": "bad_request", "detail": "place must be a non-empty name"}
+        try:
+            resolved_area = geocoding.resolve_area(place)
+        except errors.AmbiguousArea as e:
+            return {
+                "error": "ambiguous_area",
+                "detail": e.detail,
+                "candidates": e.candidates,
+            }
+        except overture.UpstreamUnavailable as e:
+            return _upstream_error(e)
+        if resolved_area is None:
+            return {"error": "not_found", "detail": f"no division matched place {place!r}"}
+        try:
+            resolved_geometry = overture._resolve_division_geometry(resolved_area["division_id"])
+        except overture.UpstreamUnavailable as e:
+            return _upstream_error(e)
+        except overture.SchemaDegraded as e:
+            return _schema_error(e)
+        if resolved_geometry is None:
+            return {"error": "not_found", "detail": f"no division matched place {place!r}"}
+        _wkb, xmin, xmax, ymin, ymax = resolved_geometry
+        span = max(xmax - xmin, ymax - ymin)
+        if span > changes.MAX_BBOX_SPAN_DEG:
+            return {
+                "error": "bad_request",
+                "detail": (
+                    f"{resolved_area['name']!r} spans {span:.2f} degrees, too large for "
+                    f"changes_in_area (max {changes.MAX_BBOX_SPAN_DEG} degrees per side). "
+                    "Pass a smaller area (a neighborhood or district rather than a whole "
+                    "city/region/country), or pass an explicit bbox."
+                ),
+            }
+        bbox = (xmin, ymin, xmax, ymax)
+    else:
+        coord_error = _invalid_coord(min_lat, min_lon) or _invalid_coord(max_lat, max_lon)
+        if coord_error is not None:
+            return coord_error
+        bbox = (min_lon, min_lat, max_lon, max_lat)
+
+    available = release.available_releases()
+    if from_release is None and to_release is None:
+        # Default to a window ending at the ACTIVE release — the one every
+        # other tool in this conversation queries (resolve_release honors
+        # PLACEROOT_OVERTURE_RELEASE pins; available[-1] would be whatever
+        # is newest on S3, contradicting them) — starting from the newest
+        # listed release older than it: adjacent and recent, not the
+        # years-old, schema-drifted oldest release Overture still serves.
+        # The active release itself need not appear in the listing (a
+        # pinned or mirrored install): only "older than active" matters.
+        to_release = release.resolve_release()
+        to_key = release._numeric_patch_key(to_release)
+        older = [r for r in available if release._numeric_patch_key(r) < to_key]
+        if not older:
+            found = ", ".join(available) if available else "none"
+            return {
+                "error": "upstream_unavailable",
+                "detail": (
+                    "could not establish a diff window: the active release is "
+                    f"{to_release} and release.available_releases() found no "
+                    f"older release (releases found: {found}). Pass "
+                    "from_release and to_release explicitly if you know two "
+                    "valid release names."
+                ),
+                "retry_advised": True,
+            }
+        from_release = older[-1]  # `available` is ascending: the previous release
+    elif from_release is None or to_release is None:
+        return {
+            "error": "bad_request",
+            "detail": "pass both from_release and to_release, or neither",
+        }
+    elif available and (from_release not in available or to_release not in available):
+        unknown = [r for r in (from_release, to_release) if r not in available]
+        return {
+            "error": "bad_request",
+            "detail": (
+                f"{', '.join(unknown)} not in the available releases ({', '.join(available)})"
+            ),
+        }
+    # else: available == [] (listing unreachable) -- try the given releases
+    # directly, they may still resolve even though the listing couldn't be
+    # built (see docstring).
+
+    try:
+        diff = changes.diff_places(bbox, from_release, to_release, category, limit)
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
+    except changes.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except changes.SchemaDegraded as e:
+        return _schema_error(e)
+
+    # limit drives the digest's per-bucket top_n (capped at the same
+    # per-answer row bound every other tool uses), so "widen the limit"
+    # actually widens the lists instead of stalling at the default 8.
+    digest = changes.changes_digest(diff, top_n=min(limit, overture.MAX_ROWS))
+    if resolved_area is not None:
+        digest["area"] = resolved_area
+    # Budget the three lists with ONE summed omitted_count: successive
+    # apply_budget calls would each overwrite truncated/omitted_count with
+    # only their own bucket's numbers, under-reporting omissions.
+    omitted_total = 0
+    for bucket in ("appeared", "disappeared", "changed"):
+        digest = budget.apply_budget(digest, bucket)
+        omitted_total += digest.pop("omitted_count", 0)
+    if omitted_total:
+        digest["omitted_count"] = omitted_total
+    return digest
 
 
 @_tool("Summarize buildings")

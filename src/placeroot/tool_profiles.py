@@ -107,6 +107,9 @@ PROFILES: dict[str, frozenset[str]] = {
         "admin_lookup",
         # Same compose as core: a characterize-the-neighborhood question.
         "neighborhood_verdict",
+        # Characterizes an area across two releases instead of one snapshot,
+        # but it's still "what's in/around this area" -- analysis, not search.
+        "changes_in_area",
     }),
     # Working on geometry the caller already has, and turning results into
     # something a human can look at.
