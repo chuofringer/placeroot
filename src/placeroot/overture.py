@@ -562,10 +562,12 @@ def _place_category_name_filters(
 # measure and is left for a follow-up if POI data turns out to need it.
 _POI_FUZZY_SIMILARITY_THRESHOLD = 0.92  # mirrors geocode._FUZZY_SIMILARITY_THRESHOLD (#215)
 
-# Bounded candidate pool tier 3 scores jaro_winkler over — nearest-first,
-# within the query's own bbox/radius, never a theme-wide scan. Sized like
-# geocode.py's CHECKLIST_MAX_CANDIDATES-class caps: generous for a single
-# radius query, small enough that scoring it in SQL is free.
+# Cap on tier 3's candidate pool — the nearest rows that already cleared
+# the similarity threshold (#374: the score is applied before this limit,
+# so density can't crowd the real match out), within the query's own
+# bbox/radius, never a theme-wide scan. Sized like geocode.py's
+# CHECKLIST_MAX_CANDIDATES-class caps: generous for a single radius query,
+# small enough that carrying it through the query is free.
 _POI_FUZZY_POOL_SIZE = 500
 
 
@@ -647,12 +649,20 @@ def _find_places_name_fallback(
     folded_name = _fold_poi_name(name)
     base_params = {k: v for k, v in params.items() if k != "name"}
     alt_params = dict(base_params, _folded_name=folded_name)
+    # list_distinct + the QUALIFY row_number guard (#374): names.common is a
+    # per-language map, and the same alternate spelling routinely repeats
+    # across locale keys ({'en': 'Munich', 'es': 'Munich', ...}) — a plain
+    # UNNEST(map_values(...)) yields one row per locale, so a single place
+    # came back as duplicate result rows. list_distinct collapses repeats of
+    # the same string; row_number over id collapses the remaining case of
+    # two *different* alternates both folding equal to the query.
     alt_sql = f"""
         {with_clause}
         SELECT {select_cols}, _alt_spelling AS matched_alt
-        FROM {from_clause}, UNNEST(map_values(names.common)) AS _u(_alt_spelling)
+        FROM {from_clause}, UNNEST(list_distinct(map_values(names.common))) AS _u(_alt_spelling)
         WHERE {' AND '.join(dedup_filters)}
           AND {_fold_poi_name_sql("_alt_spelling")} = $_folded_name
+        QUALIFY row_number() OVER (PARTITION BY {exprs["id"]} ORDER BY _alt_spelling) = 1
         ORDER BY distance_m
         LIMIT {limit}
     """
@@ -670,10 +680,24 @@ def _find_places_name_fallback(
 
     # --- tier 3: fuzzy (jaro_winkler) on names.primary -----------------
     #
-    # Bounded pool first (nearest _POI_FUZZY_POOL_SIZE within the same
-    # bbox/distance/category/attribute filters), THEN score similarity over
-    # that pool in SQL — never an unbounded scan. Empty when the query
-    # folds to the empty string, same guard as
+    # Score first, THEN limit (#374): the similarity predicate is applied
+    # INSIDE the pool CTE, so the pool is "the nearest _POI_FUZZY_POOL_SIZE
+    # rows that actually clear the threshold" — not "the nearest 500 rows,
+    # hoping the real match is among them". A pure distance-first pool died
+    # in dense areas: 500 Manhattan storefronts filled it before "Empire
+    # State Building" was ever scored. Still bounded by construction — the
+    # same bbox/distance/category/attribute filters prune what gets scored,
+    # and the CTE's LIMIT caps what leaves it.
+    #
+    # The score itself is substring-tolerant (#374): tier 1 is a substring
+    # match, so a query for one word of a longer stored name ("startbucks"
+    # vs "Starbucks Coffee") must not be held to whole-string similarity —
+    # jaro_winkler('startbucks', 'starbucks coffee') is 0.89, under the
+    # threshold. Each name is therefore also compared through a prefix
+    # window of the query's own length, and the better of the two scores
+    # counts; the 0.92 threshold itself is unchanged.
+    #
+    # Empty when the query folds to the empty string, same guard as
     # geocode._query_divisions_fuzzy and for the same reason: DuckDB scores
     # jaro_winkler_similarity(name, '') above the threshold, which would
     # otherwise answer a nonsense query with the nearest places, dressed up
@@ -684,29 +708,38 @@ def _find_places_name_fallback(
         from_source, base_filters, has_recreation
     )
     fuzzy_params = dict(base_params, _folded_name=folded_name)
+    folded_col = _fold_poi_name_sql("names.primary")
+    similarity_expr = (
+        f"greatest("
+        f"jaro_winkler_similarity({folded_col}, $_folded_name), "
+        f"jaro_winkler_similarity("
+        f"left({folded_col}, length($_folded_name)), $_folded_name))"
+    )
     # _dedup_rows_sql's with_clause (when the recreation layer is in play)
     # already opens its own "WITH _candidate_rows AS (...)" — chaining a
     # second CTE onto it is a comma, not a second WITH keyword. When there's
     # no recreation layer, with_clause is "" and this pool CTE opens its own.
     pool_cte = (
         f"_pool AS MATERIALIZED ("
-        f"SELECT {select_cols}, names.primary AS _primary_name "
-        f"FROM {from_clause} WHERE {' AND '.join(dedup_filters)} "
+        f"SELECT * FROM ("
+        f"SELECT {select_cols}, {similarity_expr} AS similarity "
+        f"FROM {from_clause} WHERE {' AND '.join(dedup_filters)}) "
+        f"WHERE similarity >= {_POI_FUZZY_SIMILARITY_THRESHOLD} "
         f"ORDER BY distance_m LIMIT {_POI_FUZZY_POOL_SIZE})"
     )
     if with_clause:
         pool_with_clause = f"{with_clause}, {pool_cte}"
     else:
         pool_with_clause = f"WITH {pool_cte}"
+    # Nearest first, like every other find_places path (#374): similarity
+    # already gated admission above, so it only breaks distance ties here —
+    # a fallback row 900m away must not outrank one 50m away just because
+    # its spelling scored a shade closer.
     fuzzy_sql = f"""
         {pool_with_clause}
-        SELECT {', '.join(cols)},
-               jaro_winkler_similarity({_fold_poi_name_sql('_primary_name')}, $_folded_name)
-                   AS similarity
+        SELECT {', '.join(cols)}, similarity
         FROM _pool
-        WHERE jaro_winkler_similarity({_fold_poi_name_sql('_primary_name')}, $_folded_name)
-              >= {_POI_FUZZY_SIMILARITY_THRESHOLD}
-        ORDER BY similarity DESC, distance_m
+        ORDER BY distance_m, similarity DESC
         LIMIT {limit}
     """
     try:
@@ -876,6 +909,7 @@ def find_places(
     has_website: bool | None = None,
     has_phone: bool | None = None,
     limit: int = 10,
+    allow_name_fallback: bool = True,
 ) -> list[dict]:
     """Places near a point, nearest first, compact rows.
 
@@ -911,7 +945,11 @@ def find_places(
     row) — a caller reading that field can tell a spelling correction from
     a literal hit. names.common missing from the dataset silently skips the
     alt-name tier; the fuzzy tier always runs (jaro_winkler is a built-in
-    DuckDB function).
+    DuckDB function). allow_name_fallback=False disables both fallback
+    tiers — for callers whose answer shape can't honestly carry a
+    correction (#374: within_distance is a yes/no with no note surface, and
+    "is there a Startbucks within 200m" must not silently become a claim
+    about Starbucks).
     """
     # int() before interpolating into the SQL LIMIT clause: the MCP layer
     # already type-validates this arg, but the cast makes the query layer
@@ -969,7 +1007,7 @@ def find_places(
         "confidence", "brand", "has_website", "has_phone", "lat", "lon", "distance_m",
     ]
     results = [dict(zip(cols, r)) for r in rows]
-    if not results and name and "names" not in missing:
+    if not results and name and allow_name_fallback and "names" not in missing:
         # #373: tier 1 (the ILIKE substring search above) found nothing —
         # try the alt-name/fuzzy fallback tiers before giving up. Skipped
         # outright when `name` wasn't given (nothing to fall back from) or
@@ -1768,7 +1806,10 @@ def within_distance(
 ) -> dict:
     """Is the nearest matching place within max_distance_m of (lat, lon)?
 
-    category/name narrow the search the same way as find_places. The search
+    category/name narrow the search the same way as find_places — except
+    that name stays strictly literal here: #373's alt-spelling/fuzzy
+    fallback tiers are disabled (#374), because this tool's yes/no shape
+    has nowhere to disclose a spelling correction. The search
     window is capped at max_distance_m * 2 so a "nothing nearby" answer
     doesn't degrade into an unbounded scan — a real nearest match beyond
     that window comes back as nearest: None rather than its true distance.
@@ -1785,7 +1826,14 @@ def within_distance(
     still reported as within: True with no caveat.
     """
     search_radius_m = max_distance_m * 2
-    rows = find_places(lat, lon, search_radius_m, category=category, name=name, limit=1)
+    # allow_name_fallback=False (#374): this is a yes/no answer with no
+    # note surface to carry a spelling correction, so #373's alt-name/fuzzy
+    # tiers must not leak in — "is there a Startbucks within 200m" answered
+    # from a Starbucks row would be a silent claim about a different name.
+    rows = find_places(
+        lat, lon, search_radius_m, category=category, name=name, limit=1,
+        allow_name_fallback=False,
+    )
     if not rows:
         result = {"within": False, "nearest": None, "distance_m": None}
         if max_distance_m > geo.MAX_QUERY_RADIUS_M:

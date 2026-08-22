@@ -668,6 +668,9 @@ def within_distance(
     "distance_m": float | None}. nearest is None if nothing matches within
     a search window capped at max_distance_m * 2 — a real match further out
     than that isn't found (documented, not a bug: keeps the search bounded).
+    name is a literal substring match only — no alt-spelling or typo
+    fallback applies here, so a misspelled name is an honest "no match",
+    never a silent yes about a different name.
     Returns a structured {"error": ...} if upstream is unavailable or the
     dataset is missing columns this tool depends on.
     """
@@ -1321,7 +1324,6 @@ def resolve_place(
     except overture.SchemaDegraded as e:
         return _schema_error(e)
     payload: dict = {"results": rows}
-    payload = _with_name_fallback_note(payload, query)
     if not rows and city is None and near_lat is None:
         # Machine-actionable instead of prose: the caller can retry without
         # parsing a sentence, and the thing it should add is the one thing
@@ -1331,7 +1333,10 @@ def resolve_place(
             "query": query,
             "city": "<the city or region this is in, e.g. 'San Jose, CA'>",
         }
-    return budget.apply_budget(payload, "results")
+    # Note AFTER budgeting (#374), mirroring find_places: the note names a
+    # concrete row, and attaching it first could leave it pointing at a row
+    # apply_budget then dropped from the answer.
+    return _with_name_fallback_note(budget.apply_budget(payload, "results"), query)
 
 
 @_tool("Resolve GERS ids in batch")

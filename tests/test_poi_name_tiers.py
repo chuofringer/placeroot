@@ -140,7 +140,7 @@ def test_resolve_place_note_on_fuzzy_hit():
 # --- tier 2: names.common alternate spellings -------------------------------
 
 
-def _build_alt_name_fixture(tmp_path):
+def _build_alt_name_fixture(tmp_path, common_sql=None):
     """A minimal places.parquet-shaped fixture at CENTER_LAT/CENTER_LON,
     schema-identical to tests/fixtures/places.parquet except `names` also
     carries a `common` MAP(VARCHAR, VARCHAR) — the default fixture has no
@@ -152,10 +152,13 @@ def _build_alt_name_fixture(tmp_path):
     fixture name unrelated by substring to its own alt spelling), with a
     names.common alternate "Munich Coffee House" — a query for the alt
     spelling must NOT literally match the primary name (tier 1 fails) but
-    must match via tier 2.
+    must match via tier 2. `common_sql` overrides the names.common MAP
+    literal (#374: the dedup tests store the same alternate under several
+    locale keys).
     """
     out = tmp_path / "alt_name_fixture.parquet"
     con = duckdb.connect()
+    common_sql = common_sql or "MAP {'en': 'Munich Coffee House'}"
     con.execute(f"""
         COPY (
             SELECT
@@ -164,7 +167,7 @@ def _build_alt_name_fixture(tmp_path):
                   'xmax': {CENTER_LON}, 'ymax': {CENTER_LAT}}}
                     ::STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE) AS bbox,
                 {{'primary': 'Muenchen Coffee House',
-                  'common': MAP {{'en': 'Munich Coffee House'}}}}
+                  'common': {common_sql}}}
                     ::STRUCT("primary" VARCHAR, common MAP(VARCHAR, VARCHAR)) AS names,
                 {{'primary': 'coffee_shop', 'alternates': []}}
                     ::STRUCT("primary" VARCHAR, alternates VARCHAR[]) AS taxonomy,
@@ -200,6 +203,31 @@ def test_alt_name_tier_matches_names_common_spelling(tmp_path):
     assert results[0]["matched_by"] == "alt_name"
 
 
+def test_alt_name_tier_dedupes_same_spelling_across_locales(tmp_path):
+    """#374: names.common is a per-language map and the same alternate
+    routinely repeats across locale keys — a plain UNNEST(map_values(...))
+    returned one duplicate row per locale for a single place id. Three
+    locales carrying the same alternate (plus one different) must still
+    yield exactly one row."""
+    fixture = _build_alt_name_fixture(
+        tmp_path,
+        common_sql=(
+            "MAP {'en': 'Munich Coffee House', 'es': 'Munich Coffee House', "
+            "'fr': 'Munich Coffee House', 'de': 'Muenchener Kaffeehaus'}"
+        ),
+    )
+    overture.set_data_path(str(fixture))
+    try:
+        results = overture.find_places(
+            CENTER_LAT, CENTER_LON, radius_m=1000, name="Munich Coffee House", limit=25
+        )
+    finally:
+        overture.set_data_path(str(FIXTURE_PATH))
+    assert len(results) == 1
+    assert results[0]["name"] == "Muenchen Coffee House"
+    assert results[0]["matched_by"] == "alt_name"
+
+
 def test_missing_names_common_column_skips_tier_2_without_error(tmp_path):
     """The default fixture's `names` struct has no "common" key at all — the
     alt-name tier's query fails to bind and is caught, falling through to
@@ -211,3 +239,164 @@ def test_missing_names_common_column_skips_tier_2_without_error(tmp_path):
     )
     assert results
     assert results[0]["matched_by"] == "fuzzy"
+
+
+# --- #374: review fixes on the #373 tiers ------------------------------------
+
+
+def _build_named_places_fixture(tmp_path, rows, filename="places_374.parquet"):
+    """A places.parquet-shaped fixture (schema-identical to
+    tests/fixtures/places.parquet: `names` is STRUCT(primary VARCHAR), no
+    "common" key) holding `rows` of (id, name, lat, lon) — for the #374
+    regression tests that need specific name/distance layouts."""
+    out = tmp_path / filename
+    con = duckdb.connect()
+    selects = " UNION ALL ".join(
+        f"""
+        SELECT
+            '{rid}'::VARCHAR AS id,
+            {{'xmin': {lon}, 'ymin': {lat}, 'xmax': {lon}, 'ymax': {lat}}}
+                ::STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE) AS bbox,
+            {{'primary': '{name}'}}::STRUCT("primary" VARCHAR) AS names,
+            {{'primary': 'coffee_shop', 'alternates': []}}
+                ::STRUCT("primary" VARCHAR, alternates VARCHAR[]) AS taxonomy,
+            'coffee_shop'::VARCHAR AS basic_category,
+            'open'::VARCHAR AS operating_status,
+            0.9::DOUBLE AS confidence,
+            CAST([] AS STRUCT(freeform VARCHAR, locality VARCHAR, region VARCHAR,
+                               postcode VARCHAR, country VARCHAR)[]) AS addresses,
+            CAST([] AS VARCHAR[]) AS websites,
+            CAST([] AS VARCHAR[]) AS phones,
+            CAST([] AS VARCHAR[]) AS socials,
+            CAST(NULL AS STRUCT("names" STRUCT("primary" VARCHAR))) AS brand,
+            CAST([] AS STRUCT(dataset VARCHAR, record_id VARCHAR)[]) AS sources
+        """
+        for rid, name, lat, lon in rows
+    )
+    con.execute(f"COPY ({selects}) TO '{out}' (FORMAT PARQUET)")
+    return out
+
+
+def test_fuzzy_pool_scores_before_limiting_in_dense_areas(tmp_path, monkeypatch):
+    """#374: the tier-3 pool used to be ORDER BY distance LIMIT N *before*
+    any similarity test — in a dense area, N near-but-dissimilar storefronts
+    filled the pool and the real match (slightly farther out) was never
+    scored. The similarity predicate now gates admission to the pool, so a
+    match beyond the N nearest rows still comes back. Modeled with a
+    shrunken pool: 10 filler cafes at the center, the target ~1.1km out,
+    pool capped at 5."""
+    rows = [(f"fill{i}", f"Filler Cafe {i}", CENTER_LAT, CENTER_LON) for i in range(10)]
+    rows.append(("target", "Empire State Building", CENTER_LAT + 0.01, CENTER_LON))
+    fixture = _build_named_places_fixture(tmp_path, rows)
+    monkeypatch.setattr(overture, "_POI_FUZZY_POOL_SIZE", 5)
+    overture.set_data_path(str(fixture))
+    try:
+        results = overture.find_places(
+            CENTER_LAT, CENTER_LON, radius_m=2000, name="Empire Statte Building", limit=25
+        )
+    finally:
+        overture.set_data_path(str(FIXTURE_PATH))
+    assert [r["name"] for r in results] == ["Empire State Building"]
+    assert results[0]["matched_by"] == "fuzzy"
+
+
+def test_fuzzy_matches_a_word_of_a_longer_stored_name(tmp_path):
+    """#374: tier 1 is a substring match, so tier 3 must not hold a
+    one-word query to whole-string similarity against a longer stored name:
+    jaro_winkler('startbucks', 'starbucks coffee') is 0.89 — under the 0.92
+    threshold — but against the name's prefix window of the query's length
+    it is 0.96. The documented "Startbucks -> Starbucks" case, against a
+    realistically-named row."""
+    fixture = _build_named_places_fixture(
+        tmp_path, [("sb1", "Starbucks Coffee", CENTER_LAT, CENTER_LON)]
+    )
+    overture.set_data_path(str(fixture))
+    try:
+        results = overture.find_places(
+            CENTER_LAT, CENTER_LON, radius_m=1000, name="Startbucks", limit=25
+        )
+    finally:
+        overture.set_data_path(str(FIXTURE_PATH))
+    assert [r["name"] for r in results] == ["Starbucks Coffee"]
+    assert results[0]["matched_by"] == "fuzzy"
+
+
+def test_fuzzy_fallback_returns_nearest_first(tmp_path):
+    """#374: tier 3 used to ORDER BY similarity DESC, so with limit=1 a
+    far row whose spelling scored a shade higher beat a near one — breaking
+    find_places' nearest-first contract. Similarity gates admission;
+    distance orders. Both fixture names clear the threshold for the query,
+    the farther one with the higher similarity — the nearer must win."""
+    fixture = _build_named_places_fixture(tmp_path, [
+        ("near", "Blue Bottle Roasters", CENTER_LAT, CENTER_LON),
+        ("far", "Blue Bottle Roastery", CENTER_LAT + 0.005, CENTER_LON),
+    ])
+    overture.set_data_path(str(fixture))
+    try:
+        results = overture.find_places(
+            CENTER_LAT, CENTER_LON, radius_m=2000, name="Blue Botle Roastery", limit=25
+        )
+        top_only = overture.find_places(
+            CENTER_LAT, CENTER_LON, radius_m=2000, name="Blue Botle Roastery", limit=1
+        )
+    finally:
+        overture.set_data_path(str(FIXTURE_PATH))
+    assert [r["name"] for r in results] == ["Blue Bottle Roasters", "Blue Bottle Roastery"]
+    assert [r["name"] for r in top_only] == ["Blue Bottle Roasters"]
+
+
+def test_within_distance_does_not_leak_the_fuzzy_fallback():
+    """#374: within_distance is a yes/no tool with no note surface — a
+    misspelled name must stay an honest "no match", not silently become a
+    claim about a differently-named place. The fixture's "Blue Bottle
+    Roastery" is well within range and fuzzy-close to the query; it must
+    still not be counted."""
+    result = overture.within_distance(
+        CENTER_LAT, CENTER_LON, 1000, name="Blue Botle Roastery"
+    )
+    assert result["within"] is False
+    assert result["nearest"] is None
+    assert result["distance_m"] is None
+    # The literal spelling still works exactly as before.
+    hit = overture.within_distance(
+        CENTER_LAT, CENTER_LON, 1000, name="Blue Bottle Roastery"
+    )
+    assert hit["within"] is True
+
+
+def test_resolve_place_gates_one_token_fuzzy_coincidence(tmp_path):
+    """#374: resolve_place searches per token, so a one-token fuzzy
+    coincidence — a bar named "King", typo-close to the token "kings" —
+    used to be trusted as an answer to the whole three-token query "Kings
+    Barbershop Springfield". A token-matched fallback row must cover the
+    query's other distinctive words too, or be dropped."""
+    fixture = _build_named_places_fixture(
+        tmp_path, [("king1", "King", CENTER_LAT, CENTER_LON)]
+    )
+    overture.set_data_path(str(fixture))
+    try:
+        results = geocode.resolve_place(
+            "Kings Barbershop Springfield", near_lat=CENTER_LAT, near_lon=CENTER_LON, limit=5
+        )
+    finally:
+        overture.set_data_path(str(FIXTURE_PATH))
+    assert not any(r.get("name") == "King" for r in results)
+
+
+def test_resolve_place_note_reflects_post_budget_rows(monkeypatch):
+    """#374: the fallback note used to be attached BEFORE budgeting, so it
+    could name a row apply_budget then dropped from the answer. With every
+    result budgeted away, no note may survive to describe a row the caller
+    never sees."""
+    def drop_everything(payload, key):
+        payload = dict(payload)
+        payload[key] = []
+        payload["truncated"] = True
+        return payload
+
+    monkeypatch.setattr(server.budget, "apply_budget", drop_everything)
+    payload = server.resolve_place(
+        "Blue Botle Roastery", near_lat=CENTER_LAT, near_lon=CENTER_LON, limit=5
+    )
+    assert payload["results"] == []
+    assert "note" not in payload
