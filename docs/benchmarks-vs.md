@@ -138,9 +138,9 @@ Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Eve
 - Snapshots captured: **2026-08-08**
 - PlaceRoot's own answers were captured on **Linux-6.12.94+-x86_64-with-glibc2.41** (Python 3.11.16, Overture `2026-07-22.0`) and are snapshotted rather than recomputed here: floating-point differences in routing and geometry change digit counts between platforms, so a live rerun costs a few tokens more or less on Linux than on macOS. A tolerance test reruns them for real and fails if this snapshot drifts from what the code now answers.
 - Schema figures are counted twice: over the **common fields** every server here publishes, and **verbatim** over everything it sends. The ratios below are the common-field ones, because Mapbox declares an `outputSchema` that PlaceRoot does not declare at all — see the note under the table.
-- Schema surface, whole install (common fields): PlaceRoot **22618** tokens (41 tools) · Mapbox **15190** (29 tools) · Google Maps **655** (7 tools)
+- Schema surface, whole install (common fields): PlaceRoot **23601** tokens (42 tools) · Mapbox **15190** (29 tools) · Google Maps **655** (7 tools)
 - Schema surface, the six tools each server needs for the scenarios below (common fields): PlaceRoot **4198** · Mapbox **4654** (1.1x ours) · Google Maps **500** (5 tools — no isochrone tool exists)
-- Whole-install surface: Mapbox is **0.7x** PlaceRoot's on common fields, on 29 tools against 41. Verbatim — counting the output schemas Mapbox publishes and we don't — it is 1.3x (29295 against 22618), and 3.1x on the six-tool subset.
+- Whole-install surface: Mapbox is **0.6x** PlaceRoot's on common fields, on 29 tools against 42. Verbatim — counting the output schemas Mapbox publishes and we don't — it is 1.2x (29295 against 23601), and 3.1x on the six-tool subset.
 - Answers, over the 6 scenarios both PlaceRoot and Mapbox answer: PlaceRoot **1682** tokens total, Mapbox **1337** (1219 with pretty-print whitespace removed)
 
 ### Where the competitor numbers come from
@@ -154,7 +154,7 @@ Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Eve
 
 | server | tools registered | whole install, verbatim | whole install, common fields | the 6-scenario subset | subset verbatim | subset common fields |
 |---|---:|---:|---:|---:|---:|---:|
-| PlaceRoot | 41 | 22618 | **22618** | 6 | 4198 | **4198** |
+| PlaceRoot | 42 | 23601 | **23601** | 6 | 4198 | **4198** |
 | Mapbox MCP | 29 | 29295 | **15190** | 6 | 13129 | **4654** |
 | Google Maps MCP (archived) | 7 | 655 | **655** | 5 | 500 | **500** |
 
