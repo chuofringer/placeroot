@@ -9,6 +9,16 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `search_categories` embeddings tail extension (#356): a bundled, static
+  hashed n-gram embedding artifact (~300 KiB, no model/network/API key)
+  extends the phrase-intent fallback from #355 to queries that share no
+  word with any slug, path segment, or synonym at all ("somewhere calm to
+  read for an hour" -> `library`). Blended in only at a confidence below
+  every lexical band, so it fills slots the lexical tiers left empty and
+  never outranks a lexical hit — measured on a 28-query held-out corpus:
+  10/10 lexicon-covered control queries unchanged, long-tail hit rate
+  8/18 -> 11/18, total 18/28 -> 21/28. Falls back cleanly to lexical-only
+  if the artifact is missing.
 - `travel_time_matrix`: routed travel time and distance between every
   origin and every destination (up to 5x5) in one call, by mode — a shared
   cached street graph with one Dijkstra per origin when the points fit one
