@@ -361,6 +361,13 @@ def _category_slug(category: str) -> str:
     "coffee_shop" stays a slug. "coffee" / "coffee shops" / "playgrounds"
     map through the taxonomy (singularize, then the first word) so the
     phrases users actually type reach find_places.
+
+    All candidate spellings are tried before settling: an exact taxonomy
+    slug wins outright, otherwise the best-confidence search hit across
+    every candidate is taken. Stopping at the first candidate that yields
+    anything let the raw plural phrase's low-confidence lexical-fallback
+    hit shadow the singularized exact slug ("grocery stores" resolved to
+    rice_shop instead of grocery_store, #357).
     """
     raw = category.strip()
     if not raw:
@@ -375,17 +382,30 @@ def _category_slug(category: str) -> str:
     if first.lower() != lower:
         candidates.append(first)
     seen: set[str] = set()
+    ordered: list[str] = []
     for cand in candidates:
         key = cand.lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        slug = key.replace(" ", "_")
+        if key and key not in seen:
+            seen.add(key)
+            ordered.append(cand)
+    # First pass: any candidate that already is a taxonomy slug wins.
+    for cand in ordered:
+        slug = cand.lower().replace(" ", "_")
         if categories.hierarchy_for(slug):
             return slug
+    # Second pass: best-confidence search hit across all candidates, so a
+    # high tier (exact/prefix/substring/path) from a later candidate beats
+    # an earlier candidate's lexical-fallback guess. Candidate order still
+    # breaks confidence ties.
+    best_slug: str | None = None
+    best_conf = 0.0
+    for cand in ordered:
         hits = categories.search_categories(cand, limit=1)
-        if hits:
-            return hits[0]["slug"]
+        if hits and hits[0]["confidence"] > best_conf:
+            best_conf = hits[0]["confidence"]
+            best_slug = hits[0]["slug"]
+    if best_slug is not None:
+        return best_slug
     return raw.lower().replace(" ", "_")
 
 
@@ -1538,12 +1558,15 @@ def search_categories(query: str, limit: int = 8) -> dict:
     against a bundled snapshot of Overture's places taxonomy (pinned to
     schema v1.9.0). Ranks exact slug match > slug prefix > slug substring >
     a match on any taxonomy path segment, so close siblings like "cafe" vs
-    "coffee_shop" both surface rather than one silently winning. Returns
-    {"results": [{"slug", "path"}, ...]} — path is the root-to-leaf
-    taxonomy (e.g. ["eat_and_drink", "cafe", "coffee_shop"]), budgeted like
-    every other tool. An empty/whitespace query returns {"results": []}.
-    limit is clamped to 0-50, matching every other tool's limit handling
-    (out-of-range values are not an error).
+    "coffee_shop" both surface rather than one silently winning. If the
+    whole query matches nothing, falls back to a lexical phrase-intent
+    match against a curated synonym lexicon (e.g. "fix my cracked phone
+    screen" -> mobile_phone_repair). Returns {"results": [{"slug", "path",
+    "confidence"}, ...]} — path is the root-to-leaf taxonomy (e.g.
+    ["eat_and_drink", "cafe", "coffee_shop"]), confidence is 0-1 and
+    descending, budgeted like every other tool. An empty/whitespace query
+    returns {"results": []}. limit is clamped to 0-50, matching every
+    other tool's limit handling (out-of-range values are not an error).
     """
     limit = max(0, min(int(limit), 50))
     rows = categories.search_categories(query, limit)
