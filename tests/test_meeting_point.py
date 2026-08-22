@@ -175,7 +175,7 @@ def meeting_places(tmp_path):
 
 
 def test_two_origins_rank_the_midpoint_venue_first(meeting_places):
-    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")))
+    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True)
     assert "error" not in result
     assert result["candidates"], "expected at least one routable candidate"
     top = result["candidates"][0]
@@ -196,7 +196,7 @@ def test_two_origins_rank_the_midpoint_venue_first(meeting_places):
 
 
 def test_center_is_returned_and_near_the_grid(meeting_places):
-    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")))
+    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True)
     center = result["center"]
     mid_lat, mid_lon = MIDPOINT_NODE
     # Same mode, symmetric origins -> the fair center should land close to
@@ -206,7 +206,7 @@ def test_center_is_returned_and_near_the_grid(meeting_places):
 
 def test_category_filter_passes_through_to_places_search(meeting_places):
     result = server.meeting_point(
-        _origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), category="coffee_shop"
+        _origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), category="coffee_shop", confirm=True
     )
     assert "error" not in result
     assert all(c["category"] == "coffee_shop" for c in result["candidates"])
@@ -222,7 +222,7 @@ def test_category_matching_nothing_returns_empty_candidates_with_a_note(meeting_
 
 
 def test_result_carries_no_geometry(meeting_places):
-    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")))
+    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True)
     for candidate in result["candidates"]:
         assert set(candidate) <= {
             "id",
@@ -233,6 +233,7 @@ def test_result_carries_no_geometry(meeting_places):
             "per_person",
             "max_travel_time_min",
             "spread_min",
+            "truncated",
         }
 
 
@@ -268,7 +269,7 @@ def test_missing_mode_defaults_to_walk(meeting_places):
         {"lat": ORIGIN_A[0], "lon": ORIGIN_A[1]},
         {"lat": ORIGIN_B[0], "lon": ORIGIN_B[1]},
     ]
-    result = server.meeting_point(origins)
+    result = server.meeting_point(origins, confirm=True)
     assert "error" not in result
     for candidate in result["candidates"]:
         assert all(p["mode"] == "walk" for p in candidate["per_person"])
@@ -301,7 +302,9 @@ def test_non_dict_origin_is_a_bad_request():
 
 
 def test_limit_is_clamped_between_one_and_five(meeting_places):
-    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), limit=99)
+    result = server.meeting_point(
+        _origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), limit=99, confirm=True
+    )
     assert "error" not in result
     assert len(result["candidates"]) <= 5
 
@@ -310,7 +313,9 @@ def test_limit_is_clamped_between_one_and_five(meeting_places):
 
 
 def test_origin_far_from_any_graph_excludes_every_candidate_with_a_note(meeting_places):
-    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*FAR_FROM_GRID, "walk")))
+    result = server.meeting_point(
+        _origins((*ORIGIN_A, "walk"), (*FAR_FROM_GRID, "walk")), confirm=True
+    )
     assert "error" not in result
     assert result["candidates"] == []
     assert "note" in result
@@ -327,8 +332,120 @@ def test_five_origins_with_no_upstream_exception(meeting_places):
         (*fx.node_latlon(10, 10), "walk"),
         (*fx.node_latlon(0, 0), "walk"),
     )
-    result = server.meeting_point(pts)
+    result = server.meeting_point(pts, confirm=True)
     assert "error" not in result
+
+
+# --- antimeridian seed --------------------------------------------------
+
+
+def test_find_center_seed_crosses_the_antimeridian_correctly():
+    """Origins at lon 179.9 and -179.9 are ~22km apart across the seam;
+    an arithmetic mean would seed the search near lon 0, half a world
+    away. The circular mean lands on the seam."""
+    center_lat, center_lon = meeting.find_center(
+        [(10.0, 179.9, "walk"), (10.0, -179.9, "walk")]
+    )
+    assert center_lat == pytest.approx(10.0, abs=0.1)
+    assert abs(abs(center_lon) - 180.0) < 0.2
+
+
+# --- confirm gate, pair cap, outage and truncation propagation ----------
+
+
+def test_cold_graph_without_confirm_is_needs_confirm(meeting_places, monkeypatch):
+    monkeypatch.setattr(server.routing, "route_graph_is_cached", lambda *a, **k: False)
+    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")))
+    assert result["error"] == "needs_confirm"
+    assert "confirm=true" in result["detail"]
+
+
+def test_cached_graph_routes_without_confirm(meeting_places, monkeypatch):
+    monkeypatch.setattr(server.routing, "route_graph_is_cached", lambda *a, **k: True)
+    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")))
+    assert "error" not in result
+    assert result["candidates"]
+
+
+def test_five_origins_cap_total_routed_pairs(tmp_path, monkeypatch):
+    """10 venues x 5 origins would be 50 routed calls without the pair
+    budget; the candidate cap derived from _MEETING_MAX_PAIRS keeps the
+    fan-out within it even at limit=5."""
+    mid_lat, mid_lon = MIDPOINT_NODE
+    rows = [
+        _place_row(f"p{i}", f"Cafe {i}", *fx._offset(mid_lat, mid_lon, 20.0 * i, 90))
+        for i in range(10)
+    ]
+    _write_places(tmp_path, rows)
+    calls = []
+
+    def fake_route(olat, olon, dlat, dlon, mode="walk", **kwargs):
+        calls.append((olat, olon, dlat, dlon))
+        return {"duration_s": 600.0, "distance_m": 800.0, "mode": mode}
+
+    monkeypatch.setattr(server.routing, "route", fake_route)
+    pts = _origins(*[(*fx.node_latlon(2, i * 4), "walk") for i in range(5)])
+    result = server.meeting_point(pts, limit=5, confirm=True)
+    assert "error" not in result
+    assert result["candidates"]
+    assert len(calls) <= server._MEETING_MAX_PAIRS
+
+
+def test_routing_outage_is_a_structured_error_not_unroutable(meeting_places, monkeypatch):
+    def outage(*a, **k):
+        raise server.routing.UpstreamUnavailable("transportation scan failed")
+
+    monkeypatch.setattr(server.routing, "route", outage)
+    result = server.meeting_point(
+        _origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True
+    )
+    assert result["error"] == "upstream_unavailable"
+    assert result["retry_advised"] is True
+
+
+def test_routing_schema_degraded_is_a_structured_error(meeting_places, monkeypatch):
+    def degraded(*a, **k):
+        raise server.routing.SchemaDegraded(["connectors"])
+
+    monkeypatch.setattr(server.routing, "route", degraded)
+    result = server.meeting_point(
+        _origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True
+    )
+    assert result["error"] == "schema_degraded"
+    assert result["missing_columns"] == ["connectors"]
+
+
+def test_truncated_leg_flags_candidate_and_note(meeting_places, monkeypatch):
+    real_route = server.routing.route
+
+    def truncated_route(*a, **k):
+        result = real_route(*a, **k)
+        result["truncated"] = True
+        return result
+
+    monkeypatch.setattr(server.routing, "route", truncated_route)
+    result = server.meeting_point(
+        _origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True
+    )
+    assert result["candidates"]
+    top = result["candidates"][0]
+    assert top["truncated"] is True
+    assert all(p["truncated"] is True for p in top["per_person"])
+    assert "truncated" in result["note"]
+
+
+def test_route_too_long_note_suggests_a_different_mode(meeting_places, monkeypatch):
+    def too_long(*a, **k):
+        raise server.routing.RouteTooLong(9000.0, 7500.0)
+
+    monkeypatch.setattr(server.routing, "route", too_long)
+    result = server.meeting_point(
+        _origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True
+    )
+    assert "error" not in result
+    assert result["candidates"] == []
+    assert "cap" in result["note"]
+    assert "no street graph" not in result["note"]
 
 
 # --- registration ------------------------------------------------------

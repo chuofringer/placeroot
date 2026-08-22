@@ -719,39 +719,54 @@ def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
 # unbounded scan; category narrows it further, same as find_places.
 _MEETING_SEARCH_RADIUS_M = 1500.0
 
-# Cap on (candidate venue, origin) routing pairs, so a 5-origin request
-# with a generous limit can't fan out into dozens of routed calls: at most
-# 8 candidates are ever routed against, however many `limit` asked for.
-_MEETING_MAX_CANDIDATES = 8
+# Cap on total (candidate venue, origin) routed pairs, so a 5-origin
+# request with a generous limit can't fan out into dozens of sequential
+# routed calls: the candidate count is derived from this budget divided by
+# the origin count (2 origins -> 8 candidates, 5 origins -> 3), however
+# many `limit` asked for. A shared-graph redesign (build each origin's
+# graph once and reuse it across candidates, which sit within ~1.5km of
+# each other) would raise this budget cheaply; deliberately not done here.
+_MEETING_MAX_PAIRS = 16
+
+# Floor on candidates even at 5 origins — one candidate is a ranking of
+# nothing, two is the minimum for "ranked fairest-first" to mean anything.
+_MEETING_MIN_CANDIDATES = 2
 
 
-def _meeting_travel_time_for(origin: tuple, dest_lat: float, dest_lon: float) -> dict | None:
-    """One origin -> candidate leg, routed. None if that leg is unroutable.
+def _meeting_travel_time_for(origin: tuple, dest_lat: float, dest_lon: float) -> dict | str:
+    """One origin -> candidate leg, routed. A reason string if unroutable.
 
-    Mirrors route()'s own exception handling, but folds every failure mode
-    (unsupported mode already validated away, no usable street graph near
-    either end, too far apart, or two snapped points with nothing
-    connecting them) into "this candidate doesn't work for this origin"
-    rather than raising — meeting_point drops the candidate rather than
-    erroring the whole answer over one bad pair.
+    Mirrors route()'s own exception handling, but folds the per-pair
+    failure modes (unsupported mode already validated away, no usable
+    street graph near either end, too far apart for the mode's cap, or two
+    snapped points with nothing connecting them) into "this candidate
+    doesn't work for this origin" — meeting_point drops the candidate
+    rather than erroring the whole answer over one bad pair — returning
+    the failure reason so the caller can word its empty-answer note
+    honestly. Outages are different: routing.UpstreamUnavailable and
+    routing.SchemaDegraded propagate for the caller to turn into the same
+    structured {"error": ...} that route/isochrone return, never folded
+    into "unroutable".
     """
     olat, olon, mode = origin
     try:
         result = routing.route(olat, olon, dest_lat, dest_lon, mode=mode)
-    except (
-        routing.UnsupportedMode,
-        routing.NoGraphNearby,
-        routing.RouteTooLong,
-        ValueError,
-    ):
-        return None
+    except routing.NoGraphNearby:
+        return "no_graph_nearby"
+    except routing.RouteTooLong:
+        return "route_too_long"
+    except (routing.UnsupportedMode, ValueError):
+        return "bad_request"
     if "error" in result:  # no_route: both ends snapped, nothing connects them
-        return None
-    return {
+        return result["error"]
+    leg = {
         "mode": mode,
         "travel_time_min": round(result["duration_s"] / 60.0, 1),
         "distance_m": round(result["distance_m"]),
     }
+    if result.get("truncated"):
+        leg["truncated"] = True
+    return leg
 
 
 @_tool("Meeting point")
@@ -759,6 +774,7 @@ def meeting_point(
     origins: list[dict],
     category: str | None = None,
     limit: int = 3,
+    confirm: bool = False,
 ) -> dict:
     """Where several people should meet, fairly: candidate venues ranked by
     equalized travel time, not geometric distance.
@@ -781,8 +797,9 @@ def meeting_point(
     pulls the center toward them more than a driving one at the same
     distance), venues are searched for near that seed, and each
     candidate's real per-person times come from routing.route() — the
-    exact routed number, not the seed's approximation. At most 8 candidate
-    venues are ever routed against, regardless of `limit`.
+    exact routed number, not the seed's approximation. The total routed
+    (candidate, origin) fan-out is capped at 16 pairs, regardless of
+    `limit` — 8 candidates at 2 origins, down to 3 candidates at 5.
 
     Returns {"center": {"lat", "lon"}, "candidates": [{"id", "name",
     "category", "lat", "lon", "per_person": [{"origin_idx", "mode",
@@ -792,17 +809,26 @@ def meeting_point(
     origins list, one entry per origin — a candidate that can't be routed
     from every origin (no street graph nearby, or genuinely disconnected)
     is dropped from the ranking entirely rather than ranked on a partial,
-    unfair comparison. An empty
+    unfair comparison. A per_person leg whose street graph hit its
+    internal size cap carries "truncated": true (as does its candidate,
+    and the answer carries a note) — that leg's time may be off. An empty
     "candidates" list is a valid answer (nothing matched the category
     nearby, or nothing routed from every origin) — it carries a "note"
-    explaining which.
+    explaining which, including when every pair was over the mode's
+    straight-line routing cap (try a faster mode).
+
+    confirm=true after the user agreed to wait for a first-time
+    street-graph build (about 5–25 seconds; see `route`). Without it, a
+    fan-out that would need a cold graph build returns {"error":
+    "needs_confirm"} instead of silently blocking. Omit confirm unless you
+    just asked and they said yes.
 
     Returns a structured {"error": "bad_request", ...} if origins has
     fewer than 2 or more than 5 points, a point is missing/non-numeric
     lat or lon, or a mode isn't walk/cycle/drive; {"error": "bad_request",
     ...} with the offending coordinate if lat/lon is out of range; or a
-    structured {"error": ...} if the upstream places dataset is
-    unavailable or missing columns this tool depends on.
+    structured {"error": ...} if the upstream places or transportation
+    dataset is unavailable or missing columns this tool depends on.
     """
     if not isinstance(origins, list) or not (2 <= len(origins) <= 5):
         got = len(origins) if isinstance(origins, list) else 0
@@ -847,7 +873,8 @@ def meeting_point(
 
     center_lat, center_lon = meeting.find_center(parsed)
 
-    fetch_n = min(2 * limit + 2, _MEETING_MAX_CANDIDATES)
+    max_candidates = max(_MEETING_MIN_CANDIDATES, _MEETING_MAX_PAIRS // len(parsed))
+    fetch_n = min(2 * limit + 2, max_candidates)
     try:
         rows = overture.find_places(
             center_lat, center_lon, radius_m=_MEETING_SEARCH_RADIUS_M,
@@ -874,41 +901,88 @@ def meeting_point(
             )
         return payload
 
+    rows = rows[:max_candidates]
+
+    # Same cheap-reject gate as route() (#336), checked over the whole
+    # fan-out before any routed call: a cold street graph anywhere in it
+    # means a 5-25s build the user did not agree to wait for. Pairs beyond
+    # the mode's straight-line cap are skipped — they are rejected before
+    # any graph is built, so they never trigger one.
+    if not confirm:
+        for olat, olon, mode in parsed:
+            for row in rows:
+                if (
+                    routing._haversine_m(olat, olon, row["lat"], row["lon"])
+                    > routing.ROUTE_MAX_STRAIGHT_LINE_M[mode]
+                ):
+                    continue
+                if not routing.route_graph_is_cached(
+                    olat, olon, row["lat"], row["lon"], mode
+                ):
+                    return _needs_confirm_graph(mode)
+
     candidates = []
-    for row in rows[:_MEETING_MAX_CANDIDATES]:
-        per_person = []
-        routable = True
-        for origin_idx, origin in enumerate(parsed):
-            leg = _meeting_travel_time_for(origin, row["lat"], row["lon"])
-            if leg is None:
-                routable = False
-                break
-            per_person.append({"origin_idx": origin_idx, **leg})
-        if not routable:
-            continue
-        times = [p["travel_time_min"] for p in per_person]
-        candidates.append({
-            "id": row["id"],
-            "name": row["name"],
-            "category": row.get("category"),
-            "lat": row["lat"],
-            "lon": row["lon"],
-            "per_person": per_person,
-            "max_travel_time_min": max(times),
-            "spread_min": round(max(times) - min(times), 1),
-        })
+    drop_reasons: set[str] = set()
+    try:
+        for row in rows:
+            per_person = []
+            routable = True
+            for origin_idx, origin in enumerate(parsed):
+                leg = _meeting_travel_time_for(origin, row["lat"], row["lon"])
+                if isinstance(leg, str):
+                    drop_reasons.add(leg)
+                    routable = False
+                    break
+                per_person.append({"origin_idx": origin_idx, **leg})
+            if not routable:
+                continue
+            times = [p["travel_time_min"] for p in per_person]
+            candidate = {
+                "id": row["id"],
+                "name": row["name"],
+                "category": row.get("category"),
+                "lat": row["lat"],
+                "lon": row["lon"],
+                "per_person": per_person,
+                "max_travel_time_min": max(times),
+                "spread_min": round(max(times) - min(times), 1),
+            }
+            if any(p.get("truncated") for p in per_person):
+                candidate["truncated"] = True
+            candidates.append(candidate)
+    except routing.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except routing.SchemaDegraded as e:
+        return _schema_error(e)
 
     candidates.sort(
         key=lambda c: meeting.fairness_key([p["travel_time_min"] for p in c["per_person"]])
     )
     payload["candidates"] = candidates[:limit]
     if not candidates:
+        reasons = []
+        if "route_too_long" in drop_reasons:
+            reasons.append(
+                "at least one origin is further from every candidate than its "
+                "mode's straight-line routing cap — a faster mode (cycle or "
+                "drive) has a larger cap and may route"
+            )
+        if drop_reasons - {"route_too_long"}:
+            reasons.append(
+                "no street graph nearby, or genuinely disconnected, for at "
+                "least one origin"
+            )
         payload["note"] = (
-            "found candidate venues near the fair meeting point, but none could be "
-            "routed to from every participant (no street graph nearby, or "
-            "genuinely disconnected for at least one origin)"
+            "found candidate venues near the fair meeting point, but none could "
+            "be routed to from every participant (" + "; ".join(reasons) + ")"
         )
         return payload
+    if any(c.get("truncated") for c in payload["candidates"]):
+        payload["note"] = (
+            "some legs' street graphs hit the internal size cap (marked "
+            "truncated) — those travel times may be based on a suboptimal or "
+            "incomplete route"
+        )
     return budget.apply_budget(payload, "candidates")
 
 

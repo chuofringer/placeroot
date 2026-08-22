@@ -18,6 +18,8 @@ search, calls routing.route() once per (origin, candidate) pair for the
 real routed numbers, and sorts the results with fairness_key.
 """
 
+import math
+
 from placeroot import geo, routing
 
 # Iterations for find_center's worst-offender walk. A seed for venue
@@ -61,7 +63,7 @@ def find_center(origins: list[tuple[float, float, str]]) -> tuple[float, float]:
     if not origins:
         raise ValueError("find_center requires at least one origin")
     lat = sum(o[0] for o in origins) / len(origins)
-    lon = sum(o[1] for o in origins) / len(origins)
+    lon = _circular_mean_lon([o[1] for o in origins])
     for i in range(FIND_CENTER_ITERATIONS):
         worst_lat, worst_lon, worst_time = lat, lon, -1.0
         for olat, olon, mode in origins:
@@ -71,8 +73,30 @@ def find_center(origins: list[tuple[float, float, str]]) -> tuple[float, float]:
                 worst_time, worst_lat, worst_lon = implied_time, olat, olon
         step = 0.5 * (0.85**i)
         lat += (worst_lat - lat) * step
-        lon += (worst_lon - lon) * step
+        # Step along the short way around: a naive (worst_lon - lon) delta
+        # across the antimeridian (e.g. 179.9 toward -179.9) would walk the
+        # long way through lon 0 instead of across the seam.
+        lon = _wrap_lon(lon + _wrap_lon(worst_lon - lon) * step)
     return lat, lon
+
+
+def _wrap_lon(lon: float) -> float:
+    """Wrap a longitude (or longitude delta) into [-180, 180)."""
+    return (lon + 180.0) % 360.0 - 180.0
+
+
+def _circular_mean_lon(lons: list[float]) -> float:
+    """Mean longitude on the unit circle, so origins straddling the
+    antimeridian (e.g. 179.9 and -179.9) average near +/-180, not 0.
+
+    atan2 of the mean sin/cos — degenerate only when the vectors cancel
+    exactly (antipodal spread), where any branch is as fair as another.
+    """
+    sin_sum = sum(math.sin(math.radians(lon)) for lon in lons)
+    cos_sum = sum(math.cos(math.radians(lon)) for lon in lons)
+    if sin_sum == 0.0 and cos_sum == 0.0:
+        return _wrap_lon(sum(lons) / len(lons))
+    return _wrap_lon(math.degrees(math.atan2(sin_sum, cos_sum)))
 
 
 def fairness_key(times_min: list[float]) -> tuple[float, float, float]:
