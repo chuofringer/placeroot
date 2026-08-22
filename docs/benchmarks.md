@@ -77,10 +77,10 @@ Generated 2026-08-22 by `uv run python benchmarks/token_efficiency.py --write`.
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-07-22.0`
 - Tools registered: **35**
-- Total schema surface: **17170 tokens** (68732 chars, 68918 bytes)
-- Schema cost per tool: min 158, median 373, max 1459 tokens
+- Total schema surface: **17677 tokens** (70760 chars, 70952 bytes)
+- Schema cost per tool: min 158, median 378, max 1459 tokens
 - Median scenario response: **208 tokens** (range 87-811)
-- Break-even: the schema surface costs about as much as **83 median answers**
+- Break-even: the schema surface costs about as much as **85 median answers**
 
 ### Schema surface (paid once per conversation)
 
@@ -90,6 +90,7 @@ Generated 2026-08-22 by `uv run python benchmarks/token_efficiency.py --write`.
 | `find_places` | 965 | 296 | **1335** | 5342 |
 | `route` | 729 | 128 | **928** | 3713 |
 | `optimize_route` | 647 | 99 | **822** | 3291 |
+| `compare_areas` | 628 | 98 | **794** | 3176 |
 | `places_along_route` | 522 | 173 | **759** | 3037 |
 | `resolve_place` | 550 | 112 | **733** | 2935 |
 | `water_near` | 530 | 116 | **713** | 2855 |
@@ -112,7 +113,6 @@ Generated 2026-08-22 by `uv run python benchmarks/token_efficiency.py --write`.
 | `search_categories` | 207 | 46 | **310** | 1240 |
 | `find_near` | 175 | 74 | **304** | 1217 |
 | `buildings_at` | 151 | 91 | **293** | 1175 |
-| `compare_areas` | 174 | 61 | **287** | 1148 |
 | `within_distance` | 128 | 104 | **286** | 1144 |
 | `summarize_buildings` | 154 | 58 | **264** | 1059 |
 | `reverse_geocode_batch` | 142 | 48 | **247** | 990 |
@@ -121,7 +121,7 @@ Generated 2026-08-22 by `uv run python benchmarks/token_efficiency.py --write`.
 | `data_version` | 166 | 16 | **231** | 926 |
 | `reverse_geocode` | 111 | 42 | **205** | 820 |
 | `summarize_area` | 53 | 57 | **158** | 635 |
-| **all 35 tools** | 11839 | 3259 | **17170** | 68732 |
+| **all 35 tools** | 12293 | 3296 | **17677** | 70760 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 
