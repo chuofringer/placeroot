@@ -415,3 +415,102 @@ def test_export_report_shapes_only(tmp_path):
     assert data["points"] == []
     assert len(data["shapes"]) == 1
     assert not _EXTERNAL_REF_RE.search(doc)
+
+
+# --- pin classes + legend (#367) --------------------------------------------
+
+
+def _classed_rows(classes):
+    """Like _rows(), but each row carries props["class"] = classes[i]."""
+    rows = _rows(len(classes))
+    for row, cls in zip(rows, classes):
+        row["class"] = cls
+    return rows
+
+
+def test_render_map_legend_two_classes_get_distinct_fills_and_a_legend_box(tmp_path):
+    payload = {"results": _classed_rows(["open", "closed"])}
+    legend = {
+        "open": {"label": "Open now", "color": "#009e73"},
+        "closed": {"label": "Permanently closed", "color": "#d55e00"},
+    }
+    result = mapview.export_report(payload, title="Classed", legend=legend, out_dir=tmp_path)
+    assert "note" not in result
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    assert 'class="legend"' in doc
+    assert "Open now" in doc
+    assert "Permanently closed" in doc
+    data = _embedded_data(doc)
+    assert {p["cls"] for p in data["points"]} == {"open", "closed"}
+    assert data["legend"]["open"]["color"] == "#009e73"
+    assert data["legend"]["closed"]["color"] == "#d55e00"
+
+
+def test_render_map_legend_explicit_hex_color_is_honored(tmp_path):
+    payload = {"results": _classed_rows(["hazard"])}
+    legend = {"hazard": {"label": "Hazard", "color": "#abc"}}
+    result = mapview.export_report(payload, legend=legend, out_dir=tmp_path)
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    data = _embedded_data(doc)
+    assert data["legend"]["hazard"]["color"] == "#abc"
+    assert "background:#abc" in doc
+
+
+def test_render_map_legend_invalid_color_falls_back_and_is_never_written(tmp_path):
+    payload = {"results": _classed_rows(["hazard"])}
+    evil = "red;} </style><script>alert(1)</script>"
+    legend = {"hazard": {"label": "Hazard", "color": evil}}
+    result = mapview.export_report(payload, legend=legend, out_dir=tmp_path)
+    assert "note" in result
+    assert "hazard" in result["note"]
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    assert evil not in doc
+    data = _embedded_data(doc)
+    color = data["legend"]["hazard"]["color"]
+    assert re.fullmatch(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})", color)
+
+
+def test_render_map_legend_unknown_class_falls_back_to_default_dot_and_notes(tmp_path):
+    payload = {"results": _classed_rows(["open", "mystery"])}
+    legend = {"open": {"label": "Open now"}}
+    result = mapview.export_report(payload, legend=legend, out_dir=tmp_path)
+    assert "note" in result
+    assert "1 feature" in result["note"]
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    data = _embedded_data(doc)
+    classed = [p for p in data["points"] if "cls" in p]
+    assert len(classed) == 1
+    assert classed[0]["cls"] == "open"
+    assert "mystery" not in data.get("legend", {})
+
+
+def test_render_map_legend_labels_are_html_escaped(tmp_path):
+    payload = {"results": _classed_rows(["danger"])}
+    legend = {"danger": {"label": "<script>alert(1)</script>"}}
+    result = mapview.export_report(payload, legend=legend, out_dir=tmp_path)
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    assert "<script>alert(1)</script>" not in doc
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in doc
+
+
+def test_render_map_classless_input_is_unaffected_by_legend_support(tmp_path):
+    payload = {"results": _rows(3)}
+    result = mapview.export_report(payload, title="Plain", out_dir=tmp_path)
+    assert set(result) == {"path", "bytes", "features_rendered", "skipped_features"}
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    assert 'class="legend"' not in doc
+    data = _embedded_data(doc)
+    assert "legend" not in data
+    assert all("cls" not in p for p in data["points"])
+
+
+def test_render_map_tool_accepts_legend_and_returns_note(tmp_path, monkeypatch):
+    monkeypatch.setenv("PLACEROOT_ARTIFACT_DIR", str(tmp_path))
+    result = server.render_map(
+        {"results": _classed_rows(["open", "mystery"])},
+        title="Legend via tool",
+        legend={"open": {"label": "Open now", "color": "#009e73"}},
+    )
+    assert "note" in result
+    doc = Path(result["path"]).read_text(encoding="utf-8")
+    assert "Open now" in doc
