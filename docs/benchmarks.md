@@ -75,7 +75,7 @@ ceiling.
 Generated 2026-08-22 by `uv run python benchmarks/token_efficiency.py --write`.
 
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
-- Overture release pinned for the fixture run: `2026-07-22.0`
+- Overture release pinned for the fixture run: `2026-08-19.0`
 - Tools registered: **41**
 - Total schema surface: **22618 tokens** (90533 chars, 90779 bytes)
 - Schema cost per tool: min 158, median 476, max 1459 tokens

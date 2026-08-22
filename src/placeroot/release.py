@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 # against upstream's newest release and probes the schema, so a stale pin
 # or a breaking upstream change opens an issue instead of waiting for a
 # bug report.
-PINNED_RELEASE = "2026-07-22.0"
+PINNED_RELEASE = "2026-08-19.0"
 
 LISTING_URL = (
     "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/"
