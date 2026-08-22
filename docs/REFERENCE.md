@@ -10,7 +10,7 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 
 | Tool | Answers |
 |---|---|
-| `find_places` | Named places near a point **or inside a named area / division polygon**, nearest first — filter by category, brand, confidence, operating status, or has-website / has-phone; each result carries a compact trust note |
+| `find_places` | Named places near a point **or inside a named area / division polygon**, nearest first — filter by category, brand, confidence, operating status, or has-website / has-phone; each result carries a compact trust note; a `name` filter with no literal match falls back to an alt-spelling then a typo-tolerant fuzzy match, tagging the row and noting the correction |
 | `summarize_area` | What's in an area: total places and top categories |
 | `compare_areas` | 2–5 areas side by side: category mix, density, and what differs most — optional weighted `priorities` add a scored verdict with reasons |
 | `within_distance` | Is the nearest matching place within N meters of a point? |
@@ -25,7 +25,7 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `water_near` | Water near a point, nearest first — is this waterfront, how far to the nearest river/canal/lake; filter by `subtype`/`water_class` |
 | `geocode` | Free-text place name → ranked candidates with coordinates and admin context (`geocode_batch` for many at once) |
 | `geocode_batch` | Many free-text place names → one best match each, one round-trip |
-| `resolve_place` | Free-text place reference → stable ids an agent can hold onto across turns |
+| `resolve_place` | Free-text place reference → stable ids an agent can hold onto across turns; a place name with no literal match falls back to `find_places`' alt-spelling/fuzzy tiers, same corrective note |
 | `resolve_place_batch` | Many GERS ids → compact place rows (batched `place_details`), one round-trip |
 | `reverse_geocode` | Point → nearest address plus its containing admin areas (`reverse_geocode_batch`) |
 | `reverse_geocode_batch` | Many points → nearest address plus containing admin areas, one round-trip |
@@ -72,7 +72,7 @@ PlaceRoot also speaks the MCP 2026-07-28 revision's listing cache hints:
 `tools/list` (and the prompt and resource listings) come back with
 `ttlMs: 86400000` and `cacheScope: "public"`. The listings are frozen at build
 time — nothing at runtime can change them — so a client is free to reuse them
-for a day instead of re-reading a ~17.7k-token schema surface every session.
+for a day instead of re-reading a ~18.0k-token schema surface every session.
 Clients that speak an older revision are unaffected: those fields did not exist
 before 2026-07-28, and the response they get is byte-identical to what it was.
 
@@ -135,8 +135,8 @@ without them registered.
 
 ## Loading fewer tools (`PLACEROOT_TOOLS`)
 
-All 35 tool schemas cost roughly **17.7k tokens** of every conversation's
-context, paid before the agent asks anything — about the cost of 85 median
+All 35 tool schemas cost roughly **18.0k tokens** of every conversation's
+context, paid before the agent asks anything — about the cost of 86 median
 answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS`
 selects which tools get registered. Unselected tools are never registered and
 never appear in `tools/list`.
@@ -158,10 +158,10 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 35 | ~17,737 | — |
-| `search` | 15 | ~7,173 | 60% |
-| `core` | 15 | ~7,629 | 57% |
-| `routing` | 8 | ~3,941 | 78% |
+| unset / `all` (default) | 35 | ~17,952 | — |
+| `search` | 15 | ~7,340 | 59% |
+| `core` | 15 | ~7,796 | 57% |
+| `routing` | 8 | ~3,989 | 78% |
 | `analysis` | 12 | ~5,899 | 67% |
 | `geometry` | 4 | ~1,265 | 93% |
 | `progressive` | 4 (all 35 reachable) | ~866 | 95% |
@@ -171,7 +171,7 @@ union of everything named:
 - **`routing`** — `route`, `from_to`, `isochrone`, `distance_matrix`, `within_distance`, `optimize_route`.
 - **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`, `neighborhood_verdict`, `changes_in_area`.
 - **`geometry`** — `simplify_geometry`, `render_map`.
-- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 35 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 17.7k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
+- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 35 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 18.0k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 
 `data_version` and `preferences` are registered under every profile.
 `data_version` is ~230 tokens and the only way an agent can tell which
