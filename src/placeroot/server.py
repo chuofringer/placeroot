@@ -38,6 +38,7 @@ from placeroot import (
     categories,
     db,
     divisions,
+    elevation,
     errors,
     export,
     geo,
@@ -1784,6 +1785,37 @@ def route(
         result["export"] = export.from_route_result(result)
     # Middleware attach()s again; idempotent (same request log, status not clobbered).
     return progress.attach(result)
+
+
+@_tool("Elevation at a point")
+def elevation_at(lat: float, lon: float) -> dict:
+    """Ground elevation in meters at a point, from Copernicus GLO-30 (~30 m resolution).
+
+    Reads the Copernicus DEM directly from AWS Open Data (no API key, no
+    third-party elevation service) — the same open-data pattern every other
+    tool here uses, just a different bucket than Overture's. Nearest-cell
+    sampling, not interpolated: at ~30 m ground resolution the answer is
+    "the elevation of the DEM cell containing this point", which can be off
+    by a few meters from the exact spot on a steep slope.
+
+    Returns {"elevation_m": <float>}. No coverage at this point — open
+    ocean, or a tile the Copernicus release excludes from public
+    distribution — is a real, non-error answer: {"elevation_m": null,
+    "note": "..."} explaining why. Returns a structured {"error": ...} for
+    an out-of-range coordinate, or if the DEM tile can't be fetched
+    (network/upstream failure).
+
+    Attribution: Copernicus DEM © DLR/ESA, accessed via AWS Open Data.
+    """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
+    try:
+        return elevation.elevation_at(lat, lon)
+    except elevation.ElevationFormatError as e:
+        return {"error": "upstream_unavailable", "detail": e.detail, "retry_advised": False}
+    except errors.UpstreamUnavailable as e:
+        return _upstream_error(e)
 
 
 @_tool("Named-place route")
