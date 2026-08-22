@@ -40,7 +40,6 @@ _DEGRADE_EXC = (
     routing.NoGraphNearby,
     routing.RadiusTooLarge,
     routing.UnsupportedMode,
-    ValueError,
 )
 
 
@@ -64,10 +63,19 @@ def _surroundings(lat: float, lon: float, notes: list[str]) -> dict | None:
         return None
     total = summary.get("total_places") or 0
     area_km2 = math.pi * (SURROUNDINGS_RADIUS_M / 1000.0) ** 2
+    top_all = summary.get("top_categories") or []
+    # Truncating to TOP_CATEGORIES_LIMIT must keep the counts reconcilable:
+    # anything cut here is folded into other_categories_count so
+    # total_places == sum(top) + other + uncategorized still holds.
+    other_count = (summary.get("other_categories_count") or 0) + sum(
+        row.get("count") or 0 for row in top_all[TOP_CATEGORIES_LIMIT:]
+    )
     return {
         "radius_m": SURROUNDINGS_RADIUS_M,
         "total_places": total,
-        "top_categories": (summary.get("top_categories") or [])[:TOP_CATEGORIES_LIMIT],
+        "top_categories": top_all[:TOP_CATEGORIES_LIMIT],
+        "other_categories_count": other_count,
+        "uncategorized_count": summary.get("uncategorized_count") or 0,
         "density_per_km2": round(total / area_km2, 1) if area_km2 else None,
     }
 

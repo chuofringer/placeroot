@@ -1,6 +1,8 @@
 """Single-hop location grounding: ground_location (#362)."""
 
-from placeroot import ground, overture, routing, server
+import pytest
+
+from placeroot import ground, overture, preferences, routing, server
 
 from .conftest import CENTER_LAT, CENTER_LON
 
@@ -152,6 +154,75 @@ def test_all_sections_failing_returns_structured_error(monkeypatch):
     assert result["error"] == "upstream_unavailable"
     assert result["retry_advised"] is True
     assert "detail" in result
+
+
+def test_omitted_mode_uses_stored_preference(monkeypatch):
+    preferences.update(mode="cycle")
+    seen: dict = {}
+
+    def fake(lat, lon, minutes=15, mode="walk", **_k):
+        seen["mode"] = mode
+        return {**_fake_iso(), "mode": mode}
+
+    monkeypatch.setattr(routing, "isochrone", fake)
+    result = server.ground_location(CENTER_LAT, CENTER_LON, minutes=15)
+    assert "error" not in result
+    assert seen["mode"] == "cycle"
+
+
+def test_explicit_mode_wins_over_stored_preference(monkeypatch):
+    preferences.update(mode="cycle")
+    seen: dict = {}
+
+    def fake(lat, lon, minutes=15, mode="walk", **_k):
+        seen["mode"] = mode
+        return {**_fake_iso(), "mode": mode}
+
+    monkeypatch.setattr(routing, "isochrone", fake)
+    result = server.ground_location(CENTER_LAT, CENTER_LON, minutes=15, mode="walk")
+    assert "error" not in result
+    assert seen["mode"] == "walk"
+
+
+def test_surroundings_counts_reconcile_after_truncation(monkeypatch):
+    # 7 categorized rows from summarize_area; ground truncates to 5 and must
+    # fold the two cut rows into other_categories_count so
+    # total == sum(top) + other + uncategorized still holds.
+    counts = [6, 5, 4, 3, 3, 2, 2]
+    summary = {
+        "total_places": 30,
+        "top_categories": [
+            {"category": f"cat_{i}", "count": n} for i, n in enumerate(counts)
+        ],
+        "other_categories_count": 2,
+        "uncategorized_count": 3,
+    }
+    monkeypatch.setattr(ground.overture, "summarize_area", lambda *_a, **_k: summary)
+    monkeypatch.setattr(routing, "isochrone", _fake_iso)
+
+    surroundings = server.ground_location(CENTER_LAT, CENTER_LON)["surroundings"]
+    assert len(surroundings["top_categories"]) == 5
+    shown = sum(row["count"] for row in surroundings["top_categories"])
+    assert surroundings["other_categories_count"] == 2 + 2 + 2
+    assert surroundings["uncategorized_count"] == 3
+    assert (
+        shown
+        + surroundings["other_categories_count"]
+        + surroundings["uncategorized_count"]
+        == surroundings["total_places"]
+    )
+
+
+def test_internal_valueerror_is_not_hidden_as_a_note(monkeypatch):
+    # ValueError from a delegate is a programming error, not a degraded
+    # section — it must propagate, not turn into "section unavailable".
+    def boom(*_a, **_k):
+        raise ValueError("internal bug")
+
+    monkeypatch.setattr(ground.overture, "summarize_area", boom)
+    monkeypatch.setattr(routing, "isochrone", _fake_iso)
+    with pytest.raises(ValueError):
+        server.ground_location(CENTER_LAT, CENTER_LON)
 
 
 def test_rejects_out_of_range_coordinates():

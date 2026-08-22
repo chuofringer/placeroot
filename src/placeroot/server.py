@@ -1923,7 +1923,7 @@ def ground_location(
     lat: float,
     lon: float,
     minutes: float = 15,
-    mode: str = "walk",
+    mode: str | None = None,
 ) -> dict:
     """One-hop location grounding: where, surroundings, reach, notable.
 
@@ -1945,7 +1945,8 @@ def ground_location(
     section failed, returning a structured {"error":
     "upstream_unavailable", ...}.
 
-    minutes must be > 0 and <= 60; mode is "walk", "cycle", or "drive".
+    minutes must be > 0 and <= 60; mode is "walk", "cycle", or "drive";
+    omit it to use the stored preferences mode, else walk.
     Both, plus out-of-range coordinates, return {"error": "bad_request"}.
     No confirm gate: the reach scan runs with the requested minutes/mode
     as-is (it self-caps its graph extraction radius; no nearby street
@@ -1965,6 +1966,7 @@ def ground_location(
             "error": "bad_request",
             "detail": f"minutes={minutes!r} must be > 0 and <= 60",
         }
+    mode = preference_store.resolve_mode(mode, preference_store.DEFAULT_MODE_ISOCHRONE)
     if not isinstance(mode, str) or mode not in routing.MODE_CONFIG:
         return {
             "error": "bad_request",
