@@ -19,6 +19,29 @@ this file from the matching schema tag and update the pin + date above. Keep the
 same filename and column shape, or update `search_categories`' parser to match.
 
 
+## category_synonyms.csv
+
+Hand-curated lexicon (#355) backing `search_categories`' phrase-intent
+fallback: when a query like "fix my cracked phone screen" shares no
+substring with any slug, it's tokenized and matched against each row's
+slug/path words plus its synonym words here, instead of returning nothing.
+
+- **Format:** `slug; synonym words` — semicolon-delimited, UTF-8, one row
+  per slug worth disambiguating, e.g. `mobile_phone_repair; phone screen
+  cracked repair fix cell smartphone broken shattered`. Synonym words are
+  free-form, space-separated; case doesn't matter (tokenized the same way
+  as queries).
+- **Schema pin:** every slug here must exist in the pinned
+  `overture_categories.csv` above (same schema tag) — enforced by a
+  permanent test (tests/test_search_categories_intent.py::
+  test_lexicon_slugs_all_exist_in_taxonomy) that fails if a row's slug
+  isn't in the taxonomy, so a bad edit can't silently rot.
+- **Refreshing:** add or edit rows directly; no generator. When
+  `overture_categories.csv` is refreshed to a new schema tag, re-run the
+  slug-validity test — a renamed/removed slug needs its lexicon row
+  updated or dropped.
+
+
 ## geocode-index/aliases.json
 
 Tiny landmark → city overlay for the bundled stage-0 name index (#329).

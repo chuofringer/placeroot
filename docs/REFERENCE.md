@@ -32,7 +32,7 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `address_at` | Point → the nearest street addresses (number, street, unit, postcode), with an explicit note when the country is outside Overture's 39-country address coverage |
 | `geocode_address` | Street address → coordinates: "1600 Amphitheatre Parkway, Mountain View" — city-bounded, deduplicated to distinct number+street, nearest first |
 | `gers_lookup` | Any GERS id → the entity it names (place, division, or building), what it's inside, and the building at its point |
-| `search_categories` | Free text → the right Overture category slug to filter `find_places` by |
+| `search_categories` | Free text (including phrase intents like "fix my cracked phone screen") → ranked Overture category slugs with confidence, to filter `find_places` by |
 | `isochrone` | The area reachable within N minutes on foot, bike, or car |
 | `route` | Shortest-path distance and duration between two points, on foot, bike, or car; `include_path=true` adds the simplified route polyline; also returns an `export` object (Google/Apple Maps links, GPX, printable stop list). Optional `confirm` (bool, default false): a cold street-graph build returns `needs_confirm` with an ETA instead of blocking |
 | `from_to` | Named-place walk/cycle/drive: resolve A and B in parallel, one graph, same shape as `route` including `export` maps/gpx/text. Fails with `too_far` if the ends are a city apart. Same optional `confirm` / `needs_confirm` gate as `route` |
@@ -158,9 +158,9 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 35 | ~17,677 | — |
-| `search` | 15 | ~7,113 | 60% |
-| `core` | 15 | ~7,569 | 57% |
+| unset / `all` (default) | 35 | ~17,737 | — |
+| `search` | 15 | ~7,173 | 60% |
+| `core` | 15 | ~7,629 | 57% |
 | `routing` | 8 | ~3,941 | 78% |
 | `analysis` | 12 | ~5,899 | 67% |
 | `geometry` | 4 | ~1,265 | 93% |
