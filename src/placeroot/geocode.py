@@ -3797,6 +3797,85 @@ def _place_match_label(name: str, query: str) -> str | None:
     return None
 
 
+def _jaro_winkler(a: str, b: str) -> float:
+    """Plain-Python Jaro-Winkler (0..1), matching DuckDB's
+    jaro_winkler_similarity closely enough to share
+    _FUZZY_SIMILARITY_THRESHOLD: standard Jaro, then the Winkler common-
+    prefix boost (scaling 0.1, prefix capped at 4, applied above 0.7 —
+    the same shape as the rapidfuzz implementation DuckDB vendors).
+
+    Exists for the #374 re-score below, where a per-row SQL round-trip per
+    candidate would be all overhead: the SQL tiers keep using DuckDB's own
+    function.
+    """
+    if a == b:
+        return 1.0
+    la, lb = len(a), len(b)
+    if not la or not lb:
+        return 0.0
+    window = max(max(la, lb) // 2 - 1, 0)
+    a_matched = [False] * la
+    b_matched = [False] * lb
+    matches = 0
+    for i, ca in enumerate(a):
+        for j in range(max(0, i - window), min(lb, i + window + 1)):
+            if not b_matched[j] and b[j] == ca:
+                a_matched[i] = b_matched[j] = True
+                matches += 1
+                break
+    if not matches:
+        return 0.0
+    transpositions = 0
+    j = 0
+    for i in range(la):
+        if a_matched[i]:
+            while not b_matched[j]:
+                j += 1
+            if a[i] != b[j]:
+                transpositions += 1
+            j += 1
+    jaro = (
+        matches / la + matches / lb + (matches - transpositions / 2) / matches
+    ) / 3
+    if jaro <= 0.7:
+        return jaro
+    prefix = 0
+    for ca, cb in zip(a, b):
+        if ca != cb or prefix == 4:
+            break
+        prefix += 1
+    return jaro + prefix * 0.1 * (1 - jaro)
+
+
+def _fuzzy_place_covers_query(name: str, tokens: list[str]) -> bool:
+    """#374: whole-query relatedness re-score for a #373 fallback row that
+    was matched against a single TOKEN of a multi-token query.
+
+    The per-token find_places loop in resolve_place means a fuzzy/alt-name
+    hit only proved similarity to ONE word — trusting its matched_by label
+    outright let a bar named "King" (fuzzy-close to the token "kings")
+    resolve the whole query "Kings Barbershop Chicago". Such a row is only
+    kept when every distinctive query token is covered by the row's actual
+    name: contained in it, or typo-close (same 0.92 threshold as the SQL
+    tier) to one of its words. Rows matched against the whole query never
+    come through here — their similarity was already scored against
+    everything the caller typed.
+    """
+    folded_name = overture._fold_poi_name(name)
+    name_words = folded_name.split()
+    for tok in tokens:
+        folded_tok = overture._fold_poi_name(tok)
+        if not folded_tok or folded_tok in folded_name:
+            continue
+        if any(
+            _jaro_winkler(word, folded_tok) >= _FUZZY_SIMILARITY_THRESHOLD
+            for word in name_words
+        ):
+            continue
+        return False
+    return True
+
+
 # #344: subtypes a `city` hint is allowed to resolve to without falling
 # back to the top (population-ranked) hit. Deliberately narrower than
 # _SUBTYPE_WEIGHT's full ladder — a hint named "city" should not silently
@@ -3849,14 +3928,17 @@ def resolve_place(
 
     Each candidate: {"id" (GERS), "kind": "division" | "place", "name",
     "lat", "lon", "match": "exact" | "prefix" | "substring" | "fuzzy", plus
-    "admin_context" (division) or "category" (place)}. "fuzzy" (#215,
-    divisions only) means the name doesn't contain the query at all and was
-    reached by close spelling instead — the caller asked for one string and
-    is being handed the answer to another, so it ranks below every literal
-    label. Ranked by match tier first — kind-agnostic, an exact place beats
-    a prefix-matched division — then by prominence (division rank_score /
-    place confidence, both roughly 0-1 scales), then id for determinism.
-    Never more than `limit` results.
+    "admin_context" (division) or "category" (place)}. "fuzzy" (#215 for
+    divisions, #373 for places) means the name doesn't contain the query at
+    all and was reached by close spelling instead — the caller asked for
+    one string and is being handed the answer to another, so it ranks below
+    every literal label. A place candidate reached through #373's fallback
+    tiers (an alt-spelling or fuzzy match on the underlying find_places
+    call) additionally carries "matched_by": "alt_name" | "fuzzy", absent
+    on an ordinary literal match. Ranked by match tier first — kind-agnostic,
+    an exact place beats a prefix-matched division — then by prominence
+    (division rank_score / place confidence, both roughly 0-1 scales), then
+    id for determinism. Never more than `limit` results.
 
     No match is a valid answer, not an error: an unresolvable query returns
     an empty list. Raises overture.UpstreamUnavailable if a remote scan
@@ -3961,6 +4043,7 @@ def resolve_place(
         reference = (options[0][0], options[0][1]) if options else None
 
     place_rows: list[dict] = []
+    gate_tokens: list[str] = []  # #374: set alongside the token loop below
     # geocode()'s own anchored fallback often already searched the places
     # theme near this same reference with the whole query and its tokens —
     # when it came back with enough place-kind rows, re-scanning per token
@@ -3998,6 +4081,7 @@ def resolve_place(
         # the one-word scan then answers Harvard FCU).
         if search_query and search_query.lower() not in {t.lower() for t in tokens}:
             tokens.insert(0, search_query)
+        alias_tokens: set[str] = set()
         for alias_name in _alias_names_for(search_query):
             for tok in alias_name.split():
                 if (
@@ -4005,11 +4089,18 @@ def resolve_place(
                     and tok.lower().strip(".,") not in _GENERIC_PLACE_WORDS
                 ):
                     tokens.append(tok)
+                    alias_tokens.add(tok)
         if len(tokens) > 1:
             folded_city = {t.lower() for t in tokens}
             for div in division_hits[:1]:
                 folded_city &= {w.lower() for w in (div.get("name") or "").split()}
             tokens = [t for t in tokens if t.lower() not in folded_city] or tokens
+        # #374: the query words a fallback-matched row must account for —
+        # the single distinctive tokens that survived the generic/city
+        # pruning above, minus alias-derived ones (an alias is an
+        # *alternative* spelling of the query, not extra context the name
+        # has to contain too). See _fuzzy_place_covers_query.
+        gate_tokens = [t for t in tokens if " " not in t and t not in alias_tokens]
         for token in tokens:
             for row in overture.find_places(
                 ref_lat, ref_lon, radius_m=_RESOLVE_PLACE_RADIUS_M,
@@ -4017,6 +4108,11 @@ def resolve_place(
             ):
                 if row["id"] and row["id"] not in seen_place_ids:
                     seen_place_ids.add(row["id"])
+                    if row.get("matched_by"):
+                        # Which token the #373 fallback actually matched
+                        # this row against — the #374 gate below trusts the
+                        # fuzzy label only when that was the whole query.
+                        row["_matched_token"] = token
                     place_rows.append(row)
 
     candidates = []
@@ -4036,22 +4132,45 @@ def resolve_place(
     for r in place_rows:
         if not r["id"] or r["id"] in seen_ids or not r["name"]:
             continue
-        label = _place_match_label(r["name"], query)
-        if label is None:
-            for alt in _alias_names_for(query) + ([search_query] if search_query != query else []):
-                label = _place_match_label(r["name"], alt)
-                if label is not None:
-                    break
+        # #373: a row overture.find_places tagged as an alt-name/fuzzy
+        # fallback hit doesn't contain the typo the caller typed and would
+        # be dropped as unrelated by _place_match_label's containment
+        # check. But the tag only certifies similarity to the STRING IT WAS
+        # SEARCHED WITH (#374): trusted outright only when that was the
+        # whole query; a row matched against one token of a multi-token
+        # query must additionally cover the rest of the query's distinctive
+        # words, or a one-token fuzzy coincidence (a bar named "King")
+        # would resolve the whole of "Kings Barbershop Chicago".
+        if r.get("matched_by"):
+            matched_token = (r.get("_matched_token") or "").lower()
+            if matched_token in {query.lower(), search_query.lower()}:
+                label = "fuzzy"
+            elif _fuzzy_place_covers_query(r["name"], gate_tokens):
+                label = "fuzzy"
+            else:
+                continue
+        else:
+            label = _place_match_label(r["name"], query)
+            if label is None:
+                for alt in _alias_names_for(query) + (
+                    [search_query] if search_query != query else []
+                ):
+                    label = _place_match_label(r["name"], alt)
+                    if label is not None:
+                        break
         if label is None:
             continue
         seen_ids.add(r["id"])
-        candidates.append({
+        candidate = {
             "id": r["id"], "kind": "place", "name": r["name"],
             "lat": r["lat"], "lon": r["lon"],
             "category": r["category"],
             "match": label,
             "_prominence": r.get("confidence") or 0.0,
-        })
+        }
+        if r.get("matched_by"):
+            candidate["matched_by"] = r["matched_by"]
+        candidates.append(candidate)
     # geocode() can resolve a place on its own — its anchored fallback
     # handles "Shibuya Crossing Tokyo" by splitting the trailing city off
     # and searching places around it. Discarding those hits (the previous
