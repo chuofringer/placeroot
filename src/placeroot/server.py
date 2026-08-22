@@ -360,6 +360,13 @@ def _category_slug(category: str) -> str:
     "coffee_shop" stays a slug. "coffee" / "coffee shops" / "playgrounds"
     map through the taxonomy (singularize, then the first word) so the
     phrases users actually type reach find_places.
+
+    All candidate spellings are tried before settling: an exact taxonomy
+    slug wins outright, otherwise the best-confidence search hit across
+    every candidate is taken. Stopping at the first candidate that yields
+    anything let the raw plural phrase's low-confidence lexical-fallback
+    hit shadow the singularized exact slug ("grocery stores" resolved to
+    rice_shop instead of grocery_store, #357).
     """
     raw = category.strip()
     if not raw:
@@ -374,17 +381,30 @@ def _category_slug(category: str) -> str:
     if first.lower() != lower:
         candidates.append(first)
     seen: set[str] = set()
+    ordered: list[str] = []
     for cand in candidates:
         key = cand.lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        slug = key.replace(" ", "_")
+        if key and key not in seen:
+            seen.add(key)
+            ordered.append(cand)
+    # First pass: any candidate that already is a taxonomy slug wins.
+    for cand in ordered:
+        slug = cand.lower().replace(" ", "_")
         if categories.hierarchy_for(slug):
             return slug
+    # Second pass: best-confidence search hit across all candidates, so a
+    # high tier (exact/prefix/substring/path) from a later candidate beats
+    # an earlier candidate's lexical-fallback guess. Candidate order still
+    # breaks confidence ties.
+    best_slug: str | None = None
+    best_conf = 0.0
+    for cand in ordered:
         hits = categories.search_categories(cand, limit=1)
-        if hits:
-            return hits[0]["slug"]
+        if hits and hits[0]["confidence"] > best_conf:
+            best_conf = hits[0]["confidence"]
+            best_slug = hits[0]["slug"]
+    if best_slug is not None:
+        return best_slug
     return raw.lower().replace(" ", "_")
 
 

@@ -33,7 +33,8 @@ slug/path words plus its synonym words here, instead of returning nothing.
   as queries).
 - **Schema pin:** every slug here must exist in the pinned
   `overture_categories.csv` above (same schema tag) — enforced by a
-  permanent test (tests/test_categories.py) that fails if a row's slug
+  permanent test (tests/test_search_categories_intent.py::
+  test_lexicon_slugs_all_exist_in_taxonomy) that fails if a row's slug
   isn't in the taxonomy, so a bad edit can't silently rot.
 - **Refreshing:** add or edit rows directly; no generator. When
   `overture_categories.csv` is refreshed to a new schema tag, re-run the

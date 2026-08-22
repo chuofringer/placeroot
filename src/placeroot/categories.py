@@ -22,6 +22,7 @@ share no substring with any slug (#355).
 """
 
 import importlib.resources
+import math
 
 # Overture schema tag the bundled CSV was taken from; see data/README.md,
 # which is the thing to update in lockstep when the snapshot is refreshed.
@@ -29,6 +30,13 @@ SCHEMA_VERSION = "v1.9.0"
 
 _CATEGORIES: list[dict] | None = None
 _SYNONYMS: dict[str, set[str]] | None = None
+# Lexical-fallback index, built once per process alongside the CSVs above:
+# per-row (row, all matchable words, the row's own slug words) plus the
+# document frequency of every word. Rebuilding these per query costs tens
+# of milliseconds across the ~2,100 rows and find_places may issue several
+# queries per call (#357).
+_LEX_INDEX: list[tuple[dict, set[str], set[str]]] | None = None
+_LEX_DF: dict[str, int] | None = None
 
 # Dropped before tokenizing a query or row text — filler words common in
 # agent-phrased intents ("find me somewhere to get my phone fixed near
@@ -179,15 +187,23 @@ def _row_word_set(row: dict) -> set[str]:
     return words
 
 
-def _document_frequencies(rows: list[dict]) -> dict[str, int]:
-    """How many rows' word sets contain each token — used to down-weight
-    tokens so common they'd surface half the taxonomy on their own (e.g.
-    "shop", "service", "store")."""
-    df: dict[str, int] = {}
-    for row in rows:
-        for word in _row_word_set(row):
-            df[word] = df.get(word, 0) + 1
-    return df
+def _lexical_index() -> tuple[list[tuple[dict, set[str], set[str]]], dict[str, int]]:
+    """Build (once) and return the memoized lexical-fallback index: per-row
+    (row, all matchable words, slug-own words) and token document
+    frequencies. Keyed off the same process-lifetime caching as
+    _CATEGORIES/_SYNONYMS — the bundled CSVs never change mid-process."""
+    global _LEX_INDEX, _LEX_DF
+    if _LEX_INDEX is None or _LEX_DF is None:
+        rows = _load_categories()
+        _LEX_INDEX = [
+            (row, _row_word_set(row), set(_tokenize(row["slug"]))) for row in rows
+        ]
+        df: dict[str, int] = {}
+        for _, words, _ in _LEX_INDEX:
+            for word in words:
+                df[word] = df.get(word, 0) + 1
+        _LEX_DF = df
+    return _LEX_INDEX, _LEX_DF
 
 
 def taxonomy_summary() -> dict:
@@ -260,22 +276,54 @@ def _match_rank(slug: str, query: str) -> int | None:
 # path-segment fallback have always produced, now surfaced as a number.
 _TIER_CONFIDENCE = {0: 1.0, 1: 0.9, 2: 0.75, 3: 0.6}
 
-# A token that shows up in more than this fraction of rows' word sets
-# ("shop", "service", "store", ...) is too generic to carry a match on its
-# own; it still counts but at reduced weight (see _TOKEN_MATCH_BAND).
-_HIGH_DF_FRACTION = 0.10
-_HIGH_DF_WEIGHT = 0.3
+# Tokens are weighted continuously by rarity (IDF-style): a token in one
+# row weighs 1.0, and the weight falls off logarithmically as it appears
+# in more rows, so mid-frequency generic nouns like "shop" and "store"
+# (each in ~100 of the ~2,100 rows) are discounted too — a fixed
+# high-DF cutoff missed exactly those (#357). A token whose weight falls
+# below _CARRY_WEIGHT_MIN is too generic to carry a match by itself: it
+# still adds (reduced) coverage, but a row whose every matched token is
+# that generic is dropped rather than ride shared filler words into the
+# results. 0.5 puts the carry line at roughly df > sqrt(N) rows (~46 of
+# 2,117), which covers "shop"/"store"/"service" while leaving real
+# content words ("grocery", "coffee", "repair") full-strength.
+_CARRY_WEIGHT_MIN = 0.5
 
 # Token-coverage confidence band for the phrase-intent fallback (#355):
 # a query matching none of its tokens never reaches this code path (see
 # search_categories), and full coverage tops out below the whole-query
-# tiers above so an exact/substring slug hit always outranks a synonym hit.
+# tiers above (tier 3 is 0.6) so an exact/prefix/substring/path-segment
+# hit always outranks a synonym hit — enforced by keeping
+# _TOKEN_MATCH_MAX < min(_TIER_CONFIDENCE.values()).
 _TOKEN_MATCH_MIN = 0.2
-_TOKEN_MATCH_MAX = 0.7
+_TOKEN_MATCH_MAX = 0.55
+
+
+def _token_weight(token: str, df: dict[str, int], n_rows: int) -> float:
+    """IDF-style weight in (0, 1]: 1.0 for a token unique to one row,
+    trending to 0 as the token approaches appearing in every row.
+
+    Rarity is taken over the token's singular AND plural surface forms
+    (same fold as _token_matches' _hit): the handful of rows that spell a
+    generic word in the plural ("dairy_stores") must not get full rarity
+    credit for "stores" while every "store" row is discounted.
+    """
+    variants = {token, token + "s"}
+    if len(token) > 3 and token.endswith("s"):
+        variants.add(token[:-1])
+    d = max(1, max(df.get(v, 0) for v in variants))
+    if n_rows <= 1:
+        return 1.0
+    return math.log(n_rows / d) / math.log(n_rows)
 
 
 def _whole_query_matches(query: str, rows: list[dict]) -> list[tuple]:
-    """Today's exact/prefix/substring/path-segment tiers, scored rows."""
+    """Today's exact/prefix/substring/path-segment tiers, scored rows.
+
+    Tuple shape is (confidence, slug_word_miss, slug_len, slug, row) —
+    shared with _token_matches so both sort under the same key. Whole-query
+    tiers matched against the slug string itself, so slug_word_miss is 0.
+    """
     scored = []
     for row in rows:
         rank = _match_rank(row["slug"], query)
@@ -285,17 +333,24 @@ def _whole_query_matches(query: str, rows: list[dict]) -> list[tuple]:
                 rank = 3
             else:
                 continue
-        scored.append((_TIER_CONFIDENCE[rank], len(row["slug"]), row["slug"], row))
+        scored.append((_TIER_CONFIDENCE[rank], 0, len(row["slug"]), row["slug"], row))
     return scored
 
 
 def _token_matches(query_tokens: list[str], rows: list[dict]) -> list[tuple]:
-    """Lexical phrase-intent fallback: score each row by weighted token
+    """Lexical phrase-intent fallback: score each row by IDF-weighted token
     coverage against its slug/path/synonym words (see module docstring).
 
-    A row only qualifies if at least one matched token is not "high
-    document-frequency" (shared across a large slice of the taxonomy) —
-    otherwise a word like "shop" alone would surface half the taxonomy.
+    A row only qualifies if at least one matched token is rare enough to
+    carry a match (weight >= _CARRY_WEIGHT_MIN) — otherwise a word like
+    "shop" alone would surface half the taxonomy.
+
+    Equal-coverage rows are ranked by how many matched tokens hit the
+    row's OWN slug words rather than words inherited from parent path
+    segments or synonyms: rice_shop inherits {grocery, store} from its
+    grocery_store path segment, and without this a query like "grocery
+    stores" would tie rice_shop with grocery_store and let the shorter
+    slug win arbitrarily (#357).
 
     Plural queries fold to the singular the taxonomy uses: a token ending
     in "s" (length > 3, so "gas" survives) also matches its bare stem, so
@@ -303,9 +358,8 @@ def _token_matches(query_tokens: list[str], rows: list[dict]) -> list[tuple]:
     of losing the "shops" token and tying with every other coffee-synonym
     row.
     """
-    rows_with_words = [(row, _row_word_set(row)) for row in rows]
-    df = _document_frequencies(rows)
-    threshold = _HIGH_DF_FRACTION * len(rows)
+    rows_with_words, df = _lexical_index()
+    n_rows = len(rows)
 
     def _hit(token: str, words: set[str]) -> str | None:
         if token in words:
@@ -315,19 +369,22 @@ def _token_matches(query_tokens: list[str], rows: list[dict]) -> list[tuple]:
         return None
 
     scored = []
-    for row, words in rows_with_words:
+    for row, words, slug_words in rows_with_words:
         matched = [hit for t in query_tokens if (hit := _hit(t, words)) is not None]
         if not matched:
             continue
-        weights = [1.0 if df.get(t, 0) <= threshold else _HIGH_DF_WEIGHT for t in matched]
-        if all(df.get(t, 0) > threshold for t in matched):
+        weights = [_token_weight(t, df, n_rows) for t in matched]
+        if all(w < _CARRY_WEIGHT_MIN for w in weights):
             # Every matched token is too generic on its own — drop the row
             # rather than let it ride shared filler words into the results.
             continue
-        coverage = sum(weights) / len(query_tokens)
-        coverage = min(coverage, 1.0)
+        coverage = min(sum(weights) / len(query_tokens), 1.0)
         confidence = _TOKEN_MATCH_MIN + coverage * (_TOKEN_MATCH_MAX - _TOKEN_MATCH_MIN)
-        scored.append((confidence, len(row["slug"]), row["slug"], row))
+        slug_hits = sum(1 for hit in matched if hit in slug_words)
+        # Sort ascending on misses: rows whose matches came from their own
+        # slug words rank above rows that matched only inherited words.
+        slug_word_miss = len(matched) - slug_hits
+        scored.append((confidence, slug_word_miss, len(row["slug"]), row["slug"], row))
     return scored
 
 
@@ -347,13 +404,14 @@ def search_categories(query: str, limit: int = 8) -> list[dict]:
     each row's slug words, path-segment words, and curated synonym words
     (data/category_synonyms.csv) — e.g. "fix my cracked phone screen"
     reaches mobile_phone_repair even though it shares no substring with
-    it. Confidence there is weighted token coverage scaled into 0.2-0.7,
-    always below the whole-query tiers; a token shared across a large
-    slice of the taxonomy ("shop", "service") counts for less, and a row
-    that only matched such tokens is dropped.
+    it. Confidence there is IDF-weighted token coverage scaled into
+    0.2-0.55, always below the whole-query tiers; a token shared across a
+    large slice of the taxonomy ("shop", "store", "service") counts for
+    less, and a row that only matched such tokens is dropped.
 
-    Ties break by shorter slug, then alphabetically. Empty, whitespace,
-    or stopword-only query returns [].
+    Ties break by matches on the row's own slug words over inherited
+    path/synonym words, then by shorter slug, then alphabetically. Empty,
+    whitespace, or stopword-only query returns [].
     """
     query = query.strip().lower()
     if not query:
@@ -366,8 +424,8 @@ def search_categories(query: str, limit: int = 8) -> list[dict]:
         if query_tokens:
             scored = _token_matches(query_tokens, rows)
 
-    scored.sort(key=lambda t: (-t[0], t[1], t[2]))
+    scored.sort(key=lambda t: (-t[0], t[1], t[2], t[3]))
     return [
         {"slug": r["slug"], "path": r["path"], "confidence": round(conf, 2)}
-        for conf, _, _, r in scored[:limit]
+        for conf, _, _, _, r in scored[:limit]
     ]

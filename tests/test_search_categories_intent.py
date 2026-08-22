@@ -89,6 +89,31 @@ def test_server_tool_passes_confidence_through():
         assert 0 <= row["confidence"] <= 1
 
 
+def test_grocery_stores_resolves_to_grocery_store_not_a_sibling():
+    # rice_shop inherits {grocery, store} from the grocery_store segment of
+    # its taxonomy path; without slug-word priority it tied grocery_store
+    # on coverage and won on shorter slug, and _category_slug accepted the
+    # raw plural phrase's lexical guess before ever trying the singularized
+    # exact slug (#357).
+    results = categories.search_categories("grocery stores")
+    assert results
+    assert results[0]["slug"] == "grocery_store"
+    assert server._category_slug("grocery stores") == "grocery_store"
+
+
+def test_common_plural_phrases_resolve_to_canonical_slugs():
+    assert server._category_slug("gas stations") == "gas_station"
+    assert server._category_slug("book stores") == "bookstore"
+    assert server._category_slug("coffee shops") == "coffee_shop"
+
+
+def test_lexical_fallback_confidence_stays_below_whole_query_tiers():
+    # The docs promise a synonym/token hit never outranks any whole-query
+    # tier; _TOKEN_MATCH_MAX = 0.7 silently broke that against tier 3's
+    # 0.6 (#357).
+    assert categories._TOKEN_MATCH_MAX < min(categories._TIER_CONFIDENCE.values())
+
+
 def test_plural_query_folds_to_the_singular_slug():
     # "coffee shops" must score 2/2 against coffee_shop's {coffee, shop},
     # beating single-token coffee-synonym rows like cafe — the regression
