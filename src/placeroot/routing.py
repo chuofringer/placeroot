@@ -3328,19 +3328,27 @@ def _travel_time_matrix_shared_graph(
     origins: list[tuple[float, float]],
     destinations: list[tuple[float, float]],
     mode: str,
-) -> tuple[list[list[tuple[float, float] | None]], int] | None:
+) -> tuple[list[list[tuple[float, float] | None]], int, bool] | None:
     """One shared-graph attempt covering every origin and destination, or None.
 
-    Reuses optimize_route's own extraction-geometry and widen-and-retry
-    machinery (_stops_extraction_geometry / _stops_radius_cap_m /
-    _get_or_build_graph) over the combined origins+destinations point set —
-    that geometry only cares about the set's span and enclosing circle, not
-    which points are sources and which are targets, so it generalizes to
-    the origin/destination split for free.
+    Returns (grid, unroutable_count, graph_truncated) — the last element is
+    the extraction Graph's own truncated flag, so a matrix filled from a
+    size-capped graph can say so instead of presenting unroutable cells as
+    genuinely disconnected — or None when the point set doesn't fit one
+    shared graph and travel_time_matrix must fall back to a route() call
+    per pair.
 
-    Returns None when the combined set's span exceeds the mode's
-    straight-line cap (_stops_extraction_geometry raises RouteTooLong in
-    that case) — travel_time_matrix falls back to a route() call per pair.
+    Reuses optimize_route's extraction-geometry and widen-and-retry
+    machinery (_stops_extraction_geometry / _stops_radius_cap_m /
+    _get_or_build_graph) over the combined origins+destinations point set,
+    but the ACCEPTANCE gate is the matrix's own: only origin<->destination
+    separations are ever routed (no cell needs an origin<->origin or
+    destination<->destination path), so the mode's straight-line cap is
+    checked against the widest CROSS pair, not the combined set's span.
+    When the cross pairs all fit but the combined enclosing circle outgrows
+    the extraction cap optimize_route already pays (origins far apart with
+    destinations in the middle can span up to twice the widest cross pair),
+    returns None rather than building an oversized graph.
 
     Raises NoGraphNearby only when nothing in the combined set ever snaps
     to a usable graph node at any tried radius, matching route()'s and
@@ -3352,10 +3360,34 @@ def _travel_time_matrix_shared_graph(
     """
     combined = list(origins) + list(destinations)
     n_origins = len(origins)
+    cap_m = ROUTE_MAX_STRAIGHT_LINE_M[mode]
+    cross_span_m = max(
+        _haversine_m(olat, olon, dlat, dlon)
+        for olat, olon in origins
+        for dlat, dlon in destinations
+    )
+    if cross_span_m > cap_m:
+        # At least one actual matrix cell exceeds route()'s own cap; the
+        # per-pair fallback answers what it can and folds that pair to an
+        # honest unroutable cell.
+        return None
     try:
         center_lat, center_lon, base_radius_m = _stops_extraction_geometry(combined, mode)
     except RouteTooLong:
-        return None
+        # The combined SPAN over the cap is an origin<->origin or
+        # destination<->destination separation no cell routes (every cross
+        # pair passed above). Size directly on the combined set's enclosing
+        # circle instead, keeping the same extraction-radius cap
+        # optimize_route pays — past that, fall back per pair.
+        center_lat, center_lon = _minimum_enclosing_center(combined)
+        enclosing_radius_m = max(
+            _haversine_m(center_lat, center_lon, lat, lon) for lat, lon in combined
+        )
+        base_radius_m = max(
+            enclosing_radius_m * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M
+        )
+        if base_radius_m > _stops_radius_cap_m(combined, mode):
+            return None
 
     max_radius_m = _stops_radius_cap_m(combined, mode)
     radii_m = [base_radius_m]
@@ -3363,7 +3395,7 @@ def _travel_time_matrix_shared_graph(
     if retry_radius_m > base_radius_m:
         radii_m.append(retry_radius_m)
 
-    best: tuple[list[list[tuple[float, float] | None]], int] | None = None
+    best: tuple[list[list[tuple[float, float] | None]], int, bool] | None = None
     for i, radius_m in enumerate(radii_m):
         is_last = i == len(radii_m) - 1
         graph = _get_or_build_graph(
@@ -3380,9 +3412,9 @@ def _travel_time_matrix_shared_graph(
             continue
         grid, unroutable = _od_matrix(graph, nodes[:n_origins], nodes[n_origins:], mode)
         if unroutable == 0:
-            return grid, unroutable
+            return grid, unroutable, graph.truncated
         if best is None or unroutable < best[1]:
-            best = (grid, unroutable)
+            best = (grid, unroutable, graph.truncated)
     if best is None:  # pragma: no cover - the last radius returns, records, or raises
         raise AssertionError("unreachable: the last radius returns, records, or raises")
     return best
@@ -3392,7 +3424,7 @@ def _travel_time_matrix_fallback(
     origins: list[tuple[float, float]],
     destinations: list[tuple[float, float]],
     mode: str,
-) -> list[list[tuple[float, float] | None]]:
+) -> tuple[list[list[tuple[float, float] | None]], bool]:
     """Per-pair route() fallback for a point set too spread out for one shared graph.
 
     There is no single extraction circle covering every origin and
@@ -3400,23 +3432,43 @@ def _travel_time_matrix_fallback(
     (origin, destination) pair is answered exactly as route() would answer
     it standalone — up to 25 calls for the 5x5 cap. A pair that comes back
     RouteTooLong, NoGraphNearby, or a structured no_route result folds to
-    an unroutable (None) cell rather than failing the whole matrix.
+    an unroutable (None) cell rather than failing the whole matrix — except
+    that when EVERY pair fails with NoGraphNearby, the last one is
+    re-raised: no street data exists anywhere near any pair, which is
+    route()'s and the shared-graph path's own top-level failure, not a
+    matrix of nulls.
+
+    Returns (grid, truncated): truncated is the OR of the per-pair route()
+    responses' own "truncated" flags, so a matrix stitched from size-capped
+    extractions stays as honest as the routes it is made of.
     """
     grid: list[list[tuple[float, float] | None]] = []
+    truncated = False
+    no_graph_count = 0
+    last_no_graph: NoGraphNearby | None = None
     for olat, olon in origins:
         row: list[tuple[float, float] | None] = []
         for dlat, dlon in destinations:
             try:
                 result = route(olat, olon, dlat, dlon, mode=mode)
-            except (RouteTooLong, NoGraphNearby):
+            except RouteTooLong:
+                row.append(None)
+                continue
+            except NoGraphNearby as exc:
+                no_graph_count += 1
+                last_no_graph = exc
                 row.append(None)
                 continue
             if "error" in result:
                 row.append(None)
             else:
+                if result.get("truncated"):
+                    truncated = True
                 row.append((result["duration_s"], result["distance_m"]))
         grid.append(row)
-    return grid
+    if last_no_graph is not None and no_graph_count == len(origins) * len(destinations):
+        raise last_no_graph
+    return grid, truncated
 
 
 def travel_time_matrix(
@@ -3431,15 +3483,16 @@ def travel_time_matrix(
     element comes from a real shortest-path search over Overture's street
     graph (route()'s own cost model), not a straight-line guess.
 
-    When every origin and destination fits inside one mode-capped
-    extraction circle (the bounding circle of the whole combined point
-    set), builds ONE shared, cached street graph, snaps every point into
-    it once, and fills the matrix with one target-less Dijkstra per origin
-    against every destination at once (_travel_time_matrix_shared_graph) —
-    the same reuse idea optimize_route uses for its cost matrix, just
-    rectangular instead of square. When the points are too spread out for
-    one shared graph, falls back to a route() call per pair
-    (_travel_time_matrix_fallback, <=25 calls for the 5x5 cap).
+    When every origin<->destination pair fits inside the mode's
+    straight-line cap and the combined point set's bounding circle fits the
+    extraction cap, builds ONE shared, cached street graph, snaps every
+    point into it once, and fills the matrix with one target-less Dijkstra
+    per origin against every destination at once
+    (_travel_time_matrix_shared_graph) — the same reuse idea optimize_route
+    uses for its cost matrix, just rectangular instead of square. When the
+    points are too spread out for one shared graph, falls back to a route()
+    call per pair (_travel_time_matrix_fallback, <=25 calls for the 5x5
+    cap).
 
     An unroutable pair — a snap failure on either endpoint, a disconnected
     fragment, or (fallback mode only) a pair whose straight-line distance
@@ -3447,15 +3500,20 @@ def travel_time_matrix(
     duration_min/distance_m come back None with a "note": "unroutable",
     and the matrix still returns. Raises NoGraphNearby only when nothing in
     the combined point set ever snaps to a usable street node anywhere —
-    the shared-graph area (or, in fallback mode, every single pair) has no
-    usable street data at all — matching route()'s own top-level failure
-    rather than a matrix of nulls; the caller (server.travel_time_matrix)
-    turns that into a structured {"error": "no_graph_nearby"}, same as
-    route() and optimize_route() do.
+    the shared-graph area has no usable street data at all, or every single
+    fallback pair failed with NoGraphNearby — matching route()'s own
+    top-level failure rather than a matrix of nulls; the caller
+    (server.travel_time_matrix) turns that into a structured {"error":
+    "no_graph_nearby"}, same as route() and optimize_route() do.
 
     Returns {"mode", "elements": [{"origin_idx", "dest_idx", "duration_min",
     "distance_m"}, ...], "durations_note"}, flat and origin-major (all
     destinations for origin 0, then origin 1, ...) like distance_matrix.
+    Empty origins or destinations returns the same shape with "elements":
+    []. When the street graph (any per-pair extraction, in fallback mode)
+    hit its size cap the response carries "truncated": true plus a note —
+    a capped graph can present a reachable pair as unroutable, so the
+    matrix says so instead of dressing the cap up as real disconnection.
     If every pair in the matrix is unroutable, the response also carries a
     top-level "note" saying so.
     """
@@ -3466,13 +3524,22 @@ def travel_time_matrix(
             for value in point:
                 if not _is_finite_number(value):
                     raise ValueError(f"{label}[{idx}]: lat and lon must be finite numbers")
+    if not origins or not destinations:
+        # No pairs to route; an empty matrix in the tool's own shape, never
+        # a bare ValueError out of the geometry helpers' max() over an
+        # empty pair sequence.
+        return {
+            "mode": mode,
+            "elements": [],
+            "durations_note": _TRAVEL_TIME_MATRIX_DURATIONS_NOTE,
+        }
 
     outcome = _travel_time_matrix_shared_graph(origins, destinations, mode)
     if outcome is None:
-        matrix = _travel_time_matrix_fallback(origins, destinations, mode)
+        matrix, truncated = _travel_time_matrix_fallback(origins, destinations, mode)
         unroutable = sum(cell is None for row in matrix for cell in row)
     else:
-        matrix, unroutable = outcome
+        matrix, unroutable, truncated = outcome
 
     elements = []
     for oi, row in enumerate(matrix):
@@ -3503,7 +3570,18 @@ def travel_time_matrix(
         "elements": elements,
         "durations_note": _TRAVEL_TIME_MATRIX_DURATIONS_NOTE,
     }
+    notes = []
+    if truncated:
+        # Same honesty flag + wording family as route()/optimize_route():
+        # a size-capped graph can miss the only connection between a pair,
+        # so "unroutable" cells may reflect the cap, not real disconnection.
+        result["truncated"] = True
+        notes.append(
+            "the street graph hit its size cap; this matrix may be suboptimal or incomplete"
+        )
     total = len(origins) * len(destinations)
     if unroutable and unroutable == total:
-        result["note"] = "no pair in this matrix could be routed"
+        notes.append("no pair in this matrix could be routed")
+    if notes:
+        result["note"] = "; ".join(notes)
     return result

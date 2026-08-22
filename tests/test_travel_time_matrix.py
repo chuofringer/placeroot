@@ -14,6 +14,8 @@ check the null-cell/"unroutable" folding against real fixture data rather
 than a mock.
 """
 
+import pytest
+
 from placeroot import routing, server
 
 from ._routing_fixture import build_routing_fixture as fx
@@ -207,3 +209,149 @@ def test_bad_mode():
     result = server.travel_time_matrix(origins=[point], destinations=[point], mode="teleport")
     assert result["error"] == "bad_request"
     assert "teleport" in result["detail"]
+
+
+def test_routing_level_empty_lists_return_the_empty_matrix_shape():
+    # The library entry point (not just the server wrapper) must answer an
+    # empty side with the tool's own empty shape, never a bare ValueError
+    # out of a max() over zero pairs.
+    point = fx.node_latlon(2, 2)
+    for origins, destinations in ([], [point]), ([point], []), ([], []):
+        result = routing.travel_time_matrix(origins, destinations, mode="walk")
+        assert result["elements"] == []
+        assert result["mode"] == "walk"
+        assert "durations_note" in result
+
+
+# --- shared-vs-fallback dispatch geometry -----------------------------------
+
+
+def test_wide_origin_spread_with_short_cells_stays_on_the_shared_graph(monkeypatch):
+    # Origins ~8.4km apart (over walk's ~7.5km straight-line cap), one
+    # destination midway: every actual matrix cell is ~4.2km. The dispatch
+    # gate is the widest ORIGIN<->DESTINATION pair — origin<->origin
+    # separations no cell routes must not push this onto the per-pair path.
+    class Chosen(Exception):
+        pass
+
+    def sentinel(*args, **kwargs):
+        raise Chosen
+
+    monkeypatch.setattr(routing, "_get_or_build_graph", sentinel)
+    origins = [(40.75, -74.05), (40.75, -73.95)]
+    destinations = [(40.75, -74.00)]
+    with pytest.raises(Chosen):
+        routing._travel_time_matrix_shared_graph(origins, destinations, "walk")
+
+
+def test_oversized_enclosing_circle_still_falls_back_per_pair(monkeypatch):
+    # Cross pairs (~6.7km) are under walk's cap, but the combined set's
+    # enclosing circle (~6.7km radius before buffering) outgrows the
+    # extraction cap — no shared graph may be built; fall back per pair.
+    def sentinel(*args, **kwargs):
+        raise AssertionError("must not build a graph past the extraction cap")
+
+    monkeypatch.setattr(routing, "_get_or_build_graph", sentinel)
+    origins = [(40.75, -74.08), (40.75, -73.92)]
+    destinations = [(40.75, -74.00)]
+    assert routing._travel_time_matrix_shared_graph(origins, destinations, "walk") is None
+
+
+def test_cross_pair_over_the_cap_falls_back_without_building(monkeypatch):
+    def sentinel(*args, **kwargs):
+        raise AssertionError("an over-cap cross pair must skip the shared graph entirely")
+
+    monkeypatch.setattr(routing, "_get_or_build_graph", sentinel)
+    origins = [fx.node_latlon(2, 2)]
+    destinations = [fx.node_latlon(5, 5), FAR_POINT]
+    assert routing._travel_time_matrix_shared_graph(origins, destinations, "walk") is None
+
+
+# --- truncation honesty ------------------------------------------------------
+
+
+def test_shared_graph_truncation_is_surfaced(monkeypatch):
+    original = routing._get_or_build_graph
+    touched = []
+
+    def capped(*args, **kwargs):
+        graph = original(*args, **kwargs)
+        touched.append((graph, graph.truncated))
+        graph.truncated = True
+        return graph
+
+    monkeypatch.setattr(routing, "_get_or_build_graph", capped)
+    try:
+        result = server.travel_time_matrix(
+            origins=_as_dicts([fx.node_latlon(2, 2)]),
+            destinations=_as_dicts([fx.node_latlon(5, 5)]),
+            mode="walk",
+        )
+    finally:
+        # Graphs are cached and shared across tests; restore their flags.
+        for graph, was_truncated in touched:
+            graph.truncated = was_truncated
+
+    assert result["truncated"] is True
+    assert "size cap" in result["note"]
+    assert result["elements"][0]["distance_m"] is not None
+
+
+def test_fallback_surfaces_per_pair_truncation(monkeypatch):
+    monkeypatch.setattr(routing, "_travel_time_matrix_shared_graph", lambda *a, **k: None)
+    monkeypatch.setattr(
+        routing,
+        "route",
+        lambda *a, **k: {"duration_s": 60.0, "distance_m": 100.0, "truncated": True},
+    )
+    result = routing.travel_time_matrix(
+        [fx.node_latlon(2, 2)], [fx.node_latlon(5, 5)], mode="walk"
+    )
+    assert result["truncated"] is True
+    assert "size cap" in result["note"]
+
+
+def test_untruncated_matrix_has_no_truncated_flag():
+    result = server.travel_time_matrix(
+        origins=_as_dicts([fx.node_latlon(2, 2)]),
+        destinations=_as_dicts([fx.node_latlon(5, 5)]),
+        mode="walk",
+    )
+    assert "truncated" not in result
+    assert "note" not in result
+
+
+# --- fallback NoGraphNearby contract ----------------------------------------
+
+
+def test_fallback_raises_when_every_pair_has_no_graph(monkeypatch):
+    def no_graph(*args, **kwargs):
+        raise routing.NoGraphNearby(40.0, -74.0, 1000.0, mode="walk")
+
+    monkeypatch.setattr(routing, "route", no_graph)
+    monkeypatch.setattr(routing, "_travel_time_matrix_shared_graph", lambda *a, **k: None)
+    # Library level: the documented top-level failure, not a matrix of nulls.
+    with pytest.raises(routing.NoGraphNearby):
+        routing.travel_time_matrix([(40.0, -74.0)], [(40.5, -74.5)], mode="walk")
+    # Server level: the documented structured error.
+    result = server.travel_time_matrix(
+        origins=[{"lat": 40.0, "lon": -74.0}],
+        destinations=[{"lat": 40.5, "lon": -74.5}],
+    )
+    assert result["error"] == "no_graph_nearby"
+
+
+def test_fallback_mixed_failures_still_return_a_matrix(monkeypatch):
+    calls = iter(["no_graph", "too_long"])
+
+    def failing(*args, **kwargs):
+        if next(calls) == "no_graph":
+            raise routing.NoGraphNearby(40.0, -74.0, 1000.0, mode="walk")
+        raise routing.RouteTooLong(9000.0, 7520.0)
+
+    monkeypatch.setattr(routing, "route", failing)
+    grid, truncated = routing._travel_time_matrix_fallback(
+        [(40.0, -74.0)], [(40.5, -74.5), (40.6, -74.6)], "walk"
+    )
+    assert grid == [[None, None]]
+    assert truncated is False

@@ -728,13 +728,13 @@ def travel_time_matrix(
     (default), "cycle", or "drive", one mode per call.
 
     Reuses a single cached street graph across every origin and
-    destination when they all fit inside one mode-capped extraction circle
-    (the bounding circle of every point in the call), running one Dijkstra
-    per origin against every destination at once rather than a search per
-    pair — for a same-city matrix this costs about what a single
-    isochrone does, not one route() call per pair. When the points are too
-    spread out for one shared graph, falls back to a route() call per pair
-    (up to 25).
+    destination when every origin-destination pair fits the mode's
+    straight-line cap and the whole point set fits one extraction circle,
+    running one Dijkstra per origin against every destination at once
+    rather than a search per pair — for a same-city matrix this costs
+    about what a single isochrone does, not one route() call per pair.
+    When the points are too spread out for one shared graph, falls back to
+    a route() call per pair (up to 25).
 
     Returns {"mode", "elements": [{"origin_idx", "dest_idx", "duration_min",
     "distance_m"}, ...], "durations_note"}, flat and origin-major like
@@ -744,7 +744,9 @@ def travel_time_matrix(
     {"duration_min": null, "distance_m": null, "note": "unroutable"}
     instead of failing the whole call; if every pair in the matrix is
     unroutable the response also carries a top-level "note" saying so.
-    Empty origins or destinations returns {"elements": []}.
+    If the street graph hit its size cap the response carries "truncated":
+    true plus a note — capped extractions may present reachable pairs as
+    unroutable. Empty origins or destinations returns {"elements": []}.
 
     Returns a structured {"error": "bad_request", ...} instead of raising
     if either list exceeds 5 points, a point is missing/non-numeric lat or
