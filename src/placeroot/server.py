@@ -2495,6 +2495,7 @@ def render_map(
     title: str | None = None,
     inline: bool = False,
     summary: str | None = None,
+    legend: dict | None = None,
 ) -> dict:
     """Render any result as a shareable one-pager: map, verdict, and stop list.
 
@@ -2515,8 +2516,20 @@ def render_map(
     mapview.MAX_RENDER_VERTICES) rather than failing the call outright. Pass
     inline=true to also get the HTML back in the response when it's small
     enough to be worth it.
+
+    A point in `result` carrying a "class" property gets a contrasting
+    marker dot when `legend` maps that class to {"label": str, "color":
+    str?} — pass e.g. {"open": {"label": "Open now"}, "closed": {"label":
+    "Closed", "color": "#d55e00"}}. A missing color is assigned from a
+    fixed color-blind-safe palette; an invalid one (not #rgb/#rrggbb hex)
+    is dropped rather than used. Classes actually present get a legend box
+    on the page; a class not in `legend` keeps the default dot and is
+    reported in the response's "note". Omitting `legend` (or a result with
+    no "class" properties) renders exactly as before.
     """
-    return mapview.write_artifact(result, title=title, inline=inline, summary=summary)
+    return mapview.write_artifact(
+        result, title=title, inline=inline, summary=summary, legend=legend
+    )
 
 @_tool("Reachable area (isochrone)")
 def isochrone(
