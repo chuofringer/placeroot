@@ -42,6 +42,7 @@ from placeroot import (
     export,
     geo,
     gers,
+    ground,
     honesty,
     infrastructure,
     land_use,
@@ -1915,6 +1916,61 @@ def find_near(
         if key in payload:
             out[key] = payload[key]
     return budget.apply_budget(out, "results")
+
+
+@_tool("Ground a location")
+def ground_location(
+    lat: float,
+    lon: float,
+    minutes: float = 15,
+    mode: str = "walk",
+) -> dict:
+    """One-hop location grounding: where, surroundings, reach, notable.
+
+    Answers "orient me at this point" in a single call instead of chaining
+    a reverse lookup, an area summary, a reachable-area scan, and a
+    nearby-places search. Returns:
+    - where: reverse_geocode's answer for the point (address/divisions
+      chain, or a "divisions_only" degrade).
+    - surroundings: total places and the top few categories within a fixed
+      500m radius, plus density_per_km2.
+    - reach: reachable-area stats only for (minutes, mode) —
+      {reachable_nodes, max_radius_m, area_km2}. Never includes the
+      reachable-area polygon; this tool returns no geometry, ever.
+    - notable: the nearest 2-3 named places, no category filter.
+
+    Each section is independent: if its underlying call fails or comes
+    back empty, that section is dropped and a short line explaining why is
+    added to "notes" instead — the call only fails outright if every
+    section failed, returning a structured {"error":
+    "upstream_unavailable", ...}.
+
+    minutes must be > 0 and <= 60; mode is "walk", "cycle", or "drive".
+    Both, plus out-of-range coordinates, return {"error": "bad_request"}.
+    No confirm gate: the reach scan runs with the requested minutes/mode
+    as-is (it self-caps its graph extraction radius; no nearby street
+    graph just degrades the reach section to a note).
+    """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
+    if (
+        not isinstance(minutes, (int, float))
+        or isinstance(minutes, bool)
+        or not math.isfinite(minutes)
+        or minutes <= 0
+        or minutes > 60
+    ):
+        return {
+            "error": "bad_request",
+            "detail": f"minutes={minutes!r} must be > 0 and <= 60",
+        }
+    if not isinstance(mode, str) or mode not in routing.MODE_CONFIG:
+        return {
+            "error": "bad_request",
+            "detail": f"mode={mode!r} is not supported; supported: {sorted(routing.MODE_CONFIG)}",
+        }
+    return ground.ground_location(lat, lon, float(minutes), mode)
 
 
 @_tool("Places along a route")
