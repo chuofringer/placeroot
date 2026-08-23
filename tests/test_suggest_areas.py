@@ -20,9 +20,10 @@ A 2-minute walk budget reaches only each anchor's 4 immediate grid
 neighbors (a 5-node reachable set, under routing.CONCAVE_MIN_NODES — see
 that module's own concave_boundary docstring — so the isochrone's drawn
 shape is the exact convex hull of those 5 points, not the grid-cell
-boundary trace, which this repo's fixture-grid spacing (100m, coarser than
-the boundary tracer's own minimum cell size) can otherwise degenerate for
-a uniformly-spaced synthetic grid). Because the two anchors are only 100m
+boundary trace). The trace itself no longer degenerates on a uniformly
+spaced grid: #389 taught concave_boundary to coarsen its cells until they
+actually join up, so the layout below is chosen for the 5-node convex-hull
+path on its own merits, not to dodge that bug. Because the two anchors are only 100m
 apart, each one's own position sits ON the other's reachable diamond
 (A reaches B directly and vice versa) — the two diamonds overlap
 substantially rather than merely touching at a point, and BOTH (placed at

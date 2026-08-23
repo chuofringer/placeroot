@@ -416,6 +416,24 @@ CONCAVE_MIN_NODES = 8  # fewer reached nodes than this: convex hull is used dire
 CONCAVE_CELL_MIN_M = 60.0
 CONCAVE_CELL_DIVISOR = 40.0  # cell size ~= max(CONCAVE_CELL_MIN_M, reached_radius_m / this)
 
+# A cell finer than the graph's own node spacing drops every reached node
+# into a cell of its own, and isolated cells never share a side — so the
+# boundary trace returns one arbitrary cell's little square instead of the
+# shed (issue #389: a 300m-spaced lattice traced a single 60m box for a
+# 3.2km reach). Real street graphs are irregular and dense enough that this
+# rarely bites, but sparse rural networks and synthetic grids hit it
+# squarely, and nothing about the failure looks like a failure downstream —
+# it is a valid, plausible, tiny polygon.
+#
+# The signal is connectivity: measure what share of occupied cells sit in
+# the largest 4-connected component, and coarsen (double the cell) until
+# that share clears CONCAVE_MIN_CONNECTED_FRACTION. Measured on this repo's
+# fixtures, healthy inputs score 0.70-1.00 and degenerate lattices 0.01-0.19,
+# so 0.5 separates them with room on both sides and leaves every
+# already-connected input bucketed exactly as before.
+CONCAVE_MIN_CONNECTED_FRACTION = 0.5
+CONCAVE_MAX_CELL_DOUBLINGS = 6  # 60m -> 3.8km; past that, fall back to the hull
+
 GRAPH_CACHE_MAXSIZE = 8
 GRAPH_CACHE_MARGIN = 1.3  # over-fetch factor so nearby repeat queries hit the cache
 
@@ -1355,22 +1373,61 @@ def _clamp_ring_to_bbox(
     return [(min(max(lon, xmin), xmax), min(max(lat, ymin), ymax)) for lon, lat in ring]
 
 
+def _base_cell_m(radius_for_cell_m: float) -> float:
+    """Starting cell size: coarser for a larger isochrone so the trace stays
+    cheap, but never finer than CONCAVE_CELL_MIN_M so it doesn't fragment
+    into noise at small radii. `concave_boundary` may coarsen past this when
+    the graph's node spacing demands it (see CONCAVE_MIN_CONNECTED_FRACTION).
+    """
+    return max(CONCAVE_CELL_MIN_M, radius_for_cell_m / CONCAVE_CELL_DIVISOR)
+
+
+def _largest_connected_fraction(occupied: set[tuple[int, int]]) -> float:
+    """Share of `occupied` in its largest 4-connected component (0.0 if empty).
+
+    1.0 means every occupied cell reaches every other by side-adjacent
+    steps — one blob, exactly what the boundary trace assumes. A small value
+    means the cells are scattered dust the trace cannot join, which is the
+    #389 failure: the "longest" loop is then just some single cell's square.
+    """
+    if not occupied:
+        return 0.0
+    seen: set[tuple[int, int]] = set()
+    largest = 0
+    for cell in occupied:
+        if cell in seen:
+            continue
+        stack = [cell]
+        seen.add(cell)
+        size = 0
+        while stack:
+            cx, cy = stack.pop()
+            size += 1
+            for neighbor in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
+                if neighbor in occupied and neighbor not in seen:
+                    seen.add(neighbor)
+                    stack.append(neighbor)
+        largest = max(largest, size)
+    return largest / len(occupied)
+
+
 def _grid_bucket(
     reached_coords: list[tuple[float, float]],  # (lat, lon)
     origin_lat: float,
     origin_lon: float,
     radius_for_cell_m: float,
+    cell_m: float | None = None,
 ) -> tuple[set[tuple[int, int]], float, float]:
     """Occupied (cx, cy) grid cells for reached_coords, plus the cell size in degrees.
 
-    Cell size is max(CONCAVE_CELL_MIN_M, radius_for_cell_m / CONCAVE_CELL_DIVISOR)
-    — coarser for a larger isochrone, so the boundary trace stays cheap, but
-    never finer than CONCAVE_CELL_MIN_M so it doesn't fragment into noise at
-    small radii. Cells are indexed relative to (origin_lat, origin_lon) using
-    a single (origin-latitude) meters-per-degree scale, not each node's own
-    latitude, so the grid stays a true regular lattice.
+    Cell size defaults to _base_cell_m(radius_for_cell_m); pass `cell_m` to
+    bucket at an explicit size (concave_boundary does this while coarsening).
+    Cells are indexed relative to (origin_lat, origin_lon) using a single
+    (origin-latitude) meters-per-degree scale, not each node's own latitude,
+    so the grid stays a true regular lattice.
     """
-    cell_m = max(CONCAVE_CELL_MIN_M, radius_for_cell_m / CONCAVE_CELL_DIVISOR)
+    if cell_m is None:
+        cell_m = _base_cell_m(radius_for_cell_m)
     mpd_lat = 110_540.0
     mpd_lon = 111_320.0 * max(math.cos(math.radians(origin_lat)), 1e-6)
     cell_lat_deg = cell_m / mpd_lat
@@ -1452,13 +1509,30 @@ def concave_boundary(
 ) -> list[tuple[float, float]] | None:
     """Closed (lon, lat) boundary ring of reached_coords' occupied-cell union, or None.
 
-    None means the trace found no loop (shouldn't happen once the caller has
-    already gated on CONCAVE_MIN_NODES, but degenerate inputs are handled
-    defensively) — callers fall back to the convex hull in that case.
+    The cell size starts at _base_cell_m() and doubles while the occupied
+    cells stay too scattered to trace as one region — see
+    CONCAVE_MIN_CONNECTED_FRACTION for why a cell finer than the graph's node
+    spacing otherwise yields one arbitrary cell's square (#389).
+
+    None means the trace found no loop, or the cells never joined up even at
+    CONCAVE_MAX_CELL_DOUBLINGS — callers fall back to the convex hull, which
+    is honest about covering more than the concave shape would.
     """
+    cell_m = _base_cell_m(radius_for_cell_m)
     occupied, cell_lon_deg, cell_lat_deg = _grid_bucket(
-        reached_coords, origin_lat, origin_lon, radius_for_cell_m
+        reached_coords, origin_lat, origin_lon, radius_for_cell_m, cell_m
     )
+    for _ in range(CONCAVE_MAX_CELL_DOUBLINGS):
+        if _largest_connected_fraction(occupied) >= CONCAVE_MIN_CONNECTED_FRACTION:
+            break
+        cell_m *= 2.0
+        occupied, cell_lon_deg, cell_lat_deg = _grid_bucket(
+            reached_coords, origin_lat, origin_lon, radius_for_cell_m, cell_m
+        )
+    else:
+        if _largest_connected_fraction(occupied) < CONCAVE_MIN_CONNECTED_FRACTION:
+            return None
+
     loop = _trace_cell_boundary(occupied)
     if not loop:
         return None
