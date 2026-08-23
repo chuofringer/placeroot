@@ -22,6 +22,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BUNDLE = REPO_ROOT / "site" / "placeroot.mcpb"
 
+# Cloudflare Pages refuses to upload any single file larger than this, and
+# the bundle is served from there (site/), so it is a hard ceiling on what
+# the bundle may grow to — see test_site_bundle_fits_the_pages_file_limit.
+PAGES_FILE_LIMIT_MIB = 25
+
 
 def _bundle_manifest() -> dict:
     with zipfile.ZipFile(BUNDLE) as z:
@@ -31,6 +36,27 @@ def _bundle_manifest() -> dict:
 def test_site_bundle_exists_and_is_a_zip():
     assert BUNDLE.is_file(), "site/placeroot.mcpb missing — run scripts/build_mcpb.py"
     assert zipfile.is_zipfile(BUNDLE)
+
+
+def test_site_bundle_fits_the_pages_file_limit():
+    """The bundle ships from Cloudflare Pages, which rejects files over 25 MiB.
+
+    Nothing in the build warns about this: the bundle grows with whatever
+    src/placeroot/data carries, so a pin bump that leaves the previous
+    release's artifacts beside the new ones silently doubles it and the
+    site deploy — not the test suite, not the release — is what fails,
+    after the release is already tagged (v0.9.8 hit exactly that at 42.8
+    MiB). Deleting the superseded release's artifact sets is the fix
+    docs/PIN.md already sanctions; this asserts it actually happened.
+    """
+    size_mib = BUNDLE.stat().st_size / (1024 * 1024)
+    assert size_mib < PAGES_FILE_LIMIT_MIB, (
+        f"site/placeroot.mcpb is {size_mib:.1f} MiB, over Cloudflare Pages' "
+        f"{PAGES_FILE_LIMIT_MIB} MiB per-file limit — the site deploy will fail. "
+        "Usually this means src/placeroot/data still carries a superseded "
+        "release's artifacts (manifests/, geocode-index/, land-cover-grid/); "
+        "delete them per docs/PIN.md and rebuild the bundle."
+    )
 
 
 def test_site_bundle_version_matches_the_package():

@@ -49,10 +49,17 @@ and read independently by `release.bundled_artifact_release()`:
 | Land-cover grid | `src/placeroot/data/land-cover-grid/<release>.parquet` | `uv run python scripts/build_land_cover_grid.py` |
 
 Each writes a *new*, release-named directory or file — it does not rewrite
-the old one in place, and the old one can be deleted once the new one is
-committed (or kept; `bundled_artifact_release()` takes the newest release
-present in *all three* sets, so a partial regeneration is safely ignored
-rather than silently claimed). Run all three in the same PR as the pin bump:
+the old one in place. **Delete the superseded release's three sets in the
+same PR** once the new ones are committed. Keeping them is functionally
+harmless (`bundled_artifact_release()` takes the newest release present in
+*all three* sets, so a partial regeneration is safely ignored rather than
+silently claimed) but it doubles `site/placeroot.mcpb`, and Cloudflare
+Pages refuses any file over 25 MiB — which fails the *site deploy*, not
+the test suite or the release job, so it surfaces only after the release
+is tagged. 0.9.8 shipped with the bundle at 42.8 MiB and the site stuck on
+the previous version until the old artifacts were pruned;
+`tests/test_mcpb_bundle.py::test_site_bundle_fits_the_pages_file_limit`
+now catches it before merge. Run all three in the same PR as the pin bump:
 `resolve_release()`'s `_resolved()` logic (see its docstring) prefers a
 *current* artifact release over a newer bare pin, so doing only some of them
 just means the deployment stays on the old release a while longer — annoying,
