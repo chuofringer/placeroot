@@ -25,7 +25,7 @@
   },
   "answers": {
     "file": "benchmarks/competitors/answers.json",
-    "method": "Both competitor servers were run for real over stdio, with their upstream HTTP calls redirected to a local stub that replies with the vendor's own documented example response for that endpoint. Every answer is therefore their code's output \u2014 their formatting, their field selection, their added hints \u2014 on a payload they publish themselves. Script: benchmarks/competitors/capture/capture_answers.mjs",
+    "method": "Both competitor servers were run for real over stdio, with their upstream HTTP calls redirected to a local stub that replies with the vendor's own documented example response for that endpoint. Every answer is therefore their code's output — their formatting, their field selection, their added hints — on a payload they publish themselves. Script: benchmarks/competitors/capture/capture_answers.mjs",
     "redirection": {
       "mapbox-mcp": "MAPBOX_API_ENDPOINT env var, supported by their own src/tools/MapboxApiBasedTool.ts. Server code unmodified.",
       "google-maps-archived": "Their built dist/index.js hardcodes https://maps.googleapis.com; the capture script rewrites that string to the stub origin and changes nothing else."
@@ -34,20 +34,20 @@
       "directory": "benchmarks/competitors/upstream_examples/",
       "method": "Extracted from the vendors' published API reference pages: every <pre> block is stripped of markup and kept only if it parses as JSON, then selected by index plus an asserted heading. Script: benchmarks/competitors/capture/extract_doc_examples.py",
       "sources": {
-        "mb_forward_geocode.json": "https://docs.mapbox.com/api/search/geocoding/ \u2014 'Example response: Forward geocoding'",
-        "mb_searchbox_forward.json": "https://docs.mapbox.com/api/search/search-box/ \u2014 'Example responses: Search request'",
-        "mb_searchbox_category.json": "https://docs.mapbox.com/api/search/search-box/ \u2014 'Example response: Search for POIs by category'",
-        "mb_directions.json": "https://docs.mapbox.com/api/navigation/directions/ \u2014 'Example EV Alternative route response with EV charging stops'",
-        "mb_matrix.json": "https://docs.mapbox.com/api/navigation/matrix/ \u2014 'Example response: Retrieve a matrix'",
-        "mb_isochrone.json": "https://docs.mapbox.com/api/navigation/isochrone/ \u2014 'Example response: Retrieve isochrones around a location'",
-        "g_geocode.json": "https://developers.google.com/maps/documentation/geocoding/start \u2014 'Geocoding request and response (latitude/longitude lookup)'"
+        "mb_forward_geocode.json": "https://docs.mapbox.com/api/search/geocoding/ — 'Example response: Forward geocoding'",
+        "mb_searchbox_forward.json": "https://docs.mapbox.com/api/search/search-box/ — 'Example responses: Search request'",
+        "mb_searchbox_category.json": "https://docs.mapbox.com/api/search/search-box/ — 'Example response: Search for POIs by category'",
+        "mb_directions.json": "https://docs.mapbox.com/api/navigation/directions/ — 'Example EV Alternative route response with EV charging stops'",
+        "mb_matrix.json": "https://docs.mapbox.com/api/navigation/matrix/ — 'Example response: Retrieve a matrix'",
+        "mb_isochrone.json": "https://docs.mapbox.com/api/navigation/isochrone/ — 'Example response: Retrieve isochrones around a location'",
+        "g_geocode.json": "https://developers.google.com/maps/documentation/geocoding/start — 'Geocoding request and response (latitude/longitude lookup)'"
       }
     },
     "known_understatements": [
       "The route_a_to_b row is partly a capability difference, not an efficiency one, and should not be quoted as a ratio. PlaceRoot's route answer carries distance, duration, mode and the two endpoints and nothing else — no polyline, no turn-by-turn steps — so its size barely moves with the length of the route. Mapbox's cell is a two-leg 4,575 m EV route with waypoints, leg summaries and a congestion breakdown. Ours is smaller in large part because it contains less.",
-      "The isochrone_15min row does not compare equal content. Both servers were asked for a single 15-minute contour, but the stub replies with Mapbox's published example whatever the request says, and that example carries three contours (15, 10 and 5 minutes) against PlaceRoot's one polygon. Their cell is therefore roughly three contours' worth of envelope; unlike the abridging caveats below, this one inflates their number rather than deflating it.",
+      "The isochrone_15min row does not compare equal content. Both servers were asked for a single 15-minute contour, but the stub replies with Mapbox's published example whatever the request says, and that example carries three contours (15, 10 and 5 minutes) against PlaceRoot's one polygon. Their cell is therefore roughly three contours' worth of envelope; unlike the abridging caveats below, this one inflates their number rather than deflating it. A second caveat on our own side: PlaceRoot's isochrone answer was 205 tokens in earlier snapshots because the boundary tracer was degenerate on this fixture (issue #389 — scattered grid cells collapsed the shed to a 0.02 km2 sliver). Fixed, the same query answers a real 2.9 km2 walkshed, and the honest cost of that correctness is a 540-token answer: larger than Mapbox's cell here, not smaller.",
       "Both reverse-geocode cells are their servers' rendering of a forward-geocoding example payload — mb_forward_geocode.json for Mapbox, g_geocode.json for Google — because neither vendor publishes a separate reverse-geocode example response. Both APIs return the same response shape either way and each server's own reverse-geocode handler did the formatting, but the input was not a reverse-geocode payload.",
-      "Vendor documentation abridges long payloads. The Mapbox isochrone example replaces every polygon ring with the literal string \"arrays of longitude, latitude coordinates\", and its search examples carry a single feature and a \"{mapbox_id}\" placeholder. Competitor answer sizes below are therefore floors, not typical values \u2014 a real isochrone or a ten-result search is much larger.",
+      "Vendor documentation abridges long payloads. The Mapbox isochrone example replaces every polygon ring with the literal string \"arrays of longitude, latitude coordinates\", and its search examples carry a single feature and a \"{mapbox_id}\" placeholder. Competitor answer sizes below are therefore floors, not typical values — a real isochrone or a ten-result search is much larger.",
       "The only Mapbox Directions example response their reference publishes is an EV route with charging stops, and it carries no step-by-step geometry. A real turn-by-turn response with geometry is far larger.",
       "The nearest_coffee row is the least comparable in the table and should not be read as a win or a loss: PlaceRoot returns ten ranked places, while Mapbox's published category-search example contains one POI. Their cell is roughly a per-result cost; ours is a ten-result answer.",
       "Mapbox's search, geocode and category tools return formatted plain text rather than JSON, which is a real compaction choice on their part and is reflected in the '(text)' cells. Their routing, isochrone and matrix tools return upstream JSON, pretty-printed."

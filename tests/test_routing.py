@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 from placeroot import routing, server
@@ -311,6 +313,67 @@ def test_isochrone_snaps_past_isolated_fragment():
 
 
 # --- Issue #36: concave (grid-boundary-trace) isochrone polygons -----------
+
+
+def _lattice(spacing_m: float, n: int, lat: float = 40.0, lon: float = -74.0):
+    """n x n evenly-spaced (lat, lon) nodes centered on (lat, lon)."""
+    mpd_lat = 110_540.0
+    mpd_lon = 111_320.0 * math.cos(math.radians(lat))
+    return [
+        (lat + (i - n // 2) * spacing_m / mpd_lat, lon + (j - n // 2) * spacing_m / mpd_lon)
+        for i in range(n)
+        for j in range(n)
+    ]
+
+
+def _ring_span_m(ring, lat: float = 40.0) -> tuple[float, float]:
+    lons = [p[0] for p in ring]
+    lats = [p[1] for p in ring]
+    mpd_lon = 111_320.0 * math.cos(math.radians(lat))
+    return (max(lons) - min(lons)) * mpd_lon, (max(lats) - min(lats)) * 110_540.0
+
+
+@pytest.mark.parametrize("spacing_m", [60.0, 100.0, 150.0, 300.0, 400.0])
+def test_concave_boundary_covers_a_lattice_coarser_than_its_cell(spacing_m):
+    """Issue #389: node spacing at or above the cell size must not collapse
+    the shed to one cell's square.
+
+    Every node landing in its own cell leaves no two cells sharing a side,
+    so the "longest" boundary loop was just some arbitrary single cell — a
+    60m box reported for a 3.2km reach, plausible-looking and entirely
+    wrong. concave_boundary now coarsens until the cells join up, so the
+    traced ring spans the lattice it was built from.
+    """
+    n = 9
+    coords = _lattice(spacing_m, n)
+    span_m = spacing_m * (n - 1)
+    ring = routing.concave_boundary(coords, 40.0, -74.0, spacing_m * (n // 2))
+    assert ring is not None
+    width_m, height_m = _ring_span_m(ring)
+    assert width_m >= span_m * 0.9, f"ring spans {width_m:.0f}m of a {span_m:.0f}m lattice"
+    assert height_m >= span_m * 0.9, f"ring spans {height_m:.0f}m of a {span_m:.0f}m lattice"
+
+
+def test_concave_boundary_leaves_an_already_connected_grid_alone():
+    """The coarsening must not fire when it isn't needed: a lattice finer
+    than the cell size already buckets into one connected blob, and its ring
+    should be the same one the un-coarsened trace produced."""
+    coords = _lattice(20.0, 9)
+    occupied, _, _ = routing._grid_bucket(coords, 40.0, -74.0, 180.0)
+    assert routing._largest_connected_fraction(occupied) == 1.0
+    ring = routing.concave_boundary(coords, 40.0, -74.0, 180.0)
+    width_m, _ = _ring_span_m(ring)
+    # Base cell (60m) padding on a 160m lattice: one cell either side, no more.
+    assert width_m <= 160.0 + 2 * routing.CONCAVE_CELL_MIN_M
+
+
+def test_largest_connected_fraction_reports_scattered_cells():
+    assert routing._largest_connected_fraction(set()) == 0.0
+    assert routing._largest_connected_fraction({(0, 0), (1, 0), (2, 0)}) == 1.0
+    # Two cells touching only at a corner are not 4-connected.
+    assert routing._largest_connected_fraction({(0, 0), (1, 1)}) == 0.5
+    scattered = {(x * 5, y * 5) for x in range(4) for y in range(4)}
+    assert routing._largest_connected_fraction(scattered) == 1 / 16
 
 
 def test_build_polygon_falls_back_to_convex_hull_below_threshold():

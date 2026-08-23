@@ -8,6 +8,24 @@ fixing behavior is patch.
 
 ## [Unreleased]
 
+### Fixed
+- `isochrone`'s concave boundary trace no longer collapses on sparse or
+  evenly spaced street graphs (#389). A grid cell finer than the graph's
+  own node spacing dropped every reached node into a cell of its own, and
+  isolated cells share no sides — so the "longest boundary loop" was one
+  arbitrary cell's square: a plausible-looking, tiny polygon reported for
+  a large reach. `concave_boundary` now measures how much of the occupied
+  set sits in one connected component and coarsens its cells until they
+  join up, falling back to the convex hull if they never do. On the
+  committed benchmark fixture the same 15-minute walk goes from a 0.02 km²
+  sliver to a 2.9 km² walkshed; on a 300 m lattice, from a single 60 m box
+  to the full 2.4 km span.
+- Benchmarks re-captured accordingly: the published `isochrone_15min`
+  answer size rises from 205 to 540 tokens, because the old number
+  measured the degenerate polygon rather than a real one. `docs/benchmarks-vs.md`
+  now says so beside the row instead of quietly booking the difference as
+  efficiency.
+
 ## [0.9.9] — 2026-08-23
 
 ### Fixed

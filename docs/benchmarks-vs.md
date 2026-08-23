@@ -136,12 +136,12 @@ Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Eve
 
 - Token counting method: **chars/4 heuristic — `placeroot.budget.estimate_tokens`, applied identically to all three servers**
 - Snapshots captured: **2026-08-08**
-- PlaceRoot's own answers were captured on **Linux-6.12.94+-x86_64-with-glibc2.41** (Python 3.11.16, Overture `2026-07-22.0`) and are snapshotted rather than recomputed here: floating-point differences in routing and geometry change digit counts between platforms, so a live rerun costs a few tokens more or less on Linux than on macOS. A tolerance test reruns them for real and fails if this snapshot drifts from what the code now answers.
+- PlaceRoot's own answers were captured on **macOS-26.3.1-arm64-arm-64bit** (Python 3.11.0, Overture `2026-08-19.0`) and are snapshotted rather than recomputed here: floating-point differences in routing and geometry change digit counts between platforms, so a live rerun costs a few tokens more or less on Linux than on macOS. A tolerance test reruns them for real and fails if this snapshot drifts from what the code now answers.
 - Schema figures are counted twice: over the **common fields** every server here publishes, and **verbatim** over everything it sends. The ratios below are the common-field ones, because Mapbox declares an `outputSchema` that PlaceRoot does not declare at all — see the note under the table.
 - Schema surface, whole install (common fields): PlaceRoot **24410** tokens (42 tools) · Mapbox **15190** (29 tools) · Google Maps **655** (7 tools)
 - Schema surface, the six tools each server needs for the scenarios below (common fields): PlaceRoot **4703** · Mapbox **4654** (1.0x ours) · Google Maps **500** (5 tools — no isochrone tool exists)
 - Whole-install surface: Mapbox is **0.6x** PlaceRoot's on common fields, on 29 tools against 42. Verbatim — counting the output schemas Mapbox publishes and we don't — it is 1.2x (29295 against 24410), and 2.8x on the six-tool subset.
-- Answers, over the 6 scenarios both PlaceRoot and Mapbox answer: PlaceRoot **1682** tokens total, Mapbox **1337** (1219 with pretty-print whitespace removed)
+- Answers, over the 6 scenarios both PlaceRoot and Mapbox answer: PlaceRoot **2026** tokens total, Mapbox **1337** (1219 with pretty-print whitespace removed)
 
 ### Where the competitor numbers come from
 
@@ -173,18 +173,18 @@ Mapbox declares an `outputSchema` on almost every tool; PlaceRoot declares none,
 | `geocode_address` — Geocode one address / place name. | **87** | **93** (text) | **48** (41 minified) |
 | `reverse_geocode` — What address is at this coordinate? | **45** | **64** (text) | **288** (188 minified) |
 | `nearest_coffee` — Coffee shops near this point. | **811** | **117** (text) | not measured |
-| `route_a_to_b` — Route from A to B. | **427** | **422** (text) | not measured |
-| `isochrone_15min` — How far can I get in 15 minutes? | **205** | **396** (text) | not measured |
+| `route_a_to_b` — Route from A to B. | **436** | **422** (text) | not measured |
+| `isochrone_15min` — How far can I get in 15 minutes? | **540** | **396** (text) | not measured |
 | `matrix_3x3` — 3x3 distance matrix over three points. | **107** | **245** (127 minified) | not measured |
 
 Competitor answers are their real servers' output: each server was run over stdio with its upstream HTTP calls pointed at a local stub replying with the vendor's own documented example response for that endpoint (`benchmarks/competitors/upstream_examples/`). The stub answers with that example whatever the request says, so a competitor cell is the size of their code's rendering of a payload they publish — not of an answer to our exact question, and not of the same content ours answered. Read the caveats below before comparing any row. Both pretty-print their JSON with two-space indentation, so the whitespace-free count is shown alongside; PlaceRoot serializes compact, and its two counts come out equal.
 
-PlaceRoot's answers were captured the same way, on Linux-6.12.94+-x86_64-with-glibc2.41: the six scenarios run through the same `placeroot.server` functions the MCP server exposes, answered from the committed fixtures with the Overture release pinned and the tile cache off.
+PlaceRoot's answers were captured the same way, on macOS-26.3.1-arm64-arm-64bit: the six scenarios run through the same `placeroot.server` functions the MCP server exposes, answered from the committed fixtures with the Overture release pinned and the tile cache off.
 
 ### What these numbers are not
 
 - The route_a_to_b row is partly a capability difference, not an efficiency one, and should not be quoted as a ratio. PlaceRoot's route answer carries distance, duration, mode and the two endpoints and nothing else — no polyline, no turn-by-turn steps — so its size barely moves with the length of the route. Mapbox's cell is a two-leg 4,575 m EV route with waypoints, leg summaries and a congestion breakdown. Ours is smaller in large part because it contains less.
-- The isochrone_15min row does not compare equal content. Both servers were asked for a single 15-minute contour, but the stub replies with Mapbox's published example whatever the request says, and that example carries three contours (15, 10 and 5 minutes) against PlaceRoot's one polygon. Their cell is therefore roughly three contours' worth of envelope; unlike the abridging caveats below, this one inflates their number rather than deflating it.
+- The isochrone_15min row does not compare equal content. Both servers were asked for a single 15-minute contour, but the stub replies with Mapbox's published example whatever the request says, and that example carries three contours (15, 10 and 5 minutes) against PlaceRoot's one polygon. Their cell is therefore roughly three contours' worth of envelope; unlike the abridging caveats below, this one inflates their number rather than deflating it. A second caveat on our own side: PlaceRoot's isochrone answer was 205 tokens in earlier snapshots because the boundary tracer was degenerate on this fixture (issue #389 — scattered grid cells collapsed the shed to a 0.02 km2 sliver). Fixed, the same query answers a real 2.9 km2 walkshed, and the honest cost of that correctness is a 540-token answer: larger than Mapbox's cell here, not smaller.
 - Both reverse-geocode cells are their servers' rendering of a forward-geocoding example payload — mb_forward_geocode.json for Mapbox, g_geocode.json for Google — because neither vendor publishes a separate reverse-geocode example response. Both APIs return the same response shape either way and each server's own reverse-geocode handler did the formatting, but the input was not a reverse-geocode payload.
 - Vendor documentation abridges long payloads. The Mapbox isochrone example replaces every polygon ring with the literal string "arrays of longitude, latitude coordinates", and its search examples carry a single feature and a "{mapbox_id}" placeholder. Competitor answer sizes below are therefore floors, not typical values — a real isochrone or a ten-result search is much larger.
 - The only Mapbox Directions example response their reference publishes is an EV route with charging stops, and it carries no step-by-step geometry. A real turn-by-turn response with geometry is far larger.
