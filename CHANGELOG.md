@@ -8,6 +8,32 @@ fixing behavior is patch.
 
 ## [Unreleased]
 
+## [0.9.9] — 2026-08-23
+
+### Fixed
+- Packaging: the published 0.9.8 wheel (42.7 MB) and sdist (87 MB) carried
+  the *previous* Overture release's bundled artifacts alongside the pinned
+  one — the pin bump added `2026-08-19.0`'s three artifact sets without
+  removing `2026-07-22.0`'s, doubling every install for no benefit.
+  Pruned: 0.9.9 installs at roughly half the size, with identical
+  behavior (`bundled_artifact_release()` only ever reads the newest
+  release present in all three sets).
+- The same duplication pushed `site/placeroot.mcpb` to 42.8 MiB, over
+  Cloudflare Pages' 25 MiB per-file limit, so every site deploy failed
+  from the pin bump until it was pruned — the one-click Desktop Extension
+  download and the site's version copy were stuck on the previous release.
+  `docs/PIN.md` now requires deleting the superseded sets in the bump PR,
+  and `tests/test_mcpb_bundle.py::test_site_bundle_fits_the_pages_file_limit`
+  fails at merge time rather than after a tag.
+- `Prepare Release` re-syncs `npm/README.md`: the version bump rewrites
+  README's version-pinned links, which left the generated npm copy stale
+  and failed the workflow's own verify step.
+- `score_locality`'s requirement matching requires lexical-band confidence,
+  so `search_categories`' embeddings tail (#356) — which matches almost
+  any text at a deliberately low confidence — can no longer put a graded
+  score behind a phrase the taxonomy never really matched. Unmatched text
+  stays `measurable: false`, as #349 intends.
+
 ## [0.9.8] — 2026-08-22
 
 ### Added
