@@ -72,6 +72,10 @@ jobs:
           # the bundle's manifest version matches the bump —
           # tests/test_mcpb_bundle.py fails the verify step below otherwise.
           uv run python scripts/build_mcpb.py site/placeroot.mcpb
+          # The bump rewrites version-pinned links in README.md; npm/README.md
+          # is generated from it, so re-sync or test_npm_readme_sync fails the
+          # verify step (seen cutting 0.9.8).
+          uv run python scripts/sync_npm_readme.py
 
       - name: Verify the bumped tree
         run: |
