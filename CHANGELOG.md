@@ -8,6 +8,8 @@ fixing behavior is patch.
 
 ## [Unreleased]
 
+## [0.9.8] — 2026-08-22
+
 ### Added
 - `suggest_areas`: inverse area search (#305 — #348/#349/#350). "Where
   within 25 min by bike of my office has parks and groceries?" — each
