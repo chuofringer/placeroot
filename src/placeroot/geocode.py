@@ -513,6 +513,14 @@ _DIVISIONS_TABLE_SUBDIR = "geocode-divisions"
 _DIVISIONS_TABLE_FILENAME = "table.parquet"
 # #214: the alternate-name table, written alongside the primary one.
 _ALT_NAMES_TABLE_FILENAME = "alt_names.parquet"
+# #410: the language-tagged name table, written alongside the primary one.
+# Distinct from the alt-name table above: that one folds/dedupes
+# names.common down to spellings for *searching* and discards which
+# language each came from; this one keeps (id, lang) intact for *serving*
+# the caller's requested language back — the two answer different
+# questions off the same source column, so keeping them separate tables
+# means neither has to carry columns the other's query pattern doesn't use.
+_LANG_NAMES_TABLE_FILENAME = "lang_names.parquet"
 
 # #224: the bbox columns carried by the materialized divisions table. Named
 # with a bbox_ prefix rather than reusing the struct so the stale-cache check
@@ -899,6 +907,41 @@ def _materialize_alt_names_table(path: Path, glob: str) -> None:
     _publish_copied_parquet(con, tmp_path, path)
 
 
+def _materialize_lang_names_table(path: Path, glob: str) -> None:
+    """COPY the #410 language-tagged name table — one row per (division id,
+    names.common language key) — into a local parquet at `path`.
+
+    Reads the same `names.common` map the #214 alt-name table (above) reads,
+    but keeps the map key (the language code) instead of discarding it, and
+    does not fold/dedupe by spelling — a lang lookup wants "the row for this
+    exact id and this exact language", not "some spelling near this string".
+    One extra pass over names.common at materialization time (a one-time
+    cost, alongside the alt-name table's own pass); the per-request cost
+    this buys is a single indexed join by (id, lang) against a small local
+    parquet — see _lang_variants_for, not a second scan of Overture data.
+
+    Raises duckdb.Error if names.common isn't there or isn't a map — same
+    convention as _materialize_alt_names_table; the caller treats that as
+    "no lang table" and geocode answers with primary names only.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".parquet.tmp")
+    con = overture._new_connection()
+    sql = f"""
+        COPY (
+            SELECT id, lower(entry.key) AS lang, entry.value AS name
+            FROM (
+                SELECT id, unnest(map_entries(names.common)) AS entry
+                FROM read_parquet('{glob}', hive_partitioning=1)
+                WHERE names.common IS NOT NULL
+            )
+            WHERE entry.value IS NOT NULL AND entry.value <> ''
+        ) TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)
+    """
+    con.execute(sql)
+    _publish_copied_parquet(con, tmp_path, path)
+
+
 def _is_remote_glob(glob: str) -> bool:
     return glob.startswith(("s3://", "http://", "https://"))
 
@@ -948,6 +991,7 @@ def _materialize_divisions_table(path: Path, glob: str) -> None:
     else:
         _materialize_divisions_pass(path, glob, with_hierarchies=True)
         _try_materialize_alt_names_table(path.with_name(_ALT_NAMES_TABLE_FILENAME), glob)
+        _try_materialize_lang_names_table(path.with_name(_LANG_NAMES_TABLE_FILENAME), glob)
 
 
 def _materialize_divisions_pass(path: Path, glob: str, with_hierarchies: bool) -> None:
@@ -1066,6 +1110,7 @@ def _upgrade_divisions_table(path: Path, glob: str) -> None:
     t0 = time.time()
     _materialize_divisions_pass(path, glob, with_hierarchies=True)
     _try_materialize_alt_names_table(path.with_name(_ALT_NAMES_TABLE_FILENAME), glob)
+    _try_materialize_lang_names_table(path.with_name(_LANG_NAMES_TABLE_FILENAME), glob)
     _stage1_sentinel(path).unlink(missing_ok=True)
     logger.info(
         "divisions table upgraded with admin chains in %.1fs -> %s",
@@ -1106,6 +1151,79 @@ def _try_materialize_alt_names_table(alt_path: Path, glob: str) -> None:
     logger.info(
         "alternate-name table materialized in %.1fs -> %s", time.time() - t0, alt_path
     )
+
+
+_LANG_BUILD_ATTEMPTED: set[str] = set()
+
+
+def _try_materialize_lang_names_table(lang_path: Path, glob: str) -> None:
+    """Build the #410 lang table, logging and swallowing any failure — same
+    reasoning as _try_materialize_alt_names_table: losing this table means
+    geocode/resolve_place/place_details answer with primary names only,
+    which is a much smaller loss than failing the call that triggered the
+    build.
+    """
+    t0 = time.time()
+    try:
+        _materialize_lang_names_table(lang_path, glob)
+    except (duckdb.Error, overture.UpstreamUnavailable, OSError) as e:
+        logger.warning(
+            "language-tagged name table materialization failed, lang lookups "
+            "will find no variant: %s", e,
+        )
+        return
+    logger.info(
+        "language-tagged name table materialized in %.1fs -> %s", time.time() - t0, lang_path
+    )
+
+
+def _local_lang_names_table(local_table: str | None) -> str | None:
+    """Path to the #410 language-tagged name table sitting beside
+    `local_table`, or None if there isn't one — same "no lang variants
+    available" convention as _local_alt_names_table's None (cache off, a
+    cache directory predating #410, a dataset without names.common, or a
+    failed best-effort build).
+    """
+    if local_table is None:
+        return None
+    path = Path(local_table).with_name(_LANG_NAMES_TABLE_FILENAME)
+    if path.exists():
+        return str(path)
+    key = str(path)
+    if key not in _LANG_BUILD_ATTEMPTED:
+        _LANG_BUILD_ATTEMPTED.add(key)
+        logger.info("no language-tagged name table at %s (cache predates #410); building it", path)
+        _try_materialize_lang_names_table(
+            path, overture.upstream_glob(theme="divisions", type_="division")
+        )
+        if path.exists():
+            return str(path)
+    return None
+
+
+def _lang_variants_for(lang_table: str | None, ids: list[str], lang: str) -> dict[str, str]:
+    """{id: variant name} for every id in `ids` that has a names.common entry
+    under `lang` in `lang_table`. One indexed lookup for the whole batch of
+    result rows — not one query per row — so applying #410's lang preference
+    to a page of results costs one extra small local-parquet scan, not N.
+
+    Empty dict (never an error) when there's no lang table, no ids, or the
+    id/lang combination just isn't present — all of which mean the same
+    thing to the caller: no variant, primary name stands.
+    """
+    if not lang_table or not ids:
+        return {}
+    sql = f"""
+        SELECT id, name
+        FROM read_parquet('{lang_table}')
+        WHERE lang = $lang AND id IN (SELECT unnest($ids))
+    """
+    try:
+        with overture._conn_lock:
+            rows = overture.conn().execute(sql, {"lang": lang, "ids": ids}).fetchall()
+    except duckdb.Error:
+        return {}
+    return dict(rows)
 
 
 def _local_alt_names_table(local_table: str | None) -> str | None:
@@ -1620,19 +1738,23 @@ def _well_known_city_near(row: dict, query: str) -> int:
 
 def _resolve_cache_key(
     query: str, city: str | None, near_lat: float | None, near_lon: float | None,
+    lang: str | None = None,
 ) -> tuple:
     near = (
         (round(near_lat, 3), round(near_lon, 3))
         if near_lat is not None and near_lon is not None
         else (None, None)
     )
-    return (_fold_query_key(query), _fold_query_key(city) if city else "", *near)
+    # #410: lang is part of the key — otherwise a lang="de" call would replay
+    # a cache entry another lang (or no lang at all) already populated.
+    return (_fold_query_key(query), _fold_query_key(city) if city else "", *near, lang or "")
 
 
 def _resolve_cache_get(
     query: str, city: str | None, near_lat: float | None, near_lon: float | None,
+    lang: str | None = None,
 ) -> list[dict] | None:
-    key = _resolve_cache_key(query, city, near_lat, near_lon)
+    key = _resolve_cache_key(query, city, near_lat, near_lon, lang)
     with _resolve_lru_lock:
         rows = _resolve_lru.get(key)
         if rows is None:
@@ -1647,8 +1769,9 @@ def _resolve_cache_put(
     near_lat: float | None,
     near_lon: float | None,
     rows: list[dict],
+    lang: str | None = None,
 ) -> None:
-    key = _resolve_cache_key(query, city, near_lat, near_lon)
+    key = _resolve_cache_key(query, city, near_lat, near_lon, lang)
     stored = [dict(r) for r in rows]
     with _resolve_lru_lock:
         _resolve_lru[key] = stored
@@ -3103,9 +3226,9 @@ def _postcode_empty_note(display: str) -> str:
     )
 
 
-def geocode(query: str, limit: int = DEFAULT_LIMIT) -> list[dict]:
+def geocode(query: str, limit: int = DEFAULT_LIMIT, lang: str | None = None) -> list[dict]:
     """Free-text place name -> ranked candidates. See geocode_detailed."""
-    return geocode_detailed(query, limit)["results"]
+    return geocode_detailed(query, limit, lang=lang)["results"]
 
 
 def geocode_batch(queries: list[str], limit_per_query: int = 3) -> list[dict]:
@@ -3152,6 +3275,7 @@ def geocode_detailed(
     *,
     local_table: str | None = None,
     alt_table: str | None = None,
+    lang: str | None = None,
 ) -> dict:
     """Free-text place name -> ranked candidates, from Overture divisions (and places fallback).
 
@@ -3193,6 +3317,16 @@ def geocode_detailed(
     runner-up anchor sitting in a different country than the top candidate
     ("London" -> London, Ontario for a UK query) and cannot do that from
     admin_context alone once a row's chain is empty.
+
+    lang (#410, a 2-3 letter code) requests Overture's language-tagged
+    names.common variant for each division-kind row, when one exists for
+    that id and language: `name` becomes the variant and the primary is
+    added back as `name_primary` only when it differs — piggybacked as one
+    extra lookup keyed by the batch of result ids, not a scan per row (see
+    _lang_variants_for). Places-fallback rows (a row's `_category` is set)
+    are unaffected — same scope line find_places itself draws this round.
+    No lang given, or no variant found for a row, leaves it byte-identical
+    to the no-lang answer.
     """
     query = query.strip()
     limit = max(1, min(limit, MAX_LIMIT))
@@ -3558,6 +3692,18 @@ def geocode_detailed(
         recalled.sort(key=lambda r: _rank_key(r, search_query, region_population))
         candidates = recalled
 
+    # #410: one lookup for the whole page of division-kind rows about to be
+    # returned, keyed by the ids actually surviving [:limit] — not a scan per
+    # row, and not run at all unless a lang was actually requested. Places-
+    # fallback rows (row["_category"] is set) are excluded: they come from a
+    # different theme/id-space than the divisions lang table indexes, same
+    # scope line find_places draws this round (see the docstring above).
+    lang_variants: dict[str, str] = {}
+    if lang:
+        page = candidates[:limit]
+        division_ids = [r["id"] for r in page if r.get("id") and r.get("_category") is None]
+        lang_variants = _lang_variants_for(_local_lang_names_table(local_table), division_ids, lang)
+
     out = []
     for row in candidates[:limit]:
         entry = {
@@ -3592,6 +3738,14 @@ def geocode_detailed(
             # from a name that doesn't contain the query, and call a
             # correction a "substring" match.
             entry["matched_by"] = "fuzzy"
+        variant = lang_variants.get(row["id"]) if row.get("id") else None
+        if variant and variant != entry["name"]:
+            # #410: never invent or transliterate — variant only ever comes
+            # from Overture's own names.common map, looked up above.
+            # name_primary appears only when it actually differs, so a
+            # no-variant answer stays byte-identical to the no-lang one.
+            entry["name_primary"] = entry["name"]
+            entry["name"] = variant
         out.append(entry)
     if out:
         _kick_autowarm(out[0])
@@ -3916,6 +4070,7 @@ def resolve_place(
     near_lon: float | None = None,
     limit: int = 3,
     city: str | None = None,
+    lang: str | None = None,
 ) -> list[dict]:
     """Free-text place reference -> ranked, typed GERS ids an agent can hold onto.
 
@@ -3952,6 +4107,15 @@ def resolve_place(
     fails after retries, or overture.SchemaDegraded if the places dataset
     is missing bbox — the caller (server.py) turns either into a structured
     error like every other tool.
+
+    lang (#410) requests Overture's language-tagged names.common variant,
+    the same as geocode() — but only for "kind": "division" candidates
+    (threaded through the internal geocode() call this function already
+    makes). "kind": "place" candidates come from find_places, which is out
+    of scope for #410 this round (the same scope line find_places' own
+    docstring draws), so they always carry their primary name. A division
+    candidate's `name_primary` is present under the same rule as
+    geocode()'s: only when the variant actually differs from the primary.
     """
     query = query.strip()
     limit = max(1, min(limit, MAX_LIMIT))
@@ -3983,7 +4147,7 @@ def resolve_place(
                     city_bounded = True
 
     cache_city, cache_lat, cache_lon = city, near_lat, near_lon
-    cached = _resolve_cache_get(query, cache_city, cache_lat, cache_lon)
+    cached = _resolve_cache_get(query, cache_city, cache_lat, cache_lon, lang)
     if cached is not None:
         return cached[:limit]
 
@@ -4023,7 +4187,7 @@ def resolve_place(
     # Search the place half when we stripped a trailing city, so
     # "Colosseo Roma" does not return Rome the city as the pin.
     search_query = place_query if city_bounded and place_query != query else query
-    geocode_hits = geocode(search_query, limit=_RESOLVE_OVERFETCH)
+    geocode_hits = geocode(search_query, limit=_RESOLVE_OVERFETCH, lang=lang)
     if city_bounded and near_lat is not None and near_lon is not None:
         geocode_hits = [
             r for r in geocode_hits
@@ -4128,14 +4292,19 @@ def resolve_place(
         if not r["id"] or r["id"] in seen_ids:
             continue
         seen_ids.add(r["id"])
-        candidates.append({
+        candidate = {
             "id": r["id"], "kind": "division", "name": r["name"],
             "lat": r["lat"], "lon": r["lon"],
             "type": r.get("type"),
             "admin_context": r["admin_context"],
             "match": _division_match_label(r, query, search_query),
             "_prominence": r["rank_score"],
-        })
+        }
+        if r.get("name_primary"):
+            # #410: geocode()'s own lang enrichment already applied — just
+            # carry it through the merge rather than re-deriving it.
+            candidate["name_primary"] = r["name_primary"]
+        candidates.append(candidate)
     for r in place_rows:
         if not r["id"] or r["id"] in seen_ids or not r["name"]:
             continue
@@ -4225,7 +4394,7 @@ def resolve_place(
     for c in candidates:
         del c["_prominence"]
     out = candidates[:limit]
-    _resolve_cache_put(query, cache_city, cache_lat, cache_lon, out)
+    _resolve_cache_put(query, cache_city, cache_lat, cache_lon, out, lang)
     if out:
         _remember_last_city(city, out[0])
         _kick_autowarm(out[0])

@@ -51,7 +51,7 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `geometry_op` | Offline geometry math and predicates behind one `op` catalog: point distance/bearing/destination/midpoint, area/length/bbox/centroid, buffer/convex hull (returns geometry), point-in-polygon, nearest point, nearest point on a line |
 | `warmup_city` | Pre-cache a city's places and transportation tiles so later place searches over it read locally — does not build the street graph or cache buildings. A first tile COPY without `confirm` returns `needs_confirm` |
 | `data_version` | Which Overture release the answers are drawn from |
-| `preferences` | Read or update local travel/household defaults (mode, pace, dog, …). Nothing leaves the machine |
+| `preferences` | Read or update local travel/household defaults (mode, pace, dog, result language, …). Nothing leaves the machine |
 
 
 ## Confirming a slow hop
@@ -123,7 +123,7 @@ context, so you can pin them into a conversation without spending a tool call:
 | Resource | Contents |
 |---|---|
 | `placeroot://data-version` | The resolved Overture release, its date, how it was resolved (discovery, env override, the pinned fallback, or held at the artifact release), its age, and whether the bundled acceleration applies to it. Same values the `data_version` tool returns — one shared code path, so they cannot drift. |
-| `placeroot://preferences` | Local travel and household preferences (mode, pace, household). Same document the `preferences` tool reads and updates — one shared code path. Nothing in this file leaves the machine. |
+| `placeroot://preferences` | Local travel and household preferences (mode, pace, household, result-language `lang`). Same document the `preferences` tool reads and updates — one shared code path. Nothing in this file leaves the machine. |
 | `placeroot://categories` | Summary of the place-category taxonomy: all 22 top-level categories with how many slugs sit under each, plus how to get an exact slug. ~530 tokens — a summary, not the 2,117-slug CSV, which stays behind `search_categories`. |
 
 In Claude Code they auto-complete as @-mentions:
@@ -200,7 +200,9 @@ union of everything named:
 `data_version` and `preferences` are registered under every profile.
 `data_version` is ~230 tokens and the only way an agent can tell which
 Overture release backs its answers. `preferences` is the local defaults
-document; routing tools read its stored mode when theirs is omitted.
+document; routing tools read its stored mode when theirs is omitted, and
+`geocode`, `resolve_place`, and `place_details` read its stored `lang`
+(#410) the same way.
 
 Profiles may overlap, and a list may mix them with bare tool names —
 `PLACEROOT_TOOLS=routing,find_places` or

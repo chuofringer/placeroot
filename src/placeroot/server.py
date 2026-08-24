@@ -240,6 +240,17 @@ _ModeSetArg = Annotated[
         json_schema_extra={"enum": _MODE_ENUM},
     ),
 ]
+# #410: no fixed enum — a language code is validated by shape (2-3 lowercase
+# letters), not membership in a closed list the way mode is, since Overture's
+# names.common keys are not a small fixed set.
+_LangArg = Annotated[
+    str | None,
+    Field(
+        description="Result-language code (2-3 lowercase letters, e.g. \"de\"). "
+        "Overture-tagged name variants only — never transliterated or invented. "
+        "Default: stored preference, else the primary name.",
+    ),
+]
 _OperatingStatusArg = Annotated[
     str | None,
     Field(
@@ -1366,6 +1377,7 @@ def place_details(
     radius_m: float = overture.DEFAULT_DETAILS_RADIUS_M,
     near_lat: float | None = None,
     near_lon: float | None = None,
+    lang: _LangArg = None,
 ) -> dict:
     """One place, in full: addresses, websites, phones, socials, brand,
     source attribution, GERS id, confidence, operating status, and a
@@ -1385,6 +1397,12 @@ def place_details(
     can be narrowed to a ~50km box instead of scanning the whole dataset.
     Ignored when resolving by name. Omitting it still works, just slower on
     a cold, uncached id.
+
+    lang (#410) requests Overture's language-tagged name variant for this
+    place, when the data has one: `name` becomes the variant and
+    `name_primary` is added only when it differs. Default: the stored
+    `preferences()` lang, else the primary name unchanged. Never invented
+    or transliterated.
     """
     if lat is not None and lon is not None:
         coord_error = _invalid_coord(lat, lon)
@@ -1394,8 +1412,11 @@ def place_details(
         coord_error = _invalid_coord(near_lat, near_lon)
         if coord_error is not None:
             return coord_error
+    lang = preference_store.resolve_lang(lang)
     try:
-        result = overture.place_details(id, name, lat, lon, radius_m, near_lat, near_lon)
+        result = overture.place_details(
+            id, name, lat, lon, radius_m, near_lat, near_lon, lang=lang,
+        )
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
     except overture.UpstreamUnavailable as e:
@@ -3071,7 +3092,7 @@ def water_near(
 
 
 @_tool("Geocode a place name")
-def geocode(query: str, limit: int = 5) -> dict:
+def geocode(query: str, limit: int = 5, lang: _LangArg = None) -> dict:
     """Free-text place name -> ranked candidate locations, from Overture divisions and places.
 
     No Nominatim, no third-party geocoding API. Matches localities,
@@ -3109,9 +3130,17 @@ def geocode(query: str, limit: int = 5) -> dict:
     München and "Tokyo" answers 東京都. `name` is always the canonical
     spelling; such rows carry an extra "matched_name" naming the alternate
     that matched.
+
+    lang (#410) requests Overture's language-tagged name variant instead
+    of a division row's primary name, when the data has one for that row
+    and language: `name` becomes the variant and `name_primary` is added
+    only when it differs. Default: the stored `preferences()` lang, else
+    the primary name unchanged. Never invented or transliterated — only a
+    variant actually present in Overture's data is ever returned.
     """
+    lang = preference_store.resolve_lang(lang)
     try:
-        result = geocoding.geocode_detailed(query, limit)
+        result = geocoding.geocode_detailed(query, limit, lang=lang)
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     payload = budget.apply_budget({"results": result["results"]}, "results")
@@ -3180,6 +3209,7 @@ def resolve_place(
     near_lon: float | None = None,
     limit: int = 3,
     city: str | None = None,
+    lang: _LangArg = None,
 ) -> dict:
     """Free-text place reference -> ranked, typed GERS ids to hold onto.
 
@@ -3220,14 +3250,21 @@ def resolve_place(
     An unresolvable query returns {"results": []} — not an error. Returns a
     structured {"error": ...} instead of raising if the remote scan fails
     or the places dataset is missing columns this tool depends on.
+
+    lang (#410) requests Overture's language-tagged name variant, same as
+    geocode() — but only for "kind": "division" rows; "kind": "place" rows
+    (from find_places, out of scope for #410 this round) always carry
+    their primary name. Default: the stored `preferences()` lang, else the
+    primary name unchanged.
     """
     if near_lat is not None and near_lon is not None:
         coord_error = _invalid_coord(near_lat, near_lon)
         if coord_error is not None:
             return coord_error
+    lang = preference_store.resolve_lang(lang)
     try:
         rows = geocoding.resolve_place(
-            query, near_lat, near_lon, limit, city=city,
+            query, near_lat, near_lon, limit, city=city, lang=lang,
         )
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
@@ -4720,6 +4757,7 @@ def preferences(
     pace: str | None = None,
     household: list[str] | None = None,
     note: str | None = None,
+    lang: _LangArg = None,
     clear: bool = False,
 ) -> dict:
     """Travel defaults.
@@ -4727,14 +4765,18 @@ def preferences(
     State "I bike everywhere, I have a dog" once. Routing tools use the
     stored mode when you omit theirs; an explicit argument always wins.
     pace and household are stored for later features and do not change
-    answers yet. The same document is the placeroot://preferences resource.
+    answers yet. lang (#410) is the stored result-language preference: the
+    name-lookup tools that accept their own `lang` use this one when
+    theirs is omitted, returning an Overture-tagged name variant (e.g.
+    "Munich" for "München" with lang="en") — a per-call `lang` always
+    wins. The same document is the placeroot://preferences resource.
 
-    Call with no arguments to read. Pass mode, pace, household tags, or a
-    free-text note to merge those fields.
+    Call with no arguments to read. Pass mode, pace, household tags, a
+    free-text note, or lang to merge those fields.
     clear=true deletes the file and cannot be combined with other fields.
     Nothing is sent off this machine.
     """
-    fields = (mode, pace, household, note)
+    fields = (mode, pace, household, note, lang)
     if clear and any(value is not None for value in fields):
         return {
             "error": "bad_request",
@@ -4750,8 +4792,13 @@ def preferences(
                     "detail": f"mode={mode!r} is not supported",
                     "supported": sorted(preference_store.MODES),
                 }
+            if lang is not None and not preference_store.is_valid_lang(lang):
+                return {
+                    "error": "bad_request",
+                    "detail": f"lang={lang!r} must be 2-3 lowercase letters",
+                }
             return preference_store.update(
-                mode=mode, pace=pace, household=household, note=note
+                mode=mode, pace=pace, household=household, note=note, lang=lang,
             )
         return preference_store.payload()
     except preference_store.PreferencesError as exc:

@@ -6,6 +6,12 @@ small read/update tool. Routing tools consult the stored travel mode
 when theirs is omitted. An explicit argument always wins. pace and
 household are stored for later features; they do not change answers yet.
 
+#410: `lang` is a stored result-language preference (a 2-3 letter code,
+e.g. "de", "fra") that geocode/geocode_detailed, resolve_place, and
+place_details consult when their own per-call `lang` is omitted — see
+resolve_lang. Unlike pace/household it does change answers, the same way
+mode does for routing.
+
 Nothing leaves the machine: the file lives under the user's config
 directory (or PLACEROOT_PREFERENCES_PATH) and is never sent upstream.
 """
@@ -14,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -28,7 +35,23 @@ MODES = frozenset({"walk", "cycle", "drive"})
 DEFAULT_MODE_ISOCHRONE = "walk"
 DEFAULT_MODE_ROUTE = "drive"
 
+# #410: a language code stored/passed for the result-language preference.
+# 2-3 lowercase letters covers both ISO 639-1 ("de", "en") and 639-2/3
+# ("fra", "yue") — Overture's names.common keys are themselves BCP-47-ish
+# short codes, not validated against a fixed registry, so this is a shape
+# check (reject obvious junk) rather than a membership check against a
+# closed list of "supported" languages the way MODES is.
+_LANG_PATTERN = re.compile(r"^[a-z]{2,3}$")
+
 ENV_PATH = "PLACEROOT_PREFERENCES_PATH"
+
+
+def is_valid_lang(value: str) -> bool:
+    """Shape check for a #410 language code — 2-3 lowercase letters after
+    stripping/lowercasing. Public so server.py's preferences() tool can
+    reject junk before it ever reaches update()/_normalize, the same way
+    it checks mode against MODES."""
+    return bool(_LANG_PATTERN.match(str(value).strip().lower()))
 
 _THREAD_LOCK = threading.Lock()
 
@@ -61,6 +84,7 @@ def empty() -> dict[str, Any]:
         "pace": None,
         "household": [],
         "note": None,
+        "lang": None,
     }
 
 
@@ -135,6 +159,7 @@ def update(
     pace: str | None = None,
     household: list[str] | None = None,
     note: str | None = None,
+    lang: str | None = None,
 ) -> dict[str, Any]:
     """Merge the given fields into the document. Omitted fields stay as-is.
 
@@ -151,6 +176,8 @@ def update(
             current["household"] = household
         if note is not None:
             current["note"] = note
+        if lang is not None:
+            current["lang"] = lang
         return save(current)
 
 
@@ -170,6 +197,21 @@ def resolve_mode(explicit: str | None, fallback: str) -> str:
     if stored in MODES:
         return stored
     return fallback
+
+
+def resolve_lang(explicit: str | None) -> str | None:
+    """Pick a result-language code (#410). `explicit` is the caller's
+    per-call `lang` argument; None means omitted, and then the stored
+    preference is used if there is one. Neither given returns None — no
+    lang override at all, byte-identical to pre-#410 behavior. A corrupt
+    or unreadable preferences file behaves the same as no stored lang.
+    """
+    if explicit is not None:
+        return explicit
+    try:
+        return load().get("lang")
+    except PreferencesError:
+        return None
 
 
 @contextmanager
@@ -218,11 +260,17 @@ def _normalize(data: dict[str, Any]) -> dict[str, Any]:
     note = data.get("note")
     if note is not None:
         note = str(note).strip() or None
+    lang = data.get("lang")
+    if lang is not None:
+        lang = str(lang).strip().lower() or None
+        if lang is not None and not _LANG_PATTERN.match(lang):
+            lang = None
     return {
         "mode": mode,
         "pace": pace,
         "household": _household(data.get("household")),
         "note": note,
+        "lang": lang,
     }
 
 

@@ -13,10 +13,12 @@ when the previous one came back empty:
 
 Tier-2/3 rows carry "matched_by": "alt_name" | "fuzzy"; tier-1 rows never
 do. The fixture (tests/fixtures/places.parquet) has a real name to fuzz —
-"Blue Bottle Roastery", near CENTER_LAT/CENTER_LON — but no names.common
-data at all (confirmed live: the `names` struct there is
-STRUCT(primary VARCHAR), no "common" key), so the alt-name tier is tested
-against a small tmp_path fixture built for that one purpose.
+"Blue Bottle Roastery", near CENTER_LAT/CENTER_LON — but every row's
+names.common there is empty (#410 added the `common` MAP column itself,
+carried on one deliberately isolated far-away row for #410's own lang
+tests; nothing near CENTER_LAT/CENTER_LON has an alternate spelling), so
+the alt-name tier is tested against a small tmp_path fixture built for
+that one purpose.
 """
 
 import duckdb

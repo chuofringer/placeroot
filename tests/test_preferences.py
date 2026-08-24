@@ -12,6 +12,7 @@ def test_missing_file_is_an_empty_document():
         "pace": None,
         "household": [],
         "note": None,
+        "lang": None,
     }
 
 
@@ -64,6 +65,7 @@ def test_tool_merge_then_clear():
         "pace": None,
         "household": [],
         "note": None,
+        "lang": None,
     }
     assert server.preferences() == cleared
 
