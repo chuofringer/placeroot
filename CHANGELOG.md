@@ -30,7 +30,14 @@ fixing behavior is patch.
   `water_near`, `admin_lookup`, `changes_in_area`, `summarize_buildings`
   and `reverse_geocode` are deliberately not widened this wave — micro
   point-lookups where a geocode hop is rare and the schema cost per tool
-  adds up.
+  adds up. `within_distance`'s `max_distance_m` is now keyword-only with
+  no default, so it stays a required, non-defaultable schema field even
+  though `lat`/`lon` had to become optional to make room for `where` — an
+  omitted `max_distance_m` is refused before the tool runs rather than
+  silently searching a 0m window. `meeting_point`'s string origins now
+  resolve in parallel (same pattern `_resolve_location_refs` already
+  uses), not one name at a time, keeping a multi-person named-origin call
+  inside the project's response-time budget.
 - LocationRef, wave 1 (docs/ROADMAP.md §4.1): `optimize_route`'s `stops`,
   `compare_areas`'s `areas`, `isochrone`'s and `summarize_area`'s new
   `where`, and `from_to`'s `from`/`to` now accept a location as

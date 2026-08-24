@@ -166,10 +166,10 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 42 | ~27,654 | — |
+| unset / `all` (default) | 42 | ~27,752 | — |
 | `search` | 13 | ~8,157 | 71% |
 | `core` | 15 | ~11,283 | 59% |
-| `routing` | 9 | ~7,468 | 73% |
+| `routing` | 9 | ~7,566 | 73% |
 | `analysis` | 12 | ~7,721 | 72% |
 | `geometry` | 3 | ~1,958 | 93% |
 | `progressive` | 4 (all 42 reachable) | ~749 | 97% |
@@ -182,10 +182,10 @@ union of everything named:
 - **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 42 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 27.7k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 - **`geometry`** — `simplify_geometry`, `render_map`, `geometry_op`.
 - **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 42 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 27.7k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
-| unset / `all` (default) | 42 | ~27,654 | — |
+| unset / `all` (default) | 42 | ~27,752 | — |
 | `search` | 13 | ~8,157 | 71% |
 | `core` | 15 | ~11,283 | 59% |
-| `routing` | 9 | ~7,468 | 73% |
+| `routing` | 9 | ~7,566 | 73% |
 | `analysis` | 12 | ~7,721 | 72% |
 | `geometry` | 3 | ~1,958 | 93% |
 | `progressive` | 4 (all 42 reachable) | ~749 | 97% |

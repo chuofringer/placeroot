@@ -491,6 +491,45 @@ def test_ambiguous_origin_name_is_an_indexed_error(monkeypatch):
     assert result["detail"].startswith("origins[0]: ")
 
 
+def test_two_named_origins_resolve_in_parallel(meeting_places, monkeypatch):
+    """Two string origins must resolve concurrently (server._resolve_string_origins'
+    ThreadPoolExecutor path), not one-by-one in the per-index loop — the
+    fix for the review finding that serial cold-name resolution here could
+    burn several seconds each origin against the project's 15s budget."""
+    a_lat, a_lon = ORIGIN_A
+    b_lat, b_lon = ORIGIN_B
+    seen: list[str] = []
+
+    def fake_resolve(query):
+        seen.append(query)
+        coords = {"Origin A": (a_lat, a_lon), "Origin B": (b_lat, b_lon)}[query]
+        return {
+            "name": query, "lat": coords[0], "lon": coords[1],
+            "id": f"gers-{query.lower().replace(' ', '-')}", "type": "place",
+        }
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    result = server.meeting_point(["Origin A", "Origin B"], confirm=True)
+    assert "error" not in result
+    assert sorted(seen) == ["Origin A", "Origin B"]
+    assert [r["index"] for r in result["resolved"]] == [0, 1]
+    assert {r["name"] for r in result["resolved"]} == {"Origin A", "Origin B"}
+    assert result["candidates"], "both named origins must still resolve to routable points"
+
+
+def test_two_ambiguous_origin_names_report_the_lowest_index(monkeypatch):
+    """Both string origins fail resolution; the deterministic lowest-index
+    failure must win regardless of which parallel worker finishes first."""
+    def fake_resolve(query):
+        raise errors.AmbiguousPlace(query, candidates=[{"name": "X"}])
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    result = server.meeting_point(["Ambiguous A", "Ambiguous B"])
+    assert result["error"] == "ambiguous_place"
+    assert result["index"] == 0
+    assert result["detail"].startswith("origins[0]: ")
+
+
 # --- registration ------------------------------------------------------
 
 

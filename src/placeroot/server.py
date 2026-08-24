@@ -1384,7 +1384,8 @@ def place_details(
 def within_distance(
     lat: float | None = None,
     lon: float | None = None,
-    max_distance_m: float = 0,
+    *,
+    max_distance_m: float,
     category: str | None = None,
     name: str | None = None,
     where: dict | str | None = None,
@@ -1398,6 +1399,12 @@ def within_distance(
     "lat", "lon", "matched_by"} to the answer; absent for lat/lon or a
     {lat,lon} where.
 
+    max_distance_m is required and must be a positive number of meters — a
+    zero, negative, non-finite, or missing value returns {"error":
+    "bad_request"} rather than silently searching a 0m (or omitted from a
+    call entirely, in which case the schema itself rejects it before this
+    tool ever runs) window and answering a confident-looking "false".
+
     Returns {"within": bool, "nearest": {...place row with id...} | None,
     "distance_m": float | None}. nearest is None if nothing matches within
     a search window capped at max_distance_m * 2 — a real match further out
@@ -1408,6 +1415,16 @@ def within_distance(
     Returns a structured {"error": ...} if upstream is unavailable or the
     dataset is missing columns this tool depends on.
     """
+    if (
+        not isinstance(max_distance_m, (int, float))
+        or isinstance(max_distance_m, bool)
+        or not math.isfinite(max_distance_m)
+        or max_distance_m <= 0
+    ):
+        return {
+            "error": "bad_request",
+            "detail": "max_distance_m must be a positive number of meters",
+        }
     have_lat, have_lon = lat is not None, lon is not None
     if where is not None and (have_lat or have_lon):
         return {
@@ -1658,6 +1675,60 @@ def _meeting_travel_time_for(origin: tuple, dest_lat: float, dest_lon: float) ->
     return leg
 
 
+def _resolve_string_origins(
+    origins: list, string_idxs: list[int]
+) -> tuple[dict[int, dict], dict | None]:
+    """Resolve just origins' string entries (by real index), in parallel.
+
+    meeting_point's per-index validation loop mixes string LocationRefs
+    with dict {"lat","lon","mode"} origins that need their own mode
+    validation, so it can't just hand the whole `origins` list to
+    _resolve_location_refs (that function would try to coordinate-validate
+    the dict origins itself, with a different error shape than this tool
+    documents). This resolves only the string entries — same
+    ThreadPoolExecutor + contextvars.copy_context() + db.isolated_reads()
+    pattern _resolve_location_refs uses, so 2-5 cold name/GERS resolutions
+    run concurrently instead of serially eating into the question's time
+    budget — and returns them keyed by their real position in `origins`,
+    so the caller's per-index loop and error messages need no index
+    remapping. On any failure, returns the lowest-indexed failure with
+    `"index"` and `detail` prefixed `f"origins[{i}]: "`, same contract as
+    _resolve_location_refs.
+    """
+    resolved: dict[int, dict] = {}
+    failures: dict[int, dict] = {}
+
+    def _isolated(i: int):
+        with db.isolated_reads():
+            return i, _resolve_location_ref(origins[i])
+
+    if len(string_idxs) > 1:
+        with ThreadPoolExecutor(max_workers=min(len(string_idxs), 8)) as pool:
+            futures = [
+                pool.submit(contextvars.copy_context().run, _isolated, i) for i in string_idxs
+            ]
+            for future in futures:
+                i, (item, err) = future.result()
+                if err is not None:
+                    failures[i] = err
+                else:
+                    resolved[i] = item
+    else:
+        for i in string_idxs:
+            item, err = _resolve_location_ref(origins[i])
+            if err is not None:
+                failures[i] = err
+            else:
+                resolved[i] = item
+
+    if failures:
+        idx = min(failures)
+        err = failures[idx]
+        detail = f"origins[{idx}]: {err.get('detail', '')}"
+        return {}, {**err, "index": idx, "detail": detail}
+    return resolved, None
+
+
 @_tool("Meeting point")
 def meeting_point(
     origins: list[dict | str],
@@ -1738,14 +1809,16 @@ def meeting_point(
             "error": "bad_request",
             "detail": f"origins must hold between 2 and 5 points, got {got}",
         }
+    string_idxs = [i for i, o in enumerate(origins) if isinstance(o, str)]
+    resolved_strings, resolve_error = _resolve_string_origins(origins, string_idxs)
+    if resolve_error is not None:
+        return resolve_error
+
     parsed: list[tuple[float, float, str]] = []
     resolved_echo: list[dict] = []
     for idx, o in enumerate(origins):
         if isinstance(o, str):
-            item, ref_error = _resolve_location_ref(o)
-            if ref_error is not None:
-                detail = f"origins[{idx}]: {ref_error.get('detail', '')}"
-                return {**ref_error, "index": idx, "detail": detail}
+            item = resolved_strings[idx]
             olat, olon, mode = item["lat"], item["lon"], "walk"
             if "matched_by" in item:
                 resolved_echo.append({"index": idx, **_location_ref_echo(item)})

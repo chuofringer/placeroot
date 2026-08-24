@@ -1,5 +1,7 @@
 """Issue #13: is X within N meters of Y."""
 
+import pytest
+
 from placeroot import geocode, overture, server
 
 from .conftest import CENTER_LAT, CENTER_LON
@@ -112,3 +114,46 @@ def test_where_name_adds_resolved(monkeypatch):
 def test_where_bad_ref_is_bad_request():
     result = server.within_distance(where={"lat": 91.0, "lon": 0.0}, max_distance_m=1000)
     assert result["error"] == "bad_request"
+
+
+# --- max_distance_m: required, keyword-only, must be a positive number ----
+#
+# Issue: making lat/lon optional (for `where`) forced max_distance_m to
+# gain a Python default (`= 0`) to satisfy argument ordering — silently
+# turning an omitted max_distance_m into a 0m search window and a
+# confident-looking {"within": False} instead of a loud failure. Fixed by
+# making max_distance_m keyword-only (no default, so it stays required in
+# both Python and the published schema — see the `required` list in
+# tools/list) plus an explicit runtime check, belt-and-braces.
+
+
+def test_omitted_max_distance_m_is_a_missing_argument_error():
+    """Keyword-only with no default: Python itself refuses the call before
+    this tool's body ever runs — the schema (see `required` above) refuses
+    it identically for an MCP caller."""
+    with pytest.raises(TypeError):
+        server.within_distance(CENTER_LAT, CENTER_LON)
+
+
+def test_zero_max_distance_m_is_a_bad_request():
+    result = server.within_distance(CENTER_LAT, CENTER_LON, max_distance_m=0)
+    assert result["error"] == "bad_request"
+    assert "max_distance_m" in result["detail"]
+
+
+def test_negative_max_distance_m_is_a_bad_request():
+    result = server.within_distance(CENTER_LAT, CENTER_LON, max_distance_m=-500)
+    assert result["error"] == "bad_request"
+    assert "max_distance_m" in result["detail"]
+
+
+def test_non_numeric_max_distance_m_is_a_bad_request():
+    result = server.within_distance(CENTER_LAT, CENTER_LON, max_distance_m="far")
+    assert result["error"] == "bad_request"
+    assert "max_distance_m" in result["detail"]
+
+
+def test_non_finite_max_distance_m_is_a_bad_request():
+    result = server.within_distance(CENTER_LAT, CENTER_LON, max_distance_m=float("inf"))
+    assert result["error"] == "bad_request"
+    assert "max_distance_m" in result["detail"]

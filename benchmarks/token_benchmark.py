@@ -258,7 +258,7 @@ def _within_distance_task(
     name: str, lat: float, lon: float, max_distance_m: float, category: str | None, expected: bool
 ) -> Task:
     def fn() -> Outcome:
-        result = server.within_distance(lat, lon, max_distance_m, category=category)
+        result = server.within_distance(lat, lon, max_distance_m=max_distance_m, category=category)
         if "error" in result:
             return Outcome(False, f"tool error: {result}", 0, 0, error=str(result))
         correct = result["within"] is expected
