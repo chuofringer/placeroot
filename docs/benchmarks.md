@@ -77,16 +77,16 @@ Generated 2026-08-23 by `uv run python benchmarks/token_efficiency.py --write`.
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-08-19.0`
 - Tools registered: **42**
-- Total schema surface: **25097 tokens** (100457 chars, 100736 bytes)
-- Schema cost per tool: min 158, median 519, max 1692 tokens
-- Median scenario response: **436 tokens** (range 87-834)
-- Break-even: the schema surface costs about as much as **58 median answers**
+- Total schema surface: **25913 tokens** (103721 chars, 104013 bytes)
+- Schema cost per tool: min 158, median 519, max 2508 tokens
+- Median scenario response: **436 tokens** (range 87-540)
+- Break-even: the schema surface costs about as much as **59 median answers**
 
 ### Schema surface (paid once per conversation)
 
 | tool | description tokens | inputSchema tokens | total tokens | total chars |
 |---|---:|---:|---:|---:|
-| `find_places` | 1202 | 409 | **1692** | 6771 |
+| `find_places` | 1869 | 541 | **2508** | 10035 |
 | `changes_in_area` | 1161 | 212 | **1459** | 5836 |
 | `route` | 1150 | 218 | **1451** | 5807 |
 | `meeting_point` | 902 | 99 | **1080** | 4323 |
@@ -128,14 +128,14 @@ Generated 2026-08-23 by `uv run python benchmarks/token_efficiency.py --write`.
 | `data_version` | 166 | 16 | **231** | 926 |
 | `reverse_geocode` | 111 | 42 | **205** | 820 |
 | `summarize_area` | 53 | 57 | **158** | 635 |
-| **all 42 tools** | 17835 | 4647 | **25097** | 100457 |
+| **all 42 tools** | 18502 | 4779 | **25913** | 103721 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 
 | scenario | question | response tokens | response chars |
 |---|---|---:|---:|
-| `find_places (point, 1km)` | What named places are within 1km of the fixture center? | **824** | 3299 |
-| `find_places (point, category filter)` | Which coffee shops are within 1km? | **834** | 3338 |
+| `find_places (point, 1km)` | What named places are within 1km of the fixture center? | **463** | 1853 |
+| `find_places (point, category filter)` | Which coffee shops are within 1km? | **470** | 1881 |
 | `geocode` | Where is 'Brooklyn'? | **87** | 348 |
 | `place_details` | Tell me about the place named 'Roastery' near the fixture center. | **147** | 588 |
 | `summarize_area` | What's in this 1km area? | **113** | 453 |

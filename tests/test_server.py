@@ -326,6 +326,9 @@ def test_warm_divisions_async_is_non_fatal_on_failure(monkeypatch):
 
 def test_render_map_tool_writes_artifact_from_find_places_output(tmp_path, monkeypatch):
     monkeypatch.setenv("PLACEROOT_ARTIFACT_DIR", str(tmp_path))
+    # Default detail ("compact", roadmap §4.5) still carries lat/lon, so the
+    # advertised find_places -> render_map composition (#386) renders
+    # out of the box — this exercises that default path, not detail="full".
     found = server.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=5)
     result = server.render_map(found, title="Nearby")
     assert set(result) == {"path", "bytes", "features_rendered", "skipped_features"}

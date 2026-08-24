@@ -253,6 +253,16 @@ _CursorArg = Annotated[
         "same query on the same data release.",
     ),
 ]
+_DETAIL_ENUM = ["ids", "compact", "full"]
+_DetailArg = Annotated[
+    str | None,
+    Field(
+        description="Row detail tier for find_places rows: 'ids' (id + distance_m only), "
+        "'compact' (id/name/category/lat/lon/distance_m/trust), or 'full' (every field, "
+        "incl. trust_note prose). Default: compact.",
+        json_schema_extra={"enum": _DETAIL_ENUM},
+    ),
+]
 
 # placeroot_call reaches every tool, render_map included, so it inherits the
 # weakest claim any of them makes rather than its own: a dispatcher that
@@ -380,7 +390,88 @@ def _with_category_hint(payload: dict, category: str | None, widen_hint: str) ->
     return payload
 
 
-def _with_name_fallback_note(payload: dict, name: str | None) -> dict:
+def _project_place_row(row: dict, detail: str) -> dict:
+    """Shrink one find_places row to `detail`'s tier (roadmap §4.5).
+
+    "full" is today's row, unchanged. "ids" is the cheap-chaining shape
+    (id + distance_m, when present) — deliberately coordinate-free, since
+    it exists purely to feed an id into a batch lookup or place_details.
+    "compact" — the default — is {id, name, category, lat, lon,
+    distance_m, trust}: it keeps lat/lon so the advertised find_places ->
+    render_map composition (#386) still renders under the new default,
+    per ROADMAP §5.3's output schema listing lat/lon as required row
+    fields. `trust` is a tier string derived by honesty.trust_tier from
+    the same signals as trust_note, so it can never disagree with the
+    prose a "full" row would carry. distance_m is omitted entirely (not
+    null) on division-polygon rows, which have no reference point to
+    measure distance from — those rows still carry lat/lon, in every
+    tier but "ids".
+    """
+    if detail == "full":
+        return row
+    if detail == "ids":
+        out = {"id": row.get("id")}
+        if "distance_m" in row:
+            out["distance_m"] = row["distance_m"]
+        return out
+    out = {
+        "id": row.get("id"),
+        "name": row.get("name"),
+        "category": row.get("category"),
+    }
+    if "lat" in row:
+        out["lat"] = row["lat"]
+    if "lon" in row:
+        out["lon"] = row["lon"]
+    if "distance_m" in row:
+        out["distance_m"] = row["distance_m"]
+    out["trust"] = honesty.trust_tier(row)
+    return out
+
+
+def _project_places(rows: list[dict], detail: str) -> list[dict]:
+    return [_project_place_row(r, detail) for r in rows]
+
+
+def _project_grouped_places(grouped: dict[str, list[dict]], detail: str) -> dict[str, list[dict]]:
+    return {slug: _project_places(rows, detail) for slug, rows in grouped.items()}
+
+
+def _with_detail_legend(payload: dict, detail: str) -> dict:
+    """Attach the one-line trust-tier legend when compact rows carry a
+    bare `trust` tier instead of full rows' self-explaining trust_note."""
+    if detail == "compact":
+        payload["trust_legend"] = honesty.TRUST_LEGEND
+    return payload
+
+
+def _with_categories_hint(
+    payload: dict, categories: list[str] | None, widen_hint: str, list_key: str = "results"
+) -> dict:
+    """categories analog of _with_category_hint (#117 / roadmap §4.5): a
+    non-fatal "note" when the scan matched none of the requested slugs at
+    all. Only fires when EVERY requested category came back empty — at
+    that point naming all of them is cheap and correct, since none of them
+    could possibly have matched anything.
+    """
+    if not categories:
+        return payload
+    rows = payload.get(list_key)
+    empty = not rows if isinstance(rows, list) else not any((rows or {}).values())
+    if empty:
+        slugs = ", ".join(repr(s) for s in categories)
+        hint = (
+            f"no places matched any of categories [{slugs}] here; if a slug may not "
+            "be a valid Overture category slug, use search_categories to find the "
+            f"right one, or {widen_hint} / drop the categories filter."
+        )
+        payload["note"] = "; ".join(filter(None, [payload.get("note"), hint]))
+    return payload
+
+
+def _with_name_fallback_note(
+    payload: dict, name: str | None, rows: list[dict] | None = None
+) -> dict:
     """Add a non-fatal "note" when a result came from #373's alt-name/fuzzy
     fallback tiers rather than a literal name match.
 
@@ -389,8 +480,14 @@ def _with_name_fallback_note(payload: dict, name: str | None) -> dict:
     of its own to carry a note on — this is where that note gets attached,
     mirroring _with_category_hint's join-not-clobber convention so an
     existing truncation/category note survives alongside it.
+
+    `rows` defaults to payload["results"], but find_places' detail
+    projection (ROADMAP §4.5) can strip matched_by/name from that list
+    before this runs — callers that project pass the pre-projection rows
+    explicitly so the note still has something to read.
     """
-    rows = payload.get("results") or []
+    if rows is None:
+        rows = payload.get("results") or []
     fallback = next((r for r in rows if r.get("matched_by")), None)
     if fallback is not None:
         via = (
@@ -531,6 +628,9 @@ def find_places(
     division_id: str | None = None,
     area: str | None = None,
     cursor: _CursorArg = None,
+    detail: _DetailArg = None,
+    categories: list[str] | None = None,
+    group_by_category: bool = False,
 ) -> dict:
     """Find named places, either near a point or inside an area's boundary.
 
@@ -608,6 +708,47 @@ def find_places(
     the mismatch; a cursor issued against an older Overture release is
     honored anyway, against the current release, with a one-line "note"
     that rows may have shifted.
+
+    detail picks how much of each row comes back (ROADMAP §4.5, roadmap
+    feature 5): "compact" (the DEFAULT) is {id, name, category, lat, lon,
+    distance_m, trust} — trust is a tier string ("strong"/"ok"/"weak"/
+    "unknown") derived from the same confidence/operating-status signals
+    as "full"'s trust_note, so the two can never disagree; the payload
+    also carries one "trust_legend" line explaining the tiers. compact
+    keeps lat/lon (unlike "ids") so a composed call feeding these rows
+    into a map-rendering tool still has coordinates under the default
+    tier. "ids" is just {id,
+    distance_m} — deliberately coordinate-free, the cheapest shape, for
+    chaining straight into a batch id lookup or place_details. "full" is
+    every field, unchanged from before this param existed, including
+    trust_note's prose. division-polygon rows have no distance_m at any
+    tier (no reference point to measure from) — the key is omitted, never
+    null; they still carry lat/lon at every tier but "ids". detail is
+    presentation only: it does not affect which rows match or their
+    order, is NOT part of a cursor's query identity, and a cursor issued
+    under one detail continues correctly under a different one.
+    Projection happens before the token budget is applied, so a smaller
+    detail tier fits more rows per answer — that's the point of a tier
+    smaller than "full". Unrecognized values return a bad_request error
+    naming the accepted ones.
+
+    categories (mutually exclusive with category — passing both is a
+    bad_request) runs a checklist of up to 5 slugs in ONE scan instead of
+    category's one slug, each matched with identical substring/prefix
+    semantics. group_by_category=False (the default) merges every
+    category's matches into one nearest-first list, same shape and cursor
+    pagination as a single category (categories, sorted, is part of the
+    cursor's query identity). group_by_category=True instead buckets the
+    answer as {"results": {category: [rows...]}}, up to `limit` rows PER
+    category — a category with zero matches is simply absent from the
+    dict. Grouped answers carry no cursor at all (each category is already
+    limit-bounded from a single scan; page a specific one further by
+    re-running with category=<that slug> instead). More than 5 slugs, or
+    categories together with category, both return a bad_request error;
+    group_by_category=True together with a non-null cursor is also a
+    bad_request (there is nothing to continue). The category-miss "note"
+    (see above) also covers categories: it fires when the scan matched
+    none of the requested slugs at all.
     """
     point_given = lat is not None or lon is not None
     modes_given = sum([point_given, division_id is not None, area is not None])
@@ -621,20 +762,55 @@ def find_places(
             "error": "bad_request",
             "detail": "pass one of lat/lon (+radius_m), division_id, or area",
         }
+    if detail is not None and detail not in _DETAIL_ENUM:
+        return {
+            "error": "bad_request",
+            "detail": f"unrecognized detail {detail!r}; accepted values: "
+            f"{', '.join(_DETAIL_ENUM)}",
+        }
+    effective_detail = detail or "compact"
+    categories = categories or None
+    if category is not None and categories is not None:
+        return {
+            "error": "bad_request",
+            "detail": "pass category or categories, not both",
+        }
+    if categories is not None and len(categories) > overture.MAX_CATEGORIES:
+        return {
+            "error": "bad_request",
+            "detail": f"categories accepts at most {overture.MAX_CATEGORIES} slugs",
+        }
+    if group_by_category:
+        if categories is None:
+            return {
+                "error": "bad_request",
+                "detail": "group_by_category requires categories",
+            }
+        if cursor is not None:
+            return {
+                "error": "bad_request",
+                "detail": "group_by_category has no cursor; drop cursor or set "
+                "group_by_category=false",
+            }
 
     # Everything that affects the result set/order — everything but `cursor`
-    # itself and `limit` (a page-size knob, not part of the query identity).
-    # Numeric args are normalized to float: placeroot_call's coercion path
-    # (str/JSON dispatch, e.g. over HTTP) and a native Python call can hand
-    # this function an equal-valued int and float (radius_m=1000 vs
-    # 1000.0) for the same query — json.dumps tells those apart, so an
-    # un-normalized hash would make a cursor issued on one path unusable
-    # replayed on the other, even though nothing about the query differs.
+    # itself, `limit` (a page-size knob, not part of the query identity),
+    # `detail` (presentation, not query identity — see docstring), and
+    # `group_by_category` (grouped answers never carry a cursor at all, so
+    # it's moot for merged-mode cursors). Numeric args are normalized to
+    # float: placeroot_call's coercion path (str/JSON dispatch, e.g. over
+    # HTTP) and a native Python call can hand this function an equal-valued
+    # int and float (radius_m=1000 vs 1000.0) for the same query — json.dumps
+    # tells those apart, so an un-normalized hash would make a cursor issued
+    # on one path unusable replayed on the other, even though nothing about
+    # the query differs. categories is sorted so the same set in a
+    # different order still hashes identically.
     params_key = {
         "lat": float(lat) if lat is not None else None,
         "lon": float(lon) if lon is not None else None,
         "radius_m": float(radius_m) if radius_m is not None else None,
         "category": category, "name": name,
+        "categories": sorted(categories) if categories else None,
         "min_confidence": float(min_confidence) if min_confidence is not None else None,
         "operating_status": operating_status, "brand": brand,
         "has_website": has_website, "has_phone": has_phone,
@@ -673,11 +849,41 @@ def find_places(
     effective_limit = max(0, min(int(limit), overture.MAX_ROWS))
 
     if division_id is not None:
+        if group_by_category:
+            try:
+                grouped = overture.find_places_in_division_grouped_by_category(
+                    division_id, categories, name,
+                    min_confidence, operating_status, brand, has_website, has_phone,
+                    effective_limit,
+                )
+            except ValueError as e:
+                return {"error": "bad_request", "detail": str(e)}
+            except overture.UpstreamUnavailable as e:
+                return _upstream_error(e)
+            except overture.SchemaDegraded as e:
+                return _schema_error(e)
+            if grouped is None:
+                return {
+                    "error": "not_found",
+                    "detail": f"no division matched division_id {division_id!r}",
+                }
+            grouped = _project_grouped_places(grouped, effective_detail)
+            payload = _with_degraded_fields(
+                budget.apply_budget_grouped({"results": grouped}, "results")
+            )
+            if resolved_area is not None:
+                payload["area"] = resolved_area
+            payload = _with_categories_hint(
+                payload, categories, widen_hint="try a larger division"
+            )
+            payload = _with_detail_legend(payload, effective_detail)
+            return payload
         try:
             rows = overture.find_places_in_division(
                 division_id, category, name,
                 min_confidence, operating_status, brand, has_website, has_phone,
                 effective_limit + 1, offset=start_offset,
+                categories=categories,
             )
         except ValueError as e:
             return {"error": "bad_request", "detail": str(e)}
@@ -692,12 +898,15 @@ def find_places(
             }
         has_more = len(rows) > effective_limit
         rows = rows[:effective_limit]
+        rows = _project_places(rows, effective_detail)
         payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
         if resolved_area is not None:
             # Which division the name landed on — an agent that asked for
             # "Springfield" needs to see which one it got.
             payload["area"] = resolved_area
         payload = _with_category_hint(payload, category, widen_hint="try a larger division")
+        payload = _with_categories_hint(payload, categories, widen_hint="try a larger division")
+        payload = _with_detail_legend(payload, effective_detail)
         payload = cursor_mod.attach_cursor(
             payload, "results", params_key, current_release, start_offset, has_more
         )
@@ -710,11 +919,32 @@ def find_places(
     coord_error = _invalid_coord(lat, lon)
     if coord_error is not None:
         return coord_error
+    if group_by_category:
+        try:
+            grouped = overture.find_places_grouped_by_category(
+                lat, lon, radius_m, categories, name,
+                min_confidence, operating_status, brand, has_website, has_phone,
+                effective_limit,
+            )
+        except ValueError as e:
+            return {"error": "bad_request", "detail": str(e)}
+        except overture.UpstreamUnavailable as e:
+            return _upstream_error(e)
+        except overture.SchemaDegraded as e:
+            return _schema_error(e)
+        grouped = _project_grouped_places(grouped, effective_detail)
+        payload = _with_degraded_fields(
+            budget.apply_budget_grouped({"results": grouped}, "results")
+        )
+        payload = _with_categories_hint(payload, categories, widen_hint="widen radius_m")
+        payload = _with_detail_legend(payload, effective_detail)
+        return payload
     try:
         rows = overture.find_places(
             lat, lon, radius_m, category, name,
             min_confidence, operating_status, brand, has_website, has_phone,
             effective_limit + 1, offset=start_offset,
+            categories=categories,
         )
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
@@ -729,9 +959,13 @@ def find_places(
     used_name_fallback = any(r.get("matched_by") for r in rows)
     has_more = len(rows) > effective_limit
     rows = rows[:effective_limit]
+    fallback_rows = rows  # pre-projection: detail may strip matched_by/name
+    rows = _project_places(rows, effective_detail)
     payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
-    payload = _with_name_fallback_note(payload, name)
+    payload = _with_name_fallback_note(payload, name, fallback_rows)
     payload = _with_category_hint(payload, category, widen_hint="widen radius_m")
+    payload = _with_categories_hint(payload, categories, widen_hint="widen radius_m")
+    payload = _with_detail_legend(payload, effective_detail)
     if not used_name_fallback:
         payload = cursor_mod.attach_cursor(
             payload, "results", params_key, current_release, start_offset, has_more
@@ -3363,6 +3597,13 @@ def find_near(
         category=slug,
         limit=int(limit),
         cursor=cursor,
+        # find_near does its own projection to _FIND_NEAR_KEYS below (a
+        # different, smaller shape than any find_places detail tier) — it
+        # needs the full row to project from, not find_places' new
+        # detail="compact" default (roadmap §4.5). find_near does not gain
+        # its own `detail` param in this PR; see the PR body for that as
+        # explicit follow-up scope.
+        detail="full",
     )
     if "error" in payload:
         return payload

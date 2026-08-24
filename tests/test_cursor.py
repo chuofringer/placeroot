@@ -123,7 +123,7 @@ def test_cursor_from_a_different_release_is_served_with_honesty_note():
     stale = cursor_mod.encode_cursor(
         {
             "lat": float(CENTER_LAT), "lon": float(CENTER_LON), "radius_m": 1000.0,
-            "category": _CATEGORY, "name": None,
+            "category": _CATEGORY, "name": None, "categories": None,
             "min_confidence": None, "operating_status": None, "brand": None,
             "has_website": None, "has_phone": None,
             "division_id": None, "area": None,
