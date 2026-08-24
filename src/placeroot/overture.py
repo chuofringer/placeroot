@@ -21,6 +21,7 @@ module's call sites and the tests — import db directly in new code.
 """
 
 import hashlib
+import json
 import logging
 import math
 import os
@@ -522,6 +523,49 @@ def area_geometry(
     distance_filter = f"{_DISTANCE_EXPR} <= $radius_m"
     params = {**bbox_params, "lat": lat, "lon": lon, "radius_m": radius_m}
     return bbox_filter, distance_filter, params, (xmin, ymin, xmax, ymax), radius_m
+
+
+def _polygon_bbox_from_geojson(polygon_geojson: dict) -> tuple[float, float, float, float]:
+    """(xmin, ymin, xmax, ymax) over every ring's vertices of a GeoJSON Polygon.
+
+    Pure Python, mirroring divisions.py's own _polygon_bbox — cheaper than a
+    round trip through DuckDB just to learn the extent of a small isochrone
+    polygon. Holes are included too (a subset of the exterior ring's own
+    extent, so folding them in is harmless).
+    """
+    coords = polygon_geojson["coordinates"]
+    xs = [pt[0] for ring in coords for pt in ring]
+    ys = [pt[1] for ring in coords for pt in ring]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _within_polygon_filters(
+    within_polygon: dict, params: dict
+) -> tuple[list[str], tuple[float, float, float, float]]:
+    """Extra WHERE filters (bbox prefilter + exact ST_Contains) for a
+    reachability shed polygon (roadmap §4.2's `within` on find_places).
+
+    Mutates `params` in place, adding w_xmin/w_ymin/w_xmax/w_ymax/w_poly —
+    names distinct from every other bbox param this module uses (area_geometry's
+    xmin/ymin/xmax/ymax, a division's own div_xmin/etc.), so the returned
+    filters compose safely alongside either one rather than colliding on a
+    shared parameter name. Not antimeridian-aware (same as a division's own
+    contains_filter above) — isochrone sheds are local, never span the seam.
+
+    Returns (filters, bbox) — bbox is the polygon's own extent, for callers
+    that need it to prune the parquet source (_places_source).
+    """
+    _ensure_spatial()
+    w_xmin, w_ymin, w_xmax, w_ymax = _polygon_bbox_from_geojson(within_polygon)
+    params["w_xmin"], params["w_ymin"] = w_xmin, w_ymin
+    params["w_xmax"], params["w_ymax"] = w_xmax, w_ymax
+    params["w_poly"] = json.dumps(within_polygon)
+    bbox_filter = (
+        "bbox.xmin <= $w_xmax AND bbox.xmax >= $w_xmin"
+        " AND bbox.ymin <= $w_ymax AND bbox.ymax >= $w_ymin"
+    )
+    contains_filter = "ST_Contains(ST_GeomFromGeoJSON($w_poly), ST_Point(bbox.xmin, bbox.ymin))"
+    return [bbox_filter, contains_filter], (w_xmin, w_ymin, w_xmax, w_ymax)
 
 
 # Overture's operating_status is a business-lifecycle field (is this place a
@@ -1036,8 +1080,17 @@ def find_places(
     allow_name_fallback: bool = True,
     offset: int = 0,
     categories: list[str] | None = None,
+    within_polygon: dict | None = None,
 ) -> list[dict]:
     """Places near a point, nearest first, compact rows.
+
+    within_polygon (roadmap §4.2's `within` reachability filter) is a
+    GeoJSON Polygon; when given, it REPLACES the radius_m circle entirely —
+    the search bbox becomes the polygon's own extent and membership is
+    exact ST_Contains against it, not distance from (lat, lon). lat/lon are
+    still used to order results nearest-first (there is a center to rank
+    from even though it no longer bounds the search). See
+    _within_polygon_filters.
 
     categories (roadmap §4.5) is the multi-category alternative to
     category: an OR of several slugs in the SAME scan, each matched with
@@ -1110,7 +1163,12 @@ def find_places(
     offset = max(0, int(offset))
     upstream = _upstream_glob()
     missing = set(_check_schema(upstream))
-    bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(lat, lon, radius_m)
+    if within_polygon is not None:
+        params = {"lat": lat, "lon": lon}
+        geo_filters, bbox = _within_polygon_filters(within_polygon, params)
+        bbox_filter, distance_filter = geo_filters
+    else:
+        bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(lat, lon, radius_m)
     from_source, has_recreation = _places_source(bbox)
     base_filters = [bbox_filter, distance_filter]
     base_filters.extend(_name_filter(missing, has_recreation))
@@ -1578,11 +1636,18 @@ def find_places_in_division(
     limit: int = 10,
     offset: int = 0,
     categories: list[str] | None = None,
+    within_polygon: dict | None = None,
 ) -> list[dict] | None:
     """Places whose point falls inside a division's boundary polygon.
 
     categories is the same multi-category OR-in-one-scan alternative to
     category that find_places accepts — see its docstring.
+
+    within_polygon (find_places' reachability filter — see its docstring)
+    composes here as an EXTRA containment test, alongside the division's
+    own: a row must be inside both the division AND the reachability shed.
+    Unlike find_places' point mode, it does not replace anything — the
+    division polygon is still the base search bbox/shape.
 
     Boundary-accurate alternative to find_places' point+radius circle: pass
     a division's GERS id (e.g. from admin_lookup's chain) instead of a
@@ -1646,6 +1711,8 @@ def find_places_in_division(
     bbox = (div_xmin, div_ymin, div_xmax, div_ymax)
     from_source, has_recreation = _places_source(bbox)
     filters = [bbox_filter, contains_filter]
+    if within_polygon is not None:
+        filters.extend(_within_polygon_filters(within_polygon, params)[0])
     filters.extend(_name_filter(missing, has_recreation))
     if categories:
         filters.extend(_place_categories_multi_filter(missing, categories, params))
@@ -1715,6 +1782,7 @@ def find_places_grouped_by_category(
     has_website: bool | None = None,
     has_phone: bool | None = None,
     per_category_limit: int = 10,
+    within_polygon: dict | None = None,
 ) -> dict[str, list[dict]]:
     """The group_by_category=True path of find_places' point+radius mode.
 
@@ -1730,6 +1798,9 @@ def find_places_grouped_by_category(
     matching pulls in a near variant, same caveat find_places' single-
     category filter already has.
 
+    within_polygon is find_places' same reachability filter — see its
+    docstring; it replaces radius_m entirely when given.
+
     Returns {category_value: [rows nearest-first]}, category values sorted
     ascending; a category with zero matches is simply absent (never an
     empty list) since it never appears in the scan. Rows carry no
@@ -1740,7 +1811,12 @@ def find_places_grouped_by_category(
     per_category_limit = max(0, min(int(per_category_limit), MAX_ROWS))
     upstream = _upstream_glob()
     missing = set(_check_schema(upstream))
-    bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(lat, lon, radius_m)
+    if within_polygon is not None:
+        params = {"lat": lat, "lon": lon}
+        geo_filters, bbox = _within_polygon_filters(within_polygon, params)
+        bbox_filter, distance_filter = geo_filters
+    else:
+        bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(lat, lon, radius_m)
     from_source, has_recreation = _places_source(bbox)
     filters = [bbox_filter, distance_filter]
     filters.extend(_name_filter(missing, has_recreation))
@@ -1810,6 +1886,7 @@ def find_places_in_division_grouped_by_category(
     has_website: bool | None = None,
     has_phone: bool | None = None,
     per_category_limit: int = 10,
+    within_polygon: dict | None = None,
 ) -> dict[str, list[dict]] | None:
     """The group_by_category=True path of find_places' division-polygon mode.
 
@@ -1818,6 +1895,9 @@ def find_places_in_division_grouped_by_category(
     name, id) — division mode has no reference point to rank distance
     from, same as find_places_in_division. Returns None if division_id
     doesn't match any division (mirrors find_places_in_division).
+
+    within_polygon composes as an extra containment test, same as
+    find_places_in_division — see its docstring.
     """
     per_category_limit = max(0, min(int(per_category_limit), MAX_ROWS))
     resolved = _resolve_division_geometry(division_id)
@@ -1841,6 +1921,8 @@ def find_places_in_division_grouped_by_category(
     bbox = (div_xmin, div_ymin, div_xmax, div_ymax)
     from_source, has_recreation = _places_source(bbox)
     filters = [bbox_filter, contains_filter]
+    if within_polygon is not None:
+        filters.extend(_within_polygon_filters(within_polygon, params)[0])
     filters.extend(_name_filter(missing, has_recreation))
     filters.extend(_place_categories_multi_filter(missing, categories, params))
     filters.extend(_place_category_name_filters(missing, None, name, params))

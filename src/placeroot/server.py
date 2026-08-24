@@ -391,6 +391,19 @@ def _with_category_hint(payload: dict, category: str | None, widen_hint: str) ->
     return payload
 
 
+def _with_within_extras(payload: dict, resolved_echo: dict | None, note: str | None) -> dict:
+    """Attach find_places' `within` reachability-filter extras (roadmap §4.2):
+    the compact "resolved" echo when `of` was an id/name, and a short
+    honesty note that the answer was filtered against the street graph —
+    joined onto any note already present, not clobbering it (same
+    convention as _with_category_hint)."""
+    if resolved_echo is not None:
+        payload["resolved"] = resolved_echo
+    if note:
+        payload["note"] = "; ".join(filter(None, [payload.get("note"), note]))
+    return payload
+
+
 def _project_place_row(row: dict, detail: str) -> dict:
     """Shrink one find_places row to `detail`'s tier (roadmap §4.5).
 
@@ -784,6 +797,8 @@ def find_places(
     detail: _DetailArg = None,
     categories: list[str] | None = None,
     group_by_category: bool = False,
+    within: dict | None = None,
+    confirm: bool = False,
 ) -> dict:
     """Find named places, either near a point or inside an area's boundary.
 
@@ -902,6 +917,15 @@ def find_places(
     bad_request (there is nothing to continue). The category-miss "note"
     (see above) also covers categories: it fires when the scan matched
     none of the requested slugs at all.
+
+    within = {"minutes", "mode"?, "of"?} (roadmap §4.2) keeps only results
+    truly reachable from `of` within `minutes` by street-graph `mode` —
+    the real graph, not a radius guess; radius_m is ignored when set. `of`
+    (a LocationRef) defaults to the search center; required in
+    division_id/area mode. An id/name `of` adds a "resolved" echo; the
+    answer gets a short reachability note. A cold graph returns
+    {"error": "needs_confirm", ...} — retry with confirm=true once the
+    user agrees to wait (5-25s).
     """
     point_given = lat is not None or lon is not None
     modes_given = sum([point_given, division_id is not None, area is not None])
@@ -946,6 +970,82 @@ def find_places(
                 "group_by_category=false",
             }
 
+    # within (roadmap §4.2's reachability filter) is resolved to a numeric
+    # "of" point BEFORE params_key, below — not the raw LocationRef, which
+    # could resolve differently across releases, but the cursor already
+    # embeds the release; the numeric point is what makes "same query"
+    # stable across a replay. within_minutes/within_mode/within_of_lat/
+    # within_of_lon feed the confirm gate and the isochrone call further
+    # down, once the cursor itself has been validated.
+    within_minutes = None
+    within_mode = None
+    within_of_lat = None
+    within_of_lon = None
+    within_resolved_echo = None
+    within_canonical = None
+    if within is not None:
+        if not isinstance(within, dict):
+            return {
+                "error": "bad_request",
+                "detail": "within must be an object with minutes (and optional mode, of)",
+            }
+        extra_keys = set(within) - {"minutes", "mode", "of"}
+        if extra_keys:
+            return {
+                "error": "bad_request",
+                "detail": f"within has unrecognized keys: {sorted(extra_keys)}; "
+                "accepted: minutes, mode, of",
+            }
+        raw_minutes = within.get("minutes")
+        try:
+            within_minutes = float(raw_minutes)
+        except (TypeError, ValueError):
+            return {
+                "error": "bad_request",
+                "detail": f"within.minutes must be numeric, got {raw_minutes!r}",
+            }
+        if not math.isfinite(within_minutes) or within_minutes <= 0 or within_minutes > 60:
+            return {
+                "error": "bad_request",
+                "detail": "within.minutes must be greater than 0 and at most 60",
+            }
+        within_mode = preference_store.resolve_mode(
+            within.get("mode"), preference_store.DEFAULT_MODE_ISOCHRONE
+        )
+        if within_mode not in routing.MODE_CONFIG:
+            return {
+                "error": "unsupported_mode",
+                "detail": f"unsupported within.mode {within_mode!r}; supported: "
+                f"{sorted(routing.MODE_CONFIG)}",
+                "supported": sorted(routing.MODE_CONFIG),
+            }
+        of_ref = within.get("of")
+        if of_ref is not None:
+            of_item, of_error = _resolve_location_ref(of_ref)
+            if of_error is not None:
+                return of_error
+            within_of_lat, within_of_lon = of_item["lat"], of_item["lon"]
+            if "matched_by" in of_item:
+                within_resolved_echo = _location_ref_echo(of_item)
+        elif division_id is not None or area is not None:
+            return {
+                "error": "bad_request",
+                "detail": "within needs a point to measure from — pass of",
+            }
+        else:
+            if lat is None or lon is None:
+                return {"error": "bad_request", "detail": "pass both lat and lon"}
+            coord_error = _invalid_coord(lat, lon)
+            if coord_error is not None:
+                return coord_error
+            within_of_lat, within_of_lon = float(lat), float(lon)
+        within_canonical = {
+            "minutes": within_minutes,
+            "mode": within_mode,
+            "of_lat": within_of_lat,
+            "of_lon": within_of_lon,
+        }
+
     # Everything that affects the result set/order — everything but `cursor`
     # itself, `limit` (a page-size knob, not part of the query identity),
     # `detail` (presentation, not query identity — see docstring), and
@@ -968,6 +1068,7 @@ def find_places(
         "operating_status": operating_status, "brand": brand,
         "has_website": has_website, "has_phone": has_phone,
         "division_id": division_id, "area": area,
+        "within": within_canonical,
     }
     current_release = release.resolve_release()
     cursor_error, start_offset, cursor_note = cursor_mod.resolve_cursor(
@@ -975,6 +1076,45 @@ def find_places(
     )
     if cursor_error is not None:
         return cursor_error
+
+    # Cold-graph confirm gate (#336's pattern) + the shed itself, computed
+    # once regardless of mode — every mode below needs the same polygon.
+    within_polygon = None
+    within_note = None
+    if within is not None:
+        if not routing.isochrone_graph_is_cached(
+            within_of_lat, within_of_lon, within_minutes, within_mode
+        ) and not confirm:
+            return _needs_confirm_graph(within_mode)
+        try:
+            iso = routing.isochrone(
+                within_of_lat, within_of_lon, minutes=within_minutes, mode=within_mode
+            )
+        except routing.UnsupportedMode as e:
+            return {
+                "error": "unsupported_mode",
+                "detail": e.detail,
+                "supported": sorted(routing.MODE_CONFIG),
+            }
+        except routing.UpstreamUnavailable as e:
+            return _upstream_error(e)
+        except routing.SchemaDegraded as e:
+            return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
+        except routing.NoGraphNearby as e:
+            return {"error": "no_graph_nearby", "detail": e.detail}
+        except routing.RadiusTooLarge as e:
+            return {
+                "error": "radius_too_large",
+                "detail": e.detail,
+                "max_radius_m": e.max_radius_m,
+            }
+        except ValueError as e:
+            return {"error": "bad_request", "detail": str(e)}
+        within_polygon = iso["polygon"]
+        within_note = (
+            f"reachability-filtered against the street graph "
+            f"({within_minutes:g} min {within_mode})"
+        )
 
     # area is sugar over the division_id path: resolve the name to a
     # division, then fall through to exactly the same polygon search.
@@ -1008,6 +1148,7 @@ def find_places(
                     division_id, categories, name,
                     min_confidence, operating_status, brand, has_website, has_phone,
                     effective_limit,
+                    within_polygon=within_polygon,
                 )
             except ValueError as e:
                 return {"error": "bad_request", "detail": str(e)}
@@ -1030,6 +1171,7 @@ def find_places(
                 payload, categories, widen_hint="try a larger division"
             )
             payload = _with_detail_legend(payload, effective_detail)
+            payload = _with_within_extras(payload, within_resolved_echo, within_note)
             return payload
         try:
             rows = overture.find_places_in_division(
@@ -1037,6 +1179,7 @@ def find_places(
                 min_confidence, operating_status, brand, has_website, has_phone,
                 effective_limit + 1, offset=start_offset,
                 categories=categories,
+                within_polygon=within_polygon,
             )
         except ValueError as e:
             return {"error": "bad_request", "detail": str(e)}
@@ -1060,6 +1203,7 @@ def find_places(
         payload = _with_category_hint(payload, category, widen_hint="try a larger division")
         payload = _with_categories_hint(payload, categories, widen_hint="try a larger division")
         payload = _with_detail_legend(payload, effective_detail)
+        payload = _with_within_extras(payload, within_resolved_echo, within_note)
         payload = cursor_mod.attach_cursor(
             payload, "results", params_key, current_release, start_offset, has_more
         )
@@ -1078,6 +1222,7 @@ def find_places(
                 lat, lon, radius_m, categories, name,
                 min_confidence, operating_status, brand, has_website, has_phone,
                 effective_limit,
+                within_polygon=within_polygon,
             )
         except ValueError as e:
             return {"error": "bad_request", "detail": str(e)}
@@ -1091,6 +1236,7 @@ def find_places(
         )
         payload = _with_categories_hint(payload, categories, widen_hint="widen radius_m")
         payload = _with_detail_legend(payload, effective_detail)
+        payload = _with_within_extras(payload, within_resolved_echo, within_note)
         return payload
     try:
         rows = overture.find_places(
@@ -1098,6 +1244,7 @@ def find_places(
             min_confidence, operating_status, brand, has_website, has_phone,
             effective_limit + 1, offset=start_offset,
             categories=categories,
+            within_polygon=within_polygon,
         )
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
@@ -1119,6 +1266,7 @@ def find_places(
     payload = _with_category_hint(payload, category, widen_hint="widen radius_m")
     payload = _with_categories_hint(payload, categories, widen_hint="widen radius_m")
     payload = _with_detail_legend(payload, effective_detail)
+    payload = _with_within_extras(payload, within_resolved_echo, within_note)
     if not used_name_fallback:
         payload = cursor_mod.attach_cursor(
             payload, "results", params_key, current_release, start_offset, has_more
