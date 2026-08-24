@@ -364,6 +364,77 @@ Then stop. The next question the user asks is the real one.
 {_COMPACT}"""
 
 
+PLAN_AREA_VISIT_TOOLS = (
+    "preferences",
+    "search_categories",
+    "find_places",
+    "optimize_route",
+    "render_map",
+)
+
+
+def _plan_area_visit(area: str, interests: str, mode: str = "") -> str:
+    area = _arg(area)
+    interests = _arg(interests)
+    mode = _arg(mode)
+    where = f"in {area}" if area else "somewhere — ask the user which area first"
+    what = (
+        f"built around: {interests}"
+        if interests
+        else (
+            "The user has not said what they're interested in — ask for a "
+            "few interests (coffee, museums, bookstores, ...) before "
+            "calling anything. Do not invent them."
+        )
+    )
+    travel = (
+        f'Use travel mode "{mode}".'
+        if mode
+        else (
+            "No travel mode was given — call `preferences()` with no "
+            "arguments first to check for a stored default; use that mode "
+            "if one is set, otherwise plan the visit on foot."
+        )
+    )
+    return f"""Plan a visit {where}, {what}.
+
+{travel}
+
+1. Turn each interest into an Overture category slug. An interest phrase
+   that is already a known slug (e.g. "coffee" -> coffee_shop, "museum" ->
+   museum) can be used as-is; for anything less certain, run it through
+   `search_categories()` first rather than guessing — a made-up slug
+   matches nothing. Keep at most 5 slugs total; if there are more
+   interests than that, keep the ones the user emphasized most and say
+   which you dropped.
+2. `find_places()` **once** with area (or the resolved point) and
+   categories=[the up-to-5 slugs] and group_by_category=true. That is a
+   single scan across every interest, not one call per category — the
+   grouped answer comes back as {{category: [rows...]}}, already
+   ranked nearest-first within each bucket.
+3. From that one response, pick 1-3 stops per category — prefer rows with
+   a "strong" or "ok" trust tier over "weak"/"unknown" ones when a
+   category offers a choice — and keep the total around 4-8 stops, a
+   reasonable size for one visit.
+4. `optimize_route()` with stops=[the chosen rows' GERS ids or names] and
+   the travel mode from above, for the cheapest visiting order over the
+   real street network rather than a straight-line guess.
+5. `render_map()` on the ordered result with the plan as `summary` — a
+   one-pager the user can send as a local file.
+
+Then give a compact itinerary: the stops in visiting order, one line on
+why each fits the interest it covers, and the total distance/duration —
+not the raw tool payloads. For any stop whose `find_places()` row carried
+a "weak"/"unknown" trust tier or a trust_note flagging low confidence or
+an uncertain operating status, say so plainly and name it as worth
+double-checking before the user leaves. `optimize_route()`'s own
+verify_before_going only fires for stops passed as full place lookups,
+not the id/name stops this workflow passes, so this honesty check has to
+happen here, using what `find_places()` already told you, not skipped.
+
+{_COMPACT}"""
+
+
 # name -> (function, description, referenced tool names). The description is
 # what a client shows next to the slash command.
 PROMPTS: dict[str, tuple[Callable[..., str], str, tuple[str, ...]]] = {
@@ -404,6 +475,12 @@ PROMPTS: dict[str, tuple[Callable[..., str], str, tuple[str, ...]]] = {
         "distances) against real map data — confirmed / stretched / "
         "false / unverifiable, claimed vs. measured.",
         VERIFY_LISTING_CLAIMS_TOOLS,
+    ),
+    "plan_area_visit": (
+        _plan_area_visit,
+        "Plan a visit around specific interests: one multi-category scan, "
+        "an optimized route, and a map — trust tiers surfaced, not hidden.",
+        PLAN_AREA_VISIT_TOOLS,
     ),
 }
 
@@ -458,4 +535,10 @@ def register(server: MCPServer, selected: set[str]) -> None:
     def verify_listing_claims(location: str, claims: str) -> str:
         return _verify_listing_claims(location, claims) + _profile_note(
             VERIFY_LISTING_CLAIMS_TOOLS, selected
+        )
+
+    @server.prompt(name="plan_area_visit", description=PROMPTS["plan_area_visit"][1])
+    def plan_area_visit(area: str, interests: str, mode: str = "") -> str:
+        return _plan_area_visit(area, interests, mode) + _profile_note(
+            PLAN_AREA_VISIT_TOOLS, selected
         )
