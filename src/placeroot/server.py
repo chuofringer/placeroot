@@ -3376,7 +3376,22 @@ def find_near(
     for key in ("truncated", "omitted_count", "note", "degraded_fields", "cursor"):
         if key in payload:
             out[key] = payload[key]
-    return budget.apply_budget(out, "results")
+    pre_rows = len(out["results"])
+    out = budget.apply_budget(out, "results")
+    # find_places already computed `cursor`'s offset counting the rows it
+    # delivered — but this second apply_budget pass (over the compacted
+    # _FIND_NEAR_KEYS rows, which are smaller and shouldn't normally trim
+    # further) can itself drop rows the caller never actually receives. If
+    # it does, the cursor's offset would overcount and the next page would
+    # silently skip those rows — rewind it by exactly how many were lost so
+    # "never skip a row" holds regardless of how many trimming passes a
+    # payload goes through (see cursor.rewind_cursor).
+    dropped_here = pre_rows - len(out["results"])
+    if dropped_here > 0 and out.get("cursor"):
+        rewound = cursor_mod.rewind_cursor(out["cursor"], dropped_here)
+        if rewound is not None:
+            out["cursor"] = rewound
+    return out
 
 
 @_tool("Ground a location")

@@ -47,11 +47,17 @@ def _params_hash(params_key: dict) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:12]
 
 
-def encode_cursor(params_key: dict, release: str, offset: int) -> str:
-    """Opaque continuation token: url-safe base64 of `{"q", "r", "o"}`."""
-    payload = {"q": _params_hash(params_key), "r": release, "o": offset}
+def _encode(q: str, r: str, o: int) -> str:
+    """Low-level encoder shared by encode_cursor (hashes params_key into q)
+    and rewind_cursor (reuses an already-decoded q verbatim, unhashed)."""
+    payload = {"q": q, "r": r, "o": o}
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def encode_cursor(params_key: dict, release: str, offset: int) -> str:
+    """Opaque continuation token: url-safe base64 of `{"q", "r", "o"}`."""
+    return _encode(_params_hash(params_key), release, offset)
 
 
 def decode_cursor(s: str) -> dict | None:
@@ -113,6 +119,32 @@ def resolve_cursor(
             f"{current_release} — rows may have shifted"
         )
     return None, decoded["o"], note
+
+
+def rewind_cursor(cursor: str, by: int) -> str | None:
+    """Subtract `by` from a cursor's offset, re-encoding with the same q/r.
+
+    For a caller that attaches a cursor via `attach_cursor` and then runs a
+    *second* trimming pass over the same rows (find_near projects
+    find_places' rows to a compact shape and re-runs budget.apply_budget on
+    the result) — if that second pass drops rows find_places already
+    counted into the cursor's offset, the offset now overcounts what the
+    caller actually delivered, and the next page would silently skip the
+    dropped rows. Rewinding by however many rows the second pass dropped
+    keeps the cursor's contract ("never skip a row") intact regardless of
+    how many trimming passes a payload goes through before it reaches the
+    caller.
+
+    Floors at 0 (never a negative offset). Returns None — never raises — on
+    an undecodable cursor, so a caller can treat that the same as any other
+    unusable cursor rather than propagating an exception from a place that
+    is itself a bug-defense measure.
+    """
+    decoded = decode_cursor(cursor)
+    if decoded is None:
+        return None
+    new_offset = max(0, decoded["o"] - by)
+    return _encode(decoded["q"], decoded["r"], new_offset)
 
 
 def attach_cursor(

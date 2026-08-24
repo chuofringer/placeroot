@@ -1,7 +1,7 @@
 """Stateless pagination cursors on find_places/find_near (ROADMAP §4.4)."""
 
+from placeroot import budget, overture, release, server
 from placeroot import cursor as cursor_mod
-from placeroot import overture, release, server
 
 from .conftest import CENTER_LAT, CENTER_LON
 from .test_find_places_in_area import DIV_NOTCH, polygon_fixtures  # noqa: F401
@@ -161,6 +161,93 @@ def test_division_path_pagination_walks_to_the_same_set(polygon_fixtures):  # no
         page = server.find_places(division_id=DIV_NOTCH, limit=2, cursor=page["cursor"])
         assert "error" not in page
     assert seen == expected
+
+
+def test_rewind_cursor_subtracts_offset_keeping_q_and_r():
+    original = cursor_mod.encode_cursor({"category": "coffee_shop"}, "2026-08-19.0", 10)
+    rewound = cursor_mod.rewind_cursor(original, 3)
+    before = cursor_mod.decode_cursor(original)
+    after = cursor_mod.decode_cursor(rewound)
+    assert after["o"] == 7
+    assert after["q"] == before["q"]
+    assert after["r"] == before["r"]
+
+
+def test_rewind_cursor_floors_at_zero():
+    original = cursor_mod.encode_cursor({"category": "coffee_shop"}, "2026-08-19.0", 2)
+    rewound = cursor_mod.rewind_cursor(original, 10)
+    assert cursor_mod.decode_cursor(rewound)["o"] == 0
+
+
+def test_rewind_cursor_returns_none_for_garbage():
+    assert cursor_mod.rewind_cursor("not-a-real-cursor!!", 1) is None
+
+
+def test_find_near_rewinds_cursor_when_its_own_second_budget_pass_drops_a_row(monkeypatch):
+    """Regression: find_places' apply_budget pass computes the cursor's
+    offset from the rows *it* delivered, but find_near then re-projects
+    those rows to a compact shape and runs budget.apply_budget a SECOND
+    time on the result (server.py, end of find_near). If that second pass
+    ever drops a row find_places had already counted into the offset, the
+    next page would silently skip it — the cursor's whole contract is
+    "never skip a row". This forces that second pass to drop exactly one
+    row (find_near's own compacted rows are normally smaller than
+    find_places', so this practically never trims further today) and
+    checks the emitted cursor is rewound to compensate.
+    """
+    # Ground truth, unpatched: what find_near actually delivers on a normal
+    # first page, so we know which row the forced extra drop below removes.
+    unpatched_first = server.find_near(
+        "coffee_shop", "Blue Bottle Roastery", radius_m=1000, limit=5
+    )
+    dropped_id = unpatched_first["results"][4]["id"]  # the 5th (last) row of a normal page
+
+    real_apply_budget = budget.apply_budget
+    drop_calls = {"n": 0}
+
+    def fake_apply_budget(payload, list_key, budget_tokens=None):
+        # Only intercept find_near's own final pass — identifiable by the
+        # "near" key its projected envelope carries, which find_places'
+        # own apply_budget call never sees.
+        if list_key == "results" and isinstance(payload, dict) and "near" in payload:
+            drop_calls["n"] += 1
+            trimmed = dict(payload)
+            trimmed["results"] = list(payload["results"])[:-1]
+            trimmed["truncated"] = True
+            trimmed["omitted_count"] = payload.get("omitted_count", 0) + 1
+            return trimmed
+        return real_apply_budget(payload, list_key, budget_tokens)
+
+    # server.py does `from placeroot import budget` and calls
+    # budget.apply_budget(...) — same module object as `budget` imported
+    # above, so patching it here is enough. Scoped to just this call: the
+    # continuation call below must go through the REAL apply_budget, or it
+    # would drop its own last row too and this test couldn't tell a
+    # correctly-rewound cursor from one that just got lucky.
+    with monkeypatch.context() as m:
+        m.setattr(budget, "apply_budget", fake_apply_budget)
+        first = server.find_near("coffee_shop", "Blue Bottle Roastery", radius_m=1000, limit=5)
+
+    assert drop_calls["n"] >= 1
+    assert first["truncated"] is True
+    assert "cursor" in first
+    # find_places itself would have set offset=5 (5 rows delivered pre-drop);
+    # find_near's forced extra drop of 1 row must rewind that to 4, matching
+    # the 4 rows the caller actually received.
+    assert len(first["results"]) == 4
+    decoded = cursor_mod.decode_cursor(first["cursor"])
+    assert decoded["o"] == 4
+    assert dropped_id not in {r["id"] for r in first["results"]}
+
+    # Continuing from the rewound cursor (real apply_budget now) must not
+    # skip the row the forced second pass dropped: it reappears as the
+    # first row of the next page.
+    second = server.find_near(
+        "coffee_shop", "Blue Bottle Roastery", radius_m=1000, limit=5, cursor=first["cursor"]
+    )
+    assert "error" not in second
+    second_ids = [r["id"] for r in second["results"]]
+    assert second_ids[0] == dropped_id
 
 
 def test_find_near_end_to_end_continuation():
