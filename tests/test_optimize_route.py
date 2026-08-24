@@ -24,7 +24,7 @@ import random
 
 import pytest
 
-from placeroot import routing, server, tool_profiles
+from placeroot import errors, geocode, gers, routing, server, tool_profiles
 
 from ._routing_fixture import build_routing_fixture as fx
 
@@ -772,3 +772,74 @@ def test_the_dropped_legs_note_is_paid_for_out_of_the_budget(monkeypatch):
 
 def test_optimize_route_is_in_the_routing_profile():
     assert "optimize_route" in tool_profiles.PROFILES["routing"]
+
+
+# --- LocationRef (roadmap #4.1) -------------------------------------------
+
+
+def test_pure_coordinate_stops_have_no_resolved_key():
+    """Coordinate-only input must be byte-identical to before this feature:
+    no new "resolved" key on the answer."""
+    result = server.optimize_route(_as_dicts(SQUARE_STOPS), mode="walk")
+    assert "error" not in result
+    assert "resolved" not in result
+
+
+def test_mixed_stops_resolve_names_and_gers_ids(monkeypatch):
+    name_lat, name_lon = fx.node_latlon(2, 8)
+    id_lat, id_lon = fx.node_latlon(2, 11)
+    fake_id = "a" * 32
+
+    def fake_resolve(query):
+        assert query == "Coffee Place"
+        return {
+            "name": "Coffee Place", "lat": name_lat, "lon": name_lon,
+            "id": "gers-coffee", "type": "place",
+        }
+
+    def fake_lookup(id_, near_lat=None, near_lon=None):
+        assert id_ == fake_id
+        return {
+            "id": fake_id, "theme": "places", "type": "place", "name": "GERS Place",
+            "lat": id_lat, "lon": id_lon, "summary": {}, "related": {},
+        }
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    monkeypatch.setattr(gers, "gers_lookup", fake_lookup)
+
+    coord_lat, coord_lon = fx.node_latlon(2, 2)
+    stops = [{"lat": coord_lat, "lon": coord_lon}, "Coffee Place", fake_id]
+    result = server.optimize_route(stops, mode="walk")
+    assert "error" not in result
+    assert result["resolved"] == [
+        {
+            "stop": 1, "name": "Coffee Place", "id": "gers-coffee",
+            "lat": name_lat, "lon": name_lon, "matched_by": "name",
+        },
+        {
+            "stop": 2, "name": "GERS Place", "id": fake_id,
+            "lat": id_lat, "lon": id_lon, "matched_by": "gers_id",
+        },
+    ]
+
+
+def test_ambiguous_name_stop_is_an_indexed_error(monkeypatch):
+    def fake_resolve(query):
+        raise errors.AmbiguousPlace(query, candidates=[{"name": "X"}, {"name": "Y"}])
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    coord_lat, coord_lon = fx.node_latlon(2, 2)
+    stops = [{"lat": coord_lat, "lon": coord_lon}, "Ambiguous Name"]
+    result = server.optimize_route(stops, mode="walk")
+    assert result["error"] == "ambiguous_place"
+    assert result["index"] == 1
+    assert result["detail"].startswith("stops[1]: ")
+    assert result["candidates"]
+
+
+def test_bad_ref_form_stop_is_bad_request():
+    coord_lat, coord_lon = fx.node_latlon(2, 2)
+    stops = [{"lat": coord_lat, "lon": coord_lon}, {"lat": 91.0, "lon": 0.0}]
+    result = server.optimize_route(stops, mode="walk")
+    assert result["error"] == "bad_request"
+    assert result["detail"].startswith("stops[1]: ")

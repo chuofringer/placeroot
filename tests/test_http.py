@@ -53,9 +53,11 @@ def test_http_find_places_matches_stdio_path(running_http_server):
                 {"lat": CENTER_LAT, "lon": CENTER_LON, "radius_m": 1000, "limit": 5},
             )
             assert result.is_error is False
-            # structured_content isn't populated by this tool (plain dict
-            # return, no output schema), so parse the text content block —
-            # the same JSON body a stdio client would receive.
+            # find_places now declares an outputSchema (roadmap §4.3, #403),
+            # so structured_content is populated too — parse the text content
+            # block anyway: it's the same JSON body a stdio client would
+            # receive, and content vs structured_content is asserted equal
+            # in tests/test_output_schemas.py.
             return json.loads(result.content[0].text)
 
     over_http = anyio.run(call_over_http)

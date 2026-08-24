@@ -213,8 +213,52 @@ def test_find_places_rows_carry_a_trust_note():
         assert "permanently closed" in closed[0]["trust_note"].lower()
 
 
+def test_trust_tier_matches_trust_note_band():
+    """trust_tier and trust_note are derived from the same signals (roadmap
+    §4.5) — walking every fixture row must never find a disagreement."""
+    results = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=25)
+    assert results
+    for row in results:
+        tier = honesty.trust_tier(row)
+        assert tier in honesty.TRUST_TIERS
+        note = row["trust_note"].lower()
+        status = (row.get("operating_status") or "").lower()
+        if "closed" in status:
+            assert tier == "weak"
+            assert "closed" in note
+        elif tier == "strong":
+            assert "high confidence" in note
+            assert "call ahead" not in note
+        elif tier == "unknown":
+            assert row.get("confidence") is None
+
+
+def test_trust_tier_closed_status_is_always_weak():
+    assert honesty.trust_tier(
+        {"operating_status": "permanently closed", "confidence": 0.99}
+    ) == "weak"
+    assert honesty.trust_tier(
+        {"operating_status": "closed_temporarily", "confidence": 0.99}
+    ) == "weak"
+
+
+def test_trust_tier_no_confidence_is_unknown():
+    assert honesty.trust_tier({"operating_status": "in business"}) == "unknown"
+
+
+def test_trust_tier_bands():
+    assert honesty.trust_tier({"confidence": 0.9}) == "strong"
+    assert honesty.trust_tier({"confidence": 0.9, "sources": []}) == "ok"
+    assert honesty.trust_tier({"confidence": 0.9, "sources": [{"dataset": "x"}]}) == "strong"
+    assert honesty.trust_tier({"confidence": 0.6}) == "ok"
+    assert honesty.trust_tier({"confidence": 0.1}) == "weak"
+
+
 def test_server_find_places_surfaces_trust_note():
-    payload = server.find_places(CENTER_LAT, CENTER_LON, radius_m=200, limit=5)
+    # detail="full" (roadmap §4.5 default is now "compact", which carries a
+    # `trust` tier instead of trust_note's prose — see test_find_places.py's
+    # detail-tier tests for that shape).
+    payload = server.find_places(CENTER_LAT, CENTER_LON, radius_m=200, limit=5, detail="full")
     assert "results" in payload
     assert payload["results"]
     assert all(r.get("trust_note") for r in payload["results"])

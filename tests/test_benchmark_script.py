@@ -28,13 +28,14 @@ _SPEC.loader.exec_module(token_efficiency)
 
 def test_schema_surface_covers_every_registered_tool():
     rows = token_efficiency.measure_schema_surface()
-    names = {name for name, _, _, _ in rows}
+    names = {name for name, _, _, _, _ in rows}
     # Introspected from the registry, so this only checks that well-known
     # tools are present — not the exact tool count, which changes often.
     assert {"find_places", "geocode", "isochrone", "route"} <= names
-    for _name, whole, desc, schema in rows:
+    for _name, whole, desc, schema, output_schema in rows:
         assert whole.tokens > 0
-        assert whole.chars >= desc.chars + schema.chars - 2  # both are inside `whole`
+        # roadmap §4.3: `whole` now also includes outputSchema.
+        assert whole.chars >= desc.chars + schema.chars + output_schema.chars - 3
         assert whole.bytes_ >= whole.chars
 
 

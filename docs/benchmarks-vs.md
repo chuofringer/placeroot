@@ -58,15 +58,18 @@ never are.
 
 - **Schema surfaces are counted twice, and the ratio uses the fair one.** A
   `tools/list` entry can carry fields one server publishes and another simply
-  does not. Mapbox declares an `outputSchema` on 28 of its 29 tools; PlaceRoot
-  declares none, so on our side that field is absent rather than smaller, and it
-  is roughly half of Mapbox's verbatim surface. A ratio built on the verbatim
-  numbers would therefore mostly be reporting that one design choice. So the
-  generated table shows both: the **verbatim** cost an agent really pays, and the
-  cost over the **common fields** every server here publishes (`name`, `title`,
-  `description`, `inputSchema`, `annotations`). The headline ratios are the
-  common-field ones, and the note under the table names what each server sends
-  beyond them and what it costs.
+  does not. Mapbox declares an `outputSchema` on 28 of its 29 tools, and
+  PlaceRoot now does too on every tool (roadmap §4.3) — hand-authored and
+  deliberately lean (`additionalProperties: true`, no per-field descriptions,
+  since the docstrings already carry those). `outputSchema` is one of the
+  **common fields** every server here publishes (`name`, `title`,
+  `description`, `inputSchema`, `annotations`, `outputSchema`); the size
+  difference that remains is real verbosity, not presence-vs-absence, so it
+  shows up in the common-field ratio itself rather than being called out as
+  a structural gap. The generated table still shows both: the **verbatim**
+  cost an agent really pays, and the cost over those common fields — the
+  headline ratios are the common-field ones, and the note under the table
+  names what each server sends beyond even those and what it costs.
 - **Our answers come from the committed fixtures**, through the same
   `placeroot.server` functions the MCP server exposes, reusing
   `benchmarks/token_efficiency.py`'s scenario machinery so the two benchmarks
@@ -136,12 +139,12 @@ Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Eve
 
 - Token counting method: **chars/4 heuristic — `placeroot.budget.estimate_tokens`, applied identically to all three servers**
 - Snapshots captured: **2026-08-08**
-- PlaceRoot's own answers were captured on **macOS-26.3.1-arm64-arm-64bit** (Python 3.11.0, Overture `2026-08-19.0`) and are snapshotted rather than recomputed here: floating-point differences in routing and geometry change digit counts between platforms, so a live rerun costs a few tokens more or less on Linux than on macOS. A tolerance test reruns them for real and fails if this snapshot drifts from what the code now answers.
-- Schema figures are counted twice: over the **common fields** every server here publishes, and **verbatim** over everything it sends. The ratios below are the common-field ones, because Mapbox declares an `outputSchema` that PlaceRoot does not declare at all — see the note under the table.
-- Schema surface, whole install (common fields): PlaceRoot **24410** tokens (42 tools) · Mapbox **15190** (29 tools) · Google Maps **655** (7 tools)
-- Schema surface, the six tools each server needs for the scenarios below (common fields): PlaceRoot **4703** · Mapbox **4654** (1.0x ours) · Google Maps **500** (5 tools — no isochrone tool exists)
-- Whole-install surface: Mapbox is **0.6x** PlaceRoot's on common fields, on 29 tools against 42. Verbatim — counting the output schemas Mapbox publishes and we don't — it is 1.2x (29295 against 24410), and 2.8x on the six-tool subset.
-- Answers, over the 6 scenarios both PlaceRoot and Mapbox answer: PlaceRoot **2026** tokens total, Mapbox **1337** (1219 with pretty-print whitespace removed)
+- PlaceRoot's own answers were captured on **macOS-26.3.1-arm64-arm-64bit** (Python 3.11.15, Overture `2026-08-19.0`) and are snapshotted rather than recomputed here: floating-point differences in routing and geometry change digit counts between platforms, so a live rerun costs a few tokens more or less on Linux than on macOS. A tolerance test reruns them for real and fails if this snapshot drifts from what the code now answers.
+- Schema figures are counted twice: over the **common fields** every server here publishes, and **verbatim** over everything it sends. `outputSchema` is one of the common fields now that both sides declare one (roadmap §4.3) — the ratios below are the common-field ones; see the note under the table for the size gap that remains.
+- Schema surface, whole install (common fields): PlaceRoot **31878** tokens (42 tools) · Mapbox **28958** (29 tools) · Google Maps **655** (7 tools)
+- Schema surface, the six tools each server needs for the scenarios below (common fields): PlaceRoot **7396** · Mapbox **13069** (1.8x ours) · Google Maps **500** (5 tools — no isochrone tool exists)
+- Whole-install surface: Mapbox is **0.9x** PlaceRoot's on common fields (both sides' output schemas included), on 29 tools against 42. Verbatim — counting the rest of what each side sends beyond the common fields — it is 0.9x (29295 against 31878), and 1.8x on the six-tool subset.
+- Answers, over the 6 scenarios both PlaceRoot and Mapbox answer: PlaceRoot **1685** tokens total, Mapbox **1337** (1219 with pretty-print whitespace removed)
 
 ### Where the competitor numbers come from
 
@@ -154,17 +157,17 @@ Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Eve
 
 | server | tools registered | whole install, verbatim | whole install, common fields | the 6-scenario subset | subset verbatim | subset common fields |
 |---|---:|---:|---:|---:|---:|---:|
-| PlaceRoot | 42 | 24410 | **24410** | 6 | 4703 | **4703** |
-| Mapbox MCP | 29 | 29295 | **15190** | 6 | 13129 | **4654** |
+| PlaceRoot | 42 | 31878 | **31878** | 6 | 7396 | **7396** |
+| Mapbox MCP | 29 | 29295 | **28958** | 6 | 13129 | **13069** |
 | Google Maps MCP (archived) | 7 | 655 | **655** | 5 | 500 | **500** |
 
-**Common fields** are `name`, `title`, `description`, `inputSchema`, `annotations` — the ones every server here puts in a `tools/list` entry. The verbatim column additionally counts whatever else a server sends, and that is not the same kind of difference:
+**Common fields** are `name`, `title`, `description`, `inputSchema`, `annotations`, `outputSchema` — the ones every server here puts in a `tools/list` entry. The verbatim column additionally counts whatever else a server sends, and that is not the same kind of difference:
 
 - **PlaceRoot** sends the common fields and nothing else.
-- **Mapbox MCP** also sends `_meta`, `execution`, `outputSchema` — **14105** tokens across the install, **8475** across the six-tool subset.
+- **Mapbox MCP** also sends `_meta`, `execution` — **337** tokens across the install, **60** across the six-tool subset.
 - **Google Maps MCP (archived)** sends the common fields and nothing else.
 
-Mapbox declares an `outputSchema` on almost every tool; PlaceRoot declares none, so on our side the field is *absent*, not smaller. An agent really does pay the verbatim number, so it is in the table — but a ratio built on it would mostly be reporting that one choice, which is why the headline ratios above use the common fields. If PlaceRoot adds output schemas the two columns will converge, and this page will say so on its own.
+Mapbox declares an `outputSchema` on almost every tool, and PlaceRoot now does too (roadmap §4.3) — so it moved into the common fields above rather than staying an extra one side structurally could not send. The two are not the same size: PlaceRoot's are hand-authored and lean (`additionalProperties: true`, no per-field descriptions — the docstrings already carry those), so that gap is real and now shows up inside the common-field ratio, the same way any other field's verbosity would.
 
 ### Answer size (paid per tool call)
 
@@ -172,7 +175,7 @@ Mapbox declares an `outputSchema` on almost every tool; PlaceRoot declares none,
 |---|---:|---:|---:|
 | `geocode_address` — Geocode one address / place name. | **87** | **93** (text) | **48** (41 minified) |
 | `reverse_geocode` — What address is at this coordinate? | **45** | **64** (text) | **288** (188 minified) |
-| `nearest_coffee` — Coffee shops near this point. | **811** | **117** (text) | not measured |
+| `nearest_coffee` — Coffee shops near this point. | **470** | **117** (text) | not measured |
 | `route_a_to_b` — Route from A to B. | **436** | **422** (text) | not measured |
 | `isochrone_15min` — How far can I get in 15 minutes? | **540** | **396** (text) | not measured |
 | `matrix_3x3` — 3x3 distance matrix over three points. | **107** | **245** (127 minified) | not measured |

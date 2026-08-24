@@ -250,7 +250,11 @@ def test_resolve_place_batch_mixed_resolvable_and_not_found():
     assert rows[0]["gers_id"] == roastery_id
     assert "error" not in rows[0]
     assert rows[0]["name"] == "Blue Bottle Roastery"
-    assert rows[1] == {"gers_id": "does-not-exist", "error": "not found"}
+    assert rows[1] == {
+        "gers_id": "does-not-exist",
+        "error": "not_found",
+        "detail": "no place matched GERS id 'does-not-exist'",
+    }
 
 
 def test_resolve_place_batch_over_cap_returns_error_not_partial_results():

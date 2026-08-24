@@ -8,7 +8,234 @@ fixing behavior is patch.
 
 ## [Unreleased]
 
+### Added
+- Declared MCP `outputSchema` on all 42 tools (docs/ROADMAP.md §4 feature 3
+  / §5.3) — the one MCP-conformance gap docs/benchmarks-vs.md conceded to
+  Mapbox is closed. Hand-authored, not derived: every tool returns a bare,
+  heterogeneous `dict` (a success shape or an `{"error", "detail", ...}`
+  envelope), so the SDK's own return-type schema derivation produces
+  nothing for any of them. `find_places`, `find_near`, `geocode`,
+  `geocode_batch`, `resolve_place`, `from_to`, `route`, `isochrone`,
+  `travel_time_matrix`, `distance_matrix`, `optimize_route`, and
+  `data_version` get precise per-field schemas; every other tool gets the
+  same honest generic envelope. Every schema is `{anyOf: [<success shape,
+  additionalProperties: true>, <shared error envelope>]}`, so a real
+  answer — success, error, or a degraded/needs_confirm variant — always
+  validates; `tests/test_output_schemas.py` proves it against real calls
+  over the committed offline fixtures, both server-side and through the
+  real MCP client layer. Tool calls also now carry `structuredContent`
+  (additive — a spec-compliant client requires it once a tool declares an
+  outputSchema; the existing text `content` is unchanged), reparsed from a
+  permissive pass-through model rather than validated against the
+  published schema server-side, so a declared schema can never make a
+  previously-working call fail.
+- `try` hints on dead-end errors (docs/ROADMAP.md §4, next tier): a
+  `not_found` from resolving a free-text name or a LocationRef GERS id
+  (`from_to`, `find_near`, and every LocationRef-accepting tool — they all
+  route through the same two internal helpers, `_resolve_named_place` and
+  `_resolve_location_ref`) now carries a short machine-actionable `"try"`
+  string naming the next move — e.g. `"resolve_place with near_lat/near_lon
+  or city to disambiguate; or geocode for street addresses"`. `route`'s and
+  `places_along_route`'s `no_route` (both points snapped, nothing connects
+  them) carries a mode-tuned `"try"` — walk/cycle name the footpaths and
+  pedestrian bridges drive cannot reach; walk's own hint stays a plain
+  connectivity check rather than pointing at a nonexistent "more capable"
+  mode. `resolve_place`'s existing `need`/`retry_with` sketch already
+  covers its own no-match case, so it was left alone — the two errors serve
+  the same purpose through different shapes, and adding "try" there would
+  be redundant. Every other `not_found` site (a caller-supplied
+  `division_id`/GERS id that doesn't exist, rather than a name that failed
+  to resolve) was deliberately left unchanged — see the PR body's
+  site → hint table.
+- LocationRef, wave 2 (docs/ROADMAP.md §4.1): `distance_matrix`'s and
+  `travel_time_matrix`'s `origins`/`destinations`, `meeting_point`'s
+  `origins`, and `ground_location`'s and `within_distance`'s new `where`
+  now accept the same LocationRef — `{"lat": ..., "lon": ...}`, a GERS id
+  string, or a free-text place name — mixed freely inside a list, same
+  conventions as wave 1: parallel resolution, indexed errors
+  (`origins[i]: ...` / `destinations[i]: ...`), a compact `resolved` echo
+  only for string entries, and a byte-identical answer for
+  coordinate-only calls. The matrix tools' `resolved` splits into
+  `{"origins": [...], "destinations": [...]}`, each present only when that
+  side had a string entry. `meeting_point`'s per-origin `mode` stays a
+  dict-only field (`{"lat", "lon", "mode"}`); a string origin always gets
+  the default mode. `ground_location`'s and `within_distance`'s `where` is
+  mutually exclusive with `lat`/`lon`, same as `isochrone`/`summarize_area`
+  in wave 1. `route` gains a docstring pointer to `from_to` for name/id
+  endpoints instead of its own `where` (it already has two coordinate
+  pairs; `from_to` is the LocationRef-native route). `elevation_at`,
+  `address_at`, `buildings_at`, `land_use_at`, `infrastructure_at`,
+  `water_near`, `admin_lookup`, `changes_in_area`, `summarize_buildings`
+  and `reverse_geocode` are deliberately not widened this wave — micro
+  point-lookups where a geocode hop is rare and the schema cost per tool
+  adds up. `within_distance`'s `max_distance_m` is now keyword-only with
+  no default, so it stays a required, non-defaultable schema field even
+  though `lat`/`lon` had to become optional to make room for `where` — an
+  omitted `max_distance_m` is refused before the tool runs rather than
+  silently searching a 0m window. `meeting_point`'s string origins now
+  resolve in parallel (same pattern `_resolve_location_refs` already
+  uses), not one name at a time, keeping a multi-person named-origin call
+  inside the project's response-time budget.
+- LocationRef, wave 1 (docs/ROADMAP.md §4.1): `optimize_route`'s `stops`,
+  `compare_areas`'s `areas`, `isochrone`'s and `summarize_area`'s new
+  `where`, and `from_to`'s `from`/`to` now accept a location as
+  `{"lat": ..., "lon": ...}`, a GERS id string, or a free-text place name
+  — mixed freely inside a list. Resolving a name/id no longer requires a
+  separate `geocode`/`resolve_place` round-trip first. A string input adds
+  a compact `resolved`/`from`/`to` echo (`name`, `id`, `lat`, `lon`,
+  `matched_by`); a plain `{lat, lon}` input produces a byte-identical
+  answer to before this change — no new keys. List parameters resolve
+  their string entries in parallel and report the first failing index as
+  `{"error": ..., "index": i, "detail": "stops[i]: ..."}` so the agent can
+  retry that one argument; an ambiguous name still returns
+  `ambiguous_place` with `candidates`, indexed the same way. `optimize_route`
+  and `compare_areas` on named areas compare the same `radius_m` circle
+  around the resolved point as a coordinate input would — polygon-accurate
+  area comparison is a later wave. `route`, `distance_matrix`,
+  `travel_time_matrix`, `meeting_point`, `ground_location` and the rest of
+  the surface are out of scope for this wave; `find_near` and `from_to`
+  are not deprecated.
+- Stateless pagination cursors (docs/ROADMAP.md §4.4): a `find_places` or
+  `find_near` answer that's truncated — either token-budget-trimmed, or
+  because the scan stopped at `limit`/`MAX_ROWS` while more matching rows
+  exist — now carries `cursor`, an opaque, self-contained token encoding
+  `(query hash, Overture release, row offset)`. Pass it back with the same
+  arguments to fetch the next page; a cursor for a different query (or a
+  malformed one) returns `{"error": "bad_cursor", ...}` naming the
+  mismatch, and a cursor issued against an older Overture release is
+  honored anyway — served against the current release, with a one-line
+  `note` that rows may have shifted, rather than failing the continuation.
+  No server-side session state: correctness relies only on PlaceRoot's
+  answers coming from a pinned, immutable release. `find_places`' point
+  path gained a stable `id` tiebreak on its distance ordering (the division
+  path already had one) so pages never overlap or skip on tied distances.
+  Purely additive: `cursor` appears only on a truncated answer, and
+  `truncated`/`omitted_count` keep their existing meaning for the
+  budget-trim case; a scan that hits `limit` with more rows available is a
+  second, previously-unsignaled kind of truncation that this also now
+  flags (`truncated: true`, no `omitted_count` since the total isn't
+  known). Name-fallback answers (`matched_by: alt_name`/`fuzzy`, #373)
+  never carry a cursor — that pool is small and paginating it honestly
+  isn't worth the complexity. `geocode`, `within_distance`, `water_near`,
+  `changes_in_area` and other list tools are out of scope for this change;
+  the new `placeroot.cursor` module is a standalone, reusable helper so
+  they can adopt it later.
+- Published input schemas now carry a JSON Schema `enum` plus a stated
+  effective default for parameters whose valid values used to live only
+  in prose: `mode` (every tool that takes one — `route`, `isochrone`,
+  `from_to`, `travel_time_matrix`, `optimize_route`, `ground_location`,
+  `places_along_route`, `neighborhood_verdict`, `preferences`), `prefer`
+  (`route`, `from_to`), `op` (`geometry_op`), and `operating_status`
+  (`find_places`). Runtime validation is unchanged — these stay plain
+  strings, not `Literal`s, so an unsupported value still reaches the tool
+  and returns its own structured self-correcting error (e.g.
+  `unsupported_mode` with `supported: [...]`) instead of being rejected
+  by schema validation before the call runs (roadmap docs/ROADMAP.md
+  §4.3). Redundant value-listing prose was trimmed from several
+  docstrings now that the enum carries it, keeping the net schema-token
+  cost roughly flat.
+
+- `find_places` gains `detail: "ids" | "compact" | "full"` and multi-
+  category search (docs/ROADMAP.md §4.5). `detail="ids"` returns just
+  `{id, distance_m}` — deliberately coordinate-free, for chaining an id
+  into a batch lookup; `detail="compact"` returns `{id, name, category,
+  lat, lon, distance_m, trust}`, where `trust` is a tier string
+  (`"strong"|"ok"|"weak"|"unknown"`) derived from the exact same
+  confidence/operating-status signals as `trust_note`'s prose (new
+  `honesty.trust_tier`, alongside a payload-level `trust_legend` line so
+  the tiers are self-explaining). compact keeps `lat`/`lon` so a composed
+  `find_places` → `render_map` call still has coordinates to plot under
+  the new default (#386); `detail="full"` is today's row, unchanged.
+  Projection happens before the token budget is applied, so a smaller
+  tier fits more rows per answer — the point of the feature.
+  `categories: [...]` (up to 5 slugs, mutually exclusive with `category`)
+  runs a checklist of several categories in one scan instead of one call
+  per category, matched with the same substring/prefix semantics
+  `category` already has; `group_by_category: bool` buckets the merged
+  answer into `{category: [rows...]}`, up to `limit` rows per category
+  from that same scan (a `row_number() OVER (PARTITION BY category ...)`
+  window, not a second query per category). `detail` is presentation
+  only — it is not part of a cursor's query identity, so a cursor issued
+  under one detail tier continues correctly under another; `categories`
+  (sorted for canonicalization) IS part of a cursor's identity, same as
+  `category`. Grouped answers (`group_by_category=true`) never carry a
+  cursor — each category is already `limit`-bounded from one scan; page a
+  single one further with `category=<slug>` instead.
+- `find_places` gains `within: {minutes, mode?, of?}` (docs/ROADMAP.md
+  §4.2/§6E) — reachability-filtered search against the real street graph,
+  not a radius guess: keeps only results inside the street-graph area
+  reachable in `minutes` by `mode` from `of` (default: the search center;
+  required — a `LocationRef` — in `division_id`/`area` mode, since there's
+  no single center point there). Filtering happens in SQL
+  (`ST_Contains` against the isochrone polygon, replacing the radius
+  circle entirely — `radius_m` is ignored when `within` is set) so it
+  composes unchanged with every existing filter, `detail` projection,
+  cursor pagination, and `group_by_category`. A cold street graph returns
+  `{"error": "needs_confirm", ...}`; retry with the new `confirm: bool`
+  once the user agrees to wait (reuses the same gate `route`/
+  `suggest_areas` already use). `of` given as a GERS id or name adds a
+  compact `resolved` echo; the answer also carries a short honesty note
+  naming the filter. `within`'s resolved `{minutes, mode, of lat/lon}` is
+  part of a cursor's query identity, so a replayed cursor recomputes the
+  same shed rather than trusting a stale one. Per-row travel minutes and
+  an "excluded by radius but not by the shed" count were investigated and
+  skipped for this PR (see the PR body) rather than shipped half-honest.
+
+### Changed
+- **Breaking: per-row batch errors now use the standard `{"error", "detail"}`
+  envelope (docs/ROADMAP.md §4, next tier).** `geocode_batch`'s no-match
+  rows changed from `{"query", "error": "no match"}` to `{"query", "error":
+  "not_found", "detail": "no match for '...'"}`; `resolve_place_batch`'s
+  no-match rows from `{"gers_id", "error": "not found"}` (note the space)
+  to `{"gers_id", "error": "not_found", "detail": "no place matched GERS id
+  '...'"}`; `reverse_geocode_batch`'s malformed-point rows from a bare
+  prose string in `"error"` to `{"lat", "lon", "error": "bad_request",
+  "detail": "<the old prose>"}`. An agent or downstream tool that
+  string-matched the old bare `"error"` values (`"no match"`, `"not
+  found"`, or the coordinate-range prose) must switch to checking `error
+  == "not_found"` / `"bad_request"` and reading `detail` for the message.
+  Row position/order and the outer `{"results": [...]}` shape are
+  unchanged; only the value under each failed row's own `"error"` key
+  moved to a machine-readable code plus a separate `"detail"` sentence,
+  matching every single-call sibling's error shape.
+- **Breaking: `find_places`' default answer shape changed.** Rows now
+  default to `detail="compact"` instead of the full 13-field row (id,
+  name, category, basic_category, operating_status, confidence, brand,
+  has_website, has_phone, lat, lon, distance_m, trust_note) — an agent
+  that read fields other than `id`/`name`/`category`/`lat`/`lon`/
+  `distance_m` (e.g. `confidence`/`operating_status`/`brand`, or
+  `trust_note`'s prose) must now pass `detail="full"` explicitly.
+  Compact keeps `lat`/`lon` (unlike `ids`) specifically so the advertised
+  `find_places` → `render_map` composition (#386) still renders under the
+  default tier — ROADMAP §5.3's own output schema lists `lat`/`lon` as
+  required row fields. This directly targets the token-efficiency
+  benchmark's worst number: the committed `nearest_coffee` scenario drops
+  from 811 to 470 response tokens, and the generic "1km, no filter"
+  scenario from 824 to 463 (see `docs/benchmarks.md` /
+  `docs/benchmarks-vs.md`, regenerated with this change). `find_near`
+  passes `detail="full"` internally to keep its own existing projection
+  working unchanged — it does not gain a `detail` param of its own in
+  this PR (noted as follow-up scope). `find_places`' schema surface grew
+  by 816 tokens (1692 → 2508) to publish `detail`/`categories`/
+  `group_by_category`; the whole-install schema total moves from ~25,097
+  to ~25,913 — a one-time cost that a single subsequent call already
+  earns back given the per-call savings above.
+- **Behavior change:** `from_to` and `travel_time_matrix` now consult the
+  stored `mode` preference when `mode` is omitted, the same as `route`,
+  `isochrone`, `optimize_route`, `ground_location`, and
+  `places_along_route` already did. Previously both hard-defaulted to
+  `"walk"` regardless of any stored preference, because their `mode`
+  parameter defaulted to the literal string `"walk"` rather than `None`
+  — `preferences.resolve_mode()` only consults the stored value when the
+  caller's argument is `None`. An explicit `mode` argument still always
+  wins.
+
 ### Fixed
+- `from_to`'s published schema (the `FromToArguments` monkeypatch) used to
+  silently drop `include_path`, `include_elevation`, and `prefer` even
+  though the function has always accepted them — an agent reading the
+  schema had no way to discover those three capabilities. All three are
+  now published (docs/ROADMAP.md §4.3).
 - `isochrone`'s concave boundary trace no longer collapses on sparse or
   evenly spaced street graphs (#389). A grid cell finer than the graph's
   own node spacing dropped every reached node into a cell of its own, and

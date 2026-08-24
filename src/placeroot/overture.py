@@ -21,6 +21,7 @@ module's call sites and the tests — import db directly in new code.
 """
 
 import hashlib
+import json
 import logging
 import math
 import os
@@ -524,6 +525,49 @@ def area_geometry(
     return bbox_filter, distance_filter, params, (xmin, ymin, xmax, ymax), radius_m
 
 
+def _polygon_bbox_from_geojson(polygon_geojson: dict) -> tuple[float, float, float, float]:
+    """(xmin, ymin, xmax, ymax) over every ring's vertices of a GeoJSON Polygon.
+
+    Pure Python, mirroring divisions.py's own _polygon_bbox — cheaper than a
+    round trip through DuckDB just to learn the extent of a small isochrone
+    polygon. Holes are included too (a subset of the exterior ring's own
+    extent, so folding them in is harmless).
+    """
+    coords = polygon_geojson["coordinates"]
+    xs = [pt[0] for ring in coords for pt in ring]
+    ys = [pt[1] for ring in coords for pt in ring]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _within_polygon_filters(
+    within_polygon: dict, params: dict
+) -> tuple[list[str], tuple[float, float, float, float]]:
+    """Extra WHERE filters (bbox prefilter + exact ST_Contains) for a
+    reachability shed polygon (roadmap §4.2's `within` on find_places).
+
+    Mutates `params` in place, adding w_xmin/w_ymin/w_xmax/w_ymax/w_poly —
+    names distinct from every other bbox param this module uses (area_geometry's
+    xmin/ymin/xmax/ymax, a division's own div_xmin/etc.), so the returned
+    filters compose safely alongside either one rather than colliding on a
+    shared parameter name. Not antimeridian-aware (same as a division's own
+    contains_filter above) — isochrone sheds are local, never span the seam.
+
+    Returns (filters, bbox) — bbox is the polygon's own extent, for callers
+    that need it to prune the parquet source (_places_source).
+    """
+    _ensure_spatial()
+    w_xmin, w_ymin, w_xmax, w_ymax = _polygon_bbox_from_geojson(within_polygon)
+    params["w_xmin"], params["w_ymin"] = w_xmin, w_ymin
+    params["w_xmax"], params["w_ymax"] = w_xmax, w_ymax
+    params["w_poly"] = json.dumps(within_polygon)
+    bbox_filter = (
+        "bbox.xmin <= $w_xmax AND bbox.xmax >= $w_xmin"
+        " AND bbox.ymin <= $w_ymax AND bbox.ymax >= $w_ymin"
+    )
+    contains_filter = "ST_Contains(ST_GeomFromGeoJSON($w_poly), ST_Point(bbox.xmin, bbox.ymin))"
+    return [bbox_filter, contains_filter], (w_xmin, w_ymin, w_xmax, w_ymax)
+
+
 # Overture's operating_status is a business-lifecycle field (is this place a
 # going concern?), NOT opening hours. Its raw value "open" reads as "open right
 # now" to anyone glancing at a results table, which we can't answer — we surface
@@ -558,6 +602,15 @@ def _operating_status_reverse_map() -> dict[str, list[str]]:
     return reverse
 
 
+def accepted_operating_status_values() -> list[str]:
+    """Every operating_status value find_places accepts: relabeled + raw.
+
+    Shared by the ValueError message below and the published schema's
+    enum (server.py), so both stay derived from the same source of truth.
+    """
+    return sorted(set(_OPERATING_STATUS_LABELS) | set(_operating_status_reverse_map()))
+
+
 def _resolve_operating_status(operating_status: str) -> list[str]:
     """Resolve a caller-supplied operating_status (relabeled or raw, case-
     insensitive) to the raw Overture value(s) it should filter on.
@@ -573,7 +626,7 @@ def _resolve_operating_status(operating_status: str) -> list[str]:
     for raw in _OPERATING_STATUS_LABELS:
         if raw.lower() == needle:
             return [raw]
-    accepted = sorted(set(_OPERATING_STATUS_LABELS) | set(reverse))
+    accepted = accepted_operating_status_values()
     raise ValueError(
         f"unrecognized operating_status {operating_status!r}; accepted values: "
         f"{', '.join(accepted)}"
@@ -884,6 +937,41 @@ def _place_categories_or_filter(
     return [f"({' OR '.join(clauses)})"]
 
 
+def _place_categories_multi_filter(
+    missing: set[str], slugs: list[str], params: dict, prefix: str = "mcat"
+) -> list[str]:
+    """OR across several category slugs, one clause per slug (roadmap §4.5).
+
+    Each slug is matched exactly like find_places' single `category` filter
+    — substring ILIKE on basic_category/taxonomy.primary, exact
+    list_contains on alternates — so categories=["a"] and category="a"
+    behave identically. Deliberately NOT _place_categories_or_filter's
+    exact/hierarchy match (that one is for internal compose callers like
+    neighborhood_verdict, where "park" must not match "parking"); the
+    public multi-category search keeps the same substring/prefix semantics
+    the single-category filter has always had.
+    """
+    per_slug_clauses = []
+    for i, slug in enumerate(slugs):
+        if not slug:
+            continue
+        cat_clauses = []
+        if "basic_category" not in missing:
+            cat_clauses.append(f"basic_category ILIKE ${prefix}{i} ESCAPE '\\'")
+        if "taxonomy" not in missing:
+            cat_clauses.append(
+                f"(taxonomy.primary ILIKE ${prefix}{i} ESCAPE '\\'"
+                f" OR list_contains(taxonomy.alternates, ${prefix}{i}_exact))"
+            )
+        if cat_clauses:
+            per_slug_clauses.append(f"({' OR '.join(cat_clauses)})")
+            params[f"{prefix}{i}"] = f"%{_like_escape(slug)}%"
+            params[f"{prefix}{i}_exact"] = slug
+    if not per_slug_clauses:
+        return []
+    return [f"({' OR '.join(per_slug_clauses)})"]
+
+
 def _place_attribute_filters(
     missing: set[str],
     min_confidence: float | None,
@@ -990,8 +1078,27 @@ def find_places(
     has_phone: bool | None = None,
     limit: int = 10,
     allow_name_fallback: bool = True,
+    offset: int = 0,
+    categories: list[str] | None = None,
+    within_polygon: dict | None = None,
 ) -> list[dict]:
     """Places near a point, nearest first, compact rows.
+
+    within_polygon (roadmap §4.2's `within` reachability filter) is a
+    GeoJSON Polygon; when given, it REPLACES the radius_m circle entirely —
+    the search bbox becomes the polygon's own extent and membership is
+    exact ST_Contains against it, not distance from (lat, lon). lat/lon are
+    still used to order results nearest-first (there is a center to rank
+    from even though it no longer bounds the search). See
+    _within_polygon_filters.
+
+    categories (roadmap §4.5) is the multi-category alternative to
+    category: an OR of several slugs in the SAME scan, each matched with
+    the identical substring/prefix semantics category already has (see
+    _place_categories_multi_filter). Mutually exclusive with category —
+    callers pass one or the other; when categories is given it wins and
+    category is ignored by this function (the find_places tool itself
+    enforces the mutual exclusion earlier and never passes both).
 
     min_confidence (0.0-1.0) filters to rows with confidence >= that
     threshold; raises ValueError if out of range. operating_status filters
@@ -1030,19 +1137,45 @@ def find_places(
     correction (#374: within_distance is a yes/no with no note surface, and
     "is there a Startbucks within 200m" must not silently become a claim
     about Starbucks).
+
+    offset skips that many rows of the same nearest-first ordering before
+    LIMIT applies (cursor pagination, ROADMAP feature 4) - 0 for a first
+    page. Ordering breaks distance ties by id so repeated calls at
+    different offsets never skip or repeat a row. A server caller wanting
+    to detect "more rows exist beyond this page" passes limit+1 and slices
+    the extra row off itself; this function's own contract is otherwise
+    unchanged. The name-fallback tiers only run at offset 0 (see below) -
+    a later page finding zero rows means the query ran past the end, not
+    that tier 1 found nothing.
     """
-    # int() before interpolating into the SQL LIMIT clause: the MCP layer
-    # already type-validates this arg, but the cast makes the query layer
-    # safe for any direct (non-MCP) caller too, rather than relying on the
-    # transport for injection safety. Clamped to [0, MAX_ROWS].
+    # int() before interpolating into the SQL LIMIT/OFFSET clauses: the MCP
+    # layer already type-validates these args, but the cast makes the query
+    # layer safe for any direct (non-MCP) caller too, rather than relying on
+    # the transport for injection safety. limit stays clamped to [0,
+    # MAX_ROWS] exactly like every other query-layer function — the
+    # find_places *tool*'s own overfetch-by-one (it requests
+    # effective_limit + 1 to detect "more rows exist") is therefore capped
+    # at MAX_ROWS too, so has_more can't be detected on a page that's
+    # already at the maximum size; that's an accepted, documented edge
+    # case rather than a reason to relax this function's own cap. offset
+    # clamped to a non-negative int.
     limit = max(0, min(int(limit), MAX_ROWS))
+    offset = max(0, int(offset))
     upstream = _upstream_glob()
     missing = set(_check_schema(upstream))
-    bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(lat, lon, radius_m)
+    if within_polygon is not None:
+        params = {"lat": lat, "lon": lon}
+        geo_filters, bbox = _within_polygon_filters(within_polygon, params)
+        bbox_filter, distance_filter = geo_filters
+    else:
+        bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(lat, lon, radius_m)
     from_source, has_recreation = _places_source(bbox)
     base_filters = [bbox_filter, distance_filter]
     base_filters.extend(_name_filter(missing, has_recreation))
-    base_filters.extend(_place_category_name_filters(missing, category, None, params))
+    if categories:
+        base_filters.extend(_place_categories_multi_filter(missing, categories, params))
+    else:
+        base_filters.extend(_place_category_name_filters(missing, category, None, params))
     base_filters.extend(
         _place_attribute_filters(missing, min_confidence, operating_status, params)
     )
@@ -1072,8 +1205,9 @@ def find_places(
             round({_DISTANCE_EXPR}, 0)          AS distance_m
         FROM {from_clause}
         WHERE {' AND '.join(filters)}
-        ORDER BY distance_m
+        ORDER BY distance_m, id
         LIMIT {limit}
+        OFFSET {offset}
     """
     try:
         # Always bounded: find_places is a radius query, so the bbox filter
@@ -1087,13 +1221,16 @@ def find_places(
         "confidence", "brand", "has_website", "has_phone", "lat", "lon", "distance_m",
     ]
     results = [dict(zip(cols, r)) for r in rows]
-    if not results and name and allow_name_fallback and "names" not in missing:
+    if not results and name and allow_name_fallback and "names" not in missing and offset == 0:
         # #373: tier 1 (the ILIKE substring search above) found nothing —
         # try the alt-name/fuzzy fallback tiers before giving up. Skipped
-        # outright when `name` wasn't given (nothing to fall back from) or
+        # outright when `name` wasn't given (nothing to fall back from),
         # "names" is missing from the dataset (tier 1 already degraded to
         # a no-op in that case, and there's no primary/alternate name
-        # column to fall back to either).
+        # column to fall back to either), or offset > 0 (a later page
+        # coming back empty means the query ran past the end of tier 1's
+        # own results, not that tier 1 found nothing at all — falling back
+        # there would silently restart the search from a different tier).
         results = _find_places_name_fallback(
             from_source, base_filters, params, has_recreation, exprs, name, limit
         )
@@ -1497,8 +1634,20 @@ def find_places_in_division(
     has_website: bool | None = None,
     has_phone: bool | None = None,
     limit: int = 10,
+    offset: int = 0,
+    categories: list[str] | None = None,
+    within_polygon: dict | None = None,
 ) -> list[dict] | None:
     """Places whose point falls inside a division's boundary polygon.
+
+    categories is the same multi-category OR-in-one-scan alternative to
+    category that find_places accepts — see its docstring.
+
+    within_polygon (find_places' reachability filter — see its docstring)
+    composes here as an EXTRA containment test, alongside the division's
+    own: a row must be inside both the division AND the reachability shed.
+    Unlike find_places' point mode, it does not replace anything — the
+    division polygon is still the base search bbox/shape.
 
     Boundary-accurate alternative to find_places' point+radius circle: pass
     a division's GERS id (e.g. from admin_lookup's chain) instead of a
@@ -1528,8 +1677,15 @@ def find_places_in_division(
     there's no way to answer), or UpstreamUnavailable if either remote scan
     fails after retries. Non-essential place columns missing from the
     dataset come back as None in their field — see degraded_fields().
+
+    offset skips that many rows of the same name/id ordering before LIMIT
+    applies (cursor pagination, ROADMAP feature 4); ordering is already
+    stable (name, id), so pages never overlap or skip. limit stays clamped
+    to [0, MAX_ROWS] — see find_places' offset docstring for the same
+    accepted has_more-at-the-max-page edge case.
     """
     limit = max(0, min(int(limit), MAX_ROWS))
+    offset = max(0, int(offset))
     resolved = _resolve_division_geometry(division_id)
     if resolved is None:
         return None
@@ -1555,8 +1711,14 @@ def find_places_in_division(
     bbox = (div_xmin, div_ymin, div_xmax, div_ymax)
     from_source, has_recreation = _places_source(bbox)
     filters = [bbox_filter, contains_filter]
+    if within_polygon is not None:
+        filters.extend(_within_polygon_filters(within_polygon, params)[0])
     filters.extend(_name_filter(missing, has_recreation))
-    filters.extend(_place_category_name_filters(missing, category, name, params))
+    if categories:
+        filters.extend(_place_categories_multi_filter(missing, categories, params))
+        filters.extend(_place_category_name_filters(missing, None, name, params))
+    else:
+        filters.extend(_place_category_name_filters(missing, category, name, params))
     filters.extend(
         _place_attribute_filters(missing, min_confidence, operating_status, params)
     )
@@ -1585,6 +1747,7 @@ def find_places_in_division(
         WHERE {' AND '.join(filters)}
         ORDER BY name, id
         LIMIT {limit}
+        OFFSET {offset}
     """
     try:
         with _conn_lock:
@@ -1599,6 +1762,221 @@ def find_places_in_division(
     for d in results:
         _annotate_place(d)
     return results
+
+
+# Max categories find_places' multi-category search accepts — see roadmap
+# §4.5. Small enough that limit*MAX_CATEGORIES stays well under a single
+# scan's row budget even before the per-category window function narrows it.
+MAX_CATEGORIES = 5
+
+
+def find_places_grouped_by_category(
+    lat: float,
+    lon: float,
+    radius_m: float,
+    categories: list[str],
+    name: str | None = None,
+    min_confidence: float | None = None,
+    operating_status: str | None = None,
+    brand: str | None = None,
+    has_website: bool | None = None,
+    has_phone: bool | None = None,
+    per_category_limit: int = 10,
+    within_polygon: dict | None = None,
+) -> dict[str, list[dict]]:
+    """The group_by_category=True path of find_places' point+radius mode.
+
+    One scan (bbox/distance/attribute pruning identical to find_places),
+    with a row_number() OVER (PARTITION BY category ORDER BY distance_m,
+    id) window applied so each category keeps only its own nearest
+    `per_category_limit` rows — never a plain LIMIT over the merged set,
+    which could let one dense category crowd the others out entirely.
+
+    Grouping key is the row's own `category` column (taxonomy.primary,
+    degrading to basic_category's match when taxonomy is absent) — not
+    necessarily byte-identical to a requested slug when ILIKE substring
+    matching pulls in a near variant, same caveat find_places' single-
+    category filter already has.
+
+    within_polygon is find_places' same reachability filter — see its
+    docstring; it replaces radius_m entirely when given.
+
+    Returns {category_value: [rows nearest-first]}, category values sorted
+    ascending; a category with zero matches is simply absent (never an
+    empty list) since it never appears in the scan. Rows carry no
+    distance-degraded sort tie beyond (distance_m, id), same as
+    find_places. No offset/cursor — this is not a paginated shape, see the
+    find_places tool docstring for the "re-query a single category" note.
+    """
+    per_category_limit = max(0, min(int(per_category_limit), MAX_ROWS))
+    upstream = _upstream_glob()
+    missing = set(_check_schema(upstream))
+    if within_polygon is not None:
+        params = {"lat": lat, "lon": lon}
+        geo_filters, bbox = _within_polygon_filters(within_polygon, params)
+        bbox_filter, distance_filter = geo_filters
+    else:
+        bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(lat, lon, radius_m)
+    from_source, has_recreation = _places_source(bbox)
+    filters = [bbox_filter, distance_filter]
+    filters.extend(_name_filter(missing, has_recreation))
+    filters.extend(_place_categories_multi_filter(missing, categories, params))
+    filters.extend(_place_category_name_filters(missing, None, name, params))
+    filters.extend(
+        _place_attribute_filters(missing, min_confidence, operating_status, params)
+    )
+    filters.extend(
+        _place_presence_filters(missing, brand, has_website, has_phone, params)
+    )
+
+    exprs = _place_select_exprs(missing)
+    with_clause, from_clause, filters = _dedup_rows_sql(from_source, filters, has_recreation)
+
+    sql = f"""
+        {with_clause}
+        SELECT * FROM (
+            SELECT
+                {exprs["id"]}                       AS id,
+                {exprs["name"]}                      AS name,
+                {exprs["category"]}                  AS category,
+                {exprs["basic_category"]}             AS basic_category,
+                {exprs["operating_status"]}           AS operating_status,
+                {exprs["confidence"]}                AS confidence,
+                {exprs["brand"]}                     AS brand,
+                {exprs["has_website"]}               AS has_website,
+                {exprs["has_phone"]}                 AS has_phone,
+                round(bbox.ymin, 6)                 AS lat,
+                round(bbox.xmin, 6)                 AS lon,
+                round({_DISTANCE_EXPR}, 0)          AS distance_m,
+                row_number() OVER (
+                    PARTITION BY {exprs["category"]}
+                    ORDER BY {_DISTANCE_EXPR}, {exprs["id"]}
+                )                                    AS rn
+            FROM {from_clause}
+            WHERE {' AND '.join(filters)}
+        ) _ranked
+        WHERE rn <= {per_category_limit}
+        ORDER BY category, distance_m, id
+    """
+    try:
+        with trace.scan("places grouped scan", bounded=True, source=from_clause), _conn_lock:
+            rows = _conn().execute(sql, params).fetchall()
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(str(e)) from e
+    cols = [
+        "id", "name", "category", "basic_category", "operating_status",
+        "confidence", "brand", "has_website", "has_phone", "lat", "lon", "distance_m", "rn",
+    ]
+    grouped: dict[str, list[dict]] = {}
+    for r in rows:
+        d = dict(zip(cols, r))
+        d.pop("rn")
+        _annotate_place(d)
+        grouped.setdefault(d["category"], []).append(d)
+    return dict(sorted(grouped.items(), key=lambda kv: (kv[0] is None, kv[0])))
+
+
+def find_places_in_division_grouped_by_category(
+    division_id: str,
+    categories: list[str],
+    name: str | None = None,
+    min_confidence: float | None = None,
+    operating_status: str | None = None,
+    brand: str | None = None,
+    has_website: bool | None = None,
+    has_phone: bool | None = None,
+    per_category_limit: int = 10,
+    within_polygon: dict | None = None,
+) -> dict[str, list[dict]] | None:
+    """The group_by_category=True path of find_places' division-polygon mode.
+
+    Same one-scan-with-a-window-function shape as
+    find_places_grouped_by_category, but partitioned/ordered by (category,
+    name, id) — division mode has no reference point to rank distance
+    from, same as find_places_in_division. Returns None if division_id
+    doesn't match any division (mirrors find_places_in_division).
+
+    within_polygon composes as an extra containment test, same as
+    find_places_in_division — see its docstring.
+    """
+    per_category_limit = max(0, min(int(per_category_limit), MAX_ROWS))
+    resolved = _resolve_division_geometry(division_id)
+    if resolved is None:
+        return None
+    geom_wkb, div_xmin, div_xmax, div_ymin, div_ymax = resolved
+
+    upstream = _upstream_glob()
+    missing = set(_check_schema(upstream))
+
+    bbox_filter = (
+        "bbox.xmin <= $div_xmax AND bbox.xmax >= $div_xmin"
+        " AND bbox.ymin <= $div_ymax AND bbox.ymax >= $div_ymin"
+    )
+    contains_filter = "ST_Contains(ST_GeomFromWKB($geom_wkb), ST_Point(bbox.xmin, bbox.ymin))"
+    params = {
+        "div_xmin": div_xmin, "div_xmax": div_xmax,
+        "div_ymin": div_ymin, "div_ymax": div_ymax,
+        "geom_wkb": geom_wkb,
+    }
+    bbox = (div_xmin, div_ymin, div_xmax, div_ymax)
+    from_source, has_recreation = _places_source(bbox)
+    filters = [bbox_filter, contains_filter]
+    if within_polygon is not None:
+        filters.extend(_within_polygon_filters(within_polygon, params)[0])
+    filters.extend(_name_filter(missing, has_recreation))
+    filters.extend(_place_categories_multi_filter(missing, categories, params))
+    filters.extend(_place_category_name_filters(missing, None, name, params))
+    filters.extend(
+        _place_attribute_filters(missing, min_confidence, operating_status, params)
+    )
+    filters.extend(
+        _place_presence_filters(missing, brand, has_website, has_phone, params)
+    )
+
+    exprs = _place_select_exprs(missing)
+    with_clause, from_clause, filters = _dedup_rows_sql(from_source, filters, has_recreation)
+
+    sql = f"""
+        {with_clause}
+        SELECT * FROM (
+            SELECT
+                {exprs["id"]}                       AS id,
+                {exprs["name"]}                      AS name,
+                {exprs["category"]}                  AS category,
+                {exprs["basic_category"]}             AS basic_category,
+                {exprs["operating_status"]}           AS operating_status,
+                {exprs["confidence"]}                AS confidence,
+                {exprs["brand"]}                     AS brand,
+                {exprs["has_website"]}               AS has_website,
+                {exprs["has_phone"]}                 AS has_phone,
+                round(bbox.ymin, 6)                 AS lat,
+                round(bbox.xmin, 6)                 AS lon,
+                row_number() OVER (
+                    PARTITION BY {exprs["category"]}
+                    ORDER BY {exprs["name"]}, {exprs["id"]}
+                )                                    AS rn
+            FROM {from_clause}
+            WHERE {' AND '.join(filters)}
+        ) _ranked
+        WHERE rn <= {per_category_limit}
+        ORDER BY category, name, id
+    """
+    try:
+        with _conn_lock:
+            rows = _conn().execute(sql, params).fetchall()
+    except duckdb.Error as e:
+        raise UpstreamUnavailable(str(e)) from e
+    cols = [
+        "id", "name", "category", "basic_category", "operating_status",
+        "confidence", "brand", "has_website", "has_phone", "lat", "lon", "rn",
+    ]
+    grouped: dict[str, list[dict]] = {}
+    for r in rows:
+        d = dict(zip(cols, r))
+        d.pop("rn")
+        _annotate_place(d)
+        grouped.setdefault(d["category"], []).append(d)
+    return dict(sorted(grouped.items(), key=lambda kv: (kv[0] is None, kv[0])))
 
 
 def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:

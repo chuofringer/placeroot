@@ -2,9 +2,10 @@
 
 import pytest
 
-from placeroot import ground, overture, preferences, routing, server
+from placeroot import geocode, ground, overture, preferences, routing, server
 
 from .conftest import CENTER_LAT, CENTER_LON
+from .test_gers_lookup import PLACE_ID
 
 
 def _fake_iso(*_a, **_k):
@@ -242,4 +243,67 @@ def test_rejects_minutes_over_sixty():
 
 def test_rejects_unknown_mode():
     result = server.ground_location(CENTER_LAT, CENTER_LON, mode="teleport")
+    assert result["error"] == "bad_request"
+
+
+# --- LocationRef (roadmap #4.1): `where`, mutually exclusive with lat/lon ---
+
+
+def test_needs_lat_lon_or_where():
+    result = server.ground_location()
+    assert result["error"] == "bad_request"
+
+
+def test_rejects_both_latlon_and_where():
+    result = server.ground_location(
+        lat=CENTER_LAT, lon=CENTER_LON, where={"lat": CENTER_LAT, "lon": CENTER_LON}
+    )
+    assert result["error"] == "bad_request"
+
+
+def test_plain_latlon_has_no_resolved_key(monkeypatch):
+    monkeypatch.setattr(routing, "isochrone", _fake_iso)
+    result = server.ground_location(CENTER_LAT, CENTER_LON, minutes=15, mode="walk")
+    assert "error" not in result
+    assert "resolved" not in result
+
+
+def test_where_coordinate_dict_has_no_resolved_key(monkeypatch):
+    monkeypatch.setattr(routing, "isochrone", _fake_iso)
+    result = server.ground_location(
+        where={"lat": CENTER_LAT, "lon": CENTER_LON}, minutes=15, mode="walk"
+    )
+    assert "error" not in result
+    assert "resolved" not in result
+
+
+def test_where_gers_id_adds_resolved(monkeypatch):
+    """Real fixture GERS id (see tests/test_gers_lookup.py) — no monkeypatch on gers."""
+    monkeypatch.setattr(routing, "isochrone", _fake_iso)
+    result = server.ground_location(where=PLACE_ID, minutes=15, mode="walk")
+    assert "error" not in result
+    assert result["resolved"]["matched_by"] == "gers_id"
+    assert result["resolved"]["id"] == PLACE_ID
+
+
+def test_where_name_adds_resolved(monkeypatch):
+    def fake_resolve(query):
+        assert query == "Cluster Place 000"
+        return {
+            "name": query, "lat": CENTER_LAT, "lon": CENTER_LON,
+            "id": "gers-cluster", "type": "place",
+        }
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    monkeypatch.setattr(routing, "isochrone", _fake_iso)
+    result = server.ground_location(where="Cluster Place 000", minutes=15, mode="walk")
+    assert "error" not in result
+    assert result["resolved"] == {
+        "name": "Cluster Place 000", "id": "gers-cluster",
+        "lat": CENTER_LAT, "lon": CENTER_LON, "matched_by": "name",
+    }
+
+
+def test_where_bad_ref_is_bad_request():
+    result = server.ground_location(where={"lat": 91.0, "lon": 0.0})
     assert result["error"] == "bad_request"

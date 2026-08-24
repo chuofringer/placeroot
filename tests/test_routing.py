@@ -176,6 +176,57 @@ def test_server_isochrone_tool_happy_path():
     assert result["stats"]["reachable_nodes"] > 0
 
 
+# --- LocationRef (roadmap #4.1): `where`, mutually exclusive with lat/lon ---
+
+
+def test_isochrone_needs_lat_lon_or_where():
+    result = server.isochrone(minutes=15)
+    assert result["error"] == "bad_request"
+
+
+def test_isochrone_rejects_both_latlon_and_where():
+    lat, lon = fx.node_latlon(10, 10)
+    result = server.isochrone(lat=lat, lon=lon, where={"lat": lat, "lon": lon}, minutes=15)
+    assert result["error"] == "bad_request"
+
+
+def test_isochrone_plain_latlon_has_no_resolved_key():
+    lat, lon = fx.node_latlon(10, 10)
+    result = server.isochrone(lat, lon, minutes=15)
+    assert "error" not in result
+    assert "resolved" not in result
+
+
+def test_isochrone_where_coordinate_dict_has_no_resolved_key():
+    lat, lon = fx.node_latlon(10, 10)
+    result = server.isochrone(where={"lat": lat, "lon": lon}, minutes=15)
+    assert "error" not in result
+    assert "resolved" not in result
+    assert result["stats"]["reachable_nodes"] > 0
+
+
+def test_isochrone_where_name_adds_resolved(monkeypatch):
+    from placeroot import geocode
+
+    lat, lon = fx.node_latlon(10, 10)
+
+    def fake_resolve(query):
+        assert query == "Grid Center"
+        return {"name": "Grid Center", "lat": lat, "lon": lon, "id": "gers-grid", "type": "place"}
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    result = server.isochrone(where="Grid Center", minutes=15)
+    assert "error" not in result
+    assert result["resolved"] == {
+        "name": "Grid Center", "id": "gers-grid", "lat": lat, "lon": lon, "matched_by": "name",
+    }
+
+
+def test_isochrone_where_bad_ref_is_bad_request():
+    result = server.isochrone(where={"lat": 91.0, "lon": 0.0}, minutes=15)
+    assert result["error"] == "bad_request"
+
+
 def test_server_isochrone_unsupported_mode():
     result = server.isochrone(ORIGIN_LAT, ORIGIN_LON, minutes=15, mode="teleport")
     assert result == {

@@ -9,7 +9,7 @@ import asyncio
 
 import pytest
 
-from placeroot import geocode, progress, routing, server
+from placeroot import geocode, preferences, progress, routing, server
 
 from ._routing_fixture import build_routing_fixture as fx
 
@@ -41,6 +41,34 @@ def test_from_to_schema_accepts_from_and_to():
     assert "from" in required and "to" in required
     assert "confirm" in props
     assert "confirm" not in required
+    # #328/#395 regression: the FromToArguments monkeypatch used to drop
+    # every parameter from_to() actually accepts beyond from/to/mode/confirm.
+    assert "include_path" in props
+    assert "include_elevation" in props
+    assert "prefer" in props
+    assert props["mode"]["enum"] == ["cycle", "drive", "walk"]
+    assert props["prefer"]["enum"] == ["flat"]
+    # LocationRef wave 1 (roadmap #4.1): from/to widened to accept a
+    # {lat, lon} dict or a GERS id string, not just a free-text name.
+    for name in ("from", "to"):
+        types = {branch.get("type") for branch in props[name]["anyOf"]}
+        assert types == {"string", "object"}
+
+
+def test_from_to_omitted_mode_uses_stored_preference(monkeypatch):
+    preferences.update(mode="cycle")
+    monkeypatch.setattr(geocode, "resolve_named_place", _ab)
+    result = server.from_to("A", "B", confirm=True)
+    assert "error" not in result
+    assert result["mode"] == "cycle"
+
+
+def test_from_to_explicit_mode_wins_over_stored_preference(monkeypatch):
+    preferences.update(mode="cycle")
+    monkeypatch.setattr(geocode, "resolve_named_place", _ab)
+    result = server.from_to("A", "B", mode="walk", confirm=True)
+    assert "error" not in result
+    assert result["mode"] == "walk"
 
 
 def test_from_to_with_mocked_resolves_returns_route_shape(monkeypatch):
@@ -98,6 +126,10 @@ def test_from_to_unresolved_name(monkeypatch):
     monkeypatch.setattr(geocode, "resolve_named_place", lambda *_a, **_k: None)
     result = _call_from_to("Nowhereville", "Also Nowhere")
     assert result["error"] == "not_found"
+    # Roadmap §4, next tier: not_found from name resolution names the next
+    # move rather than leaving the caller to re-guess.
+    assert result["try"]
+    assert len(result["try"]) < 200
 
 
 def test_from_to_unsupported_mode(monkeypatch):
@@ -151,3 +183,76 @@ def test_from_to_parallel_resolves_keep_progress(monkeypatch):
     lines = attached.get("progress") or []
     assert any("Resolving A" in line for line in lines)
     assert any("Resolving B" in line for line in lines)
+
+
+# --- LocationRef (roadmap #4.1): from/to as {lat,lon} dict or GERS id ----
+
+
+def test_from_to_with_coordinate_dicts():
+    result = server.from_to(
+        {"lat": FROM_LAT, "lon": FROM_LON}, {"lat": TO_LAT, "lon": TO_LON},
+        mode="walk", confirm=True,
+    )
+    assert "error" not in result
+    assert result["distance_m"] > 0
+    assert result["from"]["lat"] == FROM_LAT
+    assert result["to"]["lat"] == TO_LAT
+    # A bare coordinate endpoint carries no name/id to echo.
+    assert "name" not in result["from"]
+
+
+def test_from_to_with_gers_ids(monkeypatch):
+    from_id = "a" * 32
+    to_id = "b" * 32
+
+    def fake_lookup(id_, near_lat=None, near_lon=None):
+        if id_ == from_id:
+            lat, lon = FROM_LAT, FROM_LON
+            name = "Origin GERS"
+        else:
+            lat, lon = TO_LAT, TO_LON
+            name = "Dest GERS"
+        return {
+            "id": id_, "theme": "places", "type": "place", "name": name,
+            "lat": lat, "lon": lon, "summary": {}, "related": {},
+        }
+
+    monkeypatch.setattr(server.gers, "gers_lookup", fake_lookup)
+    result = server.from_to(from_id, to_id, mode="walk", confirm=True)
+    assert "error" not in result
+    assert result["from"]["name"] == "Origin GERS"
+    assert result["from"]["id"] == from_id
+    assert result["to"]["name"] == "Dest GERS"
+    assert result["to"]["id"] == to_id
+
+
+def test_from_to_with_mixed_dict_and_name(monkeypatch):
+    monkeypatch.setattr(geocode, "resolve_named_place", _ab)
+    result = server.from_to({"lat": FROM_LAT, "lon": FROM_LON}, "B", mode="walk", confirm=True)
+    assert "error" not in result
+    assert "name" not in result["from"]
+    assert result["to"]["name"] == "B"
+
+
+def test_from_to_plain_names_still_use_the_original_ambiguous_place_shape(monkeypatch):
+    """Byte-identical fast path: both ends plain names still resolve through
+    _resolve_pair, so the pre-existing ambiguous_place shape is unchanged."""
+    from placeroot import errors
+
+    def fake_resolve(query):
+        if query == "A":
+            raise errors.AmbiguousPlace(query, candidates=[{"name": "A1"}, {"name": "A2"}])
+        return _ab(query)
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    result = server.from_to("A", "B", mode="walk", confirm=True)
+    assert result["error"] == "ambiguous_place"
+    assert result["field"] == "from"
+    assert result["candidates"] == [{"name": "A1"}, {"name": "A2"}]
+    assert "index" not in result
+
+
+def test_from_to_bad_dict_ref_is_bad_request():
+    result = server.from_to({"lat": 91.0, "lon": 0.0}, {"lat": TO_LAT, "lon": TO_LON})
+    assert result["error"] == "bad_request"
+    assert result["field"] == "from"

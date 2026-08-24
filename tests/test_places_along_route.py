@@ -260,6 +260,9 @@ def test_no_route_result_is_returned_when_nothing_connects(corridor_places, monk
     result = _corridor()
     assert result["error"] == "no_route"
     assert result["mode"] == "walk"
+    # Roadmap §4, next tier: no_route names the next move.
+    assert result["try"]
+    assert len(result["try"]) < 200
 
 
 def test_truncated_flag_when_candidate_cap_is_hit(corridor_places, monkeypatch):

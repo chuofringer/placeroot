@@ -19,16 +19,18 @@ import inspect
 import logging
 import math
 import os
+import re
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from typing import Annotated
 
 from mcp.server.caching import CacheableMethod, CacheHint
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.utilities.func_metadata import func_metadata
 from mcp.types import ToolAnnotations
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from placeroot import (
     addresses,
@@ -54,6 +56,7 @@ from placeroot import (
     mapexplain,
     mapview,
     meeting,
+    output_schemas,
     overture,
     progress,
     prompts,
@@ -67,6 +70,7 @@ from placeroot import (
     water,
 )
 from placeroot import claims as claim_checks
+from placeroot import cursor as cursor_mod
 from placeroot import geocode as geocoding
 from placeroot import (
     preferences as preference_store,
@@ -189,6 +193,78 @@ _PREFERENCES_ANNOTATIONS = ToolAnnotations(
 )
 
 _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {}
+
+# Annotated aliases that put an enum + a stated default into the published
+# schema without changing runtime validation: the type stays plain
+# `str | None`, so a bad string still reaches the function and comes back
+# as a structured unsupported_mode/bad_request error (see CONTRIBUTING
+# design rule 2 — a Literal would reject it before the self-correcting
+# error ever ran, and schema tokens are a budget so these are shared
+# rather than repeated per tool).
+_MODE_ENUM = sorted(preference_store.MODES)
+_ModeArgWalkDefault = Annotated[
+    str | None,
+    Field(
+        description="Travel mode. Default: stored preference, else walk.",
+        json_schema_extra={"enum": _MODE_ENUM},
+    ),
+]
+_ModeArgDriveDefault = Annotated[
+    str | None,
+    Field(
+        description="Travel mode. Default: stored preference, else drive.",
+        json_schema_extra={"enum": _MODE_ENUM},
+    ),
+]
+_PreferArg = Annotated[
+    str | None,
+    Field(
+        description="Grade preference. Default: none (plain-distance routing).",
+        json_schema_extra={"enum": sorted(routing.SUPPORTED_PREFERENCES)},
+    ),
+]
+# neighborhood_verdict doesn't consult stored preferences; its default is
+# inferred from free-text context (no car -> walk, bike -> cycle, car ->
+# drive), falling back to walk.
+_ModeArgContextDefault = Annotated[
+    str | None,
+    Field(
+        description="Travel mode override. Default: inferred from context, else walk.",
+        json_schema_extra={"enum": _MODE_ENUM},
+    ),
+]
+_ModeSetArg = Annotated[
+    str | None,
+    Field(
+        description="Travel mode to store. Omit to leave it unchanged.",
+        json_schema_extra={"enum": _MODE_ENUM},
+    ),
+]
+_OperatingStatusArg = Annotated[
+    str | None,
+    Field(
+        description="Business-lifecycle status filter (relabeled or raw Overture value, "
+        "case-insensitive). Default: no filter.",
+        json_schema_extra={"enum": overture.accepted_operating_status_values()},
+    ),
+]
+_CursorArg = Annotated[
+    str | None,
+    Field(
+        description="Continuation cursor from a previous truncated answer; valid for the "
+        "same query on the same data release.",
+    ),
+]
+_DETAIL_ENUM = ["ids", "compact", "full"]
+_DetailArg = Annotated[
+    str | None,
+    Field(
+        description="Row detail tier for find_places rows: 'ids' (id + distance_m only), "
+        "'compact' (id/name/category/lat/lon/distance_m/trust), or 'full' (every field, "
+        "incl. trust_note prose). Default: compact.",
+        json_schema_extra={"enum": _DETAIL_ENUM},
+    ),
+]
 
 # placeroot_call reaches every tool, render_map included, so it inherits the
 # weakest claim any of them makes rather than its own: a dispatcher that
@@ -316,7 +392,101 @@ def _with_category_hint(payload: dict, category: str | None, widen_hint: str) ->
     return payload
 
 
-def _with_name_fallback_note(payload: dict, name: str | None) -> dict:
+def _with_within_extras(payload: dict, resolved_echo: dict | None, note: str | None) -> dict:
+    """Attach find_places' `within` reachability-filter extras (roadmap §4.2):
+    the compact "resolved" echo when `of` was an id/name, and a short
+    honesty note that the answer was filtered against the street graph —
+    joined onto any note already present, not clobbering it (same
+    convention as _with_category_hint)."""
+    if resolved_echo is not None:
+        payload["resolved"] = resolved_echo
+    if note:
+        payload["note"] = "; ".join(filter(None, [payload.get("note"), note]))
+    return payload
+
+
+def _project_place_row(row: dict, detail: str) -> dict:
+    """Shrink one find_places row to `detail`'s tier (roadmap §4.5).
+
+    "full" is today's row, unchanged. "ids" is the cheap-chaining shape
+    (id + distance_m, when present) — deliberately coordinate-free, since
+    it exists purely to feed an id into a batch lookup or place_details.
+    "compact" — the default — is {id, name, category, lat, lon,
+    distance_m, trust}: it keeps lat/lon so the advertised find_places ->
+    render_map composition (#386) still renders under the new default,
+    per ROADMAP §5.3's output schema listing lat/lon as required row
+    fields. `trust` is a tier string derived by honesty.trust_tier from
+    the same signals as trust_note, so it can never disagree with the
+    prose a "full" row would carry. distance_m is omitted entirely (not
+    null) on division-polygon rows, which have no reference point to
+    measure distance from — those rows still carry lat/lon, in every
+    tier but "ids".
+    """
+    if detail == "full":
+        return row
+    if detail == "ids":
+        out = {"id": row.get("id")}
+        if "distance_m" in row:
+            out["distance_m"] = row["distance_m"]
+        return out
+    out = {
+        "id": row.get("id"),
+        "name": row.get("name"),
+        "category": row.get("category"),
+    }
+    if "lat" in row:
+        out["lat"] = row["lat"]
+    if "lon" in row:
+        out["lon"] = row["lon"]
+    if "distance_m" in row:
+        out["distance_m"] = row["distance_m"]
+    out["trust"] = honesty.trust_tier(row)
+    return out
+
+
+def _project_places(rows: list[dict], detail: str) -> list[dict]:
+    return [_project_place_row(r, detail) for r in rows]
+
+
+def _project_grouped_places(grouped: dict[str, list[dict]], detail: str) -> dict[str, list[dict]]:
+    return {slug: _project_places(rows, detail) for slug, rows in grouped.items()}
+
+
+def _with_detail_legend(payload: dict, detail: str) -> dict:
+    """Attach the one-line trust-tier legend when compact rows carry a
+    bare `trust` tier instead of full rows' self-explaining trust_note."""
+    if detail == "compact":
+        payload["trust_legend"] = honesty.TRUST_LEGEND
+    return payload
+
+
+def _with_categories_hint(
+    payload: dict, categories: list[str] | None, widen_hint: str, list_key: str = "results"
+) -> dict:
+    """categories analog of _with_category_hint (#117 / roadmap §4.5): a
+    non-fatal "note" when the scan matched none of the requested slugs at
+    all. Only fires when EVERY requested category came back empty — at
+    that point naming all of them is cheap and correct, since none of them
+    could possibly have matched anything.
+    """
+    if not categories:
+        return payload
+    rows = payload.get(list_key)
+    empty = not rows if isinstance(rows, list) else not any((rows or {}).values())
+    if empty:
+        slugs = ", ".join(repr(s) for s in categories)
+        hint = (
+            f"no places matched any of categories [{slugs}] here; if a slug may not "
+            "be a valid Overture category slug, use search_categories to find the "
+            f"right one, or {widen_hint} / drop the categories filter."
+        )
+        payload["note"] = "; ".join(filter(None, [payload.get("note"), hint]))
+    return payload
+
+
+def _with_name_fallback_note(
+    payload: dict, name: str | None, rows: list[dict] | None = None
+) -> dict:
     """Add a non-fatal "note" when a result came from #373's alt-name/fuzzy
     fallback tiers rather than a literal name match.
 
@@ -325,8 +495,14 @@ def _with_name_fallback_note(payload: dict, name: str | None) -> dict:
     of its own to carry a note on — this is where that note gets attached,
     mirroring _with_category_hint's join-not-clobber convention so an
     existing truncation/category note survives alongside it.
+
+    `rows` defaults to payload["results"], but find_places' detail
+    projection (ROADMAP §4.5) can strip matched_by/name from that list
+    before this runs — callers that project pass the pre-projection rows
+    explicitly so the note still has something to read.
     """
-    rows = payload.get("results") or []
+    if rows is None:
+        rows = payload.get("results") or []
     fallback = next((r for r in rows if r.get("matched_by")), None)
     if fallback is not None:
         via = (
@@ -338,11 +514,28 @@ def _with_name_fallback_note(payload: dict, name: str | None) -> dict:
     return payload
 
 
+# Roadmap §4, next tier: not_found from a name-resolution dead end names the
+# next move rather than leaving the caller to guess. resolve_place carries
+# its own "need"/"retry_with" sketch for the same situation (a plain
+# `resolve_place()` call with no rows) — this "try" string is for the
+# tools that resolve a name internally and cannot offer that structured
+# retry, since they don't expose the intermediate resolve step for the
+# caller to redo more specifically. core (the default profile) always
+# carries resolve_place and geocode, so naming them here holds for the
+# common case; a narrower PLACEROOT_TOOLS selection may not register one.
+_NAME_NOT_FOUND_TRY = (
+    "resolve_place with near_lat/near_lon or city to disambiguate; "
+    "or geocode for street addresses"
+)
+
+
 def _resolve_named_place(query: str) -> dict:
     """A free-text name -> compact {name, lat, lon, id, type} or an error.
 
     Shared by from_to and find_near. Ambiguous same-score names return
-    candidates instead of silently picking a city.
+    candidates instead of silently picking a city. An unresolvable name
+    returns {"error": "not_found", "detail", "try"} — "try" names the next
+    move (roadmap §4).
     """
     if not isinstance(query, str) or not query.strip():
         return {"error": "bad_request", "detail": "place name must be a non-empty string"}
@@ -359,7 +552,11 @@ def _resolve_named_place(query: str) -> dict:
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     if resolved is None:
-        return {"error": "not_found", "detail": f"no place matched {query!r}"}
+        return {
+            "error": "not_found",
+            "detail": f"no place matched {query!r}",
+            "try": _NAME_NOT_FOUND_TRY,
+        }
     return resolved
 
 
@@ -383,6 +580,163 @@ def _resolve_pair(a: str, b: str) -> tuple[dict, dict]:
         fa = pool.submit(contextvars.copy_context().run, _isolated, a)
         fb = pool.submit(contextvars.copy_context().run, _isolated, b)
         return fa.result(), fb.result()
+
+
+# Real GERS ids are 32 lowercase hex characters (gers.py's module docstring
+# and _validate_id's own comment). Deliberately stricter than gers.py's own
+# ID_CHARSET_RE, which has to admit synthetic fixture ids like
+# "gers-div-brooklyn" for gers_lookup's own tests — LocationRef needs the
+# opposite bias: a free-text name must never be misread as an id, so this
+# only recognizes the one shape a real id actually has. Case-insensitive
+# since nothing here depends on it and rejecting a same-shape uppercase id
+# would just cost the caller a confusing not_found.
+_GERS_ID_RE = re.compile(r"^[0-9a-f]{32}$", re.IGNORECASE)
+
+_LOCATION_REF_BAD_REQUEST = {
+    "error": "bad_request",
+    "detail": (
+        "location must be one of: {\"lat\": ..., \"lon\": ...} with numeric lat/lon in "
+        "range, a GERS id string (32 hex characters), or a non-empty free-text place name"
+    ),
+}
+
+
+def _resolve_location_ref(ref) -> tuple[dict | None, dict | None]:
+    """A LocationRef ({lat,lon} | GERS id string | free-text name) -> (resolved, error).
+
+    Exactly one of the two return values is not None. `resolved` always
+    carries numeric lat/lon; a coordinate dict passes through untouched (no
+    `id`/`name`/`matched_by` — nothing to echo back, on purpose: raw
+    coordinate input must not grow the answer). A string input additionally
+    carries `id`, `name`, and `matched_by` ("gers_id" or "name") so callers
+    can build the compact `resolved` echo the roadmap calls for.
+
+    `error` is a structured envelope ready to return as-is (bad_request,
+    not_found, ambiguous_place, or an upstream/schema failure) — callers
+    that resolve several refs prefix its `detail` with the failing index.
+    A not_found also carries "try" naming the next move (roadmap §4).
+    """
+    if isinstance(ref, dict):
+        lat, lon = ref.get("lat"), ref.get("lon")
+        coord_error = _invalid_coord(lat, lon)
+        if coord_error is not None:
+            return None, _LOCATION_REF_BAD_REQUEST
+        return {"lat": float(lat), "lon": float(lon)}, None
+    if isinstance(ref, str):
+        text = ref.strip()
+        if not text:
+            return None, _LOCATION_REF_BAD_REQUEST
+        if _GERS_ID_RE.match(text):
+            try:
+                hit = gers.gers_lookup(text)
+            except ValueError:
+                hit = None
+            except overture.UpstreamUnavailable as e:
+                return None, _upstream_error(e)
+            except overture.SchemaDegraded as e:
+                return None, _schema_error(e)
+            if hit is None or hit.get("lat") is None or hit.get("lon") is None:
+                return None, {
+                    "error": "not_found",
+                    "detail": (
+                        f"{text!r} looked like a GERS id; no feature has it in this release"
+                    ),
+                    "try": (
+                        "resolve_place or geocode to find the right id; "
+                        "or pass a {\"lat\", \"lon\"} location instead"
+                    ),
+                }
+            return {
+                "id": hit.get("id"),
+                "name": hit.get("name"),
+                "lat": hit["lat"],
+                "lon": hit["lon"],
+                "matched_by": "gers_id",
+            }, None
+        hit = _resolve_named_place(text)
+        if "error" in hit:
+            return None, hit
+        return {
+            "id": hit.get("id"),
+            "name": hit.get("name"),
+            "lat": hit["lat"],
+            "lon": hit["lon"],
+            "matched_by": "name",
+        }, None
+    return None, _LOCATION_REF_BAD_REQUEST
+
+
+def _resolve_location_refs(refs, param_name: str) -> tuple[list[dict] | None, dict | None]:
+    """A list of LocationRefs -> (resolved list, error), same contract as above.
+
+    Items that need network resolution (strings: GERS ids or names) resolve
+    in parallel, mirroring _resolve_pair's ThreadPoolExecutor + contextvars
+    pattern (workers do not inherit contextvars, so the request context is
+    copied into each submit or progress.report from a cold resolve would
+    never reach attach()). Plain {lat,lon} dicts need no network round-trip
+    and are resolved inline.
+
+    On any failure, returns the error for the lowest-indexed failing item
+    (deterministic regardless of which worker finishes first), with
+    `"index"` set and `detail` prefixed `f"{param_name}[{i}]: "` so the
+    agent can retry that one argument instead of the whole call.
+    """
+    if not isinstance(refs, list):
+        return None, {"error": "bad_request", "detail": f"{param_name} must be a list"}
+
+    resolved: list[dict | None] = [None] * len(refs)
+    failures: dict[int, dict] = {}
+    network_idxs = [i for i, r in enumerate(refs) if isinstance(r, str)]
+
+    def _isolated(i: int, ref):
+        with db.isolated_reads():
+            return i, _resolve_location_ref(ref)
+
+    if len(network_idxs) > 1:
+        with ThreadPoolExecutor(max_workers=min(len(network_idxs), 8)) as pool:
+            futures = [
+                pool.submit(contextvars.copy_context().run, _isolated, i, refs[i])
+                for i in network_idxs
+            ]
+            for future in futures:
+                i, (item, err) = future.result()
+                if err is not None:
+                    failures[i] = err
+                else:
+                    resolved[i] = item
+        pending = [i for i in range(len(refs)) if i not in network_idxs]
+    else:
+        pending = list(range(len(refs)))
+
+    for i in pending:
+        item, err = _resolve_location_ref(refs[i])
+        if err is not None:
+            failures[i] = err
+        else:
+            resolved[i] = item
+
+    if failures:
+        idx = min(failures)
+        err = failures[idx]
+        detail = f"{param_name}[{idx}]: {err.get('detail', '')}"
+        return None, {**err, "index": idx, "detail": detail}
+    return resolved, None
+
+
+def _location_ref_echo(item: dict) -> dict:
+    """The compact {name, id, lat, lon, matched_by} block for a resolved string LocationRef.
+
+    Only called for items that carry `matched_by` — coordinate inputs never
+    reach this (see _resolve_location_ref's contract), which is what keeps
+    the `resolved` echo absent for pure-coordinate calls.
+    """
+    return {
+        "name": item.get("name"),
+        "id": item.get("id"),
+        "lat": item["lat"],
+        "lon": item["lon"],
+        "matched_by": item["matched_by"],
+    }
 
 
 def _category_slug(category: str) -> str:
@@ -459,13 +813,19 @@ def find_places(
     category: str | None = None,
     name: str | None = None,
     min_confidence: float | None = None,
-    operating_status: str | None = None,
+    operating_status: _OperatingStatusArg = None,
     limit: int = 10,
     brand: str | None = None,
     has_website: bool | None = None,
     has_phone: bool | None = None,
     division_id: str | None = None,
     area: str | None = None,
+    cursor: _CursorArg = None,
+    detail: _DetailArg = None,
+    categories: list[str] | None = None,
+    group_by_category: bool = False,
+    within: dict | None = None,
+    confirm: bool = False,
 ) -> dict:
     """Find named places, either near a point or inside an area's boundary.
 
@@ -497,13 +857,10 @@ def find_places(
 
     min_confidence (0.0-1.0) keeps only rows whose confidence score is at
     least that value; out-of-range values return a bad_request error.
-    operating_status filters to a single status, accepting either the
-    relabeled value ("in business", "permanently closed", "temporarily
-    closed") or the raw Overture value ("open", "closed",
-    "closed_permanently", "closed_temporarily"), matched case-insensitively
-    — "permanently closed"/"closed" also match Overture's separate
-    "closed_permanently" raw value, since both relabel the same way.
-    Unrecognized values return a bad_request error.
+    operating_status filters to a single status (see the schema's enum for
+    accepted relabeled/raw values); "permanently closed"/"closed" also
+    match Overture's separate "closed_permanently" raw value, since both
+    relabel the same way. Unrecognized values return a bad_request error.
 
     brand is a substring match on the place's brand name (e.g. 'Starbucks').
     Brand data is sparse — most independent businesses have no brand at all,
@@ -535,6 +892,67 @@ def find_places(
     missing columns this tool depends on. If a category filter was given and
     it matched nothing (in either mode), a non-fatal "note" field hints that
     the category slug may be wrong and points at search_categories.
+
+    A truncated answer — either token-budget-trimmed or because more
+    matching rows exist beyond limit — also carries "cursor"; pass it back
+    unchanged, with every other argument identical, to fetch the next page.
+    cursor is only ever issued for a literal or ambiguity-free match: an
+    answer built from #373's alt-name/fuzzy name fallback never carries one
+    (those pools are small; ROADMAP §4.4). A cursor for a different query,
+    or one that's malformed, returns {"error": "bad_cursor", ...} naming
+    the mismatch; a cursor issued against an older Overture release is
+    honored anyway, against the current release, with a one-line "note"
+    that rows may have shifted.
+
+    detail picks how much of each row comes back (ROADMAP §4.5, roadmap
+    feature 5): "compact" (the DEFAULT) is {id, name, category, lat, lon,
+    distance_m, trust} — trust is a tier string ("strong"/"ok"/"weak"/
+    "unknown") derived from the same confidence/operating-status signals
+    as "full"'s trust_note, so the two can never disagree; the payload
+    also carries one "trust_legend" line explaining the tiers. compact
+    keeps lat/lon (unlike "ids") so a composed call feeding these rows
+    into a map-rendering tool still has coordinates under the default
+    tier. "ids" is just {id,
+    distance_m} — deliberately coordinate-free, the cheapest shape, for
+    chaining straight into a batch id lookup or place_details. "full" is
+    every field, unchanged from before this param existed, including
+    trust_note's prose. division-polygon rows have no distance_m at any
+    tier (no reference point to measure from) — the key is omitted, never
+    null; they still carry lat/lon at every tier but "ids". detail is
+    presentation only: it does not affect which rows match or their
+    order, is NOT part of a cursor's query identity, and a cursor issued
+    under one detail continues correctly under a different one.
+    Projection happens before the token budget is applied, so a smaller
+    detail tier fits more rows per answer — that's the point of a tier
+    smaller than "full". Unrecognized values return a bad_request error
+    naming the accepted ones.
+
+    categories (mutually exclusive with category — passing both is a
+    bad_request) runs a checklist of up to 5 slugs in ONE scan instead of
+    category's one slug, each matched with identical substring/prefix
+    semantics. group_by_category=False (the default) merges every
+    category's matches into one nearest-first list, same shape and cursor
+    pagination as a single category (categories, sorted, is part of the
+    cursor's query identity). group_by_category=True instead buckets the
+    answer as {"results": {category: [rows...]}}, up to `limit` rows PER
+    category — a category with zero matches is simply absent from the
+    dict. Grouped answers carry no cursor at all (each category is already
+    limit-bounded from a single scan; page a specific one further by
+    re-running with category=<that slug> instead). More than 5 slugs, or
+    categories together with category, both return a bad_request error;
+    group_by_category=True together with a non-null cursor is also a
+    bad_request (there is nothing to continue). The category-miss "note"
+    (see above) also covers categories: it fires when the scan matched
+    none of the requested slugs at all.
+
+    within = {"minutes", "mode"?, "of"?} (roadmap §4.2) keeps only results
+    truly reachable from `of` within `minutes` by street-graph `mode` —
+    the real graph, not a radius guess; radius_m is ignored when set. `of`
+    (a LocationRef) defaults to the search center; required in
+    division_id/area mode. An id/name `of` adds a "resolved" echo; the
+    answer gets a short reachability note. A cold graph returns
+    {"error": "needs_confirm", ...} — retry with confirm=true once the
+    user agrees to wait (5-25s).
     """
     point_given = lat is not None or lon is not None
     modes_given = sum([point_given, division_id is not None, area is not None])
@@ -548,6 +966,182 @@ def find_places(
             "error": "bad_request",
             "detail": "pass one of lat/lon (+radius_m), division_id, or area",
         }
+    if detail is not None and detail not in _DETAIL_ENUM:
+        return {
+            "error": "bad_request",
+            "detail": f"unrecognized detail {detail!r}; accepted values: "
+            f"{', '.join(_DETAIL_ENUM)}",
+        }
+    effective_detail = detail or "compact"
+    categories = categories or None
+    if category is not None and categories is not None:
+        return {
+            "error": "bad_request",
+            "detail": "pass category or categories, not both",
+        }
+    if categories is not None and len(categories) > overture.MAX_CATEGORIES:
+        return {
+            "error": "bad_request",
+            "detail": f"categories accepts at most {overture.MAX_CATEGORIES} slugs",
+        }
+    if group_by_category:
+        if categories is None:
+            return {
+                "error": "bad_request",
+                "detail": "group_by_category requires categories",
+            }
+        if cursor is not None:
+            return {
+                "error": "bad_request",
+                "detail": "group_by_category has no cursor; drop cursor or set "
+                "group_by_category=false",
+            }
+
+    # within (roadmap §4.2's reachability filter) is resolved to a numeric
+    # "of" point BEFORE params_key, below — not the raw LocationRef, which
+    # could resolve differently across releases, but the cursor already
+    # embeds the release; the numeric point is what makes "same query"
+    # stable across a replay. within_minutes/within_mode/within_of_lat/
+    # within_of_lon feed the confirm gate and the isochrone call further
+    # down, once the cursor itself has been validated.
+    within_minutes = None
+    within_mode = None
+    within_of_lat = None
+    within_of_lon = None
+    within_resolved_echo = None
+    within_canonical = None
+    if within is not None:
+        if not isinstance(within, dict):
+            return {
+                "error": "bad_request",
+                "detail": "within must be an object with minutes (and optional mode, of)",
+            }
+        extra_keys = set(within) - {"minutes", "mode", "of"}
+        if extra_keys:
+            return {
+                "error": "bad_request",
+                "detail": f"within has unrecognized keys: {sorted(extra_keys)}; "
+                "accepted: minutes, mode, of",
+            }
+        raw_minutes = within.get("minutes")
+        try:
+            within_minutes = float(raw_minutes)
+        except (TypeError, ValueError):
+            return {
+                "error": "bad_request",
+                "detail": f"within.minutes must be numeric, got {raw_minutes!r}",
+            }
+        if not math.isfinite(within_minutes) or within_minutes <= 0 or within_minutes > 60:
+            return {
+                "error": "bad_request",
+                "detail": "within.minutes must be greater than 0 and at most 60",
+            }
+        within_mode = preference_store.resolve_mode(
+            within.get("mode"), preference_store.DEFAULT_MODE_ISOCHRONE
+        )
+        if within_mode not in routing.MODE_CONFIG:
+            return {
+                "error": "unsupported_mode",
+                "detail": f"unsupported within.mode {within_mode!r}; supported: "
+                f"{sorted(routing.MODE_CONFIG)}",
+                "supported": sorted(routing.MODE_CONFIG),
+            }
+        of_ref = within.get("of")
+        if of_ref is not None:
+            of_item, of_error = _resolve_location_ref(of_ref)
+            if of_error is not None:
+                return of_error
+            within_of_lat, within_of_lon = of_item["lat"], of_item["lon"]
+            if "matched_by" in of_item:
+                within_resolved_echo = _location_ref_echo(of_item)
+        elif division_id is not None or area is not None:
+            return {
+                "error": "bad_request",
+                "detail": "within needs a point to measure from — pass of",
+            }
+        else:
+            if lat is None or lon is None:
+                return {"error": "bad_request", "detail": "pass both lat and lon"}
+            coord_error = _invalid_coord(lat, lon)
+            if coord_error is not None:
+                return coord_error
+            within_of_lat, within_of_lon = float(lat), float(lon)
+        within_canonical = {
+            "minutes": within_minutes,
+            "mode": within_mode,
+            "of_lat": within_of_lat,
+            "of_lon": within_of_lon,
+        }
+
+    # Everything that affects the result set/order — everything but `cursor`
+    # itself, `limit` (a page-size knob, not part of the query identity),
+    # `detail` (presentation, not query identity — see docstring), and
+    # `group_by_category` (grouped answers never carry a cursor at all, so
+    # it's moot for merged-mode cursors). Numeric args are normalized to
+    # float: placeroot_call's coercion path (str/JSON dispatch, e.g. over
+    # HTTP) and a native Python call can hand this function an equal-valued
+    # int and float (radius_m=1000 vs 1000.0) for the same query — json.dumps
+    # tells those apart, so an un-normalized hash would make a cursor issued
+    # on one path unusable replayed on the other, even though nothing about
+    # the query differs. categories is sorted so the same set in a
+    # different order still hashes identically.
+    params_key = {
+        "lat": float(lat) if lat is not None else None,
+        "lon": float(lon) if lon is not None else None,
+        "radius_m": float(radius_m) if radius_m is not None else None,
+        "category": category, "name": name,
+        "categories": sorted(categories) if categories else None,
+        "min_confidence": float(min_confidence) if min_confidence is not None else None,
+        "operating_status": operating_status, "brand": brand,
+        "has_website": has_website, "has_phone": has_phone,
+        "division_id": division_id, "area": area,
+        "within": within_canonical,
+    }
+    current_release = release.resolve_release()
+    cursor_error, start_offset, cursor_note = cursor_mod.resolve_cursor(
+        cursor, params_key, current_release
+    )
+    if cursor_error is not None:
+        return cursor_error
+
+    # Cold-graph confirm gate (#336's pattern) + the shed itself, computed
+    # once regardless of mode — every mode below needs the same polygon.
+    within_polygon = None
+    within_note = None
+    if within is not None:
+        if not routing.isochrone_graph_is_cached(
+            within_of_lat, within_of_lon, within_minutes, within_mode
+        ) and not confirm:
+            return _needs_confirm_graph(within_mode)
+        try:
+            iso = routing.isochrone(
+                within_of_lat, within_of_lon, minutes=within_minutes, mode=within_mode
+            )
+        except routing.UnsupportedMode as e:
+            return {
+                "error": "unsupported_mode",
+                "detail": e.detail,
+                "supported": sorted(routing.MODE_CONFIG),
+            }
+        except routing.UpstreamUnavailable as e:
+            return _upstream_error(e)
+        except routing.SchemaDegraded as e:
+            return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
+        except routing.NoGraphNearby as e:
+            return {"error": "no_graph_nearby", "detail": e.detail}
+        except routing.RadiusTooLarge as e:
+            return {
+                "error": "radius_too_large",
+                "detail": e.detail,
+                "max_radius_m": e.max_radius_m,
+            }
+        except ValueError as e:
+            return {"error": "bad_request", "detail": str(e)}
+        within_polygon = iso["polygon"]
+        within_note = (
+            f"reachability-filtered against the street graph "
+            f"({within_minutes:g} min {within_mode})"
+        )
 
     # area is sugar over the division_id path: resolve the name to a
     # division, then fall through to exactly the same polygon search.
@@ -569,11 +1163,50 @@ def find_places(
             return {"error": "not_found", "detail": f"no division matched area {area!r}"}
         division_id = resolved_area["division_id"]
 
+    # Overfetch by one row beyond the effective (post-clamp) limit so a
+    # scan that stops only because it hit limit — not because it ran out of
+    # matches — is distinguishable from one that didn't (has_more below).
+    effective_limit = max(0, min(int(limit), overture.MAX_ROWS))
+
     if division_id is not None:
+        if group_by_category:
+            try:
+                grouped = overture.find_places_in_division_grouped_by_category(
+                    division_id, categories, name,
+                    min_confidence, operating_status, brand, has_website, has_phone,
+                    effective_limit,
+                    within_polygon=within_polygon,
+                )
+            except ValueError as e:
+                return {"error": "bad_request", "detail": str(e)}
+            except overture.UpstreamUnavailable as e:
+                return _upstream_error(e)
+            except overture.SchemaDegraded as e:
+                return _schema_error(e)
+            if grouped is None:
+                return {
+                    "error": "not_found",
+                    "detail": f"no division matched division_id {division_id!r}",
+                }
+            grouped = _project_grouped_places(grouped, effective_detail)
+            payload = _with_degraded_fields(
+                budget.apply_budget_grouped({"results": grouped}, "results")
+            )
+            if resolved_area is not None:
+                payload["area"] = resolved_area
+            payload = _with_categories_hint(
+                payload, categories, widen_hint="try a larger division"
+            )
+            payload = _with_detail_legend(payload, effective_detail)
+            payload = _with_within_extras(payload, within_resolved_echo, within_note)
+            return payload
         try:
             rows = overture.find_places_in_division(
                 division_id, category, name,
-                min_confidence, operating_status, brand, has_website, has_phone, limit,
+                min_confidence, operating_status, brand, has_website, has_phone,
+                effective_limit + 1, offset=start_offset,
+                categories=categories,
+                within_polygon=within_polygon,
             )
         except ValueError as e:
             return {"error": "bad_request", "detail": str(e)}
@@ -586,22 +1219,59 @@ def find_places(
                 "error": "not_found",
                 "detail": f"no division matched division_id {division_id!r}",
             }
+        has_more = len(rows) > effective_limit
+        rows = rows[:effective_limit]
+        rows = _project_places(rows, effective_detail)
         payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
         if resolved_area is not None:
             # Which division the name landed on — an agent that asked for
             # "Springfield" needs to see which one it got.
             payload["area"] = resolved_area
-        return _with_category_hint(payload, category, widen_hint="try a larger division")
+        payload = _with_category_hint(payload, category, widen_hint="try a larger division")
+        payload = _with_categories_hint(payload, categories, widen_hint="try a larger division")
+        payload = _with_detail_legend(payload, effective_detail)
+        payload = _with_within_extras(payload, within_resolved_echo, within_note)
+        payload = cursor_mod.attach_cursor(
+            payload, "results", params_key, current_release, start_offset, has_more
+        )
+        if cursor_note:
+            payload["note"] = "; ".join(filter(None, [payload.get("note"), cursor_note]))
+        return payload
 
     if lat is None or lon is None:
         return {"error": "bad_request", "detail": "pass both lat and lon"}
     coord_error = _invalid_coord(lat, lon)
     if coord_error is not None:
         return coord_error
+    if group_by_category:
+        try:
+            grouped = overture.find_places_grouped_by_category(
+                lat, lon, radius_m, categories, name,
+                min_confidence, operating_status, brand, has_website, has_phone,
+                effective_limit,
+                within_polygon=within_polygon,
+            )
+        except ValueError as e:
+            return {"error": "bad_request", "detail": str(e)}
+        except overture.UpstreamUnavailable as e:
+            return _upstream_error(e)
+        except overture.SchemaDegraded as e:
+            return _schema_error(e)
+        grouped = _project_grouped_places(grouped, effective_detail)
+        payload = _with_degraded_fields(
+            budget.apply_budget_grouped({"results": grouped}, "results")
+        )
+        payload = _with_categories_hint(payload, categories, widen_hint="widen radius_m")
+        payload = _with_detail_legend(payload, effective_detail)
+        payload = _with_within_extras(payload, within_resolved_echo, within_note)
+        return payload
     try:
         rows = overture.find_places(
             lat, lon, radius_m, category, name,
-            min_confidence, operating_status, brand, has_website, has_phone, limit,
+            min_confidence, operating_status, brand, has_website, has_phone,
+            effective_limit + 1, offset=start_offset,
+            categories=categories,
+            within_polygon=within_polygon,
         )
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
@@ -609,28 +1279,82 @@ def find_places(
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
         return _schema_error(e)
+    # #373's alt-name/fuzzy fallback tiers run their own bounded pool query
+    # (only at offset 0) rather than this call's offset-aware one, so a
+    # cursor over that pool can't honestly promise the next page won't
+    # overlap or skip — no cursor is issued when a row came from either tier.
+    used_name_fallback = any(r.get("matched_by") for r in rows)
+    has_more = len(rows) > effective_limit
+    rows = rows[:effective_limit]
+    fallback_rows = rows  # pre-projection: detail may strip matched_by/name
+    rows = _project_places(rows, effective_detail)
     payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
-    payload = _with_name_fallback_note(payload, name)
-    return _with_category_hint(payload, category, widen_hint="widen radius_m")
+    payload = _with_name_fallback_note(payload, name, fallback_rows)
+    payload = _with_category_hint(payload, category, widen_hint="widen radius_m")
+    payload = _with_categories_hint(payload, categories, widen_hint="widen radius_m")
+    payload = _with_detail_legend(payload, effective_detail)
+    payload = _with_within_extras(payload, within_resolved_echo, within_note)
+    if not used_name_fallback:
+        payload = cursor_mod.attach_cursor(
+            payload, "results", params_key, current_release, start_offset, has_more
+        )
+    if cursor_note:
+        payload["note"] = "; ".join(filter(None, [payload.get("note"), cursor_note]))
+    return payload
 
 
 @_tool("Summarize area")
-def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
+def summarize_area(
+    lat: float | None = None,
+    lon: float | None = None,
+    radius_m: float = 1000,
+    where: dict | str | None = None,
+) -> dict:
     """Summarize what's in an area: total places and top categories.
+
+    Give the center as lat/lon, or as `where` — a {"lat", "lon"} dict, a
+    GERS id, or a free-text place name — but not both (and not neither);
+    either way returns {"error": "bad_request"} naming the choice. A
+    `where` given as an id/name adds a compact "resolved": {"name", "id",
+    "lat", "lon", "matched_by"} to the answer; absent for lat/lon or a
+    {lat,lon} where.
 
     Returns a structured {"error": ...} instead of raising if upstream is
     unavailable or the dataset is missing columns this tool depends on.
     """
-    coord_error = _invalid_coord(lat, lon)
-    if coord_error is not None:
-        return coord_error
+    have_lat, have_lon = lat is not None, lon is not None
+    if where is not None and (have_lat or have_lon):
+        return {
+            "error": "bad_request",
+            "detail": "pass either lat and lon, or where — not both",
+        }
+    if where is None and not (have_lat and have_lon):
+        return {
+            "error": "bad_request",
+            "detail": "summarize_area needs lat and lon, or where",
+        }
+    resolved_echo = None
+    if where is not None:
+        item, ref_error = _resolve_location_ref(where)
+        if ref_error is not None:
+            return ref_error
+        lat, lon = item["lat"], item["lon"]
+        if "matched_by" in item:
+            resolved_echo = _location_ref_echo(item)
+    else:
+        coord_error = _invalid_coord(lat, lon)
+        if coord_error is not None:
+            return coord_error
     try:
         result = overture.summarize_area(lat, lon, radius_m)
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
         return _schema_error(e)
-    return _with_degraded_fields(budget.apply_budget(result, "top_categories"))
+    result = _with_degraded_fields(budget.apply_budget(result, "top_categories"))
+    if resolved_echo is not None:
+        result["resolved"] = resolved_echo
+    return result
 
 
 @_tool("Place details")
@@ -685,13 +1409,28 @@ def place_details(
 
 @_tool("Check within distance")
 def within_distance(
-    lat: float,
-    lon: float,
+    lat: float | None = None,
+    lon: float | None = None,
+    *,
     max_distance_m: float,
     category: str | None = None,
     name: str | None = None,
+    where: dict | str | None = None,
 ) -> dict:
     """Is the nearest place matching category/name within max_distance_m of (lat, lon)?
+
+    Give the center as lat/lon, or as `where` — a {"lat", "lon"} dict, a
+    GERS id, or a free-text place name — but not both (and not neither);
+    either way returns {"error": "bad_request"} naming the choice. A
+    `where` given as an id/name adds a compact "resolved": {"name", "id",
+    "lat", "lon", "matched_by"} to the answer; absent for lat/lon or a
+    {lat,lon} where.
+
+    max_distance_m is required and must be a positive number of meters — a
+    zero, negative, non-finite, or missing value returns {"error":
+    "bad_request"} rather than silently searching a 0m (or omitted from a
+    call entirely, in which case the schema itself rejects it before this
+    tool ever runs) window and answering a confident-looking "false".
 
     Returns {"within": bool, "nearest": {...place row with id...} | None,
     "distance_m": float | None}. nearest is None if nothing matches within
@@ -703,29 +1442,106 @@ def within_distance(
     Returns a structured {"error": ...} if upstream is unavailable or the
     dataset is missing columns this tool depends on.
     """
-    coord_error = _invalid_coord(lat, lon)
-    if coord_error is not None:
-        return coord_error
+    if (
+        not isinstance(max_distance_m, (int, float))
+        or isinstance(max_distance_m, bool)
+        or not math.isfinite(max_distance_m)
+        or max_distance_m <= 0
+    ):
+        return {
+            "error": "bad_request",
+            "detail": "max_distance_m must be a positive number of meters",
+        }
+    have_lat, have_lon = lat is not None, lon is not None
+    if where is not None and (have_lat or have_lon):
+        return {
+            "error": "bad_request",
+            "detail": "pass either lat and lon, or where — not both",
+        }
+    if where is None and not (have_lat and have_lon):
+        return {
+            "error": "bad_request",
+            "detail": "within_distance needs lat and lon, or where",
+        }
+    resolved_echo = None
+    if where is not None:
+        item, ref_error = _resolve_location_ref(where)
+        if ref_error is not None:
+            return ref_error
+        lat, lon = item["lat"], item["lon"]
+        if "matched_by" in item:
+            resolved_echo = _location_ref_echo(item)
+    else:
+        coord_error = _invalid_coord(lat, lon)
+        if coord_error is not None:
+            return coord_error
     try:
         result = overture.within_distance(lat, lon, max_distance_m, category, name)
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
         return _schema_error(e)
-    return _with_degraded_fields(result)
+    result = _with_degraded_fields(result)
+    if resolved_echo is not None:
+        result["resolved"] = resolved_echo
+    return result
+
+
+def _resolve_matrix_side(points: list, param_name: str) -> tuple[list[dict] | None, dict | None]:
+    """origins/destinations LocationRef list -> ([{"lat","lon",...}], error).
+
+    A thin name for _resolve_location_refs at the matrix tools' call sites —
+    a missing/non-numeric lat or lon on a plain {"lat", "lon"} dict already
+    comes back as an indexed bad_request via _invalid_coord inside
+    _resolve_location_ref, so no separate precheck is needed here (and
+    adding one would let a malformed dict at a higher index preempt an
+    unresolved string at a lower one, breaking "lowest index wins").
+    """
+    return _resolve_location_refs(points, param_name)
+
+
+def _matrix_resolved_echo(origins: list, resolved_origins: list[dict],
+                           destinations: list, resolved_destinations: list[dict]) -> dict | None:
+    """The {"origins": [...], "destinations": [...]} resolved echo, string items only."""
+    echo = {}
+    o_echo = [
+        {"index": i, **_location_ref_echo(r)}
+        for i, r in enumerate(resolved_origins)
+        if isinstance(origins[i], str)
+    ]
+    d_echo = [
+        {"index": i, **_location_ref_echo(r)}
+        for i, r in enumerate(resolved_destinations)
+        if isinstance(destinations[i], str)
+    ]
+    if o_echo:
+        echo["origins"] = o_echo
+    if d_echo:
+        echo["destinations"] = d_echo
+    return echo or None
 
 
 @_tool("Distance matrix")
-def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
+def distance_matrix(origins: list[dict | str], destinations: list[dict | str]) -> dict:
     """Straight-line (great-circle) distance in meters between every origin and destination.
 
-    origins and destinations are each a list of {"lat": ..., "lon": ...}
-    points, capped at 10 each (100 pairs max) — this is a plain haversine
+    origins and destinations are each a list of LocationRefs — a {"lat":
+    ..., "lon": ...} dict, a GERS id, or a free-text place name, mixed
+    freely — capped at 10 each (100 pairs max). This is a plain haversine
     calculation, not a routed distance or travel time, so it's cheap but it
     is NOT what Google/Mapbox distance-matrix APIs return: no roads, no
     turns, no travel time. For "how far can I get in N minutes" use
     isochrone() instead; for actual routed times/distances between several
     points use travel_time_matrix().
+
+    An id/name that failed to resolve returns an indexed error
+    (origins[i]: ... or destinations[i]: ...) with candidates on ambiguity
+    — checked after the 10-point cap, so an over-cap list always fails on
+    the cap first. Any origin/destination given by id/name adds "resolved":
+    {"origins": [{"index", "name", "id", "lat", "lon", "matched_by"}, ...],
+    "destinations": [...]} covering just those entries; each side is
+    present only if it had a string entry, and the whole key is absent when
+    every point was already coordinates.
 
     Returns {"elements": [{"origin_idx": 0, "dest_idx": 0, "distance_m":
     812}, ...]}, flat and origin-major (all destinations for origin 0,
@@ -750,21 +1566,14 @@ def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
         }
     if not origins or not destinations:
         return {"elements": []}
-    try:
-        o_pts = [(float(p["lat"]), float(p["lon"])) for p in origins]
-        d_pts = [(float(p["lat"]), float(p["lon"])) for p in destinations]
-    except (KeyError, TypeError, ValueError) as e:
-        return {"error": "bad_request", "detail": f"each point needs numeric lat and lon: {e}"}
-    for idx, (plat, plon) in enumerate(o_pts):
-        coord_error = _invalid_coord(plat, plon)
-        if coord_error is not None:
-            coord_error["detail"] = f"origins[{idx}]: {coord_error['detail']}"
-            return coord_error
-    for idx, (plat, plon) in enumerate(d_pts):
-        coord_error = _invalid_coord(plat, plon)
-        if coord_error is not None:
-            coord_error["detail"] = f"destinations[{idx}]: {coord_error['detail']}"
-            return coord_error
+    resolved_origins, origin_error = _resolve_matrix_side(origins, "origins")
+    if origin_error is not None:
+        return origin_error
+    resolved_destinations, dest_error = _resolve_matrix_side(destinations, "destinations")
+    if dest_error is not None:
+        return dest_error
+    o_pts = [(r["lat"], r["lon"]) for r in resolved_origins]
+    d_pts = [(r["lat"], r["lon"]) for r in resolved_destinations]
     elements = [
         {
             "origin_idx": oi,
@@ -774,7 +1583,13 @@ def distance_matrix(origins: list[dict], destinations: list[dict]) -> dict:
         for oi, (olat, olon) in enumerate(o_pts)
         for di, (dlat, dlon) in enumerate(d_pts)
     ]
-    return budget.apply_budget({"elements": elements}, "elements")
+    result = budget.apply_budget({"elements": elements}, "elements")
+    resolved_echo = _matrix_resolved_echo(
+        origins, resolved_origins, destinations, resolved_destinations
+    )
+    if resolved_echo is not None:
+        result["resolved"] = resolved_echo
+    return result
 
 
 # issue #304: priorities input cap and accepted "prefer" values.
@@ -887,9 +1702,63 @@ def _meeting_travel_time_for(origin: tuple, dest_lat: float, dest_lon: float) ->
     return leg
 
 
+def _resolve_string_origins(
+    origins: list, string_idxs: list[int]
+) -> tuple[dict[int, dict], dict | None]:
+    """Resolve just origins' string entries (by real index), in parallel.
+
+    meeting_point's per-index validation loop mixes string LocationRefs
+    with dict {"lat","lon","mode"} origins that need their own mode
+    validation, so it can't just hand the whole `origins` list to
+    _resolve_location_refs (that function would try to coordinate-validate
+    the dict origins itself, with a different error shape than this tool
+    documents). This resolves only the string entries — same
+    ThreadPoolExecutor + contextvars.copy_context() + db.isolated_reads()
+    pattern _resolve_location_refs uses, so 2-5 cold name/GERS resolutions
+    run concurrently instead of serially eating into the question's time
+    budget — and returns them keyed by their real position in `origins`,
+    so the caller's per-index loop and error messages need no index
+    remapping. On any failure, returns the lowest-indexed failure with
+    `"index"` and `detail` prefixed `f"origins[{i}]: "`, same contract as
+    _resolve_location_refs.
+    """
+    resolved: dict[int, dict] = {}
+    failures: dict[int, dict] = {}
+
+    def _isolated(i: int):
+        with db.isolated_reads():
+            return i, _resolve_location_ref(origins[i])
+
+    if len(string_idxs) > 1:
+        with ThreadPoolExecutor(max_workers=min(len(string_idxs), 8)) as pool:
+            futures = [
+                pool.submit(contextvars.copy_context().run, _isolated, i) for i in string_idxs
+            ]
+            for future in futures:
+                i, (item, err) = future.result()
+                if err is not None:
+                    failures[i] = err
+                else:
+                    resolved[i] = item
+    else:
+        for i in string_idxs:
+            item, err = _resolve_location_ref(origins[i])
+            if err is not None:
+                failures[i] = err
+            else:
+                resolved[i] = item
+
+    if failures:
+        idx = min(failures)
+        err = failures[idx]
+        detail = f"origins[{idx}]: {err.get('detail', '')}"
+        return {}, {**err, "index": idx, "detail": detail}
+    return resolved, None
+
+
 @_tool("Meeting point")
 def meeting_point(
-    origins: list[dict],
+    origins: list[dict | str],
     category: str | None = None,
     limit: int = 3,
     confirm: bool = False,
@@ -903,12 +1772,18 @@ def meeting_point(
     deliberately not "minimize the average" — that objective can strand
     one person with a long trip so two others get a short one.
 
-    origins is 2-5 {"lat": ..., "lon": ..., "mode": ...} points — mode is
-    "walk", "cycle", or "drive", defaulting to "walk" when omitted, and can
-    differ per person (e.g. one driving, one walking). category optionally
-    filters candidate venues to an Overture taxonomy slug (e.g.
-    'coffee_shop'); a wrong or unrecognized slug is a silent zero-match,
-    not an error.
+    origins is 2-5 points, each a {"lat": ..., "lon": ..., "mode": ...}
+    dict, a GERS id, or a free-text place name, mixed freely — mode is
+    "walk", "cycle", or "drive", defaulting to "walk" when omitted (a
+    string origin always gets the default mode; give a dict with "mode" to
+    pick otherwise), and can differ per person (e.g. one driving, one
+    walking). An id/name that failed to resolve returns an indexed error
+    (origins[i]: ...) with candidates on ambiguity. Any origin given by
+    id/name adds "resolved": [{"index", "name", "id", "lat", "lon",
+    "matched_by"}, ...] for just those origins; absent when every origin
+    was already coordinates. category optionally filters candidate venues
+    to an Overture taxonomy slug (e.g. 'coffee_shop'); a wrong or
+    unrecognized slug is a silent zero-match, not an error.
 
     Method: a seed center is computed from each origin's implied
     straight-line travel time (not raw distance, so a walking participant
@@ -961,33 +1836,45 @@ def meeting_point(
             "error": "bad_request",
             "detail": f"origins must hold between 2 and 5 points, got {got}",
         }
+    string_idxs = [i for i, o in enumerate(origins) if isinstance(o, str)]
+    resolved_strings, resolve_error = _resolve_string_origins(origins, string_idxs)
+    if resolve_error is not None:
+        return resolve_error
+
     parsed: list[tuple[float, float, str]] = []
+    resolved_echo: list[dict] = []
     for idx, o in enumerate(origins):
-        if not isinstance(o, dict):
+        if isinstance(o, str):
+            item = resolved_strings[idx]
+            olat, olon, mode = item["lat"], item["lon"], "walk"
+            if "matched_by" in item:
+                resolved_echo.append({"index": idx, **_location_ref_echo(item)})
+        elif isinstance(o, dict):
+            try:
+                olat, olon = float(o["lat"]), float(o["lon"])
+            except (KeyError, TypeError, ValueError) as e:
+                return {
+                    "error": "bad_request",
+                    "detail": f"origins[{idx}]: each origin needs numeric lat and lon: {e}",
+                }
+            coord_error = _invalid_coord(olat, olon)
+            if coord_error is not None:
+                coord_error["detail"] = f"origins[{idx}]: {coord_error['detail']}"
+                return coord_error
+            mode = o.get("mode", "walk")
+            if not isinstance(mode, str) or mode not in routing.MODE_CONFIG:
+                return {
+                    "error": "bad_request",
+                    "detail": (
+                        f"origins[{idx}]: mode must be one of "
+                        f"{sorted(routing.MODE_CONFIG)}, got {mode!r}"
+                    ),
+                    "supported": sorted(routing.MODE_CONFIG),
+                }
+        else:
             return {
                 "error": "bad_request",
-                "detail": f"origins[{idx}] must be an object with lat and lon",
-            }
-        try:
-            olat, olon = float(o["lat"]), float(o["lon"])
-        except (KeyError, TypeError, ValueError) as e:
-            return {
-                "error": "bad_request",
-                "detail": f"origins[{idx}]: each origin needs numeric lat and lon: {e}",
-            }
-        coord_error = _invalid_coord(olat, olon)
-        if coord_error is not None:
-            coord_error["detail"] = f"origins[{idx}]: {coord_error['detail']}"
-            return coord_error
-        mode = o.get("mode", "walk")
-        if not isinstance(mode, str) or mode not in routing.MODE_CONFIG:
-            return {
-                "error": "bad_request",
-                "detail": (
-                    f"origins[{idx}]: mode must be one of "
-                    f"{sorted(routing.MODE_CONFIG)}, got {mode!r}"
-                ),
-                "supported": sorted(routing.MODE_CONFIG),
+                "detail": f"origins[{idx}] must be an object with lat and lon, or a place name",
             }
         parsed.append((olat, olon, mode))
 
@@ -1011,6 +1898,8 @@ def meeting_point(
         return _schema_error(e)
 
     payload = {"center": {"lat": center_lat, "lon": center_lon}, "candidates": []}
+    if resolved_echo:
+        payload["resolved"] = resolved_echo
     if not rows:
         if category:
             payload["note"] = (
@@ -1109,22 +1998,32 @@ def meeting_point(
             "incomplete route"
         )
     payload = budget.apply_budget(payload, "candidates")
-    map_payload = mapexplain.from_meeting_point_result(payload, origins)
+    origin_points = [{"lat": olat, "lon": olon} for olat, olon, _mode in parsed]
+    map_payload = mapexplain.from_meeting_point_result(payload, origin_points)
     if map_payload is not None:
         payload["map"] = map_payload
     return payload
 @_tool("Travel time matrix")
 def travel_time_matrix(
-    origins: list[dict], destinations: list[dict], mode: str = "walk"
+    origins: list[dict | str], destinations: list[dict | str], mode: _ModeArgWalkDefault = None
 ) -> dict:
     """Routed travel time + distance between every origin and destination, by mode.
 
-    origins and destinations are each a list of {"lat": ..., "lon": ...}
-    points, capped at 5 each (25 pairs max). Unlike distance_matrix's plain
+    origins and destinations are each a list of LocationRefs — a {"lat":
+    ..., "lon": ...} dict, a GERS id, or a free-text place name, mixed
+    freely — capped at 5 each (25 pairs max). Unlike distance_matrix's plain
     haversine, this is a real shortest-path search over Overture's open
     street graph — roads, one-ways, and each mode's own speed model, the
-    same cost model route() uses for a single pair. mode is "walk"
-    (default), "cycle", or "drive", one mode per call.
+    same cost model route() uses for a single pair, one mode per call;
+    omit mode to use the stored preferences mode, else walk.
+
+    An id/name that failed to resolve returns an indexed error
+    (origins[i]: ... or destinations[i]: ...) with candidates on ambiguity
+    — checked after the 5-point cap. Any origin/destination given by
+    id/name adds "resolved": {"origins": [{"index", "name", "id", "lat",
+    "lon", "matched_by"}, ...], "destinations": [...]} covering just those
+    entries; each side present only if it had a string entry, absent when
+    every point was already coordinates.
 
     Reuses a single cached street graph across every origin and
     destination when every origin-destination pair fits the mode's
@@ -1166,6 +2065,7 @@ def travel_time_matrix(
         else:
             detail = f"destinations accepts at most 5 points, got {len(destinations)}"
         return {"error": "bad_request", "detail": detail}
+    mode = preference_store.resolve_mode(mode, "walk")
     if mode not in routing.MODE_CONFIG:
         return {
             "error": "bad_request",
@@ -1173,21 +2073,14 @@ def travel_time_matrix(
         }
     if not origins or not destinations:
         return {"elements": []}
-    try:
-        o_pts = [(float(p["lat"]), float(p["lon"])) for p in origins]
-        d_pts = [(float(p["lat"]), float(p["lon"])) for p in destinations]
-    except (KeyError, TypeError, ValueError) as e:
-        return {"error": "bad_request", "detail": f"each point needs numeric lat and lon: {e}"}
-    for idx, (plat, plon) in enumerate(o_pts):
-        coord_error = _invalid_coord(plat, plon)
-        if coord_error is not None:
-            coord_error["detail"] = f"origins[{idx}]: {coord_error['detail']}"
-            return coord_error
-    for idx, (plat, plon) in enumerate(d_pts):
-        coord_error = _invalid_coord(plat, plon)
-        if coord_error is not None:
-            coord_error["detail"] = f"destinations[{idx}]: {coord_error['detail']}"
-            return coord_error
+    resolved_origins, origin_error = _resolve_matrix_side(origins, "origins")
+    if origin_error is not None:
+        return origin_error
+    resolved_destinations, dest_error = _resolve_matrix_side(destinations, "destinations")
+    if dest_error is not None:
+        return dest_error
+    o_pts = [(r["lat"], r["lon"]) for r in resolved_origins]
+    d_pts = [(r["lat"], r["lon"]) for r in resolved_destinations]
     try:
         result = routing.travel_time_matrix(o_pts, d_pts, mode=mode)
     except routing.UpstreamUnavailable as e:
@@ -1196,7 +2089,13 @@ def travel_time_matrix(
         return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
     except routing.NoGraphNearby as e:
         return {"error": "no_graph_nearby", "detail": e.detail}
-    return budget.apply_budget(result, "elements")
+    result = budget.apply_budget(result, "elements")
+    resolved_echo = _matrix_resolved_echo(
+        origins, resolved_origins, destinations, resolved_destinations
+    )
+    if resolved_echo is not None:
+        result["resolved"] = resolved_echo
+    return result
 
 
 def _anchor_summary(a: dict) -> dict:
@@ -1469,19 +2368,26 @@ def suggest_areas(
 
 @_tool("Compare areas")
 def compare_areas(
-    areas: list[dict], radius_m: float = 1000, priorities: list[dict] | None = None
+    areas: list[dict | str], radius_m: float = 1000, priorities: list[dict] | None = None
 ) -> dict:
     """Compare 2-5 areas side by side: category mix, density, and what differs.
 
-    areas is a list of {"lat": ..., "lon": ...} centers sharing one
-    radius_m. Returns per-area total_places, place density per km^2, and
-    category_counts aligned across areas for the top ~10 categories by
-    combined count, plus "differentiators" — those categories ranked by how
-    much they differ, relatively, between areas (the fastest way to answer
-    "how is area A different from area B"). Returns a structured {"error":
-    ...} if areas isn't 2-5 centers, or if upstream is unavailable or the
-    dataset is missing columns this tool depends on for any area (a partial
-    comparison is not returned).
+    areas is a list of centers sharing one radius_m, each a {"lat": ...,
+    "lon": ...} dict, a GERS id, or a free-text place/area name, mixed
+    freely — a named area compares the same radius_m circle around its
+    resolved point as a coordinate would (not its actual boundary; that's a
+    later feature). An id/name that failed to resolve returns an indexed
+    error (areas[i]: ...) with candidates on ambiguity. Any area given by
+    id/name adds "resolved": [{"index": i, "name", "id", "lat", "lon",
+    "matched_by"}, ...] for just those areas; absent when every area was
+    already coordinates. Returns per-area total_places, place density per
+    km^2, and category_counts aligned across areas for the top ~10
+    categories by combined count, plus "differentiators" — those categories
+    ranked by how much they differ, relatively, between areas (the fastest
+    way to answer "how is area A different from area B"). Returns a
+    structured {"error": ...} if areas isn't 2-5 centers, or if upstream is
+    unavailable or the dataset is missing columns this tool depends on for
+    any area (a partial comparison is not returned).
 
     priorities (optional, up to 6) turns the comparison into a scored
     verdict: each entry is {"label": your own term for the criterion,
@@ -1517,15 +2423,17 @@ def compare_areas(
     its score, and a one-line summary restating the winner. Absent when
     priorities weren't given, or a verdict couldn't be scored.
     """
-    try:
-        centers = [(a["lat"], a["lon"]) for a in areas]
-    except (KeyError, TypeError) as e:
-        return {"error": "bad_request", "detail": f"each area needs lat and lon: {e}"}
-    for idx, (clat, clon) in enumerate(centers):
-        coord_error = _invalid_coord(clat, clon)
-        if coord_error is not None:
-            coord_error["detail"] = f"areas[{idx}]: {coord_error['detail']}"
-            return coord_error
+    if not isinstance(areas, list):
+        return {"error": "bad_request", "detail": "areas must be a list of area centers"}
+    resolved_areas, resolve_error = _resolve_location_refs(areas, "areas")
+    if resolve_error is not None:
+        return resolve_error
+    centers = [(r["lat"], r["lon"]) for r in resolved_areas]
+    resolved_echo = [
+        {"index": i, **_location_ref_echo(r)}
+        for i, r in enumerate(resolved_areas)
+        if "matched_by" in r
+    ]
     normalized_priorities = None
     if priorities is not None:
         priority_error = _validate_priorities(priorities)
@@ -1545,6 +2453,8 @@ def compare_areas(
         map_payload = mapexplain.from_compare_areas_result(result, radius_m)
         if map_payload is not None:
             result["map"] = map_payload
+    if resolved_echo:
+        result["resolved"] = resolved_echo
     return result
 
 
@@ -2220,11 +3130,12 @@ def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
     the top candidate.
     Returns {"results": [{"query", "name", "type", "lat", "lon", "id"
     (GERS), "rank_score"}, ...]}, one row per query, in input order — a
-    query with no match gets {"query", "error": "no match"} instead, and
-    does not fail the rest of the batch. queries is capped at 20; a longer
-    list returns a structured {"error": ...} rather than truncating
-    silently. Budgeted like every other tool. Returns a structured
-    {"error": ...} instead of raising if the remote scan itself fails.
+    query with no match gets the standard error envelope {"query",
+    "error": "not_found", "detail"} instead, and does not fail the rest of
+    the batch. queries is capped at 20; a longer list returns a structured
+    {"error": ...} rather than truncating silently. Budgeted like every
+    other tool. Returns a structured {"error": ...} instead of raising if
+    the remote scan itself fails.
     """
     if len(queries) > 20:
         return {
@@ -2348,8 +3259,9 @@ def resolve_place_batch(gers_ids: list[str]) -> dict:
     full place_details payload (addresses, websites, phones, socials,
     sources, brand, confidence, ...). Use place_details for full detail on
     a single id. Results are returned in input order; an id that doesn't
-    resolve gets {"gers_id", "error": "not found"} instead and does not
-    fail the rest of the batch. gers_ids is capped at 25; a longer list
+    resolve gets the standard error envelope {"gers_id", "error":
+    "not_found", "detail"} instead and does not fail the rest of the
+    batch. gers_ids is capped at 25; a longer list
     returns a structured {"error": ...} rather than truncating silently.
     An empty list returns {"results": []}. Budgeted like every other tool.
     Returns a structured {"error": ...} instead of raising if the remote
@@ -2366,7 +3278,11 @@ def resolve_place_batch(gers_ids: list[str]) -> dict:
         for gers_id in gers_ids:
             place = overture.place_details(id=gers_id)
             if place is None:
-                rows.append({"gers_id": gers_id, "error": "not found"})
+                rows.append({
+                    "gers_id": gers_id,
+                    "error": "not_found",
+                    "detail": f"no place matched GERS id {gers_id!r}",
+                })
                 continue
             rows.append(
                 {
@@ -2562,8 +3478,10 @@ def reverse_geocode_batch(points: list[dict]) -> dict:
     row per point in `points`, in the same order — each row is whatever
     reverse_geocode(lat, lon) returns (address/divisions chain, or a
     "divisions_only" degrade — see reverse_geocode's docstring). A
-    malformed point (missing or non-numeric lat/lon) doesn't fail the
-    whole batch — it yields a per-row {"error": ...} in its slot instead.
+    malformed point (missing/non-numeric lat/lon, or a lat/lon out of
+    range) doesn't fail the whole batch — it yields the standard error
+    envelope {"lat", "lon", "error": "bad_request", "detail"} in its slot
+    instead.
     """
     if len(points) > 20:
         return {
@@ -2582,13 +3500,19 @@ def reverse_geocode_batch(points: list[dict]) -> dict:
                     {
                         "lat": p.get("lat") if isinstance(p, dict) else None,
                         "lon": p.get("lon") if isinstance(p, dict) else None,
-                        "error": "each point needs numeric lat and lon",
+                        "error": "bad_request",
+                        "detail": "each point needs numeric 'lat' and 'lon'",
                     }
                 )
                 continue
             coord_error = _invalid_coord(lat, lon)
             if coord_error is not None:
-                rows.append({"lat": lat, "lon": lon, "error": coord_error["detail"]})
+                rows.append({
+                    "lat": lat,
+                    "lon": lon,
+                    "error": "bad_request",
+                    "detail": coord_error["detail"],
+                })
                 continue
             rows.append(geocoding.reverse_geocode(lat, lon))
     except overture.UpstreamUnavailable as e:
@@ -2632,6 +3556,14 @@ _GEOMETRY_OP_REQUIRED: dict[str, tuple[str, ...]] = {
     "nearest_point": ("point", "points"),
     "nearest_point_on_line": ("point", "geometry"),
 }
+_OpArg = Annotated[
+    str,
+    Field(
+        description="Geometry operation; each takes a different subset of the "
+        "other arguments — see below.",
+        json_schema_extra={"enum": sorted(_GEOMETRY_OP_REQUIRED)},
+    ),
+]
 
 
 def _point_coord_error(point, label: str) -> dict | None:
@@ -2673,7 +3605,7 @@ def _points_list_coord_error(points, label: str) -> dict | None:
 
 @_tool("Geometry operations")
 def geometry_op(
-    op: str,
+    op: _OpArg,
     point: dict | None = None,
     point2: dict | None = None,
     points: list[dict] | None = None,
@@ -2836,18 +3768,25 @@ def render_map(
 
 @_tool("Reachable area (isochrone)")
 def isochrone(
-    lat: float,
-    lon: float,
+    lat: float | None = None,
+    lon: float | None = None,
     minutes: float = 15,
-    mode: str | None = None,
+    mode: _ModeArgWalkDefault = None,
     speed_m_s: float | None = None,
     radius_m: float | None = None,
+    where: dict | str | None = None,
 ) -> dict:
-    """Isochrone: the area reachable from (lat, lon) within `minutes`, by mode.
+    """Isochrone: the area reachable from a point within `minutes`, by mode.
+
+    Give the point as lat/lon, or as `where` — a {"lat", "lon"} dict, a
+    GERS id, or a free-text place name — but not both (and not neither);
+    either way returns {"error": "bad_request"} naming the choice. A
+    `where` given as an id/name adds a compact "resolved": {"name", "id",
+    "lat", "lon", "matched_by"} to the answer; absent for lat/lon or a
+    {lat,lon} where.
 
     Builds a street graph from Overture's transportation theme and runs
-    Dijkstra out to the time budget. mode is "walk", "cycle", or
-    "drive"; omit it to use the stored preferences mode, else walk. Each mode
+    Dijkstra out to the time budget. Each mode
     excludes its own set of unusable road classes (e.g.
     drive excludes footway/path/steps; cycle and drive exclude
     motorway/trunk... drive itself allows motorways) and respects one-way
@@ -2868,14 +3807,37 @@ def isochrone(
     {"error": "unsupported_mode"}. minutes must be > 0 and radius_m (if
     given) must be >= 0, else returns {"error": "bad_request"}.
     """
-    coord_error = _invalid_coord(lat, lon)
-    if coord_error is not None:
-        return coord_error
+    have_lat, have_lon = lat is not None, lon is not None
+    if where is not None and (have_lat or have_lon):
+        return {
+            "error": "bad_request",
+            "detail": "pass either lat and lon, or where — not both",
+        }
+    if where is None and not (have_lat and have_lon):
+        return {
+            "error": "bad_request",
+            "detail": "isochrone needs lat and lon, or where",
+        }
+    resolved_echo = None
+    if where is not None:
+        item, ref_error = _resolve_location_ref(where)
+        if ref_error is not None:
+            return ref_error
+        lat, lon = item["lat"], item["lon"]
+        if "matched_by" in item:
+            resolved_echo = _location_ref_echo(item)
+    else:
+        coord_error = _invalid_coord(lat, lon)
+        if coord_error is not None:
+            return coord_error
     mode = preference_store.resolve_mode(mode, preference_store.DEFAULT_MODE_ISOCHRONE)
     try:
-        return routing.isochrone(
+        result = routing.isochrone(
             lat, lon, minutes=minutes, mode=mode, speed_m_s=speed_m_s, radius_m=radius_m
         )
+        if resolved_echo is not None:
+            result["resolved"] = resolved_echo
+        return result
     except routing.UnsupportedMode as e:
         return {
             "error": "unsupported_mode",
@@ -2904,10 +3866,10 @@ def route(
     from_lon: float,
     to_lat: float,
     to_lon: float,
-    mode: str | None = None,
+    mode: _ModeArgDriveDefault = None,
     include_path: bool = False,
     include_elevation: bool = False,
-    prefer: str | None = None,
+    prefer: _PreferArg = None,
     confirm: bool = False,
 ) -> dict:
     """Route: shortest-path distance and duration between two points, by mode.
@@ -2918,9 +3880,7 @@ def route(
     fastest path — no polyline unless you ask for one. export is the
     pocket handoff: Google/Apple Maps directions URLs built from the same
     two coordinates (URL schemes only — no Maps API, no extra network), a
-    GPX 1.1 document, and a printable stop list. mode is "walk",
-    "cycle", or "drive"; omit it to use the stored preferences mode,
-    else drive, on the same cost model every routing tool
+    GPX 1.1 document, and a printable stop list. Same cost model every routing tool
     uses (walk 1.4 m/s, cycle 4.2 m/s, drive per-edge from Overture's
     speed_limits or a class-based default table). drive's duration is a posted-speed model
     with no live traffic; all modes snap each endpoint to the nearest
@@ -2939,8 +3899,9 @@ def route(
     {"error": "bad_request"}. If no usable graph or street node is found
     near either point, returns {"error": "no_graph_nearby"}. If both points
     snap into the graph but no path connects them (e.g. disconnected
-    islands of road data), returns {"error": "no_route"} rather than
-    raising. If the extraction graph hit its internal size cap, the result
+    islands of road data), returns {"error": "no_route", "try": ...}
+    rather than raising — "try" is a mode-tuned next move (roadmap §4). If
+    the extraction graph hit its internal size cap, the result
     carries "truncated": true — the route may be suboptimal or incomplete.
 
     include_path=true adds "path", a GeoJSON LineString from the origin's
@@ -2983,6 +3944,10 @@ def route(
     build (about 5–25 seconds). Pass it only after a needs_confirm reply
     and they said yes. A warm or cached graph never needs it.
     Omit confirm unless you just asked and they said yes.
+
+    route takes coordinates only. For a name or GERS id endpoint, use
+    from_to instead — same routing, but each end accepts a {"lat", "lon"}
+    dict, a GERS id, or a free-text place name.
     """
     for lat, lon in ((from_lat, from_lon), (to_lat, to_lon)):
         coord_error = _invalid_coord(lat, lon)
@@ -3095,31 +4060,35 @@ def elevation_at(lat: float, lon: float) -> dict:
 
 @_tool("Named-place route")
 def from_to(
-    from_: str,
-    to: str,
-    mode: str = "walk",
+    from_: str | dict,
+    to: str | dict,
+    mode: _ModeArgWalkDefault = None,
     include_path: bool = False,
     include_elevation: bool = False,
-    prefer: str | None = None,
+    prefer: _PreferArg = None,
     confirm: bool = False,
 ) -> dict:
-    """Shortest-path walk, cycle, or drive between two named places.
+    """Shortest-path walk, cycle, or drive between two places.
 
-    Pass the user's place names as from and to. Do not call geocode(),
-    resolve_place(), or geocode_batch() first. Resolves both ends in
-    parallel, builds one street graph, and returns distance, duration,
-    export maps/gpx/text, and the resolved name and coordinates for each
-    end. One hop for a named walk.
+    Pass each of from/to as a free-text place name, a {"lat", "lon"} dict,
+    or a GERS id — mixed freely. Do not call geocode(), resolve_place(), or
+    geocode_batch() first. Plain names resolve in parallel exactly as
+    before; coordinates pass through untouched. Builds one street graph and
+    returns distance, duration, export maps/gpx/text, and a "from"/"to"
+    block carrying whatever the input resolved to (name/id when it was a
+    name or GERS id, lat/lon always).
 
     If a name matches several equally-ranked places, returns
     {"error": "ambiguous_place", "candidates": [...]} instead of picking
-    a city. If the two names resolve a city apart, returns
+    a city. If the two ends resolve a city apart, returns
     {"error": "too_far"} with the resolved ends and the mode cap rather
     than extracting a continent graph. Same per-mode straight-line caps
     as a coordinate route (walk ~7.5 km, cycle ~23.5 km, drive ~95.5 km).
-    An unresolvable name returns {"error": "not_found"}; empty names
-    return {"error": "bad_request"}. mode is "walk", "cycle", or "drive"
-    (default walk).
+    An unresolvable name or GERS id returns {"error": "not_found"}; a
+    malformed from/to (empty string, dict missing lat/lon, wrong type)
+    returns {"error": "bad_request"} — either way the offending side is
+    named in "field": "from" | "to". Omit mode to use the stored
+    preferences mode, else walk.
 
     include_path, include_elevation, and prefer pass straight through to
     route() — see that tool's docstring for what each returns/means
@@ -3131,15 +4100,37 @@ def from_to(
     and they said yes. A warm or cached graph never needs it.
     Omit confirm unless you just asked and they said yes.
     """
-    if not isinstance(from_, str) or not from_.strip():
-        return {"error": "bad_request", "detail": "from must be a non-empty place name"}
-    if not isinstance(to, str) or not to.strip():
-        return {"error": "bad_request", "detail": "to must be a non-empty place name"}
-    origin, dest = _resolve_pair(from_, to)
-    if "error" in origin:
-        return {**origin, "field": "from"}
-    if "error" in dest:
-        return {**dest, "field": "to"}
+    if isinstance(from_, str) and not from_.strip():
+        return {
+            "error": "bad_request",
+            "detail": "from must be a non-empty place name",
+            "field": "from",
+        }
+    if isinstance(to, str) and not to.strip():
+        return {
+            "error": "bad_request",
+            "detail": "to must be a non-empty place name",
+            "field": "to",
+        }
+    # Both ends still plain names (not GERS ids): the original, byte-
+    # identical path — same parallel _resolve_pair call, same
+    # ambiguous_place/not_found shape as before this feature existed.
+    if (
+        isinstance(from_, str) and isinstance(to, str)
+        and not _GERS_ID_RE.match(from_.strip()) and not _GERS_ID_RE.match(to.strip())
+    ):
+        origin, dest = _resolve_pair(from_, to)
+        if "error" in origin:
+            return {**origin, "field": "from"}
+        if "error" in dest:
+            return {**dest, "field": "to"}
+    else:
+        origin, origin_error = _resolve_location_ref(from_)
+        if origin_error is not None:
+            return {**origin_error, "field": "from"}
+        dest, dest_error = _resolve_location_ref(to)
+        if dest_error is not None:
+            return {**dest_error, "field": "to"}
     mode = preference_store.resolve_mode(mode, "walk")
     if mode not in routing.MODE_CONFIG:
         return {
@@ -3150,10 +4141,12 @@ def from_to(
     straight_m = geo.haversine_m(origin["lat"], origin["lon"], dest["lat"], dest["lon"])
     cap_m = routing.ROUTE_MAX_STRAIGHT_LINE_M[mode]
     if straight_m > cap_m:
+        origin_label = origin.get("name") or f"({origin['lat']}, {origin['lon']})"
+        dest_label = dest.get("name") or f"({dest['lat']}, {dest['lon']})"
         return {
             "error": "too_far",
             "detail": (
-                f"{origin['name']!r} and {dest['name']!r} are {round(straight_m)} m "
+                f"{origin_label!r} and {dest_label!r} are {round(straight_m)} m "
                 f"apart; from_to stays inside one city ({mode} cap {round(cap_m)} m)"
             ),
             "from": origin,
@@ -3186,6 +4179,7 @@ def find_near(
     near: str,
     radius_m: float = 1000,
     limit: int = 10,
+    cursor: _CursorArg = None,
 ) -> dict:
     """Places of a category near a named place or city.
 
@@ -3200,6 +4194,11 @@ def find_near(
     a city. An unresolvable name returns {"error": "not_found"}; empty
     category or near returns {"error": "bad_request"}. radius_m and
     limit follow the same clamps as a point search.
+
+    A truncated answer carries "cursor" (delegated straight through from
+    find_places); pass it back with the same category/near/radius_m/limit
+    to continue. See find_places' docstring for the bad_cursor/release-
+    mismatch details — they apply here unchanged.
     """
     if not isinstance(category, str) or not category.strip():
         return {"error": "bad_request", "detail": "category must be a non-empty slug or phrase"}
@@ -3223,6 +4222,14 @@ def find_near(
         radius_m=float(radius_m),
         category=slug,
         limit=int(limit),
+        cursor=cursor,
+        # find_near does its own projection to _FIND_NEAR_KEYS below (a
+        # different, smaller shape than any find_places detail tier) — it
+        # needs the full row to project from, not find_places' new
+        # detail="compact" default (roadmap §4.5). find_near does not gain
+        # its own `detail` param in this PR; see the PR body for that as
+        # explicit follow-up scope.
+        detail="full",
     )
     if "error" in payload:
         return payload
@@ -3233,24 +4240,46 @@ def find_near(
     out: dict = {"near": pin, "category": slug, "results": rows}
     if slug != category.strip():
         out["category_resolved_from"] = category.strip()
-    for key in ("truncated", "omitted_count", "note", "degraded_fields"):
+    for key in ("truncated", "omitted_count", "note", "degraded_fields", "cursor"):
         if key in payload:
             out[key] = payload[key]
-    return budget.apply_budget(out, "results")
+    pre_rows = len(out["results"])
+    out = budget.apply_budget(out, "results")
+    # find_places already computed `cursor`'s offset counting the rows it
+    # delivered — but this second apply_budget pass (over the compacted
+    # _FIND_NEAR_KEYS rows, which are smaller and shouldn't normally trim
+    # further) can itself drop rows the caller never actually receives. If
+    # it does, the cursor's offset would overcount and the next page would
+    # silently skip those rows — rewind it by exactly how many were lost so
+    # "never skip a row" holds regardless of how many trimming passes a
+    # payload goes through (see cursor.rewind_cursor).
+    dropped_here = pre_rows - len(out["results"])
+    if dropped_here > 0 and out.get("cursor"):
+        rewound = cursor_mod.rewind_cursor(out["cursor"], dropped_here)
+        if rewound is not None:
+            out["cursor"] = rewound
+    return out
 
 
 @_tool("Ground a location")
 def ground_location(
-    lat: float,
-    lon: float,
+    lat: float | None = None,
+    lon: float | None = None,
     minutes: float = 15,
-    mode: str | None = None,
+    mode: _ModeArgWalkDefault = None,
+    where: dict | str | None = None,
 ) -> dict:
     """One-hop location grounding: where, surroundings, reach, notable.
 
     Answers "orient me at this point" in a single call instead of chaining
     a reverse lookup, an area summary, a reachable-area scan, and a
-    nearby-places search. Returns:
+    nearby-places search. Give the point as lat/lon, or as `where` — a
+    {"lat", "lon"} dict, a GERS id, or a free-text place name — but not
+    both (and not neither); either way returns {"error": "bad_request"}
+    naming the choice. A `where` given as an id/name adds a compact
+    "resolved": {"name", "id", "lat", "lon", "matched_by"} to the answer
+    (a separate key from the answer's own "where" section below); absent
+    for lat/lon or a {lat,lon} where. Returns:
     - where: reverse_geocode's answer for the point (address/divisions
       chain, or a "divisions_only" degrade).
     - surroundings: total places and the top few categories within a fixed
@@ -3266,16 +4295,36 @@ def ground_location(
     section failed, returning a structured {"error":
     "upstream_unavailable", ...}.
 
-    minutes must be > 0 and <= 60; mode is "walk", "cycle", or "drive";
-    omit it to use the stored preferences mode, else walk.
+    minutes must be > 0 and <= 60; omit mode to use the stored
+    preferences mode, else walk.
     Both, plus out-of-range coordinates, return {"error": "bad_request"}.
     No confirm gate: the reach scan runs with the requested minutes/mode
     as-is (it self-caps its graph extraction radius; no nearby street
     graph just degrades the reach section to a note).
     """
-    coord_error = _invalid_coord(lat, lon)
-    if coord_error is not None:
-        return coord_error
+    have_lat, have_lon = lat is not None, lon is not None
+    if where is not None and (have_lat or have_lon):
+        return {
+            "error": "bad_request",
+            "detail": "pass either lat and lon, or where — not both",
+        }
+    if where is None and not (have_lat and have_lon):
+        return {
+            "error": "bad_request",
+            "detail": "ground_location needs lat and lon, or where",
+        }
+    resolved_echo = None
+    if where is not None:
+        item, ref_error = _resolve_location_ref(where)
+        if ref_error is not None:
+            return ref_error
+        lat, lon = item["lat"], item["lon"]
+        if "matched_by" in item:
+            resolved_echo = _location_ref_echo(item)
+    else:
+        coord_error = _invalid_coord(lat, lon)
+        if coord_error is not None:
+            return coord_error
     if (
         not isinstance(minutes, (int, float))
         or isinstance(minutes, bool)
@@ -3293,7 +4342,10 @@ def ground_location(
             "error": "bad_request",
             "detail": f"mode={mode!r} is not supported; supported: {sorted(routing.MODE_CONFIG)}",
         }
-    return ground.ground_location(lat, lon, float(minutes), mode)
+    result = ground.ground_location(lat, lon, float(minutes), mode)
+    if resolved_echo is not None and "error" not in result:
+        result["resolved"] = resolved_echo
+    return result
 
 
 @_tool("Places along a route")
@@ -3302,7 +4354,7 @@ def places_along_route(
     from_lon: float,
     to_lat: float,
     to_lon: float,
-    mode: str | None = None,
+    mode: _ModeArgDriveDefault = None,
     category: str | None = None,
     name: str | None = None,
     max_detour_m: float = routing.CORRIDOR_DEFAULT_DETOUR_M,
@@ -3337,8 +4389,7 @@ def places_along_route(
     considers, in which case the response carries "truncated": true and a
     note saying so.
 
-    mode is "walk", "cycle", or "drive"; omit it to use the stored
-    preferences mode, else drive. Same cost model
+    Omit mode to use the stored preferences mode, else drive. Same cost model
     and the same straight-line-distance caps as `route`, and the same
     structured errors: route_too_long, no_graph_nearby, no_route,
     unsupported_mode, and bad_request for non-finite/out-of-range
@@ -3393,7 +4444,7 @@ def neighborhood_verdict(
     context: str = "",
     radius_m: float | None = None,
     minutes: float | None = None,
-    mode: str | None = None,
+    mode: _ModeArgContextDefault = None,
 ) -> dict:
     """Life-decision neighborhood verdict, not a data dump.
 
@@ -3523,18 +4574,22 @@ def verify_claims(lat: float, lon: float, claims: list[dict]) -> dict:
 
 @_tool("Best visiting order for stops")
 def optimize_route(
-    stops: list[dict],
-    mode: str | None = None,
+    stops: list[dict | str],
+    mode: _ModeArgDriveDefault = None,
     roundtrip: bool = True,
     start_index: int = 0,
 ) -> dict:
     """Best order to visit several stops: multi-stop route ordering (a small TSP).
 
     Answers "I have these five errands, what order costs least" — stops is a
-    list of 2-10 {"lat": ..., "lon": ..., "name": ... (optional)} points, and
-    the answer is the cheapest visiting order over the real street graph, not
-    a straight-line guess. Solved exactly (Held-Karp over the routed cost
+    list of 2-10 points, each a {"lat": ..., "lon": ..., "name": ...
+    (optional)} dict, a GERS id, or a free-text name, mixed freely. The
+    answer is the cheapest visiting order over the real street graph, not a
+    straight-line guess. Solved exactly (Held-Karp over the routed cost
     matrix), so it is the optimum, not a nearest-neighbour approximation.
+    Any stop given by id/name that failed to resolve returns an indexed
+    error (stops[i]: ...) with candidates on ambiguity — the whole call
+    fails, not silently drops that stop.
 
     Returns {"order": [stop indices, in visiting order], "legs":
     [{"from_idx", "to_idx", "distance_m", "duration_s"}, ...],
@@ -3546,13 +4601,15 @@ def optimize_route(
     with every stop as a waypoint, and a printable list that keeps any
     names the caller passed. If a stop already carries confidence or
     operating_status (from a prior place lookup), the response adds
-    verify_before_going naming the 1–2 weakest.
+    verify_before_going naming the 1–2 weakest. Any stop given as an id or
+    name adds "resolved": [{"stop": i, "name", "id", "lat", "lon",
+    "matched_by"}, ...] for just those stops — plain {lat,lon} stops need
+    no echo and the key is absent when every stop was already coordinates.
 
     start_index (default 0) is fixed as the first stop. roundtrip=true (the
     default) returns to it; the closing leg is in "legs" but the start is not
     repeated in "order". roundtrip=false is an open path that ends wherever
-    is cheapest. mode is "walk", "cycle" or "drive"; omit it to use the
-    stored preferences mode, else drive. Same
+    is cheapest. Omit mode to use the stored preferences mode, else drive. Same
     cost model every routing tool uses; one-ways make the drive/cycle cost
     matrix asymmetric and that is solved for exactly. The objective minimized
     is total duration.
@@ -3564,15 +4621,21 @@ def optimize_route(
     approximation, never a crash.
 
     Errors are structured, not raised: fewer than 2 or more than 10 stops, a
-    stop missing numeric lat/lon, or an out-of-range start_index return
-    {"error": "bad_request"} naming the offending stop index; an unknown mode
-    returns {"error": "unsupported_mode"}; a stop set whose two furthest-apart
-    stops are further apart than the mode's straight-line cap (see `route`)
-    returns {"error": "route_too_long"}; a stop with no usable street node near it returns
-    {"error": "no_graph_nearby"} naming that stop's index.
+    stop that is not a valid location reference, or an out-of-range
+    start_index return {"error": "bad_request"} naming the offending stop
+    index; an unresolvable name/id returns {"error": "not_found"} or
+    {"error": "ambiguous_place", "candidates": [...]}, indexed the same way;
+    an unknown mode returns {"error": "unsupported_mode"}; a stop set whose
+    two furthest-apart stops are further apart than the mode's straight-line
+    cap (see `route`) returns {"error": "route_too_long"}; a stop with no
+    usable street node near it returns {"error": "no_graph_nearby"} naming
+    that stop's index.
     """
     if not isinstance(stops, list):
-        return {"error": "bad_request", "detail": "stops must be a list of {lat, lon} points"}
+        return {
+            "error": "bad_request",
+            "detail": "stops must be a list of {lat, lon} points, GERS ids, or place names",
+        }
     if not (routing.OPTIMIZE_MIN_STOPS <= len(stops) <= routing.OPTIMIZE_MAX_STOPS):
         return {
             "error": "bad_request",
@@ -3581,20 +4644,15 @@ def optimize_route(
                 f"{routing.OPTIMIZE_MAX_STOPS} points, got {len(stops)}"
             ),
         }
-    points = []
-    for idx, stop in enumerate(stops):
-        try:
-            lat, lon = float(stop["lat"]), float(stop["lon"])
-        except (KeyError, TypeError, ValueError) as e:
-            return {
-                "error": "bad_request",
-                "detail": f"stops[{idx}]: each stop needs numeric lat and lon: {e}",
-            }
-        coord_error = _invalid_coord(lat, lon)
-        if coord_error is not None:
-            coord_error["detail"] = f"stops[{idx}]: {coord_error['detail']}"
-            return coord_error
-        points.append((lat, lon))
+    resolved_stops, resolve_error = _resolve_location_refs(stops, "stops")
+    if resolve_error is not None:
+        return resolve_error
+    points = [(r["lat"], r["lon"]) for r in resolved_stops]
+    resolved_echo = [
+        {"stop": i, **_location_ref_echo(r)}
+        for i, r in enumerate(resolved_stops)
+        if "matched_by" in r
+    ]
     if not isinstance(start_index, int) or isinstance(start_index, bool):
         return {"error": "bad_request", "detail": "start_index must be an integer"}
     if not 0 <= start_index < len(points):
@@ -3631,28 +4689,34 @@ def optimize_route(
     if "error" not in result:
         # Names never enter the TSP; they ride through here so the
         # printable list / GPX waypoints say "bakery" instead of "Stop 3".
+        # A resolved id/name stop's canonical name is used when the caller
+        # didn't also pass its own "name" override.
         named = []
-        for point, raw in zip(points, stops):
+        for point, resolved, raw in zip(points, resolved_stops, stops):
             row = {"lat": point[0], "lon": point[1]}
-            if isinstance(raw, dict):
-                name = raw.get("name")
-                if isinstance(name, str) and name.strip():
-                    row["name"] = name.strip()
+            name = raw.get("name") if isinstance(raw, dict) else resolved.get("name")
+            if isinstance(name, str) and name.strip():
+                row["name"] = name.strip()
             named.append(row)
         result["export"] = export.from_optimize_result(named, result)
         # Caller-supplied stop fields (name/confidence/operating_status) are
         # already in hand — no extra lookup. routing.py is untouched (#312).
         # verify_before_going skips bare {lat, lon} stops — those are not
-        # place lookups and must not become "low confidence" warnings.
-        line = honesty.verify_before_going(stops)
+        # place lookups and must not become "low confidence" warnings. A
+        # string stop (id/name) is not a place-lookup Mapping either, so it
+        # is swapped for {} here rather than handed to a `field in place`
+        # check that expects a Mapping — index alignment is preserved.
+        line = honesty.verify_before_going([s if isinstance(s, dict) else {} for s in stops])
         if line:
             result = {**result, "verify_before_going": line}
+        if resolved_echo:
+            result["resolved"] = resolved_echo
     return result
 
 
 @_tool("Persistent preferences", annotations=_PREFERENCES_ANNOTATIONS)
 def preferences(
-    mode: str | None = None,
+    mode: _ModeSetArg = None,
     pace: str | None = None,
     household: list[str] | None = None,
     note: str | None = None,
@@ -3665,8 +4729,8 @@ def preferences(
     pace and household are stored for later features and do not change
     answers yet. The same document is the placeroot://preferences resource.
 
-    Call with no arguments to read. Pass mode (walk / cycle / drive),
-    pace, household tags, or a free-text note to merge those fields.
+    Call with no arguments to read. Pass mode, pace, household tags, or a
+    free-text note to merge those fields.
     clear=true deletes the file and cannot be combined with other fields.
     Nothing is sent off this machine.
     """
@@ -4315,9 +5379,12 @@ def _publish_from_keyword(mcp_server) -> None:
 
         class FromToArguments(ArgModelBase):
             model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
-            from_: str = Field(alias="from")
-            to: str
-            mode: str = "walk"
+            from_: str | dict = Field(alias="from")
+            to: str | dict
+            mode: _ModeArgWalkDefault = None
+            include_path: bool = False
+            include_elevation: bool = False
+            prefer: _PreferArg = None
             confirm: bool = False
 
             def model_dump_one_level(self) -> dict:
@@ -4325,6 +5392,9 @@ def _publish_from_keyword(mcp_server) -> None:
                     "from_": self.from_,
                     "to": self.to,
                     "mode": self.mode,
+                    "include_path": self.include_path,
+                    "include_elevation": self.include_elevation,
+                    "prefer": self.prefer,
                     "confirm": self.confirm,
                 }
 
@@ -4332,6 +5402,103 @@ def _publish_from_keyword(mcp_server) -> None:
         tool.parameters = FromToArguments.model_json_schema(by_alias=True)
     except (AttributeError, ImportError) as e:
         raise AssertionError("from_to schema patch failed; mcp internals changed") from e
+
+
+class _PermissiveOutput(BaseModel):
+    """A pydantic model that accepts any dict, unchanged, as extra fields.
+
+    `FuncMetadata.convert_result` (mcp/server/mcpserver/utilities/
+    func_metadata.py:110-144) is the *real* runtime gate: once
+    `fn_metadata.output_schema` is non-None it asserts `output_model is not
+    None` and calls `output_model.model_validate(result)`, then ships
+    `model_dump(mode="json", by_alias=True)` as `structuredContent`. A
+    spec-compliant client requires exactly that — confirmed empirically:
+    `mcp.client.session.ClientSession.validate_tool_result` (session.py:
+    1080-1100) raises `RuntimeError` on any tool whose declared outputSchema
+    has no matching `structured_content`. So structured output cannot be
+    faked at the publication layer alone (see `_publish_output_schemas`);
+    this model is what actually produces it, deliberately never rejecting a
+    real answer: no declared fields, `extra="allow"`, so
+    `model_validate(any_dict)` always succeeds and `model_dump` round-trips
+    it byte-for-byte. Real validation happens client-side, against the
+    precise schema `_publish_output_schemas` shadows onto `Tool.output_schema`
+    below — decoupled on purpose, so the schema tools/list advertises can be
+    richer than what this pass-through model would derive on its own.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+
+def _publish_output_schemas(mcp_server) -> None:
+    """Attach a declared `outputSchema` to every registered tool (roadmap §4.3 / §5.3).
+
+    Every tool here returns a bare `dict` — the SDK's own schema derivation
+    (func_metadata, driven by return-type annotations) gives nothing for
+    that (a bare `dict` return type carries no field types to derive from),
+    so the schemas in output_schemas.py are hand-written instead.
+
+    Runtime-safety finding, in two parts:
+
+    1. `Tool.output_schema` (mcp/server/mcpserver/tools/base.py:53-55) is a
+       `functools.cached_property` that *defaults* to reading
+       `self.fn_metadata.output_schema`, and tools/list publishes exactly
+       that cached_property (mcp/server/mcpserver/server.py:490,
+       `output_schema=info.output_schema`). `cached_property` stores its
+       computed value in the instance's own `__dict__`; setting that key
+       directly (confirmed empirically) permanently shadows the descriptor,
+       so tools/list can advertise our own richer, hand-authored schema —
+       decoupled from whatever `fn_metadata.output_schema` says.
+    2. `FuncMetadata.convert_result` (utilities/func_metadata.py:110-144) —
+       the actual runtime gate a `tools/call` goes through — reads a
+       *different* attribute: `self.fn_metadata.output_schema`, the
+       `FuncMetadata` field, not the `Tool` cached_property. Originally
+       that field is None (bare-`dict` return, no `structured_output=`), so
+       `convert_result` never touches `output_model` at all and every
+       existing answer is untouched. Initially this function left that
+       field alone entirely, on the theory that a schema which never
+       drives validation can never break a call — but a real
+       spec-compliant client rejects that: `mcp.client.session.
+       ClientSession.validate_tool_result` (session.py:1080-1100) raises
+       `RuntimeError` the moment a tool's declared outputSchema has no
+       matching `structuredContent` on the response (confirmed by running
+       tests/test_http.py's real `mcp.client.client.Client` against a
+       tool with only the publication-layer patch applied — it failed).
+       So `fn_metadata.output_schema`/`output_model` are patched too, via
+       `_PermissiveOutput` (above) — a model that accepts and round-trips
+       any dict, never rejecting a real answer regardless of which shape it
+       takes. `wrap_output=False` because our tools already return a bare
+       dict, not a primitive needing `{"result": ...}` wrapping.
+
+    Net effect: every tools/call now also carries `structuredContent`
+    (additive — `content`'s text block, computed from the same raw `result`
+    before `output_model` ever sees it, is byte-identical to before), and
+    what a client validates that structuredContent against is the precise,
+    additionalProperties-true, drift-tolerant schema from output_schemas.py
+    — honest enough by construction that every real answer satisfies it.
+
+    Patches mcp 2.0.0 private internals (pinned in uv.lock). If those move —
+    the cached_property's storage mechanism, or `convert_result`'s
+    reliance on `fn_metadata.output_schema`/`output_model` — fail with a
+    clear assertion rather than a raw AttributeError or a silently
+    unpublished/unvalidated schema.
+    """
+    try:
+        for tool in mcp_server._tool_manager.list_tools():
+            schema = output_schemas.OUTPUT_SCHEMAS.get(tool.name)
+            assert schema is not None, (
+                f"{tool.name} has no declared outputSchema; add it to "
+                "output_schemas.OUTPUT_SCHEMAS (FIRST_WAVE for a precise "
+                "shape, or _GENERIC_TOOLS otherwise)"
+            )
+            tool.fn_metadata = tool.fn_metadata.model_copy(update={
+                "output_schema": {"type": "object"},
+                "output_model": _PermissiveOutput,
+                "wrap_output": False,
+            })
+            tool.__dict__["output_schema"] = schema
+            assert tool.output_schema is schema, "cached_property shadow did not take"
+    except AttributeError as e:
+        raise AssertionError("output schema publish failed; mcp internals changed") from e
 
 
 def build_server(spec=_UNSET) -> MCPServer:
@@ -4373,6 +5540,7 @@ def build_server(spec=_UNSET) -> MCPServer:
                 annotations=_TOOL_ANNOTATIONS.get(name, _READ_ONLY_ANNOTATIONS),
             )(fn)
     _publish_from_keyword(server)
+    _publish_output_schemas(server)
     # Resources are registered whatever the selection: they never appear in
     # tools/list, so they cost a subset install nothing, and
     # placeroot://data-version is worth having precisely when the

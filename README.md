@@ -38,6 +38,7 @@ An independent project by [vibemapper](https://vibemapper.dev).
 
 - 🎯 **Answers, not data dumps.** Every tool returns compact, ranked results sized for an agent's context window — never a raw GeoJSON dump.
 - 🗺️ **Real routing, zero keys.** `route` and `isochrone` walk an actual street graph built from Overture's transportation segments — not a straight-line guess — anywhere on Earth.
+- 🚶 **Reachability-filtered search.** `find_places(..., within={"minutes": 15, "mode": "walk"})` keeps only results truly inside the street-graph walk/cycle/driveshed — not a radius that guesses at it, and not a second call to intersect a polygon yourself.
 - 🏙️ **Rich, filterable place data.** Category, brand, confidence, operating status, contactability — sourced from Overture's open dataset (contributed by Meta, Uber, TomTom, and others).
 - 📐 **Boundary-accurate.** Search inside a named place's real administrative polygon, not a guessed radius circle.
 - ⚡ **Zero setup.** Reads Overture's public data directly — no key, no database, nothing to install beyond the server itself.
