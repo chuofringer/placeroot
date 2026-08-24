@@ -8,7 +8,39 @@ fixing behavior is patch.
 
 ## [Unreleased]
 
+### Added
+- Published input schemas now carry a JSON Schema `enum` plus a stated
+  effective default for parameters whose valid values used to live only
+  in prose: `mode` (every tool that takes one — `route`, `isochrone`,
+  `from_to`, `travel_time_matrix`, `optimize_route`, `ground_location`,
+  `places_along_route`, `neighborhood_verdict`, `preferences`), `prefer`
+  (`route`, `from_to`), `op` (`geometry_op`), and `operating_status`
+  (`find_places`). Runtime validation is unchanged — these stay plain
+  strings, not `Literal`s, so an unsupported value still reaches the tool
+  and returns its own structured self-correcting error (e.g.
+  `unsupported_mode` with `supported: [...]`) instead of being rejected
+  by schema validation before the call runs (roadmap docs/ROADMAP.md
+  §4.3). Redundant value-listing prose was trimmed from several
+  docstrings now that the enum carries it, keeping the net schema-token
+  cost roughly flat.
+
+### Changed
+- **Behavior change:** `from_to` and `travel_time_matrix` now consult the
+  stored `mode` preference when `mode` is omitted, the same as `route`,
+  `isochrone`, `optimize_route`, `ground_location`, and
+  `places_along_route` already did. Previously both hard-defaulted to
+  `"walk"` regardless of any stored preference, because their `mode`
+  parameter defaulted to the literal string `"walk"` rather than `None`
+  — `preferences.resolve_mode()` only consults the stored value when the
+  caller's argument is `None`. An explicit `mode` argument still always
+  wins.
+
 ### Fixed
+- `from_to`'s published schema (the `FromToArguments` monkeypatch) used to
+  silently drop `include_path`, `include_elevation`, and `prefer` even
+  though the function has always accepted them — an agent reading the
+  schema had no way to discover those three capabilities. All three are
+  now published (docs/ROADMAP.md §4.3).
 - `isochrone`'s concave boundary trace no longer collapses on sparse or
   evenly spaced street graphs (#389). A grid cell finer than the graph's
   own node spacing dropped every reached node into a cell of its own, and

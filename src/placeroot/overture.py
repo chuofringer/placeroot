@@ -558,6 +558,15 @@ def _operating_status_reverse_map() -> dict[str, list[str]]:
     return reverse
 
 
+def accepted_operating_status_values() -> list[str]:
+    """Every operating_status value find_places accepts: relabeled + raw.
+
+    Shared by the ValueError message below and the published schema's
+    enum (server.py), so both stay derived from the same source of truth.
+    """
+    return sorted(set(_OPERATING_STATUS_LABELS) | set(_operating_status_reverse_map()))
+
+
 def _resolve_operating_status(operating_status: str) -> list[str]:
     """Resolve a caller-supplied operating_status (relabeled or raw, case-
     insensitive) to the raw Overture value(s) it should filter on.
@@ -573,7 +582,7 @@ def _resolve_operating_status(operating_status: str) -> list[str]:
     for raw in _OPERATING_STATUS_LABELS:
         if raw.lower() == needle:
             return [raw]
-    accepted = sorted(set(_OPERATING_STATUS_LABELS) | set(reverse))
+    accepted = accepted_operating_status_values()
     raise ValueError(
         f"unrecognized operating_status {operating_status!r}; accepted values: "
         f"{', '.join(accepted)}"

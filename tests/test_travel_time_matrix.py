@@ -16,7 +16,7 @@ than a mock.
 
 import pytest
 
-from placeroot import routing, server
+from placeroot import preferences, routing, server
 
 from ._routing_fixture import build_routing_fixture as fx
 
@@ -209,6 +209,28 @@ def test_bad_mode():
     result = server.travel_time_matrix(origins=[point], destinations=[point], mode="teleport")
     assert result["error"] == "bad_request"
     assert "teleport" in result["detail"]
+
+
+def test_omitted_mode_uses_stored_preference():
+    preferences.update(mode="cycle")
+    origins = [fx.node_latlon(2, 2)]
+    destinations = [fx.node_latlon(2, 5)]
+    result = server.travel_time_matrix(
+        origins=_as_dicts(origins), destinations=_as_dicts(destinations)
+    )
+    assert "error" not in result
+    assert result["mode"] == "cycle"
+
+
+def test_explicit_mode_wins_over_stored_preference():
+    preferences.update(mode="cycle")
+    origins = [fx.node_latlon(2, 2)]
+    destinations = [fx.node_latlon(2, 5)]
+    result = server.travel_time_matrix(
+        origins=_as_dicts(origins), destinations=_as_dicts(destinations), mode="walk"
+    )
+    assert "error" not in result
+    assert result["mode"] == "walk"
 
 
 def test_routing_level_empty_lists_return_the_empty_matrix_shape():

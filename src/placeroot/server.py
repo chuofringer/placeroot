@@ -23,12 +23,13 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from typing import Annotated
 
 from mcp.server.caching import CacheableMethod, CacheHint
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.utilities.func_metadata import func_metadata
 from mcp.types import ToolAnnotations
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from placeroot import (
     addresses,
@@ -189,6 +190,61 @@ _PREFERENCES_ANNOTATIONS = ToolAnnotations(
 )
 
 _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {}
+
+# Annotated aliases that put an enum + a stated default into the published
+# schema without changing runtime validation: the type stays plain
+# `str | None`, so a bad string still reaches the function and comes back
+# as a structured unsupported_mode/bad_request error (see CONTRIBUTING
+# design rule 2 — a Literal would reject it before the self-correcting
+# error ever ran, and schema tokens are a budget so these are shared
+# rather than repeated per tool).
+_MODE_ENUM = sorted(preference_store.MODES)
+_ModeArgWalkDefault = Annotated[
+    str | None,
+    Field(
+        description="Travel mode. Default: stored preference, else walk.",
+        json_schema_extra={"enum": _MODE_ENUM},
+    ),
+]
+_ModeArgDriveDefault = Annotated[
+    str | None,
+    Field(
+        description="Travel mode. Default: stored preference, else drive.",
+        json_schema_extra={"enum": _MODE_ENUM},
+    ),
+]
+_PreferArg = Annotated[
+    str | None,
+    Field(
+        description="Grade preference. Default: none (plain-distance routing).",
+        json_schema_extra={"enum": sorted(routing.SUPPORTED_PREFERENCES)},
+    ),
+]
+# neighborhood_verdict doesn't consult stored preferences; its default is
+# inferred from free-text context (no car -> walk, bike -> cycle, car ->
+# drive), falling back to walk.
+_ModeArgContextDefault = Annotated[
+    str | None,
+    Field(
+        description="Travel mode override. Default: inferred from context, else walk.",
+        json_schema_extra={"enum": _MODE_ENUM},
+    ),
+]
+_ModeSetArg = Annotated[
+    str | None,
+    Field(
+        description="Travel mode to store. Omit to leave it unchanged.",
+        json_schema_extra={"enum": _MODE_ENUM},
+    ),
+]
+_OperatingStatusArg = Annotated[
+    str | None,
+    Field(
+        description="Business-lifecycle status filter (relabeled or raw Overture value, "
+        "case-insensitive). Default: no filter.",
+        json_schema_extra={"enum": overture.accepted_operating_status_values()},
+    ),
+]
 
 # placeroot_call reaches every tool, render_map included, so it inherits the
 # weakest claim any of them makes rather than its own: a dispatcher that
@@ -459,7 +515,7 @@ def find_places(
     category: str | None = None,
     name: str | None = None,
     min_confidence: float | None = None,
-    operating_status: str | None = None,
+    operating_status: _OperatingStatusArg = None,
     limit: int = 10,
     brand: str | None = None,
     has_website: bool | None = None,
@@ -497,13 +553,10 @@ def find_places(
 
     min_confidence (0.0-1.0) keeps only rows whose confidence score is at
     least that value; out-of-range values return a bad_request error.
-    operating_status filters to a single status, accepting either the
-    relabeled value ("in business", "permanently closed", "temporarily
-    closed") or the raw Overture value ("open", "closed",
-    "closed_permanently", "closed_temporarily"), matched case-insensitively
-    — "permanently closed"/"closed" also match Overture's separate
-    "closed_permanently" raw value, since both relabel the same way.
-    Unrecognized values return a bad_request error.
+    operating_status filters to a single status (see the schema's enum for
+    accepted relabeled/raw values); "permanently closed"/"closed" also
+    match Overture's separate "closed_permanently" raw value, since both
+    relabel the same way. Unrecognized values return a bad_request error.
 
     brand is a substring match on the place's brand name (e.g. 'Starbucks').
     Brand data is sparse — most independent businesses have no brand at all,
@@ -1115,7 +1168,7 @@ def meeting_point(
     return payload
 @_tool("Travel time matrix")
 def travel_time_matrix(
-    origins: list[dict], destinations: list[dict], mode: str = "walk"
+    origins: list[dict], destinations: list[dict], mode: _ModeArgWalkDefault = None
 ) -> dict:
     """Routed travel time + distance between every origin and destination, by mode.
 
@@ -1123,8 +1176,8 @@ def travel_time_matrix(
     points, capped at 5 each (25 pairs max). Unlike distance_matrix's plain
     haversine, this is a real shortest-path search over Overture's open
     street graph — roads, one-ways, and each mode's own speed model, the
-    same cost model route() uses for a single pair. mode is "walk"
-    (default), "cycle", or "drive", one mode per call.
+    same cost model route() uses for a single pair, one mode per call;
+    omit mode to use the stored preferences mode, else walk.
 
     Reuses a single cached street graph across every origin and
     destination when every origin-destination pair fits the mode's
@@ -1166,6 +1219,7 @@ def travel_time_matrix(
         else:
             detail = f"destinations accepts at most 5 points, got {len(destinations)}"
         return {"error": "bad_request", "detail": detail}
+    mode = preference_store.resolve_mode(mode, "walk")
     if mode not in routing.MODE_CONFIG:
         return {
             "error": "bad_request",
@@ -2632,6 +2686,14 @@ _GEOMETRY_OP_REQUIRED: dict[str, tuple[str, ...]] = {
     "nearest_point": ("point", "points"),
     "nearest_point_on_line": ("point", "geometry"),
 }
+_OpArg = Annotated[
+    str,
+    Field(
+        description="Geometry operation; each takes a different subset of the "
+        "other arguments — see below.",
+        json_schema_extra={"enum": sorted(_GEOMETRY_OP_REQUIRED)},
+    ),
+]
 
 
 def _point_coord_error(point, label: str) -> dict | None:
@@ -2673,7 +2735,7 @@ def _points_list_coord_error(points, label: str) -> dict | None:
 
 @_tool("Geometry operations")
 def geometry_op(
-    op: str,
+    op: _OpArg,
     point: dict | None = None,
     point2: dict | None = None,
     points: list[dict] | None = None,
@@ -2839,15 +2901,14 @@ def isochrone(
     lat: float,
     lon: float,
     minutes: float = 15,
-    mode: str | None = None,
+    mode: _ModeArgWalkDefault = None,
     speed_m_s: float | None = None,
     radius_m: float | None = None,
 ) -> dict:
     """Isochrone: the area reachable from (lat, lon) within `minutes`, by mode.
 
     Builds a street graph from Overture's transportation theme and runs
-    Dijkstra out to the time budget. mode is "walk", "cycle", or
-    "drive"; omit it to use the stored preferences mode, else walk. Each mode
+    Dijkstra out to the time budget. Each mode
     excludes its own set of unusable road classes (e.g.
     drive excludes footway/path/steps; cycle and drive exclude
     motorway/trunk... drive itself allows motorways) and respects one-way
@@ -2904,10 +2965,10 @@ def route(
     from_lon: float,
     to_lat: float,
     to_lon: float,
-    mode: str | None = None,
+    mode: _ModeArgDriveDefault = None,
     include_path: bool = False,
     include_elevation: bool = False,
-    prefer: str | None = None,
+    prefer: _PreferArg = None,
     confirm: bool = False,
 ) -> dict:
     """Route: shortest-path distance and duration between two points, by mode.
@@ -2918,9 +2979,7 @@ def route(
     fastest path — no polyline unless you ask for one. export is the
     pocket handoff: Google/Apple Maps directions URLs built from the same
     two coordinates (URL schemes only — no Maps API, no extra network), a
-    GPX 1.1 document, and a printable stop list. mode is "walk",
-    "cycle", or "drive"; omit it to use the stored preferences mode,
-    else drive, on the same cost model every routing tool
+    GPX 1.1 document, and a printable stop list. Same cost model every routing tool
     uses (walk 1.4 m/s, cycle 4.2 m/s, drive per-edge from Overture's
     speed_limits or a class-based default table). drive's duration is a posted-speed model
     with no live traffic; all modes snap each endpoint to the nearest
@@ -3097,10 +3156,10 @@ def elevation_at(lat: float, lon: float) -> dict:
 def from_to(
     from_: str,
     to: str,
-    mode: str = "walk",
+    mode: _ModeArgWalkDefault = None,
     include_path: bool = False,
     include_elevation: bool = False,
-    prefer: str | None = None,
+    prefer: _PreferArg = None,
     confirm: bool = False,
 ) -> dict:
     """Shortest-path walk, cycle, or drive between two named places.
@@ -3118,8 +3177,8 @@ def from_to(
     than extracting a continent graph. Same per-mode straight-line caps
     as a coordinate route (walk ~7.5 km, cycle ~23.5 km, drive ~95.5 km).
     An unresolvable name returns {"error": "not_found"}; empty names
-    return {"error": "bad_request"}. mode is "walk", "cycle", or "drive"
-    (default walk).
+    return {"error": "bad_request"}. Omit mode to use the stored
+    preferences mode, else walk.
 
     include_path, include_elevation, and prefer pass straight through to
     route() — see that tool's docstring for what each returns/means
@@ -3244,7 +3303,7 @@ def ground_location(
     lat: float,
     lon: float,
     minutes: float = 15,
-    mode: str | None = None,
+    mode: _ModeArgWalkDefault = None,
 ) -> dict:
     """One-hop location grounding: where, surroundings, reach, notable.
 
@@ -3266,8 +3325,8 @@ def ground_location(
     section failed, returning a structured {"error":
     "upstream_unavailable", ...}.
 
-    minutes must be > 0 and <= 60; mode is "walk", "cycle", or "drive";
-    omit it to use the stored preferences mode, else walk.
+    minutes must be > 0 and <= 60; omit mode to use the stored
+    preferences mode, else walk.
     Both, plus out-of-range coordinates, return {"error": "bad_request"}.
     No confirm gate: the reach scan runs with the requested minutes/mode
     as-is (it self-caps its graph extraction radius; no nearby street
@@ -3302,7 +3361,7 @@ def places_along_route(
     from_lon: float,
     to_lat: float,
     to_lon: float,
-    mode: str | None = None,
+    mode: _ModeArgDriveDefault = None,
     category: str | None = None,
     name: str | None = None,
     max_detour_m: float = routing.CORRIDOR_DEFAULT_DETOUR_M,
@@ -3337,8 +3396,7 @@ def places_along_route(
     considers, in which case the response carries "truncated": true and a
     note saying so.
 
-    mode is "walk", "cycle", or "drive"; omit it to use the stored
-    preferences mode, else drive. Same cost model
+    Omit mode to use the stored preferences mode, else drive. Same cost model
     and the same straight-line-distance caps as `route`, and the same
     structured errors: route_too_long, no_graph_nearby, no_route,
     unsupported_mode, and bad_request for non-finite/out-of-range
@@ -3393,7 +3451,7 @@ def neighborhood_verdict(
     context: str = "",
     radius_m: float | None = None,
     minutes: float | None = None,
-    mode: str | None = None,
+    mode: _ModeArgContextDefault = None,
 ) -> dict:
     """Life-decision neighborhood verdict, not a data dump.
 
@@ -3524,7 +3582,7 @@ def verify_claims(lat: float, lon: float, claims: list[dict]) -> dict:
 @_tool("Best visiting order for stops")
 def optimize_route(
     stops: list[dict],
-    mode: str | None = None,
+    mode: _ModeArgDriveDefault = None,
     roundtrip: bool = True,
     start_index: int = 0,
 ) -> dict:
@@ -3551,8 +3609,7 @@ def optimize_route(
     start_index (default 0) is fixed as the first stop. roundtrip=true (the
     default) returns to it; the closing leg is in "legs" but the start is not
     repeated in "order". roundtrip=false is an open path that ends wherever
-    is cheapest. mode is "walk", "cycle" or "drive"; omit it to use the
-    stored preferences mode, else drive. Same
+    is cheapest. Omit mode to use the stored preferences mode, else drive. Same
     cost model every routing tool uses; one-ways make the drive/cycle cost
     matrix asymmetric and that is solved for exactly. The objective minimized
     is total duration.
@@ -3652,7 +3709,7 @@ def optimize_route(
 
 @_tool("Persistent preferences", annotations=_PREFERENCES_ANNOTATIONS)
 def preferences(
-    mode: str | None = None,
+    mode: _ModeSetArg = None,
     pace: str | None = None,
     household: list[str] | None = None,
     note: str | None = None,
@@ -3665,8 +3722,8 @@ def preferences(
     pace and household are stored for later features and do not change
     answers yet. The same document is the placeroot://preferences resource.
 
-    Call with no arguments to read. Pass mode (walk / cycle / drive),
-    pace, household tags, or a free-text note to merge those fields.
+    Call with no arguments to read. Pass mode, pace, household tags, or a
+    free-text note to merge those fields.
     clear=true deletes the file and cannot be combined with other fields.
     Nothing is sent off this machine.
     """
@@ -4317,7 +4374,10 @@ def _publish_from_keyword(mcp_server) -> None:
             model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
             from_: str = Field(alias="from")
             to: str
-            mode: str = "walk"
+            mode: _ModeArgWalkDefault = None
+            include_path: bool = False
+            include_elevation: bool = False
+            prefer: _PreferArg = None
             confirm: bool = False
 
             def model_dump_one_level(self) -> dict:
@@ -4325,6 +4385,9 @@ def _publish_from_keyword(mcp_server) -> None:
                     "from_": self.from_,
                     "to": self.to,
                     "mode": self.mode,
+                    "include_path": self.include_path,
+                    "include_elevation": self.include_elevation,
+                    "prefer": self.prefer,
                     "confirm": self.confirm,
                 }
 

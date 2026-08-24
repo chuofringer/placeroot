@@ -9,7 +9,7 @@ import asyncio
 
 import pytest
 
-from placeroot import geocode, progress, routing, server
+from placeroot import geocode, preferences, progress, routing, server
 
 from ._routing_fixture import build_routing_fixture as fx
 
@@ -41,6 +41,29 @@ def test_from_to_schema_accepts_from_and_to():
     assert "from" in required and "to" in required
     assert "confirm" in props
     assert "confirm" not in required
+    # #328/#395 regression: the FromToArguments monkeypatch used to drop
+    # every parameter from_to() actually accepts beyond from/to/mode/confirm.
+    assert "include_path" in props
+    assert "include_elevation" in props
+    assert "prefer" in props
+    assert props["mode"]["enum"] == ["cycle", "drive", "walk"]
+    assert props["prefer"]["enum"] == ["flat"]
+
+
+def test_from_to_omitted_mode_uses_stored_preference(monkeypatch):
+    preferences.update(mode="cycle")
+    monkeypatch.setattr(geocode, "resolve_named_place", _ab)
+    result = server.from_to("A", "B", confirm=True)
+    assert "error" not in result
+    assert result["mode"] == "cycle"
+
+
+def test_from_to_explicit_mode_wins_over_stored_preference(monkeypatch):
+    preferences.update(mode="cycle")
+    monkeypatch.setattr(geocode, "resolve_named_place", _ab)
+    result = server.from_to("A", "B", mode="walk", confirm=True)
+    assert "error" not in result
+    assert result["mode"] == "walk"
 
 
 def test_from_to_with_mocked_resolves_returns_route_shape(monkeypatch):
