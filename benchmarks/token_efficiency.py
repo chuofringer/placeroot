@@ -140,12 +140,20 @@ def tool_definitions() -> list[dict]:
     return [t.model_dump(mode="json", by_alias=True, exclude_none=True) for t in tools]
 
 
-def measure_schema_surface() -> list[tuple[str, Measurement, Measurement, Measurement]]:
-    """Per tool: (name, whole definition, description only, inputSchema only).
+_SchemaRow = tuple[str, Measurement, Measurement, Measurement, Measurement]
+
+
+def measure_schema_surface() -> list[_SchemaRow]:
+    """Per tool: (name, whole definition, description, inputSchema, outputSchema).
 
     The description/schema split matters because they are tuned by different
     means — prose can be shortened by editing, schema size is driven by the
-    parameter list.
+    parameter list. `whole` already includes outputSchema (roadmap §4.3,
+    #403): `tool_definitions()` dumps the full tools/list entry with
+    `exclude_none=True`, so once a tool carries a non-None outputSchema it is
+    part of `wire_json(definition)` automatically — the breakdown table below
+    just also reports that cost on its own line, rather than leaving it
+    invisible inside `whole`.
     """
     rows = []
     for definition in tool_definitions():
@@ -156,6 +164,7 @@ def measure_schema_surface() -> list[tuple[str, Measurement, Measurement, Measur
                 Measurement.of(name, wire_json(definition)),
                 Measurement.of("description", definition.get("description", "")),
                 Measurement.of("inputSchema", wire_json(definition.get("inputSchema", {}))),
+                Measurement.of("outputSchema", wire_json(definition.get("outputSchema", {}))),
             )
         )
     return rows
@@ -305,20 +314,23 @@ def run_scenarios(scenarios: list[Scenario] = SCENARIOS) -> list[ScenarioResult]
 
 def render_schema_table(rows) -> str:
     lines = [
-        "| tool | description tokens | inputSchema tokens | total tokens | total chars |",
-        "|---|---:|---:|---:|---:|",
+        "| tool | description tokens | inputSchema tokens | outputSchema tokens "
+        "| total tokens | total chars |",
+        "|---|---:|---:|---:|---:|---:|",
     ]
-    for name, whole, desc, schema in sorted(rows, key=lambda r: -r[1].tokens):
+    for name, whole, desc, in_schema, out_schema in sorted(rows, key=lambda r: -r[1].tokens):
         lines.append(
-            f"| `{name}` | {desc.tokens} | {schema.tokens} | **{whole.tokens}** | {whole.chars} |"
+            f"| `{name}` | {desc.tokens} | {in_schema.tokens} | {out_schema.tokens} | "
+            f"**{whole.tokens}** | {whole.chars} |"
         )
     total_tokens = sum(r[1].tokens for r in rows)
     total_chars = sum(r[1].chars for r in rows)
     desc_tokens = sum(r[2].tokens for r in rows)
-    schema_tokens = sum(r[3].tokens for r in rows)
+    in_schema_tokens = sum(r[3].tokens for r in rows)
+    out_schema_tokens = sum(r[4].tokens for r in rows)
     lines.append(
-        f"| **all {len(rows)} tools** | {desc_tokens} | {schema_tokens} | "
-        f"**{total_tokens}** | {total_chars} |"
+        f"| **all {len(rows)} tools** | {desc_tokens} | {in_schema_tokens} | "
+        f"{out_schema_tokens} | **{total_tokens}** | {total_chars} |"
     )
     return "\n".join(lines)
 
@@ -356,6 +368,9 @@ def render_generated_section(rows, results: list[ScenarioResult]) -> str:
             f"- Total schema surface: **{total_schema} tokens** "
             f"({sum(r[1].chars for r in rows)} chars, "
             f"{sum(r[1].bytes_ for r in rows)} bytes)",
+            f"- Of which inputSchema: **{sum(r[3].tokens for r in rows)} tokens**, "
+            f"outputSchema: **{sum(r[4].tokens for r in rows)} tokens** (roadmap §4.3, #403) "
+            f"— the rest is names/descriptions/annotations",
             f"- Schema cost per tool: min {min(schema_tokens)}, "
             f"median {sorted(schema_tokens)[len(schema_tokens) // 2]}, "
             f"max {max(schema_tokens)} tokens",

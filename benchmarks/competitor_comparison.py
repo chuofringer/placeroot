@@ -149,16 +149,24 @@ SCENARIO_TOOLS: dict[str, list[str]] = {
 
 
 # A `tools/list` entry may carry fields one server publishes and another does
-# not, and the difference is not a verbosity difference. Mapbox declares an
-# `outputSchema` on 28 of its 29 tools; PlaceRoot declares none, so the field is
-# structurally absent from our side rather than smaller. Counting it would make
-# the ratio mostly a report of that one choice.
+# not, and the extra/verbatim split isolates that. Both sides now declare an
+# `outputSchema` (roadmap §4.3, #403) — Mapbox on 28 of its 29 tools,
+# PlaceRoot on all of them — so it moved into COMMON_FIELDS: excluding it
+# would once again make the ratio mostly a report of one field's
+# presence/absence, which is exactly what the common/verbatim split exists
+# to avoid. PlaceRoot's schemas are still deliberately lean
+# (additionalProperties: true, no per-field descriptions — the docstrings
+# already carry those), so the size difference is real; it shows up as a
+# genuine verbosity gap inside the common-field number now, the same way any
+# other field's verbosity would. Mapbox's remaining extras (`_meta`,
+# `execution`) are fields PlaceRoot structurally does not send at all, so
+# those stay out of COMMON_FIELDS and are named in render_field_note().
 #
 # So every surface is measured twice: `tokens` is the verbatim wire cost an
 # agent really pays, and `common_tokens` restricts both sides to the fields all
 # three servers actually publish. The published ratios are the common-field
 # ones; the verbatim numbers sit next to them, with the gap named.
-COMMON_FIELDS = ("name", "title", "description", "inputSchema", "annotations")
+COMMON_FIELDS = ("name", "title", "description", "inputSchema", "annotations", "outputSchema")
 
 
 def common_fields_only(definition: dict) -> dict:
@@ -510,12 +518,13 @@ def render_field_note(surfaces: dict[str, SchemaSurface]) -> str:
             lines.append(f"- **{LABELS[name]}** sends the common fields and nothing else.")
     lines += [
         "",
-        "Mapbox declares an `outputSchema` on almost every tool; PlaceRoot declares none, "
-        "so on our side the field is *absent*, not smaller. An agent really does pay the "
-        "verbatim number, so it is in the table — but a ratio built on it would mostly be "
-        "reporting that one choice, which is why the headline ratios above use the common "
-        "fields. If PlaceRoot adds output schemas the two columns will converge, and this "
-        "page will say so on its own.",
+        "Mapbox declares an `outputSchema` on almost every tool, and PlaceRoot now does "
+        "too (roadmap §4.3) — so it moved into the common fields above rather than staying "
+        "an extra one side structurally could not send. The two are not the same size: "
+        "PlaceRoot's are hand-authored and lean (`additionalProperties: true`, no per-field "
+        "descriptions — the docstrings already carry those), so that gap is real and now "
+        "shows up inside the common-field ratio, the same way any other field's verbosity "
+        "would.",
     ]
     return "\n".join(lines)
 
@@ -606,9 +615,10 @@ def render_generated_section() -> str:
             "less on Linux than on macOS. A tolerance test reruns them for real and fails "
             "if this snapshot drifts from what the code now answers.",
             "- Schema figures are counted twice: over the **common fields** every server "
-            "here publishes, and **verbatim** over everything it sends. The ratios below "
-            "are the common-field ones, because Mapbox declares an `outputSchema` that "
-            "PlaceRoot does not declare at all — see the note under the table.",
+            "here publishes, and **verbatim** over everything it sends. `outputSchema` is "
+            "one of the common fields now that both sides declare one (roadmap §4.3) — "
+            "the ratios below are the common-field ones; see the note under the table for "
+            "the size gap that remains.",
             f"- Schema surface, whole install (common fields): PlaceRoot "
             f"**{ours.common_tokens}** tokens ({ours.tool_count} tools) · Mapbox "
             f"**{mapbox.common_tokens}** ({mapbox.tool_count} tools) · Google Maps "
@@ -619,10 +629,11 @@ def render_generated_section() -> str:
             f"**{google.subset_common_tokens}** "
             f"({google.subset_tool_count} tools — no isochrone tool exists)",
             f"- Whole-install surface: Mapbox is **{whole_vs_mapbox:.1f}x** PlaceRoot's on "
-            f"common fields, on {mapbox.tool_count} tools against {ours.tool_count}. "
-            f"Verbatim — counting the output schemas Mapbox publishes and we don't — it is "
-            f"{whole_vs_mapbox_verbatim:.1f}x ({mapbox.tokens} against {ours.tokens}), and "
-            f"{subset_vs_mapbox_verbatim:.1f}x on the six-tool subset.",
+            f"common fields (both sides' output schemas included), on {mapbox.tool_count} "
+            f"tools against {ours.tool_count}. Verbatim — counting the rest of what each "
+            f"side sends beyond the common fields — it is {whole_vs_mapbox_verbatim:.1f}x "
+            f"({mapbox.tokens} against {ours.tokens}), and {subset_vs_mapbox_verbatim:.1f}x "
+            f"on the six-tool subset.",
             f"- Answers, over the {len(measured)} scenarios both PlaceRoot and Mapbox answer: "
             f"PlaceRoot **{ours_total}** tokens total, Mapbox **{theirs_total}** "
             f"({theirs_min_total} with pretty-print whitespace removed)",

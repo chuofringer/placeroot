@@ -104,7 +104,7 @@ agent reading the schema cannot discover three real capabilities.
 | Stable IDs | Place ID | Mapbox ID | ✗ | FSQ/TomTom IDs | **✓ GERS (open)** |
 | Confidence / provenance | opaque AI summaries | ✗ | ✗ | ✗ (Placematic gestures) | **✓** |
 | Pagination | ✗ | ✗ | ✗ | ✗ | ✗ *(nobody — open lane)* |
-| outputSchema | ✗ | **✓ (almost every tool)** | ✗ | partial | ✗ *(our gap)* |
+| outputSchema | ✗ | **✓ (almost every tool)** | ✗ | partial | **✓ (all 42 tools, #403)** |
 | Traffic / hours / ratings | ✓ | ✓ | partial | ✓ | ✗ (honest non-goal) |
 | Scale ceiling | quota + billing | rate limits | 1 req/s Nominatim etc. | quotas | **local cache, none** |
 
@@ -231,29 +231,29 @@ internally, and is the capability to lead every comparison table with:
 *keyless, global, exact reachability search — nobody else has it at any
 price*.
 
-#### 3. Structured schemas: `outputSchema`, real enums, visible defaults *(impact: ████ · effort: low)*
+#### 3. Structured schemas: `outputSchema`, real enums, visible defaults *(impact: ████ · effort: low)* — **done**
 
-Three fixes in one PR series:
-- Declare `outputSchema` on all tools. The response shapes are already
-  stable and documented in prose; this makes them machine-checkable,
-  closes the one MCP-conformance gap the repo's own benchmarks concede to
-  Mapbox, and lets typed-agent frameworks (increasingly the default) bind
-  results without guessing.
-- Move enum values out of prose into JSON Schema `enum`s: `mode`, `prefer`,
-  `op`, `operating_status`, `claims[].kind`, `priorities[].prefer`. This
-  *shrinks* descriptions (prose lists become one schema line) while ending
-  guess-the-string round-trips.
-- Make defaults visible and uniform: every `mode` schema states its
-  effective default; `travel_time_matrix` and `from_to` start honoring
-  stored preferences like their siblings; the walk-vs-drive default
-  asymmetry between `route` and `isochrone` is documented in-schema.
-- Includes the bug fix: republish `from_to`'s dropped `include_path` /
-  `include_elevation` / `prefer` (or retire `from_to` into `route` per
-  feature 1).
+Three fixes, shipped across two PR series:
+- ~~Move enum values out of prose into JSON Schema `enum`s...~~ and
+  ~~make defaults visible and uniform...~~ and the `from_to` bug fix
+  (republish its dropped `include_path`/`include_elevation`/`prefer`) —
+  all shipped in #396.
+- Declare `outputSchema` on all 42 tools (#403). The response shapes were
+  already stable and documented in prose; this makes them machine-checkable,
+  closes the one MCP-conformance gap the repo's own benchmarks conceded to
+  Mapbox (docs/benchmarks-vs.md), and lets typed-agent frameworks
+  (increasingly the default) bind results without guessing. Hand-authored
+  rather than derived (every tool returns a bare, heterogeneous `dict`):
+  a first wave of 12 tools gets precise per-field schemas, the rest get a
+  generic honest envelope (`anyOf[success, error]`, both
+  `additionalProperties: true`) — see §5.3 below for the pattern and
+  tests/test_output_schemas.py for the drift-proofing.
 
 Net schema tokens: roughly flat for `inputSchema`+description (enums offset
-prose), plus an honest `outputSchema` cost — which the listing cache hints
-already amortize to once per day per client.
+prose from #396), plus an honest `outputSchema` cost (#403) — which the
+listing cache hints already amortize to once per day per client. See
+docs/benchmarks.md's generated section for the actual outputSchema token
+total, broken out from inputSchema.
 
 #### 4. Pagination cursors *(impact: ███▊ · effort: low)*
 
