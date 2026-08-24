@@ -10,7 +10,7 @@ rather than the committed places fixture (which sits ~9km away).
 import duckdb
 import pytest
 
-from placeroot import geo, meeting, overture, server, tool_profiles
+from placeroot import errors, geo, geocode, meeting, overture, server, tool_profiles
 
 from ._routing_fixture import build_routing_fixture as fx
 
@@ -446,6 +446,49 @@ def test_route_too_long_note_suggests_a_different_mode(meeting_places, monkeypat
     assert result["candidates"] == []
     assert "cap" in result["note"]
     assert "no street graph" not in result["note"]
+
+
+# --- LocationRef (roadmap #4.1): mixed origins ---------------------------
+
+
+def test_coordinate_only_origins_have_no_resolved_key(meeting_places):
+    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True)
+    assert "error" not in result
+    assert "resolved" not in result
+
+
+def test_named_origin_adds_resolved_and_defaults_to_walk_mode(meeting_places, monkeypatch):
+    a_lat, a_lon = ORIGIN_A
+
+    def fake_resolve(query):
+        assert query == "Origin A"
+        return {"name": query, "lat": a_lat, "lon": a_lon, "id": "gers-origin-a", "type": "place"}
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    result = server.meeting_point(
+        ["Origin A", {"lat": ORIGIN_B[0], "lon": ORIGIN_B[1], "mode": "walk"}], confirm=True
+    )
+    assert "error" not in result
+    assert result["resolved"] == [
+        {
+            "index": 0, "name": "Origin A", "id": "gers-origin-a",
+            "lat": a_lat, "lon": a_lon, "matched_by": "name",
+        }
+    ]
+    assert result["candidates"], "the named origin must still resolve to a routable point"
+
+
+def test_ambiguous_origin_name_is_an_indexed_error(monkeypatch):
+    def fake_resolve(query):
+        raise errors.AmbiguousPlace(query, candidates=[{"name": "X"}])
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    result = server.meeting_point(
+        ["Ambiguous", {"lat": ORIGIN_B[0], "lon": ORIGIN_B[1]}]
+    )
+    assert result["error"] == "ambiguous_place"
+    assert result["index"] == 0
+    assert result["detail"].startswith("origins[0]: ")
 
 
 # --- registration ------------------------------------------------------

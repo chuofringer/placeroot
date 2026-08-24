@@ -5,8 +5,9 @@ implementation from the one distance_matrix actually uses (placeroot.geo),
 so this isn't just checking the code against itself.
 """
 
-from placeroot import server
+from placeroot import errors, geocode, server
 from tests._geo import haversine_m as oracle_haversine_m
+from tests.test_gers_lookup import PLACE_ID
 
 ORIGINS = [
     {"lat": 30.2672, "lon": -97.7431},  # Austin
@@ -84,3 +85,73 @@ def test_distance_matrix_empty_origins():
 def test_distance_matrix_empty_destinations():
     result = server.distance_matrix(origins=[{"lat": 0.0, "lon": 0.0}], destinations=[])
     assert result == {"elements": []}
+
+
+# --- LocationRef (roadmap #4.1): mixed origins/destinations ---------------
+
+
+def test_coordinate_only_has_no_resolved_key():
+    result = server.distance_matrix(origins=ORIGINS, destinations=DESTINATIONS)
+    assert "error" not in result
+    assert "resolved" not in result
+
+
+def test_gers_id_origin_adds_resolved_origins_only():
+    """Real fixture GERS id (see tests/test_gers_lookup.py) — no monkeypatch."""
+    result = server.distance_matrix(
+        origins=[PLACE_ID], destinations=[{"lat": 30.2672, "lon": -97.7431}]
+    )
+    assert "error" not in result
+    assert result["resolved"]["origins"][0]["index"] == 0
+    assert result["resolved"]["origins"][0]["matched_by"] == "gers_id"
+    assert result["resolved"]["origins"][0]["id"] == PLACE_ID
+    assert "destinations" not in result["resolved"]
+
+
+def test_mixed_named_origin_and_destination(monkeypatch):
+    def fake_resolve(query):
+        assert query == "Austin Office"
+        return {
+            "name": query, "lat": 30.2672, "lon": -97.7431,
+            "id": "gers-austin", "type": "place",
+        }
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    result = server.distance_matrix(
+        origins=["Austin Office"], destinations=[{"lat": 29.7604, "lon": -95.3698}]
+    )
+    assert "error" not in result
+    assert result["resolved"]["origins"] == [
+        {
+            "index": 0, "name": "Austin Office", "id": "gers-austin",
+            "lat": 30.2672, "lon": -97.7431, "matched_by": "name",
+        }
+    ]
+    assert "destinations" not in result["resolved"]
+
+
+def test_ambiguous_destination_name_is_an_indexed_error(monkeypatch):
+    def fake_resolve(query):
+        raise errors.AmbiguousPlace(query, candidates=[{"name": "X"}])
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    result = server.distance_matrix(
+        origins=[{"lat": 30.2672, "lon": -97.7431}], destinations=["Ambiguous"]
+    )
+    assert result["error"] == "ambiguous_place"
+    assert result["index"] == 0
+    assert result["detail"].startswith("destinations[0]: ")
+
+
+def test_over_cap_checked_before_resolution(monkeypatch):
+    """The 10-point cap fails before any name resolution is attempted."""
+    def boom(query):
+        raise AssertionError("resolve_named_place must not be called past the cap")
+
+    monkeypatch.setattr(geocode, "resolve_named_place", boom)
+    origins = ["Somewhere"] * 11
+    result = server.distance_matrix(
+        origins=origins, destinations=[{"lat": 0.0, "lon": 0.0}]
+    )
+    assert result["error"] == "bad_request"
+    assert "elements" not in result

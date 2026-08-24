@@ -1,8 +1,9 @@
 """Issue #13: is X within N meters of Y."""
 
-from placeroot import overture, server
+from placeroot import geocode, overture, server
 
 from .conftest import CENTER_LAT, CENTER_LON
+from .test_gers_lookup import PLACE_ID
 
 
 def test_within_true_when_something_matches_inside_max_distance():
@@ -51,3 +52,63 @@ def test_server_structured_error_on_unreachable_upstream(tmp_path):
     overture.set_data_path(str(tmp_path / "does-not-exist" / "*.parquet"))
     result = server.within_distance(CENTER_LAT, CENTER_LON, max_distance_m=1000)
     assert result["error"] == "upstream_unavailable"
+
+
+# --- LocationRef (roadmap #4.1): `where`, mutually exclusive with lat/lon ---
+
+
+def test_needs_lat_lon_or_where():
+    result = server.within_distance(max_distance_m=1000)
+    assert result["error"] == "bad_request"
+
+
+def test_rejects_both_latlon_and_where():
+    result = server.within_distance(
+        lat=CENTER_LAT, lon=CENTER_LON, where={"lat": CENTER_LAT, "lon": CENTER_LON},
+        max_distance_m=1000,
+    )
+    assert result["error"] == "bad_request"
+
+
+def test_plain_latlon_has_no_resolved_key():
+    result = server.within_distance(CENTER_LAT, CENTER_LON, max_distance_m=1000)
+    assert "error" not in result
+    assert "resolved" not in result
+
+
+def test_where_coordinate_dict_has_no_resolved_key():
+    result = server.within_distance(
+        where={"lat": CENTER_LAT, "lon": CENTER_LON}, max_distance_m=1000
+    )
+    assert "error" not in result
+    assert "resolved" not in result
+
+
+def test_where_gers_id_adds_resolved():
+    """Real fixture GERS id (see tests/test_gers_lookup.py) — no monkeypatch."""
+    result = server.within_distance(where=PLACE_ID, max_distance_m=1000)
+    assert "error" not in result
+    assert result["resolved"]["matched_by"] == "gers_id"
+    assert result["resolved"]["id"] == PLACE_ID
+
+
+def test_where_name_adds_resolved(monkeypatch):
+    def fake_resolve(query):
+        assert query == "Cluster Place 000"
+        return {
+            "name": query, "lat": CENTER_LAT, "lon": CENTER_LON,
+            "id": "gers-cluster", "type": "place",
+        }
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    result = server.within_distance(where="Cluster Place 000", max_distance_m=1000)
+    assert "error" not in result
+    assert result["resolved"] == {
+        "name": "Cluster Place 000", "id": "gers-cluster",
+        "lat": CENTER_LAT, "lon": CENTER_LON, "matched_by": "name",
+    }
+
+
+def test_where_bad_ref_is_bad_request():
+    result = server.within_distance(where={"lat": 91.0, "lon": 0.0}, max_distance_m=1000)
+    assert result["error"] == "bad_request"
