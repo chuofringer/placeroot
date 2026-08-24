@@ -16,7 +16,7 @@ than a mock.
 
 import pytest
 
-from placeroot import preferences, routing, server
+from placeroot import errors, geocode, preferences, routing, server
 
 from ._routing_fixture import build_routing_fixture as fx
 
@@ -377,3 +377,68 @@ def test_fallback_mixed_failures_still_return_a_matrix(monkeypatch):
     )
     assert grid == [[None, None]]
     assert truncated is False
+
+
+# --- LocationRef (roadmap #4.1): mixed origins/destinations ---------------
+
+
+def test_coordinate_only_has_no_resolved_key():
+    origins = [fx.node_latlon(2, 2), fx.node_latlon(2, 5)]
+    destinations = [fx.node_latlon(8, 2)]
+    result = server.travel_time_matrix(
+        origins=_as_dicts(origins), destinations=_as_dicts(destinations), mode="walk"
+    )
+    assert "error" not in result
+    assert "resolved" not in result
+
+
+def test_named_origin_adds_resolved_origins_only(monkeypatch):
+    origin_lat, origin_lon = fx.node_latlon(2, 2)
+    destination = fx.node_latlon(8, 2)
+
+    def fake_resolve(query):
+        assert query == "Grid Corner"
+        return {
+            "name": query, "lat": origin_lat, "lon": origin_lon,
+            "id": "gers-grid-corner", "type": "place",
+        }
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    result = server.travel_time_matrix(
+        origins=["Grid Corner"], destinations=_as_dicts([destination]), mode="walk"
+    )
+    assert "error" not in result
+    assert result["resolved"]["origins"] == [
+        {
+            "index": 0, "name": "Grid Corner", "id": "gers-grid-corner",
+            "lat": origin_lat, "lon": origin_lon, "matched_by": "name",
+        }
+    ]
+    assert "destinations" not in result["resolved"]
+
+
+def test_ambiguous_origin_name_is_an_indexed_error(monkeypatch):
+    def fake_resolve(query):
+        raise errors.AmbiguousPlace(query, candidates=[{"name": "X"}])
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    result = server.travel_time_matrix(
+        origins=["Ambiguous"], destinations=[{"lat": 40.5, "lon": -74.5}]
+    )
+    assert result["error"] == "ambiguous_place"
+    assert result["index"] == 0
+    assert result["detail"].startswith("origins[0]: ")
+
+
+def test_over_cap_checked_before_resolution(monkeypatch):
+    """The 5-point cap fails before any name resolution is attempted."""
+    def boom(query):
+        raise AssertionError("resolve_named_place must not be called past the cap")
+
+    monkeypatch.setattr(geocode, "resolve_named_place", boom)
+    origins = ["Somewhere"] * 6
+    result = server.travel_time_matrix(
+        origins=origins, destinations=[{"lat": 0.0, "lon": 0.0}]
+    )
+    assert result["error"] == "bad_request"
+    assert "elements" not in result

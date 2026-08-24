@@ -9,6 +9,35 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- LocationRef, wave 2 (docs/ROADMAP.md §4.1): `distance_matrix`'s and
+  `travel_time_matrix`'s `origins`/`destinations`, `meeting_point`'s
+  `origins`, and `ground_location`'s and `within_distance`'s new `where`
+  now accept the same LocationRef — `{"lat": ..., "lon": ...}`, a GERS id
+  string, or a free-text place name — mixed freely inside a list, same
+  conventions as wave 1: parallel resolution, indexed errors
+  (`origins[i]: ...` / `destinations[i]: ...`), a compact `resolved` echo
+  only for string entries, and a byte-identical answer for
+  coordinate-only calls. The matrix tools' `resolved` splits into
+  `{"origins": [...], "destinations": [...]}`, each present only when that
+  side had a string entry. `meeting_point`'s per-origin `mode` stays a
+  dict-only field (`{"lat", "lon", "mode"}`); a string origin always gets
+  the default mode. `ground_location`'s and `within_distance`'s `where` is
+  mutually exclusive with `lat`/`lon`, same as `isochrone`/`summarize_area`
+  in wave 1. `route` gains a docstring pointer to `from_to` for name/id
+  endpoints instead of its own `where` (it already has two coordinate
+  pairs; `from_to` is the LocationRef-native route). `elevation_at`,
+  `address_at`, `buildings_at`, `land_use_at`, `infrastructure_at`,
+  `water_near`, `admin_lookup`, `changes_in_area`, `summarize_buildings`
+  and `reverse_geocode` are deliberately not widened this wave — micro
+  point-lookups where a geocode hop is rare and the schema cost per tool
+  adds up. `within_distance`'s `max_distance_m` is now keyword-only with
+  no default, so it stays a required, non-defaultable schema field even
+  though `lat`/`lon` had to become optional to make room for `where` — an
+  omitted `max_distance_m` is refused before the tool runs rather than
+  silently searching a 0m window. `meeting_point`'s string origins now
+  resolve in parallel (same pattern `_resolve_location_refs` already
+  uses), not one name at a time, keeping a multi-person named-origin call
+  inside the project's response-time budget.
 - LocationRef, wave 1 (docs/ROADMAP.md §4.1): `optimize_route`'s `stops`,
   `compare_areas`'s `areas`, `isochrone`'s and `summarize_area`'s new
   `where`, and `from_to`'s `from`/`to` now accept a location as
