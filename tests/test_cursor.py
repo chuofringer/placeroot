@@ -126,7 +126,7 @@ def test_cursor_from_a_different_release_is_served_with_honesty_note():
             "category": _CATEGORY, "name": None, "categories": None,
             "min_confidence": None, "operating_status": None, "brand": None,
             "has_website": None, "has_phone": None,
-            "division_id": None, "area": None,
+            "division_id": None, "area": None, "within": None,
         },
         "2020-01-01.0",
         decoded["o"],

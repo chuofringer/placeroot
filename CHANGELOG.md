@@ -94,6 +94,25 @@ fixing behavior is patch.
   `category`. Grouped answers (`group_by_category=true`) never carry a
   cursor — each category is already `limit`-bounded from one scan; page a
   single one further with `category=<slug>` instead.
+- `find_places` gains `within: {minutes, mode?, of?}` (docs/ROADMAP.md
+  §4.2/§6E) — reachability-filtered search against the real street graph,
+  not a radius guess: keeps only results inside the street-graph area
+  reachable in `minutes` by `mode` from `of` (default: the search center;
+  required — a `LocationRef` — in `division_id`/`area` mode, since there's
+  no single center point there). Filtering happens in SQL
+  (`ST_Contains` against the isochrone polygon, replacing the radius
+  circle entirely — `radius_m` is ignored when `within` is set) so it
+  composes unchanged with every existing filter, `detail` projection,
+  cursor pagination, and `group_by_category`. A cold street graph returns
+  `{"error": "needs_confirm", ...}`; retry with the new `confirm: bool`
+  once the user agrees to wait (reuses the same gate `route`/
+  `suggest_areas` already use). `of` given as a GERS id or name adds a
+  compact `resolved` echo; the answer also carries a short honesty note
+  naming the filter. `within`'s resolved `{minutes, mode, of lat/lon}` is
+  part of a cursor's query identity, so a replayed cursor recomputes the
+  same shed rather than trusting a stale one. Per-row travel minutes and
+  an "excluded by radius but not by the shed" count were investigated and
+  skipped for this PR (see the PR body) rather than shipped half-honest.
 
 ### Changed
 - **Breaking: `find_places`' default answer shape changed.** Rows now
