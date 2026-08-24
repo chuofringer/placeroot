@@ -109,26 +109,28 @@ def _resolve_home_point(text: str) -> dict | None:
     from placeroot import geocode as geocode_mod
     from placeroot import overture
 
+    # Log lines below deliberately omit the configured text, resolved name,
+    # and coordinates: the user's home location is sensitive data (CodeQL
+    # py/clear-text-logging-sensitive-data), and PlaceRoot's privacy posture
+    # is that nothing about the user's home belongs in logs — even local
+    # ones. Do not "improve" these logs by adding the location back.
     try:
         hits = geocode_mod.geocode(text, limit=1)
     except (overture.UpstreamUnavailable, overture.SchemaDegraded) as e:
-        logger.warning("home_region: failed to resolve %s=%r: %s", HOME_ENV_VAR, text, e)
+        logger.warning("home_region: failed to resolve %s: %s", HOME_ENV_VAR, e)
         return None
     except Exception:  # noqa: BLE001 - a bad home config must never break the server
         logger.warning(
-            "home_region: unexpected error resolving %s=%r", HOME_ENV_VAR, text, exc_info=True,
+            "home_region: unexpected error resolving %s", HOME_ENV_VAR, exc_info=True,
         )
         return None
     if not hits:
         logger.warning(
-            "home_region: %s=%r did not resolve to any place; bias disabled", HOME_ENV_VAR, text,
+            "home_region: %s did not resolve to any place; bias disabled", HOME_ENV_VAR,
         )
         return None
     top = hits[0]
-    logger.info(
-        "home_region: %s=%r resolved to %r (%.4f, %.4f)",
-        HOME_ENV_VAR, text, top["name"], top["lat"], top["lon"],
-    )
+    logger.info("home_region: %s resolved; ranking bias enabled", HOME_ENV_VAR)
     return {"name": top["name"], "lat": top["lat"], "lon": top["lon"]}
 
 
