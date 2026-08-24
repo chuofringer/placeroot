@@ -182,6 +182,18 @@ fixing behavior is patch.
   skipped for this PR (see the PR body) rather than shipped half-honest.
 
 ### Changed
+- docs/ROADMAP.md's next-tier "Elicitation + sampling adoption" and "MCP
+  roots as geofence" bullets corrected (#411): spec rev 2026-07-28 replaced
+  server-initiated elicitation with Multi Round-Trip Requests (MRTR) and
+  deprecated sampling and roots (SEP-2577; independently confirmed for
+  roots while building #409). Investigated wiring MRTR into the
+  `needs_confirm` cold-graph gates against the pinned SDK's
+  `Resolve`/`Elicit` support (mcp 2.0.0) and stopped short of implementing:
+  a `Resolve`-annotated parameter is dropped from the tool's published
+  `inputSchema` and is always resolver-filled, so a capability-less client
+  gets a hard `MCPError` instead of today's `needs_confirm` envelope —
+  incompatible with keeping `confirm` client-suppliable for clients that
+  don't support elicitation. No behavior change; docs-only.
 - **Breaking: per-row batch errors now use the standard `{"error", "detail"}`
   envelope (docs/ROADMAP.md §4, next tier).** `geocode_batch`'s no-match
   rows changed from `{"query", "error": "no match"}` to `{"query", "error":
