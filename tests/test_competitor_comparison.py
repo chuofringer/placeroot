@@ -72,32 +72,33 @@ def test_competitor_tool_lists_load_and_carry_schemas():
 
 
 def test_schema_ratio_does_not_charge_mapbox_for_a_field_we_never_publish():
-    """The published ratio must be like-for-like (review of #213).
+    """The published ratio must be like-for-like (review of #213, revisited
+    for roadmap §4.3 / #403).
 
-    Mapbox declares an `outputSchema` on almost every tool and PlaceRoot
-    declares none, so counting it verbatim would make the headline mostly a
-    report of that one choice — roughly half of Mapbox's surface. The common-
-    field count is what the page leads with.
+    Both servers now declare `outputSchema`, so it moved into COMMON_FIELDS:
+    counting it as "extra" would once again have made the ratio mostly a
+    report of one field's presence/absence rather than of genuine verbosity.
+    Mapbox's remaining extras (`_meta`, `execution`) are still fields
+    PlaceRoot structurally does not send, so they stay excluded from the
+    common-field ratio and named in the note under the table instead.
     """
     surfaces = competitor_comparison.measure_all_surfaces()
     ours, theirs = surfaces[PLACEROOT], surfaces[MAPBOX]
 
-    assert "outputSchema" in theirs.extra_fields
-    assert ours.extra_fields == [], f"PlaceRoot now publishes {ours.extra_fields} — recount"
-    # Not a cosmetic difference: it is a large share of their verbatim surface.
-    assert theirs.extra_tokens > theirs.common_tokens * 0.5
+    assert "outputSchema" not in theirs.extra_fields
+    assert "outputSchema" not in ours.extra_fields
+    assert ours.extra_fields == [], f"unexpected extra fields: {ours.extra_fields}"
 
-    # Common-field counting must actually exclude it, on both sides.
+    # Common-field counting must still exclude whatever remains "extra".
     for surface in surfaces.values():
         assert surface.common_tokens <= surface.tokens
         assert surface.subset_common_tokens <= surface.subset_tokens
 
     text = competitor_comparison.DOC_PATH.read_text()
-    assert "outputSchema" in text, "the page must name the field it declines to count"
+    assert "outputSchema" in text, "the page must still name the field both sides now send"
     headline = theirs.subset_common_tokens / ours.subset_common_tokens
-    verbatim = theirs.subset_tokens / ours.subset_tokens
-    assert headline < verbatim, "the fair ratio should be the smaller, published one"
     assert f"{headline:.1f}x ours" in text
+    verbatim = theirs.subset_tokens / ours.subset_tokens
     assert f"{verbatim:.1f}x on the six-tool subset" in text
 
 
@@ -112,7 +113,7 @@ def test_common_fields_only_keeps_the_shared_field_set():
             "_meta": {},
         }
     )
-    assert set(trimmed) == {"name", "description", "inputSchema"}
+    assert set(trimmed) == {"name", "description", "inputSchema", "outputSchema"}
 
 
 def test_scenario_tool_subsets_exist_in_every_snapshot():

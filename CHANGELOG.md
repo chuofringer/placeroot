@@ -9,6 +9,26 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- Declared MCP `outputSchema` on all 42 tools (docs/ROADMAP.md §4 feature 3
+  / §5.3) — the one MCP-conformance gap docs/benchmarks-vs.md conceded to
+  Mapbox is closed. Hand-authored, not derived: every tool returns a bare,
+  heterogeneous `dict` (a success shape or an `{"error", "detail", ...}`
+  envelope), so the SDK's own return-type schema derivation produces
+  nothing for any of them. `find_places`, `find_near`, `geocode`,
+  `geocode_batch`, `resolve_place`, `from_to`, `route`, `isochrone`,
+  `travel_time_matrix`, `distance_matrix`, `optimize_route`, and
+  `data_version` get precise per-field schemas; every other tool gets the
+  same honest generic envelope. Every schema is `{anyOf: [<success shape,
+  additionalProperties: true>, <shared error envelope>]}`, so a real
+  answer — success, error, or a degraded/needs_confirm variant — always
+  validates; `tests/test_output_schemas.py` proves it against real calls
+  over the committed offline fixtures, both server-side and through the
+  real MCP client layer. Tool calls also now carry `structuredContent`
+  (additive — a spec-compliant client requires it once a tool declares an
+  outputSchema; the existing text `content` is unchanged), reparsed from a
+  permissive pass-through model rather than validated against the
+  published schema server-side, so a declared schema can never make a
+  previously-working call fail.
 - `try` hints on dead-end errors (docs/ROADMAP.md §4, next tier): a
   `not_found` from resolving a free-text name or a LocationRef GERS id
   (`from_to`, `find_near`, and every LocationRef-accepting tool — they all

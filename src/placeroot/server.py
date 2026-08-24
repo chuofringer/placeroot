@@ -30,7 +30,7 @@ from mcp.server.caching import CacheableMethod, CacheHint
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.utilities.func_metadata import func_metadata
 from mcp.types import ToolAnnotations
-from pydantic import Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from placeroot import (
     addresses,
@@ -56,6 +56,7 @@ from placeroot import (
     mapexplain,
     mapview,
     meeting,
+    output_schemas,
     overture,
     progress,
     prompts,
@@ -5403,6 +5404,103 @@ def _publish_from_keyword(mcp_server) -> None:
         raise AssertionError("from_to schema patch failed; mcp internals changed") from e
 
 
+class _PermissiveOutput(BaseModel):
+    """A pydantic model that accepts any dict, unchanged, as extra fields.
+
+    `FuncMetadata.convert_result` (mcp/server/mcpserver/utilities/
+    func_metadata.py:110-144) is the *real* runtime gate: once
+    `fn_metadata.output_schema` is non-None it asserts `output_model is not
+    None` and calls `output_model.model_validate(result)`, then ships
+    `model_dump(mode="json", by_alias=True)` as `structuredContent`. A
+    spec-compliant client requires exactly that — confirmed empirically:
+    `mcp.client.session.ClientSession.validate_tool_result` (session.py:
+    1080-1100) raises `RuntimeError` on any tool whose declared outputSchema
+    has no matching `structured_content`. So structured output cannot be
+    faked at the publication layer alone (see `_publish_output_schemas`);
+    this model is what actually produces it, deliberately never rejecting a
+    real answer: no declared fields, `extra="allow"`, so
+    `model_validate(any_dict)` always succeeds and `model_dump` round-trips
+    it byte-for-byte. Real validation happens client-side, against the
+    precise schema `_publish_output_schemas` shadows onto `Tool.output_schema`
+    below — decoupled on purpose, so the schema tools/list advertises can be
+    richer than what this pass-through model would derive on its own.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+
+def _publish_output_schemas(mcp_server) -> None:
+    """Attach a declared `outputSchema` to every registered tool (roadmap §4.3 / §5.3).
+
+    Every tool here returns a bare `dict` — the SDK's own schema derivation
+    (func_metadata, driven by return-type annotations) gives nothing for
+    that (a bare `dict` return type carries no field types to derive from),
+    so the schemas in output_schemas.py are hand-written instead.
+
+    Runtime-safety finding, in two parts:
+
+    1. `Tool.output_schema` (mcp/server/mcpserver/tools/base.py:53-55) is a
+       `functools.cached_property` that *defaults* to reading
+       `self.fn_metadata.output_schema`, and tools/list publishes exactly
+       that cached_property (mcp/server/mcpserver/server.py:490,
+       `output_schema=info.output_schema`). `cached_property` stores its
+       computed value in the instance's own `__dict__`; setting that key
+       directly (confirmed empirically) permanently shadows the descriptor,
+       so tools/list can advertise our own richer, hand-authored schema —
+       decoupled from whatever `fn_metadata.output_schema` says.
+    2. `FuncMetadata.convert_result` (utilities/func_metadata.py:110-144) —
+       the actual runtime gate a `tools/call` goes through — reads a
+       *different* attribute: `self.fn_metadata.output_schema`, the
+       `FuncMetadata` field, not the `Tool` cached_property. Originally
+       that field is None (bare-`dict` return, no `structured_output=`), so
+       `convert_result` never touches `output_model` at all and every
+       existing answer is untouched. Initially this function left that
+       field alone entirely, on the theory that a schema which never
+       drives validation can never break a call — but a real
+       spec-compliant client rejects that: `mcp.client.session.
+       ClientSession.validate_tool_result` (session.py:1080-1100) raises
+       `RuntimeError` the moment a tool's declared outputSchema has no
+       matching `structuredContent` on the response (confirmed by running
+       tests/test_http.py's real `mcp.client.client.Client` against a
+       tool with only the publication-layer patch applied — it failed).
+       So `fn_metadata.output_schema`/`output_model` are patched too, via
+       `_PermissiveOutput` (above) — a model that accepts and round-trips
+       any dict, never rejecting a real answer regardless of which shape it
+       takes. `wrap_output=False` because our tools already return a bare
+       dict, not a primitive needing `{"result": ...}` wrapping.
+
+    Net effect: every tools/call now also carries `structuredContent`
+    (additive — `content`'s text block, computed from the same raw `result`
+    before `output_model` ever sees it, is byte-identical to before), and
+    what a client validates that structuredContent against is the precise,
+    additionalProperties-true, drift-tolerant schema from output_schemas.py
+    — honest enough by construction that every real answer satisfies it.
+
+    Patches mcp 2.0.0 private internals (pinned in uv.lock). If those move —
+    the cached_property's storage mechanism, or `convert_result`'s
+    reliance on `fn_metadata.output_schema`/`output_model` — fail with a
+    clear assertion rather than a raw AttributeError or a silently
+    unpublished/unvalidated schema.
+    """
+    try:
+        for tool in mcp_server._tool_manager.list_tools():
+            schema = output_schemas.OUTPUT_SCHEMAS.get(tool.name)
+            assert schema is not None, (
+                f"{tool.name} has no declared outputSchema; add it to "
+                "output_schemas.OUTPUT_SCHEMAS (FIRST_WAVE for a precise "
+                "shape, or _GENERIC_TOOLS otherwise)"
+            )
+            tool.fn_metadata = tool.fn_metadata.model_copy(update={
+                "output_schema": {"type": "object"},
+                "output_model": _PermissiveOutput,
+                "wrap_output": False,
+            })
+            tool.__dict__["output_schema"] = schema
+            assert tool.output_schema is schema, "cached_property shadow did not take"
+    except AttributeError as e:
+        raise AssertionError("output schema publish failed; mcp internals changed") from e
+
+
 def build_server(spec=_UNSET) -> MCPServer:
     """An MCPServer with the PLACEROOT_TOOLS-selected subset registered.
 
@@ -5442,6 +5540,7 @@ def build_server(spec=_UNSET) -> MCPServer:
                 annotations=_TOOL_ANNOTATIONS.get(name, _READ_ONLY_ANNOTATIONS),
             )(fn)
     _publish_from_keyword(server)
+    _publish_output_schemas(server)
     # Resources are registered whatever the selection: they never appear in
     # tools/list, so they cost a subset install nothing, and
     # placeroot://data-version is worth having precisely when the

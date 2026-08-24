@@ -77,58 +77,59 @@ Generated 2026-08-24 by `uv run python benchmarks/token_efficiency.py --write`.
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-08-19.0`
 - Tools registered: **42**
-- Total schema surface: **27816 tokens** (111318 chars, 111658 bytes)
-- Schema cost per tool: min 205, median 574, max 2689 tokens
+- Total schema surface: **31878 tokens** (127575 chars, 127915 bytes)
+- Of which inputSchema: **5101 tokens**, outputSchema: **3891 tokens** (roadmap §4.3, #403) — the rest is names/descriptions/annotations
+- Schema cost per tool: min 261, median 651, max 2971 tokens
 - Median scenario response: **436 tokens** (range 87-540)
-- Break-even: the schema surface costs about as much as **64 median answers**
+- Break-even: the schema surface costs about as much as **73 median answers**
 
 ### Schema surface (paid once per conversation)
 
-| tool | description tokens | inputSchema tokens | total tokens | total chars |
-|---|---:|---:|---:|---:|
-| `find_places` | 2000 | 586 | **2689** | 10759 |
-| `route` | 1214 | 218 | **1519** | 6076 |
-| `changes_in_area` | 1161 | 212 | **1459** | 5836 |
-| `meeting_point` | 1018 | 106 | **1209** | 4839 |
-| `compare_areas` | 885 | 105 | **1066** | 4265 |
-| `optimize_route` | 799 | 132 | **1014** | 4056 |
-| `suggest_areas` | 803 | 100 | **983** | 3932 |
-| `verify_claims` | 781 | 68 | **933** | 3733 |
-| `travel_time_matrix` | 707 | 139 | **922** | 3688 |
-| `geometry_op` | 559 | 290 | **916** | 3667 |
-| `render_map` | 597 | 136 | **801** | 3206 |
-| `resolve_place` | 601 | 112 | **787** | 3149 |
-| `places_along_route` | 513 | 198 | **773** | 3092 |
-| `from_to` | 450 | 213 | **726** | 2904 |
-| `isochrone` | 458 | 195 | **716** | 2867 |
-| `water_near` | 530 | 116 | **713** | 2855 |
-| `infrastructure_at` | 494 | 118 | **682** | 2729 |
-| `ground_location` | 463 | 150 | **678** | 2713 |
-| `geocode` | 559 | 44 | **669** | 2677 |
-| `within_distance` | 361 | 156 | **581** | 2325 |
-| `geocode_address` | 407 | 108 | **574** | 2298 |
-| `distance_matrix` | 401 | 93 | **558** | 2232 |
-| `address_at` | 427 | 54 | **541** | 2164 |
-| `gers_lookup` | 385 | 74 | **519** | 2079 |
-| `place_details` | 265 | 158 | **476** | 1906 |
-| `find_near` | 242 | 126 | **425** | 1702 |
-| `neighborhood_verdict` | 200 | 152 | **406** | 1625 |
-| `land_use_at` | 274 | 41 | **373** | 1493 |
-| `search_categories` | 266 | 46 | **370** | 1482 |
-| `resolve_place_batch` | 248 | 42 | **350** | 1402 |
-| `elevation_at` | 242 | 41 | **338** | 1355 |
-| `warmup_city` | 175 | 109 | **335** | 1341 |
-| `preferences` | 135 | 146 | **333** | 1333 |
-| `geocode_batch` | 211 | 58 | **328** | 1313 |
-| `summarize_area` | 148 | 105 | **309** | 1236 |
-| `buildings_at` | 151 | 91 | **293** | 1175 |
-| `reverse_geocode_batch` | 163 | 48 | **271** | 1084 |
-| `summarize_buildings` | 154 | 58 | **264** | 1059 |
-| `simplify_geometry` | 129 | 58 | **241** | 964 |
-| `admin_lookup` | 145 | 41 | **240** | 961 |
-| `data_version` | 166 | 16 | **231** | 926 |
-| `reverse_geocode` | 111 | 42 | **205** | 820 |
-| **all 42 tools** | 19998 | 5101 | **27816** | 111318 |
+| tool | description tokens | inputSchema tokens | outputSchema tokens | total tokens | total chars |
+|---|---:|---:|---:|---:|---:|
+| `find_places` | 2000 | 586 | 277 | **2971** | 11885 |
+| `route` | 1214 | 218 | 227 | **1750** | 7002 |
+| `changes_in_area` | 1161 | 212 | 52 | **1515** | 6060 |
+| `optimize_route` | 799 | 132 | 324 | **1342** | 5371 |
+| `meeting_point` | 1018 | 106 | 52 | **1265** | 5063 |
+| `compare_areas` | 885 | 105 | 52 | **1122** | 4489 |
+| `travel_time_matrix` | 707 | 139 | 173 | **1099** | 4399 |
+| `suggest_areas` | 803 | 100 | 52 | **1039** | 4156 |
+| `resolve_place` | 601 | 112 | 206 | **997** | 3989 |
+| `verify_claims` | 781 | 68 | 52 | **989** | 3957 |
+| `geometry_op` | 559 | 290 | 52 | **972** | 3891 |
+| `from_to` | 450 | 213 | 227 | **957** | 3830 |
+| `geocode` | 559 | 44 | 195 | **868** | 3473 |
+| `render_map` | 597 | 136 | 52 | **857** | 3430 |
+| `isochrone` | 458 | 195 | 127 | **848** | 3393 |
+| `places_along_route` | 513 | 198 | 52 | **829** | 3316 |
+| `water_near` | 530 | 116 | 52 | **769** | 3079 |
+| `infrastructure_at` | 494 | 118 | 52 | **738** | 2953 |
+| `ground_location` | 463 | 150 | 52 | **734** | 2937 |
+| `distance_matrix` | 401 | 93 | 136 | **698** | 2795 |
+| `find_near` | 242 | 126 | 222 | **651** | 2606 |
+| `within_distance` | 361 | 156 | 52 | **637** | 2549 |
+| `geocode_address` | 407 | 108 | 52 | **630** | 2522 |
+| `address_at` | 427 | 54 | 52 | **597** | 2388 |
+| `gers_lookup` | 385 | 74 | 52 | **575** | 2303 |
+| `place_details` | 265 | 158 | 52 | **532** | 2130 |
+| `neighborhood_verdict` | 200 | 152 | 52 | **462** | 1849 |
+| `geocode_batch` | 211 | 58 | 98 | **430** | 1722 |
+| `land_use_at` | 274 | 41 | 52 | **429** | 1717 |
+| `search_categories` | 266 | 46 | 52 | **426** | 1706 |
+| `resolve_place_batch` | 248 | 42 | 52 | **406** | 1626 |
+| `elevation_at` | 242 | 41 | 52 | **394** | 1579 |
+| `warmup_city` | 175 | 109 | 52 | **391** | 1565 |
+| `preferences` | 135 | 146 | 52 | **389** | 1557 |
+| `summarize_area` | 148 | 105 | 52 | **365** | 1460 |
+| `data_version` | 166 | 16 | 119 | **355** | 1421 |
+| `buildings_at` | 151 | 91 | 52 | **349** | 1399 |
+| `reverse_geocode_batch` | 163 | 48 | 52 | **327** | 1308 |
+| `summarize_buildings` | 154 | 58 | 52 | **320** | 1283 |
+| `simplify_geometry` | 129 | 58 | 52 | **297** | 1188 |
+| `admin_lookup` | 145 | 41 | 52 | **296** | 1185 |
+| `reverse_geocode` | 111 | 42 | 52 | **261** | 1044 |
+| **all 42 tools** | 19998 | 5101 | 3891 | **31878** | 127575 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 
