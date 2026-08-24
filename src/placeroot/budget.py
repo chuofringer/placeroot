@@ -95,3 +95,38 @@ def apply_budget(payload: dict, list_key: str, budget_tokens: int | None = None)
         result["truncated"] = True
         result["omitted_count"] = omitted
     return result
+
+
+def apply_budget_grouped(
+    payload: dict, group_key: str, budget_tokens: int | None = None
+) -> dict:
+    """Grouped-results analog of apply_budget for find_places'
+    group_by_category=True path (roadmap §4.5), where payload[group_key]
+    is {category: [rows...]} instead of a flat ranked list.
+
+    Flattens preserving per-category grouping/order, trims exactly like
+    fit_rows (drop lowest-ranked rows first, from the tail of the
+    flattened stream — i.e. the last rows of the last categories go
+    first), then regroups. A category that loses every one of its rows to
+    trimming is dropped from the result entirely, same as it would never
+    have appeared had the scan found nothing for it.
+    """
+    budget = token_budget() if budget_tokens is None else budget_tokens
+    groups: dict[str, list[dict]] = payload[group_key]
+    slugs = list(groups.keys())
+    flat = [(slug, row) for slug in slugs for row in groups[slug]]
+    envelope_tokens = estimate_tokens({**payload, group_key: dict.fromkeys(slugs, [])})
+    kept, truncated, omitted = fit_rows(
+        [row for _slug, row in flat], max(budget - envelope_tokens, 0)
+    )
+    # fit_rows only ever drops from the tail and/or strips fields in place —
+    # it never reorders — so the first len(kept) entries of `flat` line up
+    # positionally with `kept`.
+    result_groups: dict[str, list[dict]] = {}
+    for (slug, _orig_row), stripped_row in zip(flat[: len(kept)], kept):
+        result_groups.setdefault(slug, []).append(stripped_row)
+    result = {**payload, group_key: result_groups}
+    if truncated:
+        result["truncated"] = True
+        result["omitted_count"] = omitted
+    return result

@@ -136,12 +136,12 @@ Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Eve
 
 - Token counting method: **chars/4 heuristic — `placeroot.budget.estimate_tokens`, applied identically to all three servers**
 - Snapshots captured: **2026-08-08**
-- PlaceRoot's own answers were captured on **macOS-26.3.1-arm64-arm-64bit** (Python 3.11.0, Overture `2026-08-19.0`) and are snapshotted rather than recomputed here: floating-point differences in routing and geometry change digit counts between platforms, so a live rerun costs a few tokens more or less on Linux than on macOS. A tolerance test reruns them for real and fails if this snapshot drifts from what the code now answers.
+- PlaceRoot's own answers were captured on **macOS-26.3.1-arm64-arm-64bit** (Python 3.11.15, Overture `2026-08-19.0`) and are snapshotted rather than recomputed here: floating-point differences in routing and geometry change digit counts between platforms, so a live rerun costs a few tokens more or less on Linux than on macOS. A tolerance test reruns them for real and fails if this snapshot drifts from what the code now answers.
 - Schema figures are counted twice: over the **common fields** every server here publishes, and **verbatim** over everything it sends. The ratios below are the common-field ones, because Mapbox declares an `outputSchema` that PlaceRoot does not declare at all — see the note under the table.
-- Schema surface, whole install (common fields): PlaceRoot **25097** tokens (42 tools) · Mapbox **15190** (29 tools) · Google Maps **655** (7 tools)
-- Schema surface, the six tools each server needs for the scenarios below (common fields): PlaceRoot **4964** · Mapbox **4654** (0.9x ours) · Google Maps **500** (5 tools — no isochrone tool exists)
-- Whole-install surface: Mapbox is **0.6x** PlaceRoot's on common fields, on 29 tools against 42. Verbatim — counting the output schemas Mapbox publishes and we don't — it is 1.2x (29295 against 25097), and 2.6x on the six-tool subset.
-- Answers, over the 6 scenarios both PlaceRoot and Mapbox answer: PlaceRoot **2026** tokens total, Mapbox **1337** (1219 with pretty-print whitespace removed)
+- Schema surface, whole install (common fields): PlaceRoot **25845** tokens (42 tools) · Mapbox **15190** (29 tools) · Google Maps **655** (7 tools)
+- Schema surface, the six tools each server needs for the scenarios below (common fields): PlaceRoot **5712** · Mapbox **4654** (0.8x ours) · Google Maps **500** (5 tools — no isochrone tool exists)
+- Whole-install surface: Mapbox is **0.6x** PlaceRoot's on common fields, on 29 tools against 42. Verbatim — counting the output schemas Mapbox publishes and we don't — it is 1.1x (29295 against 25845), and 2.3x on the six-tool subset.
+- Answers, over the 6 scenarios both PlaceRoot and Mapbox answer: PlaceRoot **1626** tokens total, Mapbox **1337** (1219 with pretty-print whitespace removed)
 
 ### Where the competitor numbers come from
 
@@ -154,7 +154,7 @@ Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Eve
 
 | server | tools registered | whole install, verbatim | whole install, common fields | the 6-scenario subset | subset verbatim | subset common fields |
 |---|---:|---:|---:|---:|---:|---:|
-| PlaceRoot | 42 | 25097 | **25097** | 6 | 4964 | **4964** |
+| PlaceRoot | 42 | 25845 | **25845** | 6 | 5712 | **5712** |
 | Mapbox MCP | 29 | 29295 | **15190** | 6 | 13129 | **4654** |
 | Google Maps MCP (archived) | 7 | 655 | **655** | 5 | 500 | **500** |
 
@@ -172,7 +172,7 @@ Mapbox declares an `outputSchema` on almost every tool; PlaceRoot declares none,
 |---|---:|---:|---:|
 | `geocode_address` — Geocode one address / place name. | **87** | **93** (text) | **48** (41 minified) |
 | `reverse_geocode` — What address is at this coordinate? | **45** | **64** (text) | **288** (188 minified) |
-| `nearest_coffee` — Coffee shops near this point. | **811** | **117** (text) | not measured |
+| `nearest_coffee` — Coffee shops near this point. | **411** | **117** (text) | not measured |
 | `route_a_to_b` — Route from A to B. | **436** | **422** (text) | not measured |
 | `isochrone_15min` — How far can I get in 15 minutes? | **540** | **396** (text) | not measured |
 | `matrix_3x3` — 3x3 distance matrix over three points. | **107** | **245** (127 minified) | not measured |

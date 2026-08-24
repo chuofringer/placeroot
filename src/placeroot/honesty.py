@@ -130,6 +130,45 @@ def trust_note(place: Mapping) -> str:
     return "Low confidence — call ahead."
 
 
+TRUST_TIERS = ("strong", "ok", "weak", "unknown")
+
+# One fixed legend line for find_places' detail="compact" rows (roadmap
+# §4.5): compact rows carry a `trust` tier instead of `trust_note`'s prose,
+# so this one payload-level line is what makes the tier self-explaining
+# without repeating a sentence on every row.
+TRUST_LEGEND = (
+    "trust tiers: strong=high confidence & sourced (or compact's implicit "
+    "source); ok=moderate confidence, or high confidence with an unnamed "
+    "source; weak=low confidence, or listed permanently/temporarily "
+    "closed; unknown=no confidence score at all"
+)
+
+
+def trust_tier(place: Mapping) -> str:
+    """One of TRUST_TIERS, derived from the exact same signals as
+    trust_note (#308) — status, confidence band, named source — so the
+    tier and the prose can never disagree about the same row.
+
+    Closed statuses always win, same as trust_note. Otherwise: no
+    confidence score at all is "unknown" (distinct from an explicit low
+    score, which is "weak"); high confidence is "strong" unless the row
+    explicitly carries an empty sources list ("ok", mirroring trust_note's
+    "unnamed source" call-ahead); moderate confidence is always "ok".
+    """
+    status = _status(place)
+    if status in _PERMANENTLY_CLOSED or status in _TEMPORARILY_CLOSED:
+        return "weak"
+    confidence = _as_float(place.get("confidence"))
+    if confidence is None:
+        return "unknown"
+    band = _confidence_band(confidence)
+    if band == "high":
+        return "ok" if _named_source(place) is False else "strong"
+    if band == "moderate":
+        return "ok"
+    return "weak"
+
+
 def attach_trust_note(place: dict) -> dict:
     """Set `trust_note` on `place` in place and return it."""
     place["trust_note"] = trust_note(place)

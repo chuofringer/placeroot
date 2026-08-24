@@ -93,8 +93,12 @@ def test_fuzzy_tier_is_bounded_to_the_query_bbox():
 
 
 def test_server_find_places_note_on_fuzzy_hit():
+    # detail="full": matched_by is a full-row-only field (compact/ids
+    # project it away, roadmap §4.5) — the top-level "note" already
+    # surfaces the fuzzy match for every tier.
     payload = server.find_places(
-        lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000, name="Blue Botle Roastery"
+        lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000, name="Blue Botle Roastery",
+        detail="full",
     )
     assert payload["results"]
     assert payload["results"][0]["matched_by"] == "fuzzy"

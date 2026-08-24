@@ -49,7 +49,49 @@ fixing behavior is patch.
   docstrings now that the enum carries it, keeping the net schema-token
   cost roughly flat.
 
+- `find_places` gains `detail: "ids" | "compact" | "full"` and multi-
+  category search (docs/ROADMAP.md §4.5). `detail="ids"` returns just
+  `{id, distance_m}`; `detail="compact"` returns `{id, name, category,
+  distance_m, trust}` where `trust` is a tier string
+  (`"strong"|"ok"|"weak"|"unknown"`) derived from the exact same
+  confidence/operating-status signals as `trust_note`'s prose (new
+  `honesty.trust_tier`, alongside a payload-level `trust_legend` line so
+  the tiers are self-explaining); `detail="full"` is today's row,
+  unchanged. Projection happens before the token budget is applied, so a
+  smaller tier fits more rows per answer — the point of the feature.
+  `categories: [...]` (up to 5 slugs, mutually exclusive with `category`)
+  runs a checklist of several categories in one scan instead of one call
+  per category, matched with the same substring/prefix semantics
+  `category` already has; `group_by_category: bool` buckets the merged
+  answer into `{category: [rows...]}`, up to `limit` rows per category
+  from that same scan (a `row_number() OVER (PARTITION BY category ...)`
+  window, not a second query per category). `detail` is presentation
+  only — it is not part of a cursor's query identity, so a cursor issued
+  under one detail tier continues correctly under another; `categories`
+  (sorted for canonicalization) IS part of a cursor's identity, same as
+  `category`. Grouped answers (`group_by_category=true`) never carry a
+  cursor — each category is already `limit`-bounded from one scan; page a
+  single one further with `category=<slug>` instead.
+
 ### Changed
+- **Breaking: `find_places`' default answer shape changed.** Rows now
+  default to `detail="compact"` instead of the full 13-field row (id,
+  name, category, basic_category, operating_status, confidence, brand,
+  has_website, has_phone, lat, lon, distance_m, trust_note) — an agent
+  that read fields other than `id`/`name`/`category`/`distance_m` (e.g.
+  `lat`/`lon` for `render_map`, or `trust_note`'s prose) must now pass
+  `detail="full"` explicitly. This directly targets the token-efficiency
+  benchmark's worst number: the committed `nearest_coffee` scenario drops
+  from 811 to 411 response tokens, and the generic "1km, no filter"
+  scenario from 824 to 404 (see `docs/benchmarks.md` /
+  `docs/benchmarks-vs.md`, regenerated with this change). `find_near`
+  passes `detail="full"` internally to keep its own existing projection
+  working unchanged — it does not gain a `detail` param of its own in
+  this PR (noted as follow-up scope). `find_places`' schema surface grew
+  by 748 tokens (1692 → 2440) to publish `detail`/`categories`/
+  `group_by_category`; the whole-install schema total moves from ~25,097
+  to ~25,845 — a one-time cost that a single subsequent call already
+  earns back given the per-call savings above.
 - **Behavior change:** `from_to` and `travel_time_matrix` now consult the
   stored `mode` preference when `mode` is omitted, the same as `route`,
   `isochrone`, `optimize_route`, `ground_location`, and
