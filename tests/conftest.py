@@ -19,6 +19,7 @@ from placeroot import (  # noqa: E402
     autowarm,
     buildings,
     gers,
+    home_region,
     overture,
     progress,
     recreation,
@@ -62,6 +63,21 @@ def no_ambient_tool_selection(monkeypatch):
     body runs, so a test's own monkeypatch.setenv still wins.
     """
     monkeypatch.delenv("PLACEROOT_TOOLS", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_ambient_home_region(monkeypatch):
+    """Every test sees PLACEROOT_HOME unset and a cold home_region cache
+    unless it opts in itself (#406).
+
+    home_region.get_home_region() memoizes its resolution for the life of
+    the process; without this, the first test to set PLACEROOT_HOME would
+    leak its resolved home into every later test, home-biased or not.
+    """
+    monkeypatch.delenv(home_region.HOME_ENV_VAR, raising=False)
+    home_region.reset_home_region_state()
+    yield
+    home_region.reset_home_region_state()
 
 
 @pytest.fixture(autouse=True)

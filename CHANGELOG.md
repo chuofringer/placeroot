@@ -9,6 +9,33 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `PLACEROOT_HOME=<city/area>` (#406, docs/ROADMAP.md next tier): a home
+  region, resolved once lazily through the same geocode ranking and cached
+  for the process, biases `geocode`/`geocode_batch`/`resolve_place` (and
+  anything routing through the same ranking, e.g. `find_near`/`from_to`
+  name resolution) toward it — kills the "which Springfield" class of
+  ambiguity for a single-metro install. A *bias*, never a filter: a
+  bounded score bonus (0.03 on `rank_score`'s ~0-1 scale, plus the matching
+  tuple position in the internal sort key) only ever breaks a same-tier tie
+  toward home — a genuinely better-ranked distant match still wins, and
+  out-of-region results are never dropped from the answer. `geocode`'s
+  reply carries a one-line disclosure note only when the bias actually
+  changed the top result (computed by comparing the biased and unbiased
+  winner on the same already-scored candidate list); no note otherwise. If
+  the home text resolves, its tile cache is pre-warmed at startup the same
+  way a city-scale resolve warms one, on a background thread that never
+  blocks startup and respects the existing `PLACEROOT_CACHE=off` knob. No
+  `PLACEROOT_HOME` set -> byte-identical ranking to before this change.
+  MCP roots as a second config source (a client-published `placeroot.json`)
+  is investigated but left a documented stub
+  (`home_region.resolve_home_from_roots`): the pinned SDK
+  (`mcp[cli]>=2.0.0`) only exposes server-side roots access from inside an
+  in-flight request's session (`ServerSession.list_roots`), and that method
+  is itself marked deprecated as of 2026-07-28 (SEP-2577) in this SDK
+  version — threading an async, per-request, now-deprecated capability
+  through the shared, synchronous ranking path every geocode/resolve_place
+  call uses would mean contorting the architecture for a capability the SDK
+  itself is walking back. `PLACEROOT_HOME` is the supported path.
 - Declared MCP `outputSchema` on all 42 tools (docs/ROADMAP.md §4 feature 3
   / §5.3) — the one MCP-conformance gap docs/benchmarks-vs.md conceded to
   Mapbox is closed. Hand-authored, not derived: every tool returns a bare,

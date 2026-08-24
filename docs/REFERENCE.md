@@ -243,6 +243,7 @@ env vars; see below.) The ones an operator is most likely to reach for:
 | `PLACEROOT_CACHE_FETCH_CONCURRENCY` | `2` | Concurrent background tile fetches — bounded so a cold query's own scan isn't starved by its cache warmers |
 | `PLACEROOT_DUCKDB_THREADS` | `96` | DuckDB threads; deliberately above core count because cold parquet-footer reads are IO-bound |
 | `PLACEROOT_WARM_REGION` | unset | `lat,lon,radius_m` to pre-warm at startup, on top of the automatic metadata pre-warm |
+| `PLACEROOT_HOME` | unset | A free-text city/area (`"Seattle, WA"`) resolved once, lazily, and used as a *bias* — never a filter — toward that region in `geocode`/`resolve_place`/`find_near`/`from_to` ranking (#406), plus a background tile pre-warm for it at startup. Only breaks same-tier ties (the "which Springfield" case); a genuinely better-ranked distant match still wins, and out-of-region results are never dropped. `geocode`'s answer carries a one-line disclosure note only when the bias actually changed the top result. An unresolvable value logs once and disables the bias — never an error. |
 | `PLACEROOT_DATA_PATH` / `PLACEROOT_DATA_PATH_<THEME>` | unset | Pin a theme to a local dataset instead of live S3 |
 | `PLACEROOT_UPSTREAM_BASE` | Overture's public bucket | Point every theme at a mirror in the standard release layout ([docs/MIRROR.md](MIRROR.md)) |
 | `PLACEROOT_S3_REGION` / `PLACEROOT_S3_ENDPOINT` | `us-west-2` / AWS | Mirror plumbing: region, custom S3-compatible endpoint (credentials via `PLACEROOT_S3_ACCESS_KEY_ID`/`SECRET_ACCESS_KEY`) |
