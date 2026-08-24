@@ -9,6 +9,26 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `scripts/overture_canary.py` (#219) gained a field-coverage regression
+  gate (#416): alongside pin-staleness and per-theme column presence, the
+  weekly canary now scans 5 dense metro bboxes (Paris, Manhattan, Tokyo,
+  Sao Paulo, Lagos) against both the pinned and the newest Overture
+  release and compares places row count, addresses row count, and the
+  non-null rate of `brand`, `confidence`, and `taxonomy.primary` (the
+  category field `find_places` actually reads). A relative drop past
+  `REGRESSION_TOLERANCE` (0.20, chosen just under OvertureMaps/data#546's
+  documented median -21% brand-match collapse) on any metric fails the
+  canary through the existing markdown-report/exit-1 channel, so a release
+  that keeps every required column but silently guts the values behind
+  them — exactly what #546 documented for Brazil, with no schema change at
+  all — gets caught before the next pin bump adopts it. Skips the gate
+  (with a note, not a failure) when the pin already is newest, or a probe
+  fails to read; row-count-backed metrics skip below `MIN_ROWS` (50) on
+  the pinned side rather than reporting a meaningless percentage off a
+  tiny denominator. Script-only — no workflow/CI changes; the comparison
+  and report-rendering logic is pure and covered offline in
+  `tests/test_overture_canary.py` with synthetic numbers, same as the
+  existing column-drift checks.
 - Declared MCP `outputSchema` on all 42 tools (docs/ROADMAP.md §4 feature 3
   / §5.3) — the one MCP-conformance gap docs/benchmarks-vs.md conceded to
   Mapbox is closed. Hand-authored, not derived: every tool returns a bare,
