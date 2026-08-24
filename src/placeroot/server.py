@@ -258,8 +258,8 @@ _DetailArg = Annotated[
     str | None,
     Field(
         description="Row detail tier for find_places rows: 'ids' (id + distance_m only), "
-        "'compact' (id/name/category/distance_m/trust), or 'full' (every field, incl. "
-        "trust_note prose). Default: compact.",
+        "'compact' (id/name/category/lat/lon/distance_m/trust), or 'full' (every field, "
+        "incl. trust_note prose). Default: compact.",
         json_schema_extra={"enum": _DETAIL_ENUM},
     ),
 ]
@@ -394,13 +394,18 @@ def _project_place_row(row: dict, detail: str) -> dict:
     """Shrink one find_places row to `detail`'s tier (roadmap §4.5).
 
     "full" is today's row, unchanged. "ids" is the cheap-chaining shape
-    (id + distance_m, when present). "compact" — the default — is
-    {id, name, category, distance_m, trust}, where `trust` is a tier
-    string derived by honesty.trust_tier from the same signals as
-    trust_note, so it can never disagree with the prose a "full" row
-    would carry. distance_m is omitted entirely (not null) on
-    division-polygon rows, which have no reference point to measure
-    distance from.
+    (id + distance_m, when present) — deliberately coordinate-free, since
+    it exists purely to feed an id into a batch lookup or place_details.
+    "compact" — the default — is {id, name, category, lat, lon,
+    distance_m, trust}: it keeps lat/lon so the advertised find_places ->
+    render_map composition (#386) still renders under the new default,
+    per ROADMAP §5.3's output schema listing lat/lon as required row
+    fields. `trust` is a tier string derived by honesty.trust_tier from
+    the same signals as trust_note, so it can never disagree with the
+    prose a "full" row would carry. distance_m is omitted entirely (not
+    null) on division-polygon rows, which have no reference point to
+    measure distance from — those rows still carry lat/lon, in every
+    tier but "ids".
     """
     if detail == "full":
         return row
@@ -414,6 +419,10 @@ def _project_place_row(row: dict, detail: str) -> dict:
         "name": row.get("name"),
         "category": row.get("category"),
     }
+    if "lat" in row:
+        out["lat"] = row["lat"]
+    if "lon" in row:
+        out["lon"] = row["lon"]
     if "distance_m" in row:
         out["distance_m"] = row["distance_m"]
     out["trust"] = honesty.trust_tier(row)
@@ -701,22 +710,27 @@ def find_places(
     that rows may have shifted.
 
     detail picks how much of each row comes back (ROADMAP §4.5, roadmap
-    feature 5): "compact" (the DEFAULT) is {id, name, category, distance_m,
-    trust} — trust is a tier string ("strong"/"ok"/"weak"/"unknown")
-    derived from the same confidence/operating-status signals as "full"'s
-    trust_note, so the two can never disagree; the payload also carries one
-    "trust_legend" line explaining the tiers. "ids" is just {id, distance_m}
-    — the cheapest shape, for chaining straight into a batch id lookup or
-    place_details. "full" is every field, unchanged from before this
-    param existed, including trust_note's prose. division-polygon rows have
-    no distance_m at any tier (no reference point to measure from) — the
-    key is omitted, never null. detail is presentation only: it does not
-    affect which rows match or their order, is NOT part of a cursor's query
-    identity, and a cursor issued under one detail continues correctly
-    under a different one. Projection happens before the token budget is
-    applied, so a smaller detail tier fits more rows per answer — that's
-    the point of a tier smaller than "full". Unrecognized values return a
-    bad_request error naming the accepted ones.
+    feature 5): "compact" (the DEFAULT) is {id, name, category, lat, lon,
+    distance_m, trust} — trust is a tier string ("strong"/"ok"/"weak"/
+    "unknown") derived from the same confidence/operating-status signals
+    as "full"'s trust_note, so the two can never disagree; the payload
+    also carries one "trust_legend" line explaining the tiers. compact
+    keeps lat/lon (unlike "ids") so a composed call feeding these rows
+    into a map-rendering tool still has coordinates under the default
+    tier. "ids" is just {id,
+    distance_m} — deliberately coordinate-free, the cheapest shape, for
+    chaining straight into a batch id lookup or place_details. "full" is
+    every field, unchanged from before this param existed, including
+    trust_note's prose. division-polygon rows have no distance_m at any
+    tier (no reference point to measure from) — the key is omitted, never
+    null; they still carry lat/lon at every tier but "ids". detail is
+    presentation only: it does not affect which rows match or their
+    order, is NOT part of a cursor's query identity, and a cursor issued
+    under one detail continues correctly under a different one.
+    Projection happens before the token budget is applied, so a smaller
+    detail tier fits more rows per answer — that's the point of a tier
+    smaller than "full". Unrecognized values return a bad_request error
+    naming the accepted ones.
 
     categories (mutually exclusive with category — passing both is a
     bad_request) runs a checklist of up to 5 slugs in ONE scan instead of

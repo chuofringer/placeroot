@@ -137,10 +137,9 @@ TRUST_TIERS = ("strong", "ok", "weak", "unknown")
 # so this one payload-level line is what makes the tier self-explaining
 # without repeating a sentence on every row.
 TRUST_LEGEND = (
-    "trust tiers: strong=high confidence & sourced (or compact's implicit "
-    "source); ok=moderate confidence, or high confidence with an unnamed "
-    "source; weak=low confidence, or listed permanently/temporarily "
-    "closed; unknown=no confidence score at all"
+    "trust tiers: strong=high confidence; ok=moderate confidence, or high "
+    "with no named source; weak=low confidence or closed; unknown=no "
+    "confidence score"
 )
 
 

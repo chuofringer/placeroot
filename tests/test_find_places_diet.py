@@ -14,7 +14,7 @@ from placeroot import honesty, overture, server
 from .conftest import CENTER_LAT, CENTER_LON
 from .test_find_places_in_area import DIV_NOTCH, polygon_fixtures  # noqa: F401
 
-_COMPACT_KEYS = {"id", "name", "category", "distance_m", "trust"}
+_COMPACT_KEYS = {"id", "name", "category", "lat", "lon", "distance_m", "trust"}
 _IDS_KEYS = {"id", "distance_m"}
 
 
@@ -58,12 +58,14 @@ def test_unknown_detail_is_bad_request():
     assert "ids" in detail and "compact" in detail and "full" in detail
 
 
-def test_division_mode_compact_rows_omit_distance_m(polygon_fixtures):  # noqa: F811
+def test_division_mode_compact_rows_omit_distance_m_but_keep_lat_lon(
+    polygon_fixtures,  # noqa: F811
+):
     result = server.find_places(division_id=DIV_NOTCH)
     assert result["results"]
     for row in result["results"]:
         assert "distance_m" not in row
-        assert set(row) == {"id", "name", "category", "trust"}
+        assert set(row) == {"id", "name", "category", "lat", "lon", "trust"}
 
 
 def test_single_category_full_detail_matches_pre_diet_shape():

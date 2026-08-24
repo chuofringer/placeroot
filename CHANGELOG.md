@@ -51,14 +51,17 @@ fixing behavior is patch.
 
 - `find_places` gains `detail: "ids" | "compact" | "full"` and multi-
   category search (docs/ROADMAP.md §4.5). `detail="ids"` returns just
-  `{id, distance_m}`; `detail="compact"` returns `{id, name, category,
-  distance_m, trust}` where `trust` is a tier string
+  `{id, distance_m}` — deliberately coordinate-free, for chaining an id
+  into a batch lookup; `detail="compact"` returns `{id, name, category,
+  lat, lon, distance_m, trust}`, where `trust` is a tier string
   (`"strong"|"ok"|"weak"|"unknown"`) derived from the exact same
   confidence/operating-status signals as `trust_note`'s prose (new
   `honesty.trust_tier`, alongside a payload-level `trust_legend` line so
-  the tiers are self-explaining); `detail="full"` is today's row,
-  unchanged. Projection happens before the token budget is applied, so a
-  smaller tier fits more rows per answer — the point of the feature.
+  the tiers are self-explaining). compact keeps `lat`/`lon` so a composed
+  `find_places` → `render_map` call still has coordinates to plot under
+  the new default (#386); `detail="full"` is today's row, unchanged.
+  Projection happens before the token budget is applied, so a smaller
+  tier fits more rows per answer — the point of the feature.
   `categories: [...]` (up to 5 slugs, mutually exclusive with `category`)
   runs a checklist of several categories in one scan instead of one call
   per category, matched with the same substring/prefix semantics
@@ -78,19 +81,23 @@ fixing behavior is patch.
   default to `detail="compact"` instead of the full 13-field row (id,
   name, category, basic_category, operating_status, confidence, brand,
   has_website, has_phone, lat, lon, distance_m, trust_note) — an agent
-  that read fields other than `id`/`name`/`category`/`distance_m` (e.g.
-  `lat`/`lon` for `render_map`, or `trust_note`'s prose) must now pass
-  `detail="full"` explicitly. This directly targets the token-efficiency
+  that read fields other than `id`/`name`/`category`/`lat`/`lon`/
+  `distance_m` (e.g. `confidence`/`operating_status`/`brand`, or
+  `trust_note`'s prose) must now pass `detail="full"` explicitly.
+  Compact keeps `lat`/`lon` (unlike `ids`) specifically so the advertised
+  `find_places` → `render_map` composition (#386) still renders under the
+  default tier — ROADMAP §5.3's own output schema lists `lat`/`lon` as
+  required row fields. This directly targets the token-efficiency
   benchmark's worst number: the committed `nearest_coffee` scenario drops
-  from 811 to 411 response tokens, and the generic "1km, no filter"
-  scenario from 824 to 404 (see `docs/benchmarks.md` /
+  from 811 to 470 response tokens, and the generic "1km, no filter"
+  scenario from 824 to 463 (see `docs/benchmarks.md` /
   `docs/benchmarks-vs.md`, regenerated with this change). `find_near`
   passes `detail="full"` internally to keep its own existing projection
   working unchanged — it does not gain a `detail` param of its own in
   this PR (noted as follow-up scope). `find_places`' schema surface grew
-  by 748 tokens (1692 → 2440) to publish `detail`/`categories`/
+  by 816 tokens (1692 → 2508) to publish `detail`/`categories`/
   `group_by_category`; the whole-install schema total moves from ~25,097
-  to ~25,845 — a one-time cost that a single subsequent call already
+  to ~25,913 — a one-time cost that a single subsequent call already
   earns back given the per-call savings above.
 - **Behavior change:** `from_to` and `travel_time_matrix` now consult the
   stored `mode` preference when `mode` is omitted, the same as `route`,
