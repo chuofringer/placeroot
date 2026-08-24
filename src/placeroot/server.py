@@ -19,6 +19,7 @@ import inspect
 import logging
 import math
 import os
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -546,6 +547,158 @@ def _resolve_pair(a: str, b: str) -> tuple[dict, dict]:
         return fa.result(), fb.result()
 
 
+# Real GERS ids are 32 lowercase hex characters (gers.py's module docstring
+# and _validate_id's own comment). Deliberately stricter than gers.py's own
+# ID_CHARSET_RE, which has to admit synthetic fixture ids like
+# "gers-div-brooklyn" for gers_lookup's own tests — LocationRef needs the
+# opposite bias: a free-text name must never be misread as an id, so this
+# only recognizes the one shape a real id actually has. Case-insensitive
+# since nothing here depends on it and rejecting a same-shape uppercase id
+# would just cost the caller a confusing not_found.
+_GERS_ID_RE = re.compile(r"^[0-9a-f]{32}$", re.IGNORECASE)
+
+_LOCATION_REF_BAD_REQUEST = {
+    "error": "bad_request",
+    "detail": (
+        "location must be one of: {\"lat\": ..., \"lon\": ...} with numeric lat/lon in "
+        "range, a GERS id string (32 hex characters), or a non-empty free-text place name"
+    ),
+}
+
+
+def _resolve_location_ref(ref) -> tuple[dict | None, dict | None]:
+    """A LocationRef ({lat,lon} | GERS id string | free-text name) -> (resolved, error).
+
+    Exactly one of the two return values is not None. `resolved` always
+    carries numeric lat/lon; a coordinate dict passes through untouched (no
+    `id`/`name`/`matched_by` — nothing to echo back, on purpose: raw
+    coordinate input must not grow the answer). A string input additionally
+    carries `id`, `name`, and `matched_by` ("gers_id" or "name") so callers
+    can build the compact `resolved` echo the roadmap calls for.
+
+    `error` is a structured envelope ready to return as-is (bad_request,
+    not_found, ambiguous_place, or an upstream/schema failure) — callers
+    that resolve several refs prefix its `detail` with the failing index.
+    """
+    if isinstance(ref, dict):
+        lat, lon = ref.get("lat"), ref.get("lon")
+        coord_error = _invalid_coord(lat, lon)
+        if coord_error is not None:
+            return None, _LOCATION_REF_BAD_REQUEST
+        return {"lat": float(lat), "lon": float(lon)}, None
+    if isinstance(ref, str):
+        text = ref.strip()
+        if not text:
+            return None, _LOCATION_REF_BAD_REQUEST
+        if _GERS_ID_RE.match(text):
+            try:
+                hit = gers.gers_lookup(text)
+            except ValueError:
+                hit = None
+            except overture.UpstreamUnavailable as e:
+                return None, _upstream_error(e)
+            except overture.SchemaDegraded as e:
+                return None, _schema_error(e)
+            if hit is None or hit.get("lat") is None or hit.get("lon") is None:
+                return None, {
+                    "error": "not_found",
+                    "detail": (
+                        f"{text!r} looked like a GERS id; no feature has it in this release"
+                    ),
+                }
+            return {
+                "id": hit.get("id"),
+                "name": hit.get("name"),
+                "lat": hit["lat"],
+                "lon": hit["lon"],
+                "matched_by": "gers_id",
+            }, None
+        hit = _resolve_named_place(text)
+        if "error" in hit:
+            return None, hit
+        return {
+            "id": hit.get("id"),
+            "name": hit.get("name"),
+            "lat": hit["lat"],
+            "lon": hit["lon"],
+            "matched_by": "name",
+        }, None
+    return None, _LOCATION_REF_BAD_REQUEST
+
+
+def _resolve_location_refs(refs, param_name: str) -> tuple[list[dict] | None, dict | None]:
+    """A list of LocationRefs -> (resolved list, error), same contract as above.
+
+    Items that need network resolution (strings: GERS ids or names) resolve
+    in parallel, mirroring _resolve_pair's ThreadPoolExecutor + contextvars
+    pattern (workers do not inherit contextvars, so the request context is
+    copied into each submit or progress.report from a cold resolve would
+    never reach attach()). Plain {lat,lon} dicts need no network round-trip
+    and are resolved inline.
+
+    On any failure, returns the error for the lowest-indexed failing item
+    (deterministic regardless of which worker finishes first), with
+    `"index"` set and `detail` prefixed `f"{param_name}[{i}]: "` so the
+    agent can retry that one argument instead of the whole call.
+    """
+    if not isinstance(refs, list):
+        return None, {"error": "bad_request", "detail": f"{param_name} must be a list"}
+
+    resolved: list[dict | None] = [None] * len(refs)
+    failures: dict[int, dict] = {}
+    network_idxs = [i for i, r in enumerate(refs) if isinstance(r, str)]
+
+    def _isolated(i: int, ref):
+        with db.isolated_reads():
+            return i, _resolve_location_ref(ref)
+
+    if len(network_idxs) > 1:
+        with ThreadPoolExecutor(max_workers=min(len(network_idxs), 8)) as pool:
+            futures = [
+                pool.submit(contextvars.copy_context().run, _isolated, i, refs[i])
+                for i in network_idxs
+            ]
+            for future in futures:
+                i, (item, err) = future.result()
+                if err is not None:
+                    failures[i] = err
+                else:
+                    resolved[i] = item
+        pending = [i for i in range(len(refs)) if i not in network_idxs]
+    else:
+        pending = list(range(len(refs)))
+
+    for i in pending:
+        item, err = _resolve_location_ref(refs[i])
+        if err is not None:
+            failures[i] = err
+        else:
+            resolved[i] = item
+
+    if failures:
+        idx = min(failures)
+        err = failures[idx]
+        detail = f"{param_name}[{idx}]: {err.get('detail', '')}"
+        return None, {**err, "index": idx, "detail": detail}
+    return resolved, None
+
+
+def _location_ref_echo(item: dict) -> dict:
+    """The compact {name, id, lat, lon, matched_by} block for a resolved string LocationRef.
+
+    Only called for items that carry `matched_by` — coordinate inputs never
+    reach this (see _resolve_location_ref's contract), which is what keeps
+    the `resolved` echo absent for pure-coordinate calls.
+    """
+    return {
+        "name": item.get("name"),
+        "id": item.get("id"),
+        "lat": item["lat"],
+        "lon": item["lon"],
+        "matched_by": item["matched_by"],
+    }
+
+
 def _category_slug(category: str) -> str:
     """A slug, or the top search_categories hit for short free text.
 
@@ -976,22 +1129,57 @@ def find_places(
 
 
 @_tool("Summarize area")
-def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
+def summarize_area(
+    lat: float | None = None,
+    lon: float | None = None,
+    radius_m: float = 1000,
+    where: dict | str | None = None,
+) -> dict:
     """Summarize what's in an area: total places and top categories.
+
+    Give the center as lat/lon, or as `where` — a {"lat", "lon"} dict, a
+    GERS id, or a free-text place name — but not both (and not neither);
+    either way returns {"error": "bad_request"} naming the choice. A
+    `where` given as an id/name adds a compact "resolved": {"name", "id",
+    "lat", "lon", "matched_by"} to the answer; absent for lat/lon or a
+    {lat,lon} where.
 
     Returns a structured {"error": ...} instead of raising if upstream is
     unavailable or the dataset is missing columns this tool depends on.
     """
-    coord_error = _invalid_coord(lat, lon)
-    if coord_error is not None:
-        return coord_error
+    have_lat, have_lon = lat is not None, lon is not None
+    if where is not None and (have_lat or have_lon):
+        return {
+            "error": "bad_request",
+            "detail": "pass either lat and lon, or where — not both",
+        }
+    if where is None and not (have_lat and have_lon):
+        return {
+            "error": "bad_request",
+            "detail": "summarize_area needs lat and lon, or where",
+        }
+    resolved_echo = None
+    if where is not None:
+        item, ref_error = _resolve_location_ref(where)
+        if ref_error is not None:
+            return ref_error
+        lat, lon = item["lat"], item["lon"]
+        if "matched_by" in item:
+            resolved_echo = _location_ref_echo(item)
+    else:
+        coord_error = _invalid_coord(lat, lon)
+        if coord_error is not None:
+            return coord_error
     try:
         result = overture.summarize_area(lat, lon, radius_m)
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
         return _schema_error(e)
-    return _with_degraded_fields(budget.apply_budget(result, "top_categories"))
+    result = _with_degraded_fields(budget.apply_budget(result, "top_categories"))
+    if resolved_echo is not None:
+        result["resolved"] = resolved_echo
+    return result
 
 
 @_tool("Place details")
@@ -1831,19 +2019,26 @@ def suggest_areas(
 
 @_tool("Compare areas")
 def compare_areas(
-    areas: list[dict], radius_m: float = 1000, priorities: list[dict] | None = None
+    areas: list[dict | str], radius_m: float = 1000, priorities: list[dict] | None = None
 ) -> dict:
     """Compare 2-5 areas side by side: category mix, density, and what differs.
 
-    areas is a list of {"lat": ..., "lon": ...} centers sharing one
-    radius_m. Returns per-area total_places, place density per km^2, and
-    category_counts aligned across areas for the top ~10 categories by
-    combined count, plus "differentiators" — those categories ranked by how
-    much they differ, relatively, between areas (the fastest way to answer
-    "how is area A different from area B"). Returns a structured {"error":
-    ...} if areas isn't 2-5 centers, or if upstream is unavailable or the
-    dataset is missing columns this tool depends on for any area (a partial
-    comparison is not returned).
+    areas is a list of centers sharing one radius_m, each a {"lat": ...,
+    "lon": ...} dict, a GERS id, or a free-text place/area name, mixed
+    freely — a named area compares the same radius_m circle around its
+    resolved point as a coordinate would (not its actual boundary; that's a
+    later feature). An id/name that failed to resolve returns an indexed
+    error (areas[i]: ...) with candidates on ambiguity. Any area given by
+    id/name adds "resolved": [{"index": i, "name", "id", "lat", "lon",
+    "matched_by"}, ...] for just those areas; absent when every area was
+    already coordinates. Returns per-area total_places, place density per
+    km^2, and category_counts aligned across areas for the top ~10
+    categories by combined count, plus "differentiators" — those categories
+    ranked by how much they differ, relatively, between areas (the fastest
+    way to answer "how is area A different from area B"). Returns a
+    structured {"error": ...} if areas isn't 2-5 centers, or if upstream is
+    unavailable or the dataset is missing columns this tool depends on for
+    any area (a partial comparison is not returned).
 
     priorities (optional, up to 6) turns the comparison into a scored
     verdict: each entry is {"label": your own term for the criterion,
@@ -1879,15 +2074,17 @@ def compare_areas(
     its score, and a one-line summary restating the winner. Absent when
     priorities weren't given, or a verdict couldn't be scored.
     """
-    try:
-        centers = [(a["lat"], a["lon"]) for a in areas]
-    except (KeyError, TypeError) as e:
-        return {"error": "bad_request", "detail": f"each area needs lat and lon: {e}"}
-    for idx, (clat, clon) in enumerate(centers):
-        coord_error = _invalid_coord(clat, clon)
-        if coord_error is not None:
-            coord_error["detail"] = f"areas[{idx}]: {coord_error['detail']}"
-            return coord_error
+    if not isinstance(areas, list):
+        return {"error": "bad_request", "detail": "areas must be a list of area centers"}
+    resolved_areas, resolve_error = _resolve_location_refs(areas, "areas")
+    if resolve_error is not None:
+        return resolve_error
+    centers = [(r["lat"], r["lon"]) for r in resolved_areas]
+    resolved_echo = [
+        {"index": i, **_location_ref_echo(r)}
+        for i, r in enumerate(resolved_areas)
+        if "matched_by" in r
+    ]
     normalized_priorities = None
     if priorities is not None:
         priority_error = _validate_priorities(priorities)
@@ -1907,6 +2104,8 @@ def compare_areas(
         map_payload = mapexplain.from_compare_areas_result(result, radius_m)
         if map_payload is not None:
             result["map"] = map_payload
+    if resolved_echo:
+        result["resolved"] = resolved_echo
     return result
 
 
@@ -3206,14 +3405,22 @@ def render_map(
 
 @_tool("Reachable area (isochrone)")
 def isochrone(
-    lat: float,
-    lon: float,
+    lat: float | None = None,
+    lon: float | None = None,
     minutes: float = 15,
     mode: _ModeArgWalkDefault = None,
     speed_m_s: float | None = None,
     radius_m: float | None = None,
+    where: dict | str | None = None,
 ) -> dict:
-    """Isochrone: the area reachable from (lat, lon) within `minutes`, by mode.
+    """Isochrone: the area reachable from a point within `minutes`, by mode.
+
+    Give the point as lat/lon, or as `where` — a {"lat", "lon"} dict, a
+    GERS id, or a free-text place name — but not both (and not neither);
+    either way returns {"error": "bad_request"} naming the choice. A
+    `where` given as an id/name adds a compact "resolved": {"name", "id",
+    "lat", "lon", "matched_by"} to the answer; absent for lat/lon or a
+    {lat,lon} where.
 
     Builds a street graph from Overture's transportation theme and runs
     Dijkstra out to the time budget. Each mode
@@ -3237,14 +3444,37 @@ def isochrone(
     {"error": "unsupported_mode"}. minutes must be > 0 and radius_m (if
     given) must be >= 0, else returns {"error": "bad_request"}.
     """
-    coord_error = _invalid_coord(lat, lon)
-    if coord_error is not None:
-        return coord_error
+    have_lat, have_lon = lat is not None, lon is not None
+    if where is not None and (have_lat or have_lon):
+        return {
+            "error": "bad_request",
+            "detail": "pass either lat and lon, or where — not both",
+        }
+    if where is None and not (have_lat and have_lon):
+        return {
+            "error": "bad_request",
+            "detail": "isochrone needs lat and lon, or where",
+        }
+    resolved_echo = None
+    if where is not None:
+        item, ref_error = _resolve_location_ref(where)
+        if ref_error is not None:
+            return ref_error
+        lat, lon = item["lat"], item["lon"]
+        if "matched_by" in item:
+            resolved_echo = _location_ref_echo(item)
+    else:
+        coord_error = _invalid_coord(lat, lon)
+        if coord_error is not None:
+            return coord_error
     mode = preference_store.resolve_mode(mode, preference_store.DEFAULT_MODE_ISOCHRONE)
     try:
-        return routing.isochrone(
+        result = routing.isochrone(
             lat, lon, minutes=minutes, mode=mode, speed_m_s=speed_m_s, radius_m=radius_m
         )
+        if resolved_echo is not None:
+            result["resolved"] = resolved_echo
+        return result
     except routing.UnsupportedMode as e:
         return {
             "error": "unsupported_mode",
@@ -3462,30 +3692,34 @@ def elevation_at(lat: float, lon: float) -> dict:
 
 @_tool("Named-place route")
 def from_to(
-    from_: str,
-    to: str,
+    from_: str | dict,
+    to: str | dict,
     mode: _ModeArgWalkDefault = None,
     include_path: bool = False,
     include_elevation: bool = False,
     prefer: _PreferArg = None,
     confirm: bool = False,
 ) -> dict:
-    """Shortest-path walk, cycle, or drive between two named places.
+    """Shortest-path walk, cycle, or drive between two places.
 
-    Pass the user's place names as from and to. Do not call geocode(),
-    resolve_place(), or geocode_batch() first. Resolves both ends in
-    parallel, builds one street graph, and returns distance, duration,
-    export maps/gpx/text, and the resolved name and coordinates for each
-    end. One hop for a named walk.
+    Pass each of from/to as a free-text place name, a {"lat", "lon"} dict,
+    or a GERS id — mixed freely. Do not call geocode(), resolve_place(), or
+    geocode_batch() first. Plain names resolve in parallel exactly as
+    before; coordinates pass through untouched. Builds one street graph and
+    returns distance, duration, export maps/gpx/text, and a "from"/"to"
+    block carrying whatever the input resolved to (name/id when it was a
+    name or GERS id, lat/lon always).
 
     If a name matches several equally-ranked places, returns
     {"error": "ambiguous_place", "candidates": [...]} instead of picking
-    a city. If the two names resolve a city apart, returns
+    a city. If the two ends resolve a city apart, returns
     {"error": "too_far"} with the resolved ends and the mode cap rather
     than extracting a continent graph. Same per-mode straight-line caps
     as a coordinate route (walk ~7.5 km, cycle ~23.5 km, drive ~95.5 km).
-    An unresolvable name returns {"error": "not_found"}; empty names
-    return {"error": "bad_request"}. Omit mode to use the stored
+    An unresolvable name or GERS id returns {"error": "not_found"}; a
+    malformed from/to (empty string, dict missing lat/lon, wrong type)
+    returns {"error": "bad_request"} — either way the offending side is
+    named in "field": "from" | "to". Omit mode to use the stored
     preferences mode, else walk.
 
     include_path, include_elevation, and prefer pass straight through to
@@ -3498,15 +3732,37 @@ def from_to(
     and they said yes. A warm or cached graph never needs it.
     Omit confirm unless you just asked and they said yes.
     """
-    if not isinstance(from_, str) or not from_.strip():
-        return {"error": "bad_request", "detail": "from must be a non-empty place name"}
-    if not isinstance(to, str) or not to.strip():
-        return {"error": "bad_request", "detail": "to must be a non-empty place name"}
-    origin, dest = _resolve_pair(from_, to)
-    if "error" in origin:
-        return {**origin, "field": "from"}
-    if "error" in dest:
-        return {**dest, "field": "to"}
+    if isinstance(from_, str) and not from_.strip():
+        return {
+            "error": "bad_request",
+            "detail": "from must be a non-empty place name",
+            "field": "from",
+        }
+    if isinstance(to, str) and not to.strip():
+        return {
+            "error": "bad_request",
+            "detail": "to must be a non-empty place name",
+            "field": "to",
+        }
+    # Both ends still plain names (not GERS ids): the original, byte-
+    # identical path — same parallel _resolve_pair call, same
+    # ambiguous_place/not_found shape as before this feature existed.
+    if (
+        isinstance(from_, str) and isinstance(to, str)
+        and not _GERS_ID_RE.match(from_.strip()) and not _GERS_ID_RE.match(to.strip())
+    ):
+        origin, dest = _resolve_pair(from_, to)
+        if "error" in origin:
+            return {**origin, "field": "from"}
+        if "error" in dest:
+            return {**dest, "field": "to"}
+    else:
+        origin, origin_error = _resolve_location_ref(from_)
+        if origin_error is not None:
+            return {**origin_error, "field": "from"}
+        dest, dest_error = _resolve_location_ref(to)
+        if dest_error is not None:
+            return {**dest_error, "field": "to"}
     mode = preference_store.resolve_mode(mode, "walk")
     if mode not in routing.MODE_CONFIG:
         return {
@@ -3517,10 +3773,12 @@ def from_to(
     straight_m = geo.haversine_m(origin["lat"], origin["lon"], dest["lat"], dest["lon"])
     cap_m = routing.ROUTE_MAX_STRAIGHT_LINE_M[mode]
     if straight_m > cap_m:
+        origin_label = origin.get("name") or f"({origin['lat']}, {origin['lon']})"
+        dest_label = dest.get("name") or f"({dest['lat']}, {dest['lon']})"
         return {
             "error": "too_far",
             "detail": (
-                f"{origin['name']!r} and {dest['name']!r} are {round(straight_m)} m "
+                f"{origin_label!r} and {dest_label!r} are {round(straight_m)} m "
                 f"apart; from_to stays inside one city ({mode} cap {round(cap_m)} m)"
             ),
             "from": origin,
@@ -3918,7 +4176,7 @@ def verify_claims(lat: float, lon: float, claims: list[dict]) -> dict:
 
 @_tool("Best visiting order for stops")
 def optimize_route(
-    stops: list[dict],
+    stops: list[dict | str],
     mode: _ModeArgDriveDefault = None,
     roundtrip: bool = True,
     start_index: int = 0,
@@ -3926,10 +4184,14 @@ def optimize_route(
     """Best order to visit several stops: multi-stop route ordering (a small TSP).
 
     Answers "I have these five errands, what order costs least" — stops is a
-    list of 2-10 {"lat": ..., "lon": ..., "name": ... (optional)} points, and
-    the answer is the cheapest visiting order over the real street graph, not
-    a straight-line guess. Solved exactly (Held-Karp over the routed cost
+    list of 2-10 points, each a {"lat": ..., "lon": ..., "name": ...
+    (optional)} dict, a GERS id, or a free-text name, mixed freely. The
+    answer is the cheapest visiting order over the real street graph, not a
+    straight-line guess. Solved exactly (Held-Karp over the routed cost
     matrix), so it is the optimum, not a nearest-neighbour approximation.
+    Any stop given by id/name that failed to resolve returns an indexed
+    error (stops[i]: ...) with candidates on ambiguity — the whole call
+    fails, not silently drops that stop.
 
     Returns {"order": [stop indices, in visiting order], "legs":
     [{"from_idx", "to_idx", "distance_m", "duration_s"}, ...],
@@ -3941,7 +4203,10 @@ def optimize_route(
     with every stop as a waypoint, and a printable list that keeps any
     names the caller passed. If a stop already carries confidence or
     operating_status (from a prior place lookup), the response adds
-    verify_before_going naming the 1–2 weakest.
+    verify_before_going naming the 1–2 weakest. Any stop given as an id or
+    name adds "resolved": [{"stop": i, "name", "id", "lat", "lon",
+    "matched_by"}, ...] for just those stops — plain {lat,lon} stops need
+    no echo and the key is absent when every stop was already coordinates.
 
     start_index (default 0) is fixed as the first stop. roundtrip=true (the
     default) returns to it; the closing leg is in "legs" but the start is not
@@ -3958,15 +4223,21 @@ def optimize_route(
     approximation, never a crash.
 
     Errors are structured, not raised: fewer than 2 or more than 10 stops, a
-    stop missing numeric lat/lon, or an out-of-range start_index return
-    {"error": "bad_request"} naming the offending stop index; an unknown mode
-    returns {"error": "unsupported_mode"}; a stop set whose two furthest-apart
-    stops are further apart than the mode's straight-line cap (see `route`)
-    returns {"error": "route_too_long"}; a stop with no usable street node near it returns
-    {"error": "no_graph_nearby"} naming that stop's index.
+    stop that is not a valid location reference, or an out-of-range
+    start_index return {"error": "bad_request"} naming the offending stop
+    index; an unresolvable name/id returns {"error": "not_found"} or
+    {"error": "ambiguous_place", "candidates": [...]}, indexed the same way;
+    an unknown mode returns {"error": "unsupported_mode"}; a stop set whose
+    two furthest-apart stops are further apart than the mode's straight-line
+    cap (see `route`) returns {"error": "route_too_long"}; a stop with no
+    usable street node near it returns {"error": "no_graph_nearby"} naming
+    that stop's index.
     """
     if not isinstance(stops, list):
-        return {"error": "bad_request", "detail": "stops must be a list of {lat, lon} points"}
+        return {
+            "error": "bad_request",
+            "detail": "stops must be a list of {lat, lon} points, GERS ids, or place names",
+        }
     if not (routing.OPTIMIZE_MIN_STOPS <= len(stops) <= routing.OPTIMIZE_MAX_STOPS):
         return {
             "error": "bad_request",
@@ -3975,20 +4246,15 @@ def optimize_route(
                 f"{routing.OPTIMIZE_MAX_STOPS} points, got {len(stops)}"
             ),
         }
-    points = []
-    for idx, stop in enumerate(stops):
-        try:
-            lat, lon = float(stop["lat"]), float(stop["lon"])
-        except (KeyError, TypeError, ValueError) as e:
-            return {
-                "error": "bad_request",
-                "detail": f"stops[{idx}]: each stop needs numeric lat and lon: {e}",
-            }
-        coord_error = _invalid_coord(lat, lon)
-        if coord_error is not None:
-            coord_error["detail"] = f"stops[{idx}]: {coord_error['detail']}"
-            return coord_error
-        points.append((lat, lon))
+    resolved_stops, resolve_error = _resolve_location_refs(stops, "stops")
+    if resolve_error is not None:
+        return resolve_error
+    points = [(r["lat"], r["lon"]) for r in resolved_stops]
+    resolved_echo = [
+        {"stop": i, **_location_ref_echo(r)}
+        for i, r in enumerate(resolved_stops)
+        if "matched_by" in r
+    ]
     if not isinstance(start_index, int) or isinstance(start_index, bool):
         return {"error": "bad_request", "detail": "start_index must be an integer"}
     if not 0 <= start_index < len(points):
@@ -4025,22 +4291,28 @@ def optimize_route(
     if "error" not in result:
         # Names never enter the TSP; they ride through here so the
         # printable list / GPX waypoints say "bakery" instead of "Stop 3".
+        # A resolved id/name stop's canonical name is used when the caller
+        # didn't also pass its own "name" override.
         named = []
-        for point, raw in zip(points, stops):
+        for point, resolved, raw in zip(points, resolved_stops, stops):
             row = {"lat": point[0], "lon": point[1]}
-            if isinstance(raw, dict):
-                name = raw.get("name")
-                if isinstance(name, str) and name.strip():
-                    row["name"] = name.strip()
+            name = raw.get("name") if isinstance(raw, dict) else resolved.get("name")
+            if isinstance(name, str) and name.strip():
+                row["name"] = name.strip()
             named.append(row)
         result["export"] = export.from_optimize_result(named, result)
         # Caller-supplied stop fields (name/confidence/operating_status) are
         # already in hand — no extra lookup. routing.py is untouched (#312).
         # verify_before_going skips bare {lat, lon} stops — those are not
-        # place lookups and must not become "low confidence" warnings.
-        line = honesty.verify_before_going(stops)
+        # place lookups and must not become "low confidence" warnings. A
+        # string stop (id/name) is not a place-lookup Mapping either, so it
+        # is swapped for {} here rather than handed to a `field in place`
+        # check that expects a Mapping — index alignment is preserved.
+        line = honesty.verify_before_going([s if isinstance(s, dict) else {} for s in stops])
         if line:
             result = {**result, "verify_before_going": line}
+        if resolved_echo:
+            result["resolved"] = resolved_echo
     return result
 
 
@@ -4709,8 +4981,8 @@ def _publish_from_keyword(mcp_server) -> None:
 
         class FromToArguments(ArgModelBase):
             model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
-            from_: str = Field(alias="from")
-            to: str
+            from_: str | dict = Field(alias="from")
+            to: str | dict
             mode: _ModeArgWalkDefault = None
             include_path: bool = False
             include_elevation: bool = False

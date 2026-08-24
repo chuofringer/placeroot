@@ -9,6 +9,25 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- LocationRef, wave 1 (docs/ROADMAP.md §4.1): `optimize_route`'s `stops`,
+  `compare_areas`'s `areas`, `isochrone`'s and `summarize_area`'s new
+  `where`, and `from_to`'s `from`/`to` now accept a location as
+  `{"lat": ..., "lon": ...}`, a GERS id string, or a free-text place name
+  — mixed freely inside a list. Resolving a name/id no longer requires a
+  separate `geocode`/`resolve_place` round-trip first. A string input adds
+  a compact `resolved`/`from`/`to` echo (`name`, `id`, `lat`, `lon`,
+  `matched_by`); a plain `{lat, lon}` input produces a byte-identical
+  answer to before this change — no new keys. List parameters resolve
+  their string entries in parallel and report the first failing index as
+  `{"error": ..., "index": i, "detail": "stops[i]: ..."}` so the agent can
+  retry that one argument; an ambiguous name still returns
+  `ambiguous_place` with `candidates`, indexed the same way. `optimize_route`
+  and `compare_areas` on named areas compare the same `radius_m` circle
+  around the resolved point as a coordinate input would — polygon-accurate
+  area comparison is a later wave. `route`, `distance_matrix`,
+  `travel_time_matrix`, `meeting_point`, `ground_location` and the rest of
+  the surface are out of scope for this wave; `find_near` and `from_to`
+  are not deprecated.
 - Stateless pagination cursors (docs/ROADMAP.md §4.4): a `find_places` or
   `find_near` answer that's truncated — either token-budget-trimmed, or
   because the scan stopped at `limit`/`MAX_ROWS` while more matching rows
