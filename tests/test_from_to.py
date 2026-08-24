@@ -126,6 +126,10 @@ def test_from_to_unresolved_name(monkeypatch):
     monkeypatch.setattr(geocode, "resolve_named_place", lambda *_a, **_k: None)
     result = _call_from_to("Nowhereville", "Also Nowhere")
     assert result["error"] == "not_found"
+    # Roadmap §4, next tier: not_found from name resolution names the next
+    # move rather than leaving the caller to re-guess.
+    assert result["try"]
+    assert len(result["try"]) < 200
 
 
 def test_from_to_unsupported_mode(monkeypatch):

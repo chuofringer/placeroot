@@ -35,7 +35,8 @@ def test_malformed_point_gets_a_per_row_error_without_failing_the_batch():
     rows = result["results"]
     assert len(rows) == 2
     assert rows[0]["source"] == "address"
-    assert "error" in rows[1]
+    assert rows[1]["error"] == "bad_request"
+    assert rows[1]["detail"]
     assert rows[1]["lat"] is None
     assert rows[1]["lon"] == CENTER_LON
 

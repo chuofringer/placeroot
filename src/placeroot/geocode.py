@@ -3114,8 +3114,11 @@ def geocode_batch(queries: list[str], limit_per_query: int = 3) -> list[dict]:
     Opens the name table (and its alt-name sibling) once, then looks every
     query up against that same path. A two-name walk must not pay N cold
     S3 scans or N table materializations. Each row is the top candidate
-    for that query, or {"query", "error": "no match"}; input order is
-    preserved. The caller (server.py) applies the 20-query cap.
+    for that query, or the standard error envelope {"query", "error":
+    "not_found", "detail"} (roadmap §4, next tier: unified per-row batch
+    error shape — a bare "no match" string used to stand in its place);
+    input order is preserved. The caller (server.py) applies the 20-query
+    cap.
     """
     local_table = _local_divisions_table()
     alt_table = _local_alt_names_table(local_table)
@@ -3125,7 +3128,11 @@ def geocode_batch(queries: list[str], limit_per_query: int = 3) -> list[dict]:
             query, limit_per_query, local_table=local_table, alt_table=alt_table,
         )["results"]
         if not hits:
-            rows.append({"query": query, "error": "no match"})
+            rows.append({
+                "query": query,
+                "error": "not_found",
+                "detail": f"no match for {query!r}",
+            })
             continue
         top = hits[0]
         rows.append({
