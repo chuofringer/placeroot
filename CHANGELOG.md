@@ -9,6 +9,26 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `geocode_address`: an honest number-miss fallback and a `match` tier field
+  (#414). A house number with no address point on an otherwise-matched
+  street no longer just comes back empty — `results` now holds the
+  street's real nearest known numbers bracketing the miss (below and
+  above, or the 1-2 nearest when the miss is off one end of the known
+  range), each row its own genuine coordinates, plus a note naming the
+  miss and its neighbors. No coordinate is ever synthesized for the
+  missing number — Overture's addresses theme is points only, so
+  interpolating one (as Pelias/Nominatim do) would be invented precision;
+  PlaceRoot discloses the gap instead. Every answer now carries an
+  additive `match` field — `"exact"` (a number was asked for and found),
+  `"nearest_number"` (asked for, missed, bracketed from the street's own
+  points), or `"street"` (no number asked for, the dataset couldn't filter
+  on one, or the street had nothing to bracket the miss with) — present
+  whenever a street was scanned at all. **Response-shape addition**
+  (additive; existing consumers are unaffected, an exact-number answer is
+  byte-identical apart from the new field). The fallback costs one extra
+  local DuckDB query, run only on a miss, against the same bbox/street
+  parquet the exact-number scan already pulled through the tile cache —
+  not a second remote scan.
 - Declared MCP `outputSchema` on all 42 tools (docs/ROADMAP.md §4 feature 3
   / §5.3) — the one MCP-conformance gap docs/benchmarks-vs.md conceded to
   Mapbox is closed. Hand-authored, not derived: every tool returns a bare,
