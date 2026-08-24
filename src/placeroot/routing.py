@@ -2713,17 +2713,38 @@ def route(
     return result
 
 
+# Roadmap §4, next tier: no_route names the next move rather than leaving
+# the caller to re-guess. Tuned per mode since the honest next step differs
+# — walk/cycle reach footpaths, ferries-adjacent islands, and pedestrian-
+# only bridges that drive cannot, so a drive dead end is more often a real
+# gap than a walk one; no mode here invents a capability this server
+# doesn't have (no transit, no ferry routing).
+_NO_ROUTE_TRY = {
+    "drive": (
+        "check the points are on the same landmass/road network; "
+        "walk or cycle mode reaches footpaths and pedestrian bridges drive cannot"
+    ),
+    "cycle": (
+        "check the points are on the same landmass/road network; "
+        "walk mode reaches footpaths and stairs cycle cannot"
+    ),
+    "walk": "check the points are on the same landmass and connected by mapped path or road",
+}
+
+
 def _no_route_result(
     from_lat: float, from_lon: float, to_lat: float, to_lon: float, mode: str
 ) -> dict:
     """The structured "both points snapped, nothing connects them" answer,
-    shared by route() and places_along_route()."""
+    shared by route() and places_along_route(). Carries "try" naming the
+    next move, tuned per mode (roadmap §4)."""
     return {
         "error": "no_route",
         "detail": "no path found between the points in the searched area",
         "mode": mode,
         "from": {"lat": from_lat, "lon": from_lon},
         "to": {"lat": to_lat, "lon": to_lon},
+        "try": _NO_ROUTE_TRY.get(mode, _NO_ROUTE_TRY["walk"]),
     }
 
 

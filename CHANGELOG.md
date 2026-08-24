@@ -9,6 +9,24 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `try` hints on dead-end errors (docs/ROADMAP.md §4, next tier): a
+  `not_found` from resolving a free-text name or a LocationRef GERS id
+  (`from_to`, `find_near`, and every LocationRef-accepting tool — they all
+  route through the same two internal helpers, `_resolve_named_place` and
+  `_resolve_location_ref`) now carries a short machine-actionable `"try"`
+  string naming the next move — e.g. `"resolve_place with near_lat/near_lon
+  or city to disambiguate; or geocode for street addresses"`. `route`'s and
+  `places_along_route`'s `no_route` (both points snapped, nothing connects
+  them) carries a mode-tuned `"try"` — walk/cycle name the footpaths and
+  pedestrian bridges drive cannot reach; walk's own hint stays a plain
+  connectivity check rather than pointing at a nonexistent "more capable"
+  mode. `resolve_place`'s existing `need`/`retry_with` sketch already
+  covers its own no-match case, so it was left alone — the two errors serve
+  the same purpose through different shapes, and adding "try" there would
+  be redundant. Every other `not_found` site (a caller-supplied
+  `division_id`/GERS id that doesn't exist, rather than a name that failed
+  to resolve) was deliberately left unchanged — see the PR body's
+  site → hint table.
 - LocationRef, wave 2 (docs/ROADMAP.md §4.1): `distance_matrix`'s and
   `travel_time_matrix`'s `origins`/`destinations`, `meeting_point`'s
   `origins`, and `ground_location`'s and `within_distance`'s new `where`
@@ -144,6 +162,22 @@ fixing behavior is patch.
   skipped for this PR (see the PR body) rather than shipped half-honest.
 
 ### Changed
+- **Breaking: per-row batch errors now use the standard `{"error", "detail"}`
+  envelope (docs/ROADMAP.md §4, next tier).** `geocode_batch`'s no-match
+  rows changed from `{"query", "error": "no match"}` to `{"query", "error":
+  "not_found", "detail": "no match for '...'"}`; `resolve_place_batch`'s
+  no-match rows from `{"gers_id", "error": "not found"}` (note the space)
+  to `{"gers_id", "error": "not_found", "detail": "no place matched GERS id
+  '...'"}`; `reverse_geocode_batch`'s malformed-point rows from a bare
+  prose string in `"error"` to `{"lat", "lon", "error": "bad_request",
+  "detail": "<the old prose>"}`. An agent or downstream tool that
+  string-matched the old bare `"error"` values (`"no match"`, `"not
+  found"`, or the coordinate-range prose) must switch to checking `error
+  == "not_found"` / `"bad_request"` and reading `detail` for the message.
+  Row position/order and the outer `{"results": [...]}` shape are
+  unchanged; only the value under each failed row's own `"error"` key
+  moved to a machine-readable code plus a separate `"detail"` sentence,
+  matching every single-call sibling's error shape.
 - **Breaking: `find_places`' default answer shape changed.** Rows now
   default to `detail="compact"` instead of the full 13-field row (id,
   name, category, basic_category, operating_status, confidence, brand,

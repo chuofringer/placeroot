@@ -55,6 +55,10 @@ def test_gers_shaped_id_matching_nothing_is_not_found():
     assert item is None
     assert err["error"] == "not_found"
     assert "GERS id" in err["detail"]
+    # Roadmap §4, next tier: not_found from a LocationRef GERS id names the
+    # next move rather than leaving the caller to re-guess.
+    assert err["try"]
+    assert len(err["try"]) < 200
 
 
 def test_free_text_name_resolves_via_resolve_named_place(monkeypatch):
@@ -90,6 +94,10 @@ def test_unresolvable_name_is_not_found(monkeypatch):
     item, err = server._resolve_location_ref("Nowhere At All")
     assert item is None
     assert err["error"] == "not_found"
+    # Roadmap §4, next tier: not_found from name resolution names the next
+    # move rather than leaving the caller to re-guess.
+    assert err["try"]
+    assert len(err["try"]) < 200
 
 
 @pytest.mark.parametrize(

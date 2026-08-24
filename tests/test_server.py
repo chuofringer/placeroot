@@ -141,7 +141,8 @@ def test_reverse_geocode_batch_flags_out_of_range_point_without_failing_batch():
     rows = result["results"]
     assert len(rows) == 2
     assert "error" not in rows[0]
-    assert "error" in rows[1]
+    assert rows[1]["error"] == "bad_request"
+    assert rows[1]["detail"]
 
 
 def test_admin_lookup_rejects_out_of_range_coord():

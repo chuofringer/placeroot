@@ -149,6 +149,12 @@ def test_route_no_path_returns_structured_no_route_result():
 
     assert result["error"] == "no_route"
     assert "detail" in result
+    # Roadmap §4, next tier: no_route names the next move, tuned per mode —
+    # here drive is blocked by the footway-only bridge, so the hint points
+    # at walk/cycle rather than an invented capability.
+    assert result["try"]
+    assert len(result["try"]) < 200
+    assert "walk" in result["try"] or "cycle" in result["try"]
 
 
 def test_route_retry_radius_used_after_empty_first_graph():

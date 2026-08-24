@@ -513,11 +513,28 @@ def _with_name_fallback_note(
     return payload
 
 
+# Roadmap §4, next tier: not_found from a name-resolution dead end names the
+# next move rather than leaving the caller to guess. resolve_place carries
+# its own "need"/"retry_with" sketch for the same situation (a plain
+# `resolve_place()` call with no rows) — this "try" string is for the
+# tools that resolve a name internally and cannot offer that structured
+# retry, since they don't expose the intermediate resolve step for the
+# caller to redo more specifically. core (the default profile) always
+# carries resolve_place and geocode, so naming them here holds for the
+# common case; a narrower PLACEROOT_TOOLS selection may not register one.
+_NAME_NOT_FOUND_TRY = (
+    "resolve_place with near_lat/near_lon or city to disambiguate; "
+    "or geocode for street addresses"
+)
+
+
 def _resolve_named_place(query: str) -> dict:
     """A free-text name -> compact {name, lat, lon, id, type} or an error.
 
     Shared by from_to and find_near. Ambiguous same-score names return
-    candidates instead of silently picking a city.
+    candidates instead of silently picking a city. An unresolvable name
+    returns {"error": "not_found", "detail", "try"} — "try" names the next
+    move (roadmap §4).
     """
     if not isinstance(query, str) or not query.strip():
         return {"error": "bad_request", "detail": "place name must be a non-empty string"}
@@ -534,7 +551,11 @@ def _resolve_named_place(query: str) -> dict:
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     if resolved is None:
-        return {"error": "not_found", "detail": f"no place matched {query!r}"}
+        return {
+            "error": "not_found",
+            "detail": f"no place matched {query!r}",
+            "try": _NAME_NOT_FOUND_TRY,
+        }
     return resolved
 
 
@@ -592,6 +613,7 @@ def _resolve_location_ref(ref) -> tuple[dict | None, dict | None]:
     `error` is a structured envelope ready to return as-is (bad_request,
     not_found, ambiguous_place, or an upstream/schema failure) — callers
     that resolve several refs prefix its `detail` with the failing index.
+    A not_found also carries "try" naming the next move (roadmap §4).
     """
     if isinstance(ref, dict):
         lat, lon = ref.get("lat"), ref.get("lon")
@@ -617,6 +639,10 @@ def _resolve_location_ref(ref) -> tuple[dict | None, dict | None]:
                     "error": "not_found",
                     "detail": (
                         f"{text!r} looked like a GERS id; no feature has it in this release"
+                    ),
+                    "try": (
+                        "resolve_place or geocode to find the right id; "
+                        "or pass a {\"lat\", \"lon\"} location instead"
                     ),
                 }
             return {
@@ -3103,11 +3129,12 @@ def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
     the top candidate.
     Returns {"results": [{"query", "name", "type", "lat", "lon", "id"
     (GERS), "rank_score"}, ...]}, one row per query, in input order — a
-    query with no match gets {"query", "error": "no match"} instead, and
-    does not fail the rest of the batch. queries is capped at 20; a longer
-    list returns a structured {"error": ...} rather than truncating
-    silently. Budgeted like every other tool. Returns a structured
-    {"error": ...} instead of raising if the remote scan itself fails.
+    query with no match gets the standard error envelope {"query",
+    "error": "not_found", "detail"} instead, and does not fail the rest of
+    the batch. queries is capped at 20; a longer list returns a structured
+    {"error": ...} rather than truncating silently. Budgeted like every
+    other tool. Returns a structured {"error": ...} instead of raising if
+    the remote scan itself fails.
     """
     if len(queries) > 20:
         return {
@@ -3231,8 +3258,9 @@ def resolve_place_batch(gers_ids: list[str]) -> dict:
     full place_details payload (addresses, websites, phones, socials,
     sources, brand, confidence, ...). Use place_details for full detail on
     a single id. Results are returned in input order; an id that doesn't
-    resolve gets {"gers_id", "error": "not found"} instead and does not
-    fail the rest of the batch. gers_ids is capped at 25; a longer list
+    resolve gets the standard error envelope {"gers_id", "error":
+    "not_found", "detail"} instead and does not fail the rest of the
+    batch. gers_ids is capped at 25; a longer list
     returns a structured {"error": ...} rather than truncating silently.
     An empty list returns {"results": []}. Budgeted like every other tool.
     Returns a structured {"error": ...} instead of raising if the remote
@@ -3249,7 +3277,11 @@ def resolve_place_batch(gers_ids: list[str]) -> dict:
         for gers_id in gers_ids:
             place = overture.place_details(id=gers_id)
             if place is None:
-                rows.append({"gers_id": gers_id, "error": "not found"})
+                rows.append({
+                    "gers_id": gers_id,
+                    "error": "not_found",
+                    "detail": f"no place matched GERS id {gers_id!r}",
+                })
                 continue
             rows.append(
                 {
@@ -3445,8 +3477,10 @@ def reverse_geocode_batch(points: list[dict]) -> dict:
     row per point in `points`, in the same order — each row is whatever
     reverse_geocode(lat, lon) returns (address/divisions chain, or a
     "divisions_only" degrade — see reverse_geocode's docstring). A
-    malformed point (missing or non-numeric lat/lon) doesn't fail the
-    whole batch — it yields a per-row {"error": ...} in its slot instead.
+    malformed point (missing/non-numeric lat/lon, or a lat/lon out of
+    range) doesn't fail the whole batch — it yields the standard error
+    envelope {"lat", "lon", "error": "bad_request", "detail"} in its slot
+    instead.
     """
     if len(points) > 20:
         return {
@@ -3465,13 +3499,19 @@ def reverse_geocode_batch(points: list[dict]) -> dict:
                     {
                         "lat": p.get("lat") if isinstance(p, dict) else None,
                         "lon": p.get("lon") if isinstance(p, dict) else None,
-                        "error": "each point needs numeric lat and lon",
+                        "error": "bad_request",
+                        "detail": "each point needs numeric 'lat' and 'lon'",
                     }
                 )
                 continue
             coord_error = _invalid_coord(lat, lon)
             if coord_error is not None:
-                rows.append({"lat": lat, "lon": lon, "error": coord_error["detail"]})
+                rows.append({
+                    "lat": lat,
+                    "lon": lon,
+                    "error": "bad_request",
+                    "detail": coord_error["detail"],
+                })
                 continue
             rows.append(geocoding.reverse_geocode(lat, lon))
     except overture.UpstreamUnavailable as e:
@@ -3858,8 +3898,9 @@ def route(
     {"error": "bad_request"}. If no usable graph or street node is found
     near either point, returns {"error": "no_graph_nearby"}. If both points
     snap into the graph but no path connects them (e.g. disconnected
-    islands of road data), returns {"error": "no_route"} rather than
-    raising. If the extraction graph hit its internal size cap, the result
+    islands of road data), returns {"error": "no_route", "try": ...}
+    rather than raising — "try" is a mode-tuned next move (roadmap §4). If
+    the extraction graph hit its internal size cap, the result
     carries "truncated": true — the route may be suboptimal or incomplete.
 
     include_path=true adds "path", a GeoJSON LineString from the origin's

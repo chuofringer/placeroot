@@ -1124,7 +1124,11 @@ def test_geocode_batch_mixed_resolvable_and_no_match():
     assert rows[0]["query"] == "Brooklyn"
     assert "error" not in rows[0]
     assert rows[0]["name"] == "Brooklyn"
-    assert rows[1] == {"query": "Nonexistentplacexyz123", "error": "no match"}
+    assert rows[1] == {
+        "query": "Nonexistentplacexyz123",
+        "error": "not_found",
+        "detail": "no match for 'Nonexistentplacexyz123'",
+    }
 
 
 def test_geocode_batch_over_cap_returns_error_not_partial_results():
