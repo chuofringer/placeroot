@@ -1,7 +1,8 @@
-from placeroot import overture
+from placeroot import geocode, overture, server
 
 from ._geo import haversine_m
 from .conftest import CENTER_LAT, CENTER_LON, raw_rows
+from .test_gers_lookup import PLACE_ID
 
 
 def _within(radius_m):
@@ -56,3 +57,60 @@ def test_uncategorized_zero_in_fully_categorized_area():
     result = overture.summarize_area(40.698570097831244, -73.90215789910143, 100)
     assert result["total_places"] > 0
     assert result["uncategorized_count"] == 0
+
+
+# --- LocationRef (roadmap #4.1): `where`, mutually exclusive with lat/lon ---
+
+
+def test_summarize_area_needs_lat_lon_or_where():
+    result = server.summarize_area()
+    assert result["error"] == "bad_request"
+
+
+def test_summarize_area_rejects_both_latlon_and_where():
+    result = server.summarize_area(
+        lat=CENTER_LAT, lon=CENTER_LON, where={"lat": CENTER_LAT, "lon": CENTER_LON}
+    )
+    assert result["error"] == "bad_request"
+
+
+def test_summarize_area_plain_latlon_has_no_resolved_key():
+    result = server.summarize_area(CENTER_LAT, CENTER_LON, radius_m=1000)
+    assert "error" not in result
+    assert "resolved" not in result
+
+
+def test_summarize_area_where_coordinate_dict_has_no_resolved_key():
+    result = server.summarize_area(where={"lat": CENTER_LAT, "lon": CENTER_LON}, radius_m=1000)
+    assert "error" not in result
+    assert "resolved" not in result
+
+
+def test_summarize_area_where_gers_id_adds_resolved():
+    """Real fixture GERS id (see tests/test_gers_lookup.py) — no monkeypatch."""
+    result = server.summarize_area(where=PLACE_ID, radius_m=1000)
+    assert "error" not in result
+    assert result["resolved"]["matched_by"] == "gers_id"
+    assert result["resolved"]["id"] == PLACE_ID
+
+
+def test_summarize_area_where_name_adds_resolved(monkeypatch):
+    def fake_resolve(query):
+        assert query == "Cluster Place 000"
+        return {
+            "name": query, "lat": CENTER_LAT, "lon": CENTER_LON,
+            "id": "gers-cluster", "type": "place",
+        }
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    result = server.summarize_area(where="Cluster Place 000", radius_m=1000)
+    assert "error" not in result
+    assert result["resolved"] == {
+        "name": "Cluster Place 000", "id": "gers-cluster",
+        "lat": CENTER_LAT, "lon": CENTER_LON, "matched_by": "name",
+    }
+
+
+def test_summarize_area_where_bad_ref_is_bad_request():
+    result = server.summarize_area(where={"lat": 91.0, "lon": 0.0})
+    assert result["error"] == "bad_request"

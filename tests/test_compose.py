@@ -33,12 +33,16 @@ def test_publish_from_keyword_fails_loudly_if_mcp_internals_move():
         server._publish_from_keyword(_Broken())
 
 
-def test_from_to_schema_requires_from_and_to_as_strings():
+def test_from_to_schema_accepts_from_and_to_as_locationref():
+    # LocationRef wave 1 (roadmap #4.1): from/to widened to str | {lat,lon}
+    # dict (a GERS id travels as the string arm) — no longer bare strings.
     schema = _tools()["from_to"].input_schema
     props = schema["properties"]
     required = set(schema.get("required") or [])
-    assert "from" in props and props["from"].get("type") == "string"
-    assert "to" in props and props["to"].get("type") == "string"
+    for name in ("from", "to"):
+        assert name in props
+        types = {branch.get("type") for branch in props[name]["anyOf"]}
+        assert types == {"string", "object"}
     assert required >= {"from", "to"}
     assert "from_" not in props
     for coord in ("from_lat", "from_lon", "to_lat", "to_lon", "lat", "lon"):

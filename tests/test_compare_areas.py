@@ -2,7 +2,7 @@
 
 import pytest
 
-from placeroot import overture, server
+from placeroot import errors, geocode, overture, server
 
 from .conftest import CENTER_LAT, CENTER_LON
 
@@ -67,6 +67,46 @@ def test_server_bad_request_on_wrong_area_count():
 def test_server_bad_request_on_malformed_area():
     result = server.compare_areas([{"lat": CENTER_LAT}, {"lat": 78.0, "lon": 15.0}])
     assert result["error"] == "bad_request"
+
+
+# --- LocationRef (roadmap #4.1) -------------------------------------------
+
+
+def test_coordinate_only_areas_have_no_resolved_key():
+    result = server.compare_areas(
+        [{"lat": CENTER_LAT, "lon": CENTER_LON}, {"lat": 78.0, "lon": 15.0}], radius_m=1000
+    )
+    assert "error" not in result
+    assert "resolved" not in result
+
+
+def test_mixed_areas_list_with_a_named_area(monkeypatch):
+    def fake_resolve(query):
+        assert query == "Arctic Base"
+        return {"name": query, "lat": 78.0, "lon": 15.0, "id": "gers-arctic", "type": "place"}
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    result = server.compare_areas(
+        [{"lat": CENTER_LAT, "lon": CENTER_LON}, "Arctic Base"], radius_m=1000
+    )
+    assert "error" not in result
+    assert result["resolved"] == [
+        {
+            "index": 1, "name": "Arctic Base", "id": "gers-arctic",
+            "lat": 78.0, "lon": 15.0, "matched_by": "name",
+        }
+    ]
+
+
+def test_ambiguous_area_name_is_an_indexed_error(monkeypatch):
+    def fake_resolve(query):
+        raise errors.AmbiguousPlace(query, candidates=[{"name": "X"}])
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    result = server.compare_areas(["Ambiguous", {"lat": 78.0, "lon": 15.0}], radius_m=1000)
+    assert result["error"] == "ambiguous_place"
+    assert result["index"] == 0
+    assert result["detail"].startswith("areas[0]: ")
 
 
 def test_server_structured_error_on_unreachable_upstream(tmp_path):
