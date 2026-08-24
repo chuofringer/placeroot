@@ -9,6 +9,31 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- Stateless pagination cursors (docs/ROADMAP.md §4.4): a `find_places` or
+  `find_near` answer that's truncated — either token-budget-trimmed, or
+  because the scan stopped at `limit`/`MAX_ROWS` while more matching rows
+  exist — now carries `cursor`, an opaque, self-contained token encoding
+  `(query hash, Overture release, row offset)`. Pass it back with the same
+  arguments to fetch the next page; a cursor for a different query (or a
+  malformed one) returns `{"error": "bad_cursor", ...}` naming the
+  mismatch, and a cursor issued against an older Overture release is
+  honored anyway — served against the current release, with a one-line
+  `note` that rows may have shifted, rather than failing the continuation.
+  No server-side session state: correctness relies only on PlaceRoot's
+  answers coming from a pinned, immutable release. `find_places`' point
+  path gained a stable `id` tiebreak on its distance ordering (the division
+  path already had one) so pages never overlap or skip on tied distances.
+  Purely additive: `cursor` appears only on a truncated answer, and
+  `truncated`/`omitted_count` keep their existing meaning for the
+  budget-trim case; a scan that hits `limit` with more rows available is a
+  second, previously-unsignaled kind of truncation that this also now
+  flags (`truncated: true`, no `omitted_count` since the total isn't
+  known). Name-fallback answers (`matched_by: alt_name`/`fuzzy`, #373)
+  never carry a cursor — that pool is small and paginating it honestly
+  isn't worth the complexity. `geocode`, `within_distance`, `water_near`,
+  `changes_in_area` and other list tools are out of scope for this change;
+  the new `placeroot.cursor` module is a standalone, reusable helper so
+  they can adopt it later.
 - Published input schemas now carry a JSON Schema `enum` plus a stated
   effective default for parameters whose valid values used to live only
   in prose: `mode` (every tool that takes one — `route`, `isochrone`,

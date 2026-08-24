@@ -181,7 +181,15 @@ def test_find_places_tool_wraps_results_and_applies_budget():
     result = server.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=10)
     assert "results" in result
     assert len(result["results"]) == 10
-    assert "truncated" not in result  # 10 small rows comfortably fit the default budget
+    # The 10 returned rows comfortably fit the default token budget, but
+    # this dense fixture cluster has more than 10 matches within 1000m
+    # (see test_limit_fill) — pagination cursors (ROADMAP §4.4) overfetch
+    # one row beyond limit to detect exactly that, so this answer is
+    # honestly truncated (more rows exist) and carries a cursor, even
+    # though no row was ever dropped for budget reasons.
+    assert result["truncated"] is True
+    assert "omitted_count" not in result  # nothing was budget-dropped
+    assert "cursor" in result
 
 
 def test_summarize_area_tool():

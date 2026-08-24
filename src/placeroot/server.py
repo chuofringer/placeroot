@@ -68,6 +68,7 @@ from placeroot import (
     water,
 )
 from placeroot import claims as claim_checks
+from placeroot import cursor as cursor_mod
 from placeroot import geocode as geocoding
 from placeroot import (
     preferences as preference_store,
@@ -243,6 +244,13 @@ _OperatingStatusArg = Annotated[
         description="Business-lifecycle status filter (relabeled or raw Overture value, "
         "case-insensitive). Default: no filter.",
         json_schema_extra={"enum": overture.accepted_operating_status_values()},
+    ),
+]
+_CursorArg = Annotated[
+    str | None,
+    Field(
+        description="Continuation cursor from a previous truncated answer; valid for the "
+        "same query on the same data release.",
     ),
 ]
 
@@ -522,6 +530,7 @@ def find_places(
     has_phone: bool | None = None,
     division_id: str | None = None,
     area: str | None = None,
+    cursor: _CursorArg = None,
 ) -> dict:
     """Find named places, either near a point or inside an area's boundary.
 
@@ -588,6 +597,17 @@ def find_places(
     missing columns this tool depends on. If a category filter was given and
     it matched nothing (in either mode), a non-fatal "note" field hints that
     the category slug may be wrong and points at search_categories.
+
+    A truncated answer — either token-budget-trimmed or because more
+    matching rows exist beyond limit — also carries "cursor"; pass it back
+    unchanged, with every other argument identical, to fetch the next page.
+    cursor is only ever issued for a literal or ambiguity-free match: an
+    answer built from #373's alt-name/fuzzy name fallback never carries one
+    (those pools are small; ROADMAP §4.4). A cursor for a different query,
+    or one that's malformed, returns {"error": "bad_cursor", ...} naming
+    the mismatch; a cursor issued against an older Overture release is
+    honored anyway, against the current release, with a one-line "note"
+    that rows may have shifted.
     """
     point_given = lat is not None or lon is not None
     modes_given = sum([point_given, division_id is not None, area is not None])
@@ -601,6 +621,31 @@ def find_places(
             "error": "bad_request",
             "detail": "pass one of lat/lon (+radius_m), division_id, or area",
         }
+
+    # Everything that affects the result set/order — everything but `cursor`
+    # itself and `limit` (a page-size knob, not part of the query identity).
+    # Numeric args are normalized to float: placeroot_call's coercion path
+    # (str/JSON dispatch, e.g. over HTTP) and a native Python call can hand
+    # this function an equal-valued int and float (radius_m=1000 vs
+    # 1000.0) for the same query — json.dumps tells those apart, so an
+    # un-normalized hash would make a cursor issued on one path unusable
+    # replayed on the other, even though nothing about the query differs.
+    params_key = {
+        "lat": float(lat) if lat is not None else None,
+        "lon": float(lon) if lon is not None else None,
+        "radius_m": float(radius_m) if radius_m is not None else None,
+        "category": category, "name": name,
+        "min_confidence": float(min_confidence) if min_confidence is not None else None,
+        "operating_status": operating_status, "brand": brand,
+        "has_website": has_website, "has_phone": has_phone,
+        "division_id": division_id, "area": area,
+    }
+    current_release = release.resolve_release()
+    cursor_error, start_offset, cursor_note = cursor_mod.resolve_cursor(
+        cursor, params_key, current_release
+    )
+    if cursor_error is not None:
+        return cursor_error
 
     # area is sugar over the division_id path: resolve the name to a
     # division, then fall through to exactly the same polygon search.
@@ -622,11 +667,17 @@ def find_places(
             return {"error": "not_found", "detail": f"no division matched area {area!r}"}
         division_id = resolved_area["division_id"]
 
+    # Overfetch by one row beyond the effective (post-clamp) limit so a
+    # scan that stops only because it hit limit — not because it ran out of
+    # matches — is distinguishable from one that didn't (has_more below).
+    effective_limit = max(0, min(int(limit), overture.MAX_ROWS))
+
     if division_id is not None:
         try:
             rows = overture.find_places_in_division(
                 division_id, category, name,
-                min_confidence, operating_status, brand, has_website, has_phone, limit,
+                min_confidence, operating_status, brand, has_website, has_phone,
+                effective_limit + 1, offset=start_offset,
             )
         except ValueError as e:
             return {"error": "bad_request", "detail": str(e)}
@@ -639,12 +690,20 @@ def find_places(
                 "error": "not_found",
                 "detail": f"no division matched division_id {division_id!r}",
             }
+        has_more = len(rows) > effective_limit
+        rows = rows[:effective_limit]
         payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
         if resolved_area is not None:
             # Which division the name landed on — an agent that asked for
             # "Springfield" needs to see which one it got.
             payload["area"] = resolved_area
-        return _with_category_hint(payload, category, widen_hint="try a larger division")
+        payload = _with_category_hint(payload, category, widen_hint="try a larger division")
+        payload = cursor_mod.attach_cursor(
+            payload, "results", params_key, current_release, start_offset, has_more
+        )
+        if cursor_note:
+            payload["note"] = "; ".join(filter(None, [payload.get("note"), cursor_note]))
+        return payload
 
     if lat is None or lon is None:
         return {"error": "bad_request", "detail": "pass both lat and lon"}
@@ -654,7 +713,8 @@ def find_places(
     try:
         rows = overture.find_places(
             lat, lon, radius_m, category, name,
-            min_confidence, operating_status, brand, has_website, has_phone, limit,
+            min_confidence, operating_status, brand, has_website, has_phone,
+            effective_limit + 1, offset=start_offset,
         )
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
@@ -662,9 +722,23 @@ def find_places(
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
         return _schema_error(e)
+    # #373's alt-name/fuzzy fallback tiers run their own bounded pool query
+    # (only at offset 0) rather than this call's offset-aware one, so a
+    # cursor over that pool can't honestly promise the next page won't
+    # overlap or skip — no cursor is issued when a row came from either tier.
+    used_name_fallback = any(r.get("matched_by") for r in rows)
+    has_more = len(rows) > effective_limit
+    rows = rows[:effective_limit]
     payload = _with_degraded_fields(budget.apply_budget({"results": rows}, "results"))
     payload = _with_name_fallback_note(payload, name)
-    return _with_category_hint(payload, category, widen_hint="widen radius_m")
+    payload = _with_category_hint(payload, category, widen_hint="widen radius_m")
+    if not used_name_fallback:
+        payload = cursor_mod.attach_cursor(
+            payload, "results", params_key, current_release, start_offset, has_more
+        )
+    if cursor_note:
+        payload["note"] = "; ".join(filter(None, [payload.get("note"), cursor_note]))
+    return payload
 
 
 @_tool("Summarize area")
@@ -3245,6 +3319,7 @@ def find_near(
     near: str,
     radius_m: float = 1000,
     limit: int = 10,
+    cursor: _CursorArg = None,
 ) -> dict:
     """Places of a category near a named place or city.
 
@@ -3259,6 +3334,11 @@ def find_near(
     a city. An unresolvable name returns {"error": "not_found"}; empty
     category or near returns {"error": "bad_request"}. radius_m and
     limit follow the same clamps as a point search.
+
+    A truncated answer carries "cursor" (delegated straight through from
+    find_places); pass it back with the same category/near/radius_m/limit
+    to continue. See find_places' docstring for the bad_cursor/release-
+    mismatch details — they apply here unchanged.
     """
     if not isinstance(category, str) or not category.strip():
         return {"error": "bad_request", "detail": "category must be a non-empty slug or phrase"}
@@ -3282,6 +3362,7 @@ def find_near(
         radius_m=float(radius_m),
         category=slug,
         limit=int(limit),
+        cursor=cursor,
     )
     if "error" in payload:
         return payload
@@ -3292,7 +3373,7 @@ def find_near(
     out: dict = {"near": pin, "category": slug, "results": rows}
     if slug != category.strip():
         out["category_resolved_from"] = category.strip()
-    for key in ("truncated", "omitted_count", "note", "degraded_fields"):
+    for key in ("truncated", "omitted_count", "note", "degraded_fields", "cursor"):
         if key in payload:
             out[key] = payload[key]
     return budget.apply_budget(out, "results")

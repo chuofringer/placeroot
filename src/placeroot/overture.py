@@ -999,6 +999,7 @@ def find_places(
     has_phone: bool | None = None,
     limit: int = 10,
     allow_name_fallback: bool = True,
+    offset: int = 0,
 ) -> list[dict]:
     """Places near a point, nearest first, compact rows.
 
@@ -1039,12 +1040,30 @@ def find_places(
     correction (#374: within_distance is a yes/no with no note surface, and
     "is there a Startbucks within 200m" must not silently become a claim
     about Starbucks).
+
+    offset skips that many rows of the same nearest-first ordering before
+    LIMIT applies (cursor pagination, ROADMAP feature 4) - 0 for a first
+    page. Ordering breaks distance ties by id so repeated calls at
+    different offsets never skip or repeat a row. A server caller wanting
+    to detect "more rows exist beyond this page" passes limit+1 and slices
+    the extra row off itself; this function's own contract is otherwise
+    unchanged. The name-fallback tiers only run at offset 0 (see below) -
+    a later page finding zero rows means the query ran past the end, not
+    that tier 1 found nothing.
     """
-    # int() before interpolating into the SQL LIMIT clause: the MCP layer
-    # already type-validates this arg, but the cast makes the query layer
-    # safe for any direct (non-MCP) caller too, rather than relying on the
-    # transport for injection safety. Clamped to [0, MAX_ROWS].
+    # int() before interpolating into the SQL LIMIT/OFFSET clauses: the MCP
+    # layer already type-validates these args, but the cast makes the query
+    # layer safe for any direct (non-MCP) caller too, rather than relying on
+    # the transport for injection safety. limit stays clamped to [0,
+    # MAX_ROWS] exactly like every other query-layer function — the
+    # find_places *tool*'s own overfetch-by-one (it requests
+    # effective_limit + 1 to detect "more rows exist") is therefore capped
+    # at MAX_ROWS too, so has_more can't be detected on a page that's
+    # already at the maximum size; that's an accepted, documented edge
+    # case rather than a reason to relax this function's own cap. offset
+    # clamped to a non-negative int.
     limit = max(0, min(int(limit), MAX_ROWS))
+    offset = max(0, int(offset))
     upstream = _upstream_glob()
     missing = set(_check_schema(upstream))
     bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(lat, lon, radius_m)
@@ -1081,8 +1100,9 @@ def find_places(
             round({_DISTANCE_EXPR}, 0)          AS distance_m
         FROM {from_clause}
         WHERE {' AND '.join(filters)}
-        ORDER BY distance_m
+        ORDER BY distance_m, id
         LIMIT {limit}
+        OFFSET {offset}
     """
     try:
         # Always bounded: find_places is a radius query, so the bbox filter
@@ -1096,13 +1116,16 @@ def find_places(
         "confidence", "brand", "has_website", "has_phone", "lat", "lon", "distance_m",
     ]
     results = [dict(zip(cols, r)) for r in rows]
-    if not results and name and allow_name_fallback and "names" not in missing:
+    if not results and name and allow_name_fallback and "names" not in missing and offset == 0:
         # #373: tier 1 (the ILIKE substring search above) found nothing —
         # try the alt-name/fuzzy fallback tiers before giving up. Skipped
-        # outright when `name` wasn't given (nothing to fall back from) or
+        # outright when `name` wasn't given (nothing to fall back from),
         # "names" is missing from the dataset (tier 1 already degraded to
         # a no-op in that case, and there's no primary/alternate name
-        # column to fall back to either).
+        # column to fall back to either), or offset > 0 (a later page
+        # coming back empty means the query ran past the end of tier 1's
+        # own results, not that tier 1 found nothing at all — falling back
+        # there would silently restart the search from a different tier).
         results = _find_places_name_fallback(
             from_source, base_filters, params, has_recreation, exprs, name, limit
         )
@@ -1506,6 +1529,7 @@ def find_places_in_division(
     has_website: bool | None = None,
     has_phone: bool | None = None,
     limit: int = 10,
+    offset: int = 0,
 ) -> list[dict] | None:
     """Places whose point falls inside a division's boundary polygon.
 
@@ -1537,8 +1561,15 @@ def find_places_in_division(
     there's no way to answer), or UpstreamUnavailable if either remote scan
     fails after retries. Non-essential place columns missing from the
     dataset come back as None in their field — see degraded_fields().
+
+    offset skips that many rows of the same name/id ordering before LIMIT
+    applies (cursor pagination, ROADMAP feature 4); ordering is already
+    stable (name, id), so pages never overlap or skip. limit stays clamped
+    to [0, MAX_ROWS] — see find_places' offset docstring for the same
+    accepted has_more-at-the-max-page edge case.
     """
     limit = max(0, min(int(limit), MAX_ROWS))
+    offset = max(0, int(offset))
     resolved = _resolve_division_geometry(division_id)
     if resolved is None:
         return None
@@ -1594,6 +1625,7 @@ def find_places_in_division(
         WHERE {' AND '.join(filters)}
         ORDER BY name, id
         LIMIT {limit}
+        OFFSET {offset}
     """
     try:
         with _conn_lock:
