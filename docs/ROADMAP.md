@@ -501,7 +501,12 @@ Migration for all of the above: v2 parameters land additively beside the old
 ones (`lat`/`lon` continue to work as `where: {lat, lon}` internally); old
 spellings leave the *published schema* one minor version later and keep
 being *accepted* silently for a deprecation window, so existing agents and
-transcripts never break. Response-shape additions (`resolved`, `cursor`,
+transcripts never break. The §5 schemas above are the *post-deprecation*
+end state: while any legacy spelling is still accepted, the published
+schemas must keep `additionalProperties: true` and leave `where` optional
+(requiring one-of `where` | legacy params in prose), or a client that
+validates against the published schema would reject calls the server still
+honors. Response-shape additions (`resolved`, `cursor`,
 `trust`) are additive and therefore non-breaking under the project's own
 semver reading.
 
