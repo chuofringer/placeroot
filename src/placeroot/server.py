@@ -48,6 +48,7 @@ from placeroot import (
     export,
     geo,
     geometry_ops,
+    geometry_setops,
     gers,
     ground,
     honesty,
@@ -3555,6 +3556,9 @@ _GEOMETRY_OP_REQUIRED: dict[str, tuple[str, ...]] = {
     "point_in_polygon": ("points", "geometry"),
     "nearest_point": ("point", "points"),
     "nearest_point_on_line": ("point", "geometry"),
+    "union": ("geometry", "geometry2"),
+    "intersect": ("geometry", "geometry2"),
+    "difference": ("geometry", "geometry2"),
 }
 _OpArg = Annotated[
     str,
@@ -3610,6 +3614,7 @@ def geometry_op(
     point2: dict | None = None,
     points: list[dict] | None = None,
     geometry: dict | None = None,
+    geometry2: dict | None = None,
     bearing_deg: float | None = None,
     distance_m: float | None = None,
     radius_m: float | None = None,
@@ -3633,21 +3638,29 @@ def geometry_op(
       holes honored; points capped at 100)
     - `nearest_point(point, points)` -> `{"index", "distance_m"}` (points capped at 100)
     - `nearest_point_on_line(point, geometry)` -> `{"point", "distance_m", "fraction"}` (LineString)
+    - `union(geometry, geometry2)` -> `{"geometry", "area_km2"}` (Polygon/MultiPolygon, either slot)
+    - `intersect(geometry, geometry2)` -> `{"geometry", "area_km2"}`, or `{"empty": true, "note"}`
+      when the two inputs don't overlap
+    - `difference(geometry, geometry2)` -> `{"geometry", "area_km2"}` (geometry minus geometry2),
+      or `{"empty": true, "note"}` when geometry2 fully covers geometry
 
-    `buffer` and `convex_hull` are the only ops that return geometry; that
-    output is simplified to fit the same token budget `simplify_geometry`'s
-    own default targets, so there's no need to chain a second call.
-    `union`/`intersect`/`difference` are not implemented.
+    `buffer`, `convex_hull`, and `union`/`intersect`/`difference` are the
+    ops that return geometry; that output is simplified to fit the same
+    token budget `simplify_geometry`'s own default targets, so there's no
+    need to chain a second call. `union`/`intersect`/`difference` run via
+    the DuckDB spatial extension already loaded for other tools (see
+    geometry_setops.py) rather than geometry_ops.py's pure-Python math.
 
     An unknown op returns `{"error": "bad_request", ...}` listing valid ops.
     Missing/wrong-shaped params for the given op return `{"error":
     "bad_request", ...}` naming exactly what that op needs, e.g. "op=buffer
     needs point and radius_m". Point-like inputs are range-checked (lat in
-    [-90, 90], lon in [-180, 180]); `geometry` gets structural validation
-    only (right type, non-empty numeric coordinates) — see geometry_ops.py's
-    module docstring for the accuracy notes behind area/centroid (a local
-    meters projection, not a geodesic computation) and buffer/convex_hull
-    (planar approximations, fine at city/regional scale).
+    [-90, 90], lon in [-180, 180]); `geometry`/`geometry2` get structural
+    validation only (right type, non-empty numeric coordinates) — see
+    geometry_ops.py's module docstring for the accuracy notes behind
+    area/centroid (a local meters projection, not a geodesic computation)
+    and buffer/convex_hull (planar approximations, fine at city/regional
+    scale).
     """
     if op not in _GEOMETRY_OP_REQUIRED:
         return {
@@ -3660,6 +3673,7 @@ def geometry_op(
         "point2": point2,
         "points": points,
         "geometry": geometry,
+        "geometry2": geometry2,
         "bearing_deg": bearing_deg,
         "distance_m": distance_m,
         "radius_m": radius_m,
@@ -3705,8 +3719,14 @@ def geometry_op(
             result = geometry_ops.point_in_polygon(points, geometry)
         elif op == "nearest_point":
             result = geometry_ops.nearest_point(point, points)
-        else:  # nearest_point_on_line
+        elif op == "nearest_point_on_line":
             result = geometry_ops.nearest_point_on_line(point, geometry)
+        elif op == "union":
+            result = geometry_setops.union(geometry, geometry2)
+        elif op == "intersect":
+            result = geometry_setops.intersect(geometry, geometry2)
+        else:  # difference
+            result = geometry_setops.difference(geometry, geometry2)
     except geometry_ops.InvalidGeometryOp as e:
         return {"error": "bad_request", "detail": e.detail}
     # point_in_polygon's "results" list is positional (one boolean per input

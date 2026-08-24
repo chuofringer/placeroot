@@ -356,3 +356,153 @@ def test_point_in_polygon_results_are_never_budget_truncated(monkeypatch):
     points = [P(5, 5), P(50, 50)] * 50  # 100 points, alternating in/out
     out = server.geometry_op("point_in_polygon", points=points, geometry=square)
     assert out["results"] == [True, False] * 50
+
+
+# ---------------------------------------------------------------------------
+# Set ops: union / intersect / difference (issue #404)
+# ---------------------------------------------------------------------------
+
+
+def _poly(ring):
+    return {"type": "Polygon", "coordinates": [ring]}
+
+
+def _unit_square(x0, y0, x1, y1):
+    return _poly([[x0, y0], [x0, y1], [x1, y1], [x1, y0], [x0, y0]])
+
+
+def test_overlapping_union_area_is_union_of_squares():
+    a = _unit_square(0, 0, 2, 2)  # area 4
+    b = _unit_square(1, 1, 3, 3)  # area 4, overlap 1
+    out = server.geometry_op("union", geometry=a, geometry2=b)
+    assert out["geometry"]["type"] == "Polygon"
+    assert math.isclose(out["area_km2"], geometry_ops.area(a)["area_km2"] * 7 / 4, rel_tol=1e-3)
+
+
+def test_overlapping_intersect_area_is_overlap_only():
+    a = _unit_square(0, 0, 2, 2)
+    b = _unit_square(1, 1, 3, 3)
+    out = server.geometry_op("intersect", geometry=a, geometry2=b)
+    assert out["geometry"]["type"] == "Polygon"
+    # overlap is the unit square [1,1]-[2,2]: 1/4 the area of `a`.
+    assert math.isclose(out["area_km2"], geometry_ops.area(a)["area_km2"] / 4, rel_tol=1e-3)
+
+
+def test_overlapping_difference_area_is_a_minus_overlap():
+    a = _unit_square(0, 0, 2, 2)
+    b = _unit_square(1, 1, 3, 3)
+    out = server.geometry_op("difference", geometry=a, geometry2=b)
+    assert out["geometry"]["type"] == "Polygon"
+    assert math.isclose(out["area_km2"], geometry_ops.area(a)["area_km2"] * 3 / 4, rel_tol=1e-3)
+
+
+def test_disjoint_union_is_multipolygon_with_summed_area():
+    a = _unit_square(0, 0, 1, 1)
+    b = _unit_square(10, 10, 11, 11)
+    out = server.geometry_op("union", geometry=a, geometry2=b)
+    assert out["geometry"]["type"] == "MultiPolygon"
+    expected = geometry_ops.area(a)["area_km2"] + geometry_ops.area(b)["area_km2"]
+    # area() reprojects to one reference latitude for the *whole* combined
+    # geometry, vs. each square's own reference latitude individually — a
+    # small mismatch at this latitude spread is expected (see geometry_ops.py
+    # module docstring's accuracy notes), not a rel_tol=1e-6 match.
+    assert math.isclose(out["area_km2"], expected, rel_tol=1e-2)
+
+
+def test_disjoint_intersect_is_empty():
+    a = _unit_square(0, 0, 1, 1)
+    b = _unit_square(10, 10, 11, 11)
+    out = server.geometry_op("intersect", geometry=a, geometry2=b)
+    assert out == {"empty": True, "note": "geometry and geometry2 do not overlap"}
+
+
+def test_disjoint_difference_is_identity():
+    a = _unit_square(0, 0, 1, 1)
+    b = _unit_square(10, 10, 11, 11)
+    out = server.geometry_op("difference", geometry=a, geometry2=b)
+    assert out["geometry"]["type"] == "Polygon"
+    # Same reference-latitude caveat as the union case above.
+    assert math.isclose(out["area_km2"], geometry_ops.area(a)["area_km2"], rel_tol=1e-2)
+
+
+def test_contained_intersect_is_the_inner_shape():
+    outer = _unit_square(0, 0, 10, 10)
+    inner = _unit_square(2, 2, 4, 4)
+    out = server.geometry_op("intersect", geometry=outer, geometry2=inner)
+    assert math.isclose(out["area_km2"], geometry_ops.area(inner)["area_km2"], rel_tol=1e-3)
+
+
+def test_contained_difference_of_inner_from_outer_is_empty():
+    # geometry2 (outer) fully covers geometry (inner) -> empty difference.
+    outer = _unit_square(0, 0, 10, 10)
+    inner = _unit_square(2, 2, 4, 4)
+    out = server.geometry_op("difference", geometry=inner, geometry2=outer)
+    assert out == {"empty": True, "note": "geometry is fully covered by geometry2"}
+
+
+def test_contained_difference_of_outer_minus_inner_keeps_a_hole():
+    outer = _unit_square(0, 0, 10, 10)
+    inner = _unit_square(2, 2, 4, 4)
+    out = server.geometry_op("difference", geometry=outer, geometry2=inner)
+    expected = geometry_ops.area(outer)["area_km2"] - geometry_ops.area(inner)["area_km2"]
+    assert math.isclose(out["area_km2"], expected, rel_tol=1e-3)
+
+
+def test_multipolygon_input_union():
+    mp = {
+        "type": "MultiPolygon",
+        "coordinates": [
+            [[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]],
+            [[[5.0, 5.0], [5.0, 6.0], [6.0, 6.0], [6.0, 5.0], [5.0, 5.0]]],
+        ],
+    }
+    other = _unit_square(0.5, 0.5, 1.5, 1.5)
+    out = server.geometry_op("union", geometry=mp, geometry2=other)
+    assert out["geometry"]["type"] == "MultiPolygon"
+    assert out["area_km2"] > 0
+
+
+def test_budget_bounded_large_vertex_result():
+    n = 3000
+    ring = [
+        [10.0 * math.cos(2 * math.pi * i / n), 10.0 * math.sin(2 * math.pi * i / n)]
+        for i in range(n)
+    ]
+    ring.append(ring[0])
+    circle = _poly(ring)
+    far = _unit_square(100.0, 100.0, 101.0, 101.0)
+    out = server.geometry_op("union", geometry=circle, geometry2=far)
+    assert out["geometry"]["type"] == "MultiPolygon"
+    assert out["kept_points"] < out["original_points"]
+    # Never an unbounded coordinate dump.
+    total_pts = sum(len(ring) for poly in out["geometry"]["coordinates"] for ring in poly)
+    assert total_pts < 200
+
+
+def test_union_missing_geometry2_is_bad_request():
+    a = _unit_square(0, 0, 1, 1)
+    out = server.geometry_op("union", geometry=a)
+    assert out["error"] == "bad_request"
+    assert "geometry2" in out["detail"]
+
+
+def test_intersect_wrong_type_for_geometry2():
+    a = _unit_square(0, 0, 1, 1)
+    line = {"type": "LineString", "coordinates": [[0.0, 0.0], [1.0, 1.0]]}
+    out = server.geometry_op("intersect", geometry=a, geometry2=line)
+    assert out["error"] == "bad_request"
+
+
+def test_difference_malformed_geometry2():
+    a = _unit_square(0, 0, 1, 1)
+    out = server.geometry_op("difference", geometry=a, geometry2={"type": "Polygon"})
+    assert out["error"] == "bad_request"
+
+
+def test_union_op_appears_in_schema_docs():
+    assert "union" in server._GEOMETRY_OP_REQUIRED
+    assert "intersect" in server._GEOMETRY_OP_REQUIRED
+    assert "difference" in server._GEOMETRY_OP_REQUIRED
+    assert server._GEOMETRY_OP_REQUIRED["union"] == ("geometry", "geometry2")
+    assert server._GEOMETRY_OP_REQUIRED["intersect"] == ("geometry", "geometry2")
+    assert server._GEOMETRY_OP_REQUIRED["difference"] == ("geometry", "geometry2")
