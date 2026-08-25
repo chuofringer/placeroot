@@ -2073,6 +2073,7 @@ _PLACE_DETAIL_RESULT_COLS = (
 def _place_details_sql(
     from_source: str, filters: list[str], order_by: str, missing: set[str],
     has_recreation: bool = False, with_clause: str = "",
+    lang: str | None = None,
 ) -> str:
     """The shared place_details SELECT, sourced from from_source.
 
@@ -2083,19 +2084,29 @@ def _place_details_sql(
     caller can label a recreation-layer row's provenance (source_theme:
     base) — and so gers.py can name the right theme for its id; it reads
     FALSE whenever the union isn't active and the column doesn't exist.
+
+    #410: when `lang` is given, one extra trailing column
+    (names.common[$lang]) is appended to this SAME SELECT — no second scan,
+    just one more field read off the row already being fetched. names.common
+    is an optional nested field probe_schema can't see (same caveat as
+    #373's tier 2), so a dataset/theme row without it fails the query at
+    bind time; the caller (_run_place_details_query) catches that and
+    re-issues the query without this column, same convention as the #373
+    alt-name fallback.
     """
     select_list = ",\n            ".join(
         f'{"NULL" if col in missing else expr} AS {alias}'
         for col, expr, alias in _PLACE_DETAIL_COLUMNS
     )
     marker_expr = recreation.MARKER_COLUMN if has_recreation else "FALSE"
+    lang_col = ",\n            names.common[$lang] AS _lang_variant" if lang is not None else ""
     return f"""
         {with_clause}
         SELECT
             {select_list},
             round(bbox.ymin, 6) AS lat,
             round(bbox.xmin, 6) AS lon,
-            {marker_expr} AS {recreation.MARKER_COLUMN}
+            {marker_expr} AS {recreation.MARKER_COLUMN}{lang_col}
         FROM {from_source}
         WHERE {" AND ".join(filters)}
         ORDER BY {order_by}
@@ -2106,19 +2117,45 @@ def _place_details_sql(
 def _run_place_details_query(from_source: str, filters: list[str], order_by: str,
                               params: dict, missing: set[str],
                               has_recreation: bool = False,
-                              with_clause: str = "") -> tuple | None:
+                              with_clause: str = "",
+                              lang: str | None = None) -> tuple[tuple | None, str | None]:
+    """Runs the place_details SELECT, returning (row, lang_variant).
+
+    #410: lang_variant is the requested-language name.common variant for
+    this row, piggybacked onto the same query lang triggers — not a second
+    scan. When lang is given, the lang-carrying query is tried first; a
+    duckdb.Error there (names.common absent from this dataset/theme row
+    shape) falls back to the plain query with lang_variant left None, the
+    same "best-effort, never fails the call" convention #373's alt-name
+    tier and #214's alt-name table use for the same optional field. A
+    successful lang query that simply finds no row returns (None, None)
+    without a second query — that emptiness is real, not a schema miss.
+    """
+    if lang is not None:
+        lang_sql = _place_details_sql(from_source, filters, order_by, missing,
+                                       has_recreation, with_clause, lang=lang)
+        try:
+            with _conn_lock:
+                row = _conn().execute(lang_sql, {**params, "lang": lang}).fetchone()
+        except duckdb.Error:
+            row = None
+        else:
+            if row is None:
+                return None, None
+            return row[:-1], row[-1]
     sql = _place_details_sql(from_source, filters, order_by, missing,
                              has_recreation, with_clause)
     try:
         with _conn_lock:
-            return _conn().execute(sql, params).fetchone()
+            return _conn().execute(sql, params).fetchone(), None
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
 
 
 def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None,
                           upstream: str, missing: set[str],
-                          bound_to_hint: bool = False) -> tuple | None:
+                          bound_to_hint: bool = False,
+                          lang: str | None = None) -> tuple[tuple | None, str | None]:
     """Resolve a GERS id, cheapest source first (issue #41).
 
     1. Whatever tiles the local cache already has on disk — no upstream
@@ -2151,34 +2188,36 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
         if tile_paths:
             joined = ", ".join(f"'{p}'" for p in tile_paths)
             source, active = _with_recreation(f"read_parquet([{joined}])", None)
-            row = _run_place_details_query(
-                source, ["id = $id"], "1", {"id": id}, missing, active,
+            row, lang_variant = _run_place_details_query(
+                source, ["id = $id"], "1", {"id": id}, missing, active, lang=lang,
             )
             if row is not None:
-                return row
+                return row, lang_variant
 
     if near_lat is not None and near_lon is not None:
         xmin, ymin, xmax, ymax = _bbox_around(near_lat, near_lon, ID_HINT_RADIUS_M)
         bbox_filter, bbox_params = _bbox_filter_sql(xmin, ymin, xmax, ymax)
         params = {"id": id, **bbox_params}
         from_source, active = _places_source((xmin, ymin, xmax, ymax))
-        row = _run_place_details_query(from_source, ["id = $id", bbox_filter], "1",
-                                       params, missing, active)
+        row, lang_variant = _run_place_details_query(from_source, ["id = $id", bbox_filter], "1",
+                                       params, missing, active, lang=lang)
         if row is not None:
-            return row
+            return row, lang_variant
         if bound_to_hint:
             logger.info(
                 "place_details(id=%s): near-hint missed and the lookup is hint-bounded; "
                 "not falling back to a full-dataset scan", id,
             )
-            return None
+            return None, None
 
     logger.warning(
         "place_details(id=%s) fell back to a full-dataset scan (no cache hit, "
         "no near_lat/near_lon hint given, or the hint missed) — issue #41", id,
     )
     source, active = _with_recreation(f"read_parquet('{upstream}', hive_partitioning=1)", None)
-    return _run_place_details_query(source, ["id = $id"], "1", {"id": id}, missing, active)
+    return _run_place_details_query(
+        source, ["id = $id"], "1", {"id": id}, missing, active, lang=lang,
+    )
 
 
 def place_details(
@@ -2190,6 +2229,7 @@ def place_details(
     near_lat: float | None = None,
     near_lon: float | None = None,
     bound_to_hint: bool = False,
+    lang: str | None = None,
 ) -> dict | None:
     """One place, in full: resolved by GERS id, or by name + a nearby point.
 
@@ -2208,6 +2248,15 @@ def place_details(
     hint that misses returns None rather than scanning the dataset — see
     _place_details_by_id.
 
+    lang (#410, a 2-3 letter code) requests Overture's language-tagged
+    name.common variant for this row instead of its primary name, when one
+    exists — piggybacked onto the same query already reading `names`, not a
+    second scan. `name` becomes the variant; the primary is added back as
+    `name_primary` only when it differs. No variant for the requested
+    language (or a dataset/theme row with no names.common at all) leaves
+    `name` as the primary with no `name_primary` and no note — see
+    _run_place_details_query.
+
     Raises SchemaDegraded if bbox is missing (needed for the name+point
     path; an id lookup doesn't strictly need it, but the schema probe
     doesn't distinguish the two calls) or UpstreamUnavailable if the remote
@@ -2222,7 +2271,9 @@ def place_details(
     missing = set(_check_schema(upstream))
 
     if id:
-        row = _place_details_by_id(id, near_lat, near_lon, upstream, missing, bound_to_hint)
+        row, lang_variant = _place_details_by_id(
+            id, near_lat, near_lon, upstream, missing, bound_to_hint, lang=lang,
+        )
     else:
         bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(
             lat, lon, radius_m
@@ -2236,8 +2287,8 @@ def place_details(
         # both themes, details should come from the richer places row, not
         # from whichever polygon centroid happened to sit closer.
         with_clause, from_clause, filters = _dedup_rows_sql(from_source, filters, has_recreation)
-        row = _run_place_details_query(from_clause, filters, _DISTANCE_EXPR, params,
-                                       missing, has_recreation, with_clause)
+        row, lang_variant = _run_place_details_query(from_clause, filters, _DISTANCE_EXPR, params,
+                                       missing, has_recreation, with_clause, lang=lang)
 
     if row is None:
         return None
@@ -2246,6 +2297,13 @@ def place_details(
         # Truthful provenance for a recreation-layer row (docs/RECREATION.md);
         # absent for ordinary places rows, whose theme is the tool's default.
         result["source_theme"] = "base"
+    if lang_variant and lang_variant != result.get("name"):
+        # #410: never invent or transliterate — lang_variant only ever comes
+        # from Overture's own names.common map. name_primary appears only
+        # when it actually differs, so a no-variant / same-spelling answer
+        # stays byte-identical to the no-lang call.
+        result["name_primary"] = result["name"]
+        result["name"] = lang_variant
     _annotate_place(result)
     for field in _PLACE_DETAIL_LIST_FIELDS:
         kept, omitted = budget.truncate_list(result[field])

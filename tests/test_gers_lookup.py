@@ -172,11 +172,11 @@ def _count_unbounded_scans(monkeypatch) -> list[str]:
     real_place_query = overture._run_place_details_query
 
     def place_query_spy(from_source, filters, order_expr, params, missing,
-                        has_recreation=False, with_clause=""):
+                        has_recreation=False, with_clause="", lang=None):
         if not any("bbox" in f for f in filters):
             unbounded.append(from_source)
         return real_place_query(from_source, filters, order_expr, params, missing,
-                                has_recreation, with_clause)
+                                has_recreation, with_clause, lang=lang)
 
     monkeypatch.setattr(gers, "_run_id_query", id_query_spy)
     monkeypatch.setattr(overture, "_run_place_details_query", place_query_spy)
