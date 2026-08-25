@@ -48,8 +48,10 @@ from placeroot import (
     export,
     geo,
     geometry_ops,
+    geometry_setops,
     gers,
     ground,
+    home_region,
     honesty,
     infrastructure,
     land_use,
@@ -238,6 +240,17 @@ _ModeSetArg = Annotated[
     Field(
         description="Travel mode to store. Omit to leave it unchanged.",
         json_schema_extra={"enum": _MODE_ENUM},
+    ),
+]
+# #410: no fixed enum — a language code is validated by shape (2-3 lowercase
+# letters), not membership in a closed list the way mode is, since Overture's
+# names.common keys are not a small fixed set.
+_LangArg = Annotated[
+    str | None,
+    Field(
+        description="Result-language code (2-3 lowercase letters, e.g. \"de\"). "
+        "Overture-tagged name variants only — never transliterated or invented. "
+        "Default: stored preference, else the primary name.",
     ),
 ]
 _OperatingStatusArg = Annotated[
@@ -1366,6 +1379,7 @@ def place_details(
     radius_m: float = overture.DEFAULT_DETAILS_RADIUS_M,
     near_lat: float | None = None,
     near_lon: float | None = None,
+    lang: _LangArg = None,
 ) -> dict:
     """One place, in full: addresses, websites, phones, socials, brand,
     source attribution, GERS id, confidence, operating status, and a
@@ -1385,6 +1399,12 @@ def place_details(
     can be narrowed to a ~50km box instead of scanning the whole dataset.
     Ignored when resolving by name. Omitting it still works, just slower on
     a cold, uncached id.
+
+    lang (#410) requests Overture's language-tagged name variant for this
+    place, when the data has one: `name` becomes the variant and
+    `name_primary` is added only when it differs. Default: the stored
+    `preferences()` lang, else the primary name unchanged. Never invented
+    or transliterated.
     """
     if lat is not None and lon is not None:
         coord_error = _invalid_coord(lat, lon)
@@ -1394,8 +1414,11 @@ def place_details(
         coord_error = _invalid_coord(near_lat, near_lon)
         if coord_error is not None:
             return coord_error
+    lang = preference_store.resolve_lang(lang)
     try:
-        result = overture.place_details(id, name, lat, lon, radius_m, near_lat, near_lon)
+        result = overture.place_details(
+            id, name, lat, lon, radius_m, near_lat, near_lon, lang=lang,
+        )
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
     except overture.UpstreamUnavailable as e:
@@ -3071,7 +3094,7 @@ def water_near(
 
 
 @_tool("Geocode a place name")
-def geocode(query: str, limit: int = 5) -> dict:
+def geocode(query: str, limit: int = 5, lang: _LangArg = None) -> dict:
     """Free-text place name -> ranked candidate locations, from Overture divisions and places.
 
     No Nominatim, no third-party geocoding API. Matches localities,
@@ -3109,9 +3132,24 @@ def geocode(query: str, limit: int = 5) -> dict:
     München and "Tokyo" answers 東京都. `name` is always the canonical
     spelling; such rows carry an extra "matched_name" naming the alternate
     that matched.
+
+    lang (#410) requests Overture's language-tagged name variant instead
+    of a division row's primary name, when the data has one for that row
+    and language: `name` becomes the variant and `name_primary` is added
+    only when it differs. Default: the stored `preferences()` lang, else
+    the primary name unchanged. Never invented or transliterated — only a
+    variant actually present in Overture's data is ever returned.
+    `PLACEROOT_HOME=<city/area>` (#406) sets a home region once at startup;
+    a bounded score bonus then nudges same-tier ambiguous namesakes (the
+    "which Springfield" case) toward it — a bias, never a filter, so a
+    distant result stays in the answer, just not first. Only when the bias
+    actually changed the top result does a "note" say so, e.g. "ranked
+    toward your configured home region (Seattle); pass a city/near hint to
+    override". No home configured -> no bias, no note, behavior unchanged.
     """
+    lang = preference_store.resolve_lang(lang)
     try:
-        result = geocoding.geocode_detailed(query, limit)
+        result = geocoding.geocode_detailed(query, limit, lang=lang)
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     payload = budget.apply_budget({"results": result["results"]}, "results")
@@ -3180,6 +3218,7 @@ def resolve_place(
     near_lon: float | None = None,
     limit: int = 3,
     city: str | None = None,
+    lang: _LangArg = None,
 ) -> dict:
     """Free-text place reference -> ranked, typed GERS ids to hold onto.
 
@@ -3220,14 +3259,26 @@ def resolve_place(
     An unresolvable query returns {"results": []} — not an error. Returns a
     structured {"error": ...} instead of raising if the remote scan fails
     or the places dataset is missing columns this tool depends on.
+
+    lang (#410) requests Overture's language-tagged name variant, same as
+    geocode() — but only for "kind": "division" rows; "kind": "place" rows
+    (from find_places, out of scope for #410 this round) always carry
+    their primary name. Default: the stored `preferences()` lang, else the
+    primary name unchanged.
+    Division candidates come from geocode() (#406), so a configured
+    `PLACEROOT_HOME` nudges the same ambiguous-namesake ties this tool
+    merges from — see geocode()'s docstring. resolve_place does not add its
+    own disclosure note for that; its own ranking already leads with
+    distance to `near_lat`/`near_lon`/`city` when one is given.
     """
     if near_lat is not None and near_lon is not None:
         coord_error = _invalid_coord(near_lat, near_lon)
         if coord_error is not None:
             return coord_error
+    lang = preference_store.resolve_lang(lang)
     try:
         rows = geocoding.resolve_place(
-            query, near_lat, near_lon, limit, city=city,
+            query, near_lat, near_lon, limit, city=city, lang=lang,
         )
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
@@ -3450,9 +3501,18 @@ def geocode_address(
 
     Returns {"results": [{number, street, unit, postcode, country,
     distance_m, lat, lon}, ...], "anchor": {name, id, country,
-    admin_context}}, deduplicated to distinct number+street+postcode and
-    nearest the city's own point first. More matches than `limit` adds
-    "truncated", "distinct_in_range" and a note.
+    admin_context}, "match": "exact"|"nearest_number"|"street"},
+    deduplicated to distinct number+street+postcode and nearest the city's
+    own point first. More matches than `limit` adds "truncated",
+    "distinct_in_range" and a note. `match` is absent only when no street
+    was scanned at all (no street name, no city, or an unresolved anchor).
+
+    A requested number with no address point is never interpolated: when the
+    street has other numbered points, `results` holds the real nearest known
+    numbers bracketing the miss instead (`match: "nearest_number"`, each row
+    its own genuine coordinates, plus a note naming the miss and neighbors)
+    — never a synthesized coordinate for the missing number. No usable
+    numbers on the street falls to `match: "street"`, today's empty-plus-note.
 
     Coverage is alpha: 39 countries, no UK, Ireland, India or China. An empty
     list is a valid answer and always carries a note saying whether the
@@ -3555,6 +3615,9 @@ _GEOMETRY_OP_REQUIRED: dict[str, tuple[str, ...]] = {
     "point_in_polygon": ("points", "geometry"),
     "nearest_point": ("point", "points"),
     "nearest_point_on_line": ("point", "geometry"),
+    "union": ("geometry", "geometry2"),
+    "intersect": ("geometry", "geometry2"),
+    "difference": ("geometry", "geometry2"),
 }
 _OpArg = Annotated[
     str,
@@ -3610,11 +3673,12 @@ def geometry_op(
     point2: dict | None = None,
     points: list[dict] | None = None,
     geometry: dict | None = None,
+    geometry2: dict | None = None,
     bearing_deg: float | None = None,
     distance_m: float | None = None,
     radius_m: float | None = None,
 ) -> dict:
-    """Offline geometry math and predicates — one tool, many ops, no upstream call.
+    """Geometry math and predicates — one tool, many ops, no Overture scan.
 
     `op` selects the operation; pass only the params it needs (points are
     `{"lat": ..., "lon": ...}`; `geometry` is a GeoJSON object):
@@ -3633,21 +3697,29 @@ def geometry_op(
       holes honored; points capped at 100)
     - `nearest_point(point, points)` -> `{"index", "distance_m"}` (points capped at 100)
     - `nearest_point_on_line(point, geometry)` -> `{"point", "distance_m", "fraction"}` (LineString)
+    - `union(geometry, geometry2)` -> `{"geometry", "area_km2"}` (Polygon/MultiPolygon, either slot)
+    - `intersect(geometry, geometry2)` -> `{"geometry", "area_km2"}`, or `{"empty": true, "note"}`
+      when the two inputs don't overlap
+    - `difference(geometry, geometry2)` -> `{"geometry", "area_km2"}` (geometry minus geometry2),
+      or `{"empty": true, "note"}` when geometry2 fully covers geometry
 
-    `buffer` and `convex_hull` are the only ops that return geometry; that
-    output is simplified to fit the same token budget `simplify_geometry`'s
-    own default targets, so there's no need to chain a second call.
-    `union`/`intersect`/`difference` are not implemented.
+    `buffer`, `convex_hull`, and `union`/`intersect`/`difference` are the
+    ops that return geometry; that output is simplified to fit the same
+    token budget `simplify_geometry`'s own default targets, so there's no
+    need to chain a second call. `union`/`intersect`/`difference` run via
+    the DuckDB spatial extension already loaded for other tools (see
+    geometry_setops.py) rather than geometry_ops.py's pure-Python math.
 
     An unknown op returns `{"error": "bad_request", ...}` listing valid ops.
     Missing/wrong-shaped params for the given op return `{"error":
     "bad_request", ...}` naming exactly what that op needs, e.g. "op=buffer
     needs point and radius_m". Point-like inputs are range-checked (lat in
-    [-90, 90], lon in [-180, 180]); `geometry` gets structural validation
-    only (right type, non-empty numeric coordinates) — see geometry_ops.py's
-    module docstring for the accuracy notes behind area/centroid (a local
-    meters projection, not a geodesic computation) and buffer/convex_hull
-    (planar approximations, fine at city/regional scale).
+    [-90, 90], lon in [-180, 180]); `geometry`/`geometry2` get structural
+    validation only (right type, non-empty numeric coordinates) — see
+    geometry_ops.py's module docstring for the accuracy notes behind
+    area/centroid (a local meters projection, not a geodesic computation)
+    and buffer/convex_hull (planar approximations, fine at city/regional
+    scale).
     """
     if op not in _GEOMETRY_OP_REQUIRED:
         return {
@@ -3660,6 +3732,7 @@ def geometry_op(
         "point2": point2,
         "points": points,
         "geometry": geometry,
+        "geometry2": geometry2,
         "bearing_deg": bearing_deg,
         "distance_m": distance_m,
         "radius_m": radius_m,
@@ -3705,10 +3778,20 @@ def geometry_op(
             result = geometry_ops.point_in_polygon(points, geometry)
         elif op == "nearest_point":
             result = geometry_ops.nearest_point(point, points)
-        else:  # nearest_point_on_line
+        elif op == "nearest_point_on_line":
             result = geometry_ops.nearest_point_on_line(point, geometry)
+        elif op == "union":
+            result = geometry_setops.union(geometry, geometry2)
+        elif op == "intersect":
+            result = geometry_setops.intersect(geometry, geometry2)
+        else:  # difference
+            result = geometry_setops.difference(geometry, geometry2)
     except geometry_ops.InvalidGeometryOp as e:
         return {"error": "bad_request", "detail": e.detail}
+    except overture.UpstreamUnavailable as e:
+        # Only the set ops can raise this: loading the spatial extension can
+        # hit the network once on a cold install (geometry_setops).
+        return _upstream_error(e)
     # point_in_polygon's "results" list is positional (one boolean per input
     # point) and already bounded by geometry_ops.MAX_BATCH_POINTS, so it is
     # never token-budgeted: truncating it would silently misalign results
@@ -4720,6 +4803,7 @@ def preferences(
     pace: str | None = None,
     household: list[str] | None = None,
     note: str | None = None,
+    lang: _LangArg = None,
     clear: bool = False,
 ) -> dict:
     """Travel defaults.
@@ -4727,14 +4811,18 @@ def preferences(
     State "I bike everywhere, I have a dog" once. Routing tools use the
     stored mode when you omit theirs; an explicit argument always wins.
     pace and household are stored for later features and do not change
-    answers yet. The same document is the placeroot://preferences resource.
+    answers yet. lang (#410) is the stored result-language preference: the
+    name-lookup tools that accept their own `lang` use this one when
+    theirs is omitted, returning an Overture-tagged name variant (e.g.
+    "Munich" for "München" with lang="en") — a per-call `lang` always
+    wins. The same document is the placeroot://preferences resource.
 
-    Call with no arguments to read. Pass mode, pace, household tags, or a
-    free-text note to merge those fields.
+    Call with no arguments to read. Pass mode, pace, household tags, a
+    free-text note, or lang to merge those fields.
     clear=true deletes the file and cannot be combined with other fields.
     Nothing is sent off this machine.
     """
-    fields = (mode, pace, household, note)
+    fields = (mode, pace, household, note, lang)
     if clear and any(value is not None for value in fields):
         return {
             "error": "bad_request",
@@ -4750,8 +4838,13 @@ def preferences(
                     "detail": f"mode={mode!r} is not supported",
                     "supported": sorted(preference_store.MODES),
                 }
+            if lang is not None and not preference_store.is_valid_lang(lang):
+                return {
+                    "error": "bad_request",
+                    "detail": f"lang={lang!r} must be 2-3 lowercase letters",
+                }
             return preference_store.update(
-                mode=mode, pace=pace, household=household, note=note
+                mode=mode, pace=pace, household=household, note=note, lang=lang,
             )
         return preference_store.payload()
     except preference_store.PreferencesError as exc:
@@ -5641,6 +5734,21 @@ def _warm_divisions_async() -> None:
     threading.Thread(target=_warm_divisions, daemon=True).start()
 
 
+def _warm_home_async() -> None:
+    """Kick off #406's home-region resolution (PLACEROOT_HOME today; MCP
+    roots stubbed, see home_region.resolve_home_from_roots) on a daemon
+    thread at startup, mirroring _warm_divisions_async.
+
+    Resolving here — rather than waiting for the first geocode/resolve_place
+    call to do it lazily — both warms geocode.py's ranking bias ahead of
+    real traffic and, when it resolves, schedules the same background tile
+    warm a city-scale resolve gets (autowarm.py). Never blocks startup;
+    schedule_autowarm itself already no-ops when PLACEROOT_CACHE=off, so no
+    extra gating is needed here.
+    """
+    threading.Thread(target=home_region.kick_home_autowarm, daemon=True).start()
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="placeroot",
@@ -5684,6 +5792,7 @@ def main() -> None:
     _warm_metadata_async()
     _warm_divisions_async()
     _warm_start()
+    _warm_home_async()
     if args.http:
         logger.info("placeroot: streamable-HTTP on http://%s:%s/mcp", args.host, args.port)
         if args.host not in ("127.0.0.1", "localhost", "::1"):

@@ -29,6 +29,96 @@ fixing behavior is patch.
   and report-rendering logic is pure and covered offline in
   `tests/test_overture_canary.py` with synthetic numbers, same as the
   existing column-drift checks.
+- `geocode_address`: an honest number-miss fallback and a `match` tier field
+  (#414). A house number with no address point on an otherwise-matched
+  street no longer just comes back empty — `results` now holds the
+  street's real nearest known numbers bracketing the miss (below and
+  above, or the 1-2 nearest when the miss is off one end of the known
+  range), each row its own genuine coordinates, plus a note naming the
+  miss and its neighbors. No coordinate is ever synthesized for the
+  missing number — Overture's addresses theme is points only, so
+  interpolating one (as Pelias/Nominatim do) would be invented precision;
+  PlaceRoot discloses the gap instead. Every answer now carries an
+  additive `match` field — `"exact"` (a number was asked for and found),
+  `"nearest_number"` (asked for, missed, bracketed from the street's own
+  points), or `"street"` (no number asked for, the dataset couldn't filter
+  on one, or the street had nothing to bracket the miss with) — present
+  whenever a street was scanned at all. **Response-shape addition**
+  (additive; existing consumers are unaffected, an exact-number answer is
+  byte-identical apart from the new field). The fallback costs one extra
+  local DuckDB query, run only on a miss, against the same bbox/street
+  parquet the exact-number scan already pulled through the tile cache —
+  not a second remote scan.
+- Result-language preference (#410, north-star: pelias/pelias#979 and #967;
+  competitive: Nominatim's `accept-language`). A `lang` field (2-3 lowercase
+  letters) on the stored `preferences()` document, plus a per-call `lang`
+  override on `geocode`, `resolve_place`, and `place_details` (per-call
+  wins). When Overture's `names.common` carries a language-tagged variant
+  for the matched row, `name` becomes that variant and `name_primary` is
+  added only when it differs from the primary — never invented or
+  transliterated, and never a payload change when no variant exists or no
+  `lang` is given. Divisions get a new small local `lang_names.parquet`
+  table (materialized alongside #214's alt-name table, from the same
+  `names.common` scan) so a lang lookup is one indexed join by the page of
+  result ids, not a second scan; `place_details` piggybacks the variant
+  onto its existing single-row places query as one extra column. Scoped to
+  the four name-heavy answer tools this round — `find_places` rows (and,
+  through it, `resolve_place`'s place-kind candidates) keep primary names,
+  matching `find_places`' own documented scope line.
+- `PLACEROOT_HOME=<city/area>` (#406, docs/ROADMAP.md next tier): a home
+  region, resolved once lazily through the same geocode ranking and cached
+  for the process, biases `geocode`/`geocode_batch`/`resolve_place` (and
+  anything routing through the same ranking, e.g. `find_near`/`from_to`
+  name resolution) toward it — kills the "which Springfield" class of
+  ambiguity for a single-metro install. A *bias*, never a filter: a
+  bounded score bonus (0.03 on `rank_score`'s ~0-1 scale, plus the matching
+  tuple position in the internal sort key) only ever breaks a same-tier tie
+  toward home — a genuinely better-ranked distant match still wins, and
+  out-of-region results are never dropped from the answer. `geocode`'s
+  reply carries a one-line disclosure note only when the bias actually
+  changed the top result (computed by comparing the biased and unbiased
+  winner on the same already-scored candidate list); no note otherwise. If
+  the home text resolves, its tile cache is pre-warmed at startup the same
+  way a city-scale resolve warms one, on a background thread that never
+  blocks startup and respects the existing `PLACEROOT_CACHE=off` knob. No
+  `PLACEROOT_HOME` set -> byte-identical ranking to before this change.
+  MCP roots as a second config source (a client-published `placeroot.json`)
+  is investigated but left a documented stub
+  (`home_region.resolve_home_from_roots`): the pinned SDK
+  (`mcp[cli]>=2.0.0`) only exposes server-side roots access from inside an
+  in-flight request's session (`ServerSession.list_roots`), and that method
+  is itself marked deprecated as of 2026-07-28 (SEP-2577) in this SDK
+  version — threading an async, per-request, now-deprecated capability
+  through the shared, synchronous ranking path every geocode/resolve_place
+  call uses would mean contorting the architecture for a capability the SDK
+  itself is walking back. `PLACEROOT_HOME` is the supported path.
+- `plan_area_visit(area, interests, mode?)`, a seventh workflow prompt
+  (docs/ROADMAP.md §3B, issue #405) — plans a visit around an area and a
+  list of interests with the post-#398/#399 idioms: `search_categories`
+  only for interest phrases that aren't already known slugs, one
+  `find_places` scan with up to 5 category slugs and
+  `group_by_category=true` (not one call per category), `optimize_route`
+  over the chosen stops' GERS ids/names, then `render_map`. `mode`
+  defaults from stored `preferences()` when omitted, walking otherwise.
+  The final itinerary is compact (ordered stops, one line why each,
+  total time) and surfaces trust tiers/trust_note honesty explicitly,
+  since `optimize_route`'s own `verify_before_going` does not fire for
+  id/name stops. Registered under every profile, like its six siblings;
+  costs zero `tools/list` tokens.
+- `union`/`intersect`/`difference` ops on `geometry_op` (docs/ROADMAP.md
+  next-tier "Geometry set ops", #404) — Mapbox ships these as Turf tools
+  and agents do use them; they were the tool's only "not implemented"
+  ops. Each takes `geometry` + the new `geometry2` param (both Polygon or
+  MultiPolygon) and returns `{"geometry", "area_km2"}`, computed via the
+  DuckDB spatial extension already loaded for other tools
+  (`ST_Union`/`ST_Intersection`/`ST_Difference` — the same machinery
+  `area_suggest.intersect_sheds` uses) rather than a hand-rolled
+  pure-Python clipper, since `geometry_ops.py` is deliberately
+  connection-free by design. The result geometry passes through the same
+  vertex-budget/simplify convention `buffer`/`convex_hull` already use — no
+  unbounded coordinate dump. A genuinely empty result (a disjoint
+  `intersect`, or a `difference` fully covered by `geometry2`) returns
+  `{"empty": true, "note": "..."}`, not a null or zero-area geometry.
 - Declared MCP `outputSchema` on all 42 tools (docs/ROADMAP.md §4 feature 3
   / §5.3) — the one MCP-conformance gap docs/benchmarks-vs.md conceded to
   Mapbox is closed. Hand-authored, not derived: every tool returns a bare,
@@ -202,6 +292,18 @@ fixing behavior is patch.
   skipped for this PR (see the PR body) rather than shipped half-honest.
 
 ### Changed
+- docs/ROADMAP.md's next-tier "Elicitation + sampling adoption" and "MCP
+  roots as geofence" bullets corrected (#411): spec rev 2026-07-28 replaced
+  server-initiated elicitation with Multi Round-Trip Requests (MRTR) and
+  deprecated sampling and roots (SEP-2577; independently confirmed for
+  roots while building #409). Investigated wiring MRTR into the
+  `needs_confirm` cold-graph gates against the pinned SDK's
+  `Resolve`/`Elicit` support (mcp 2.0.0) and stopped short of implementing:
+  a `Resolve`-annotated parameter is dropped from the tool's published
+  `inputSchema` and is always resolver-filled, so a capability-less client
+  gets a hard `MCPError` instead of today's `needs_confirm` envelope —
+  incompatible with keeping `confirm` client-suppliable for clients that
+  don't support elicitation. No behavior change; docs-only.
 - **Breaking: per-row batch errors now use the standard `{"error", "detail"}`
   envelope (docs/ROADMAP.md §4, next tier).** `geocode_batch`'s no-match
   rows changed from `{"query", "error": "no match"}` to `{"query", "error":

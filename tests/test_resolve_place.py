@@ -78,7 +78,7 @@ def test_merged_ordering_is_kind_agnostic_by_match_tier(monkeypatch):
     # White-box: verify the merge/sort ranks candidates by match tier
     # regardless of kind, using controlled inputs so the test doesn't
     # depend on incidental overlap between fixture division/place names.
-    def fake_geocode(query, limit=5):
+    def fake_geocode(query, limit=5, lang=None):
         return [
             {
                 "name": "Example Town", "type": "locality", "lat": 1.0, "lon": 2.0,

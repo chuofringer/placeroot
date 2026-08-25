@@ -33,7 +33,7 @@ def test_a_bare_city_is_not_a_poi_alias():
 def test_famous_poi_does_not_lose_to_an_obscure_exact_division(monkeypatch):
     """Colosseum used to exact-match a Queensland locality and win."""
 
-    def fake_geocode(query, limit=5):
+    def fake_geocode(query, limit=5, lang=None):
         q = query.lower()
         if q in {"rome", "roma"}:
             return [{
@@ -64,7 +64,7 @@ def test_famous_poi_does_not_lose_to_an_obscure_exact_division(monkeypatch):
 
 
 def test_ebisu_alias_does_not_aim_at_shikoku(monkeypatch):
-    def fake_geocode(query, limit=5):
+    def fake_geocode(query, limit=5, lang=None):
         if query.lower() == "tokyo":
             return [{
                 "name": "Tokyo", "type": "locality", "lat": 35.68, "lon": 139.69,
@@ -117,7 +117,7 @@ def test_last_city_is_reused_for_the_next_poi(monkeypatch):
 
     seen = {}
 
-    def fake_geocode(query, limit=5):
+    def fake_geocode(query, limit=5, lang=None):
         seen.setdefault("q", []).append(query)
         return [{
             "name": query, "type": "locality", "lat": CENTER_LAT, "lon": CENTER_LON,
@@ -152,7 +152,7 @@ def test_observation_tower_does_not_replay_brooklyn_after_paris(monkeypatch):
     geocode.resolve_place("Brooklyn")
     assert geocode._last_good_city
 
-    def fake_geocode(query, limit=5):
+    def fake_geocode(query, limit=5, lang=None):
         q = query.lower()
         if q == "paris":
             return [{

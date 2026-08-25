@@ -54,7 +54,8 @@ CATEGORIES_DESCRIPTION = (
 )
 
 PREFERENCES_DESCRIPTION = (
-    "Local travel and household preferences (mode, pace, household). "
+    "Local travel and household preferences (mode, pace, household, "
+    "result-language lang). "
     "The same document the preferences tool reads and updates. "
     "Nothing in this file leaves the machine."
 )

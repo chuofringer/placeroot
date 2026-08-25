@@ -48,10 +48,10 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `meeting_point` | Travel-time-fair meeting point for 2–5 people (walk/cycle/drive per person): minimizes the worst-off participant's routed time, tie-broken by spread then total, and returns ranked candidate venues with per-person times |
 | `render_map` | Any result → a shareable one-pager (interactive map, verdict, stop list, and Overture/OSM attribution); optional `summary` for the verdict, otherwise a short fallback is composed from the payload; optional `legend` gives points carrying a `"class"` property a contrasting marker color and an on-page legend box; shape `role: "shed"`/`"outline"` styles it, `label`/`callout` chip a note onto it |
 | `simplify_geometry` | Any geometry → simplified to fit a token budget |
-| `geometry_op` | Offline geometry math and predicates behind one `op` catalog: point distance/bearing/destination/midpoint, area/length/bbox/centroid, buffer/convex hull (returns geometry), point-in-polygon, nearest point, nearest point on a line |
+| `geometry_op` | Geometry math and predicates behind one `op` catalog: point distance/bearing/destination/midpoint, area/length/bbox/centroid, buffer/convex hull (returns geometry), point-in-polygon, nearest point, nearest point on a line, union/intersect/difference (returns geometry) |
 | `warmup_city` | Pre-cache a city's places and transportation tiles so later place searches over it read locally — does not build the street graph or cache buildings. A first tile COPY without `confirm` returns `needs_confirm` |
 | `data_version` | Which Overture release the answers are drawn from |
-| `preferences` | Read or update local travel/household defaults (mode, pace, dog, …). Nothing leaves the machine |
+| `preferences` | Read or update local travel/household defaults (mode, pace, dog, result language, …). Nothing leaves the machine |
 
 
 ## Confirming a slow hop
@@ -85,7 +85,7 @@ before 2026-07-28, and the response they get is byte-identical to what it was.
 
 ## Workflow prompts
 
-Six MCP **prompts** ship with the server: canned multi-tool workflows that
+Seven MCP **prompts** ship with the server: canned multi-tool workflows that
 encode which tool to call first, what to do with its output, and what the
 answer should look like. In Claude Code they appear as slash commands; Claude
 Desktop and Cursor surface them in their own prompt pickers.
@@ -98,6 +98,7 @@ Desktop and Cursor surface them in their own prompt pickers.
 | `/mcp__placeroot__should_i_live_here` | `location`, `context` (optional) | `geocode` (if needed) → `neighborhood_verdict` → a verdict, strengths, the weak point, and the one thing to verify in person |
 | `/mcp__placeroot__get_to_know_my_city` | `city` (optional) | `warmup_city` → pre-cache the metro so the first real question is fast |
 | `/mcp__placeroot__verify_listing_claims` | `location`, `claims` | `geocode_address`/`resolve_place` → decompose the listing text into structured checks → `verify_claims` → a claim-by-claim confirmed/stretched/false/unverifiable table |
+| `/mcp__placeroot__plan_area_visit` | `area`, `interests`, `mode` (optional) | `search_categories` as needed → one `find_places` scan with up to 5 categories and `group_by_category` → `optimize_route` over the chosen stops → an ordered itinerary with trust tiers surfaced → `render_map()` so the user leaves with a file |
 
 ```
 /mcp__placeroot__site_selection bike repair shop | Portland, Oregon
@@ -123,7 +124,7 @@ context, so you can pin them into a conversation without spending a tool call:
 | Resource | Contents |
 |---|---|
 | `placeroot://data-version` | The resolved Overture release, its date, how it was resolved (discovery, env override, the pinned fallback, or held at the artifact release), its age, and whether the bundled acceleration applies to it. Same values the `data_version` tool returns — one shared code path, so they cannot drift. |
-| `placeroot://preferences` | Local travel and household preferences (mode, pace, household). Same document the `preferences` tool reads and updates — one shared code path. Nothing in this file leaves the machine. |
+| `placeroot://preferences` | Local travel and household preferences (mode, pace, household, result-language `lang`). Same document the `preferences` tool reads and updates — one shared code path. Nothing in this file leaves the machine. |
 | `placeroot://categories` | Summary of the place-category taxonomy: all 22 top-level categories with how many slugs sit under each, plus how to get an exact slug. ~530 tokens — a summary, not the 2,117-slug CSV, which stays behind `search_categories`. |
 
 In Claude Code they auto-complete as @-mentions:
@@ -200,7 +201,9 @@ union of everything named:
 `data_version` and `preferences` are registered under every profile.
 `data_version` is ~230 tokens and the only way an agent can tell which
 Overture release backs its answers. `preferences` is the local defaults
-document; routing tools read its stored mode when theirs is omitted.
+document; routing tools read its stored mode when theirs is omitted, and
+`geocode`, `resolve_place`, and `place_details` read its stored `lang`
+(#410) the same way.
 
 Profiles may overlap, and a list may mix them with bare tool names —
 `PLACEROOT_TOOLS=routing,find_places` or
@@ -243,6 +246,7 @@ env vars; see below.) The ones an operator is most likely to reach for:
 | `PLACEROOT_CACHE_FETCH_CONCURRENCY` | `2` | Concurrent background tile fetches — bounded so a cold query's own scan isn't starved by its cache warmers |
 | `PLACEROOT_DUCKDB_THREADS` | `96` | DuckDB threads; deliberately above core count because cold parquet-footer reads are IO-bound |
 | `PLACEROOT_WARM_REGION` | unset | `lat,lon,radius_m` to pre-warm at startup, on top of the automatic metadata pre-warm |
+| `PLACEROOT_HOME` | unset | A free-text city/area (`"Seattle, WA"`) resolved once, lazily, and used as a *bias* — never a filter — toward that region in `geocode`/`resolve_place`/`find_near`/`from_to` ranking (#406), plus a background tile pre-warm for it at startup. Only breaks same-tier ties (the "which Springfield" case); a genuinely better-ranked distant match still wins, and out-of-region results are never dropped. `geocode`'s answer carries a one-line disclosure note only when the bias actually changed the top result. An unresolvable value logs once and disables the bias — never an error. |
 | `PLACEROOT_DATA_PATH` / `PLACEROOT_DATA_PATH_<THEME>` | unset | Pin a theme to a local dataset instead of live S3 |
 | `PLACEROOT_UPSTREAM_BASE` | Overture's public bucket | Point every theme at a mirror in the standard release layout ([docs/MIRROR.md](MIRROR.md)) |
 | `PLACEROOT_S3_REGION` / `PLACEROOT_S3_ENDPOINT` | `us-west-2` / AWS | Mirror plumbing: region, custom S3-compatible endpoint (credentials via `PLACEROOT_S3_ACCESS_KEY_ID`/`SECRET_ACCESS_KEY`) |

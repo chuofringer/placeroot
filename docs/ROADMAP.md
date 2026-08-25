@@ -286,23 +286,52 @@ answers.
 - **Batch error envelope unification** — per-row errors adopt the standard
   `{error, detail}` shape; `not_found`/`no_route` gain a `try` hint. Tiny
   effort; finishes the self-correction story.
-- **MCP roots as geofence** — when the client publishes roots containing a
+- **MCP roots as geofence** — ~~when the client publishes roots containing a
   geography (workspace config, or an explicit `placeroot.json`), auto-warm
-  that region at startup and bias `resolve_place`/`geocode` ranking to it.
-  Kills the "did you mean Springfield, which one" class of ambiguity for
-  the 90% of installs that live in one metro. Design carefully: a *bias*,
-  never a hard filter, and always disclosed in the answer.
-- **Elicitation + sampling adoption** — where the client advertises
-  elicitation, `needs_confirm` and `ambiguous_*` upgrade from
-  error-shaped round-trips to native prompts (the hand-rolled protocol
-  stays as fallback); `verify_claims` optionally uses sampling to
-  decompose free-text listings server-side, deleting the client-side
-  parsing step its docstring currently delegates.
-- **Geometry set ops** — implement `union`/`intersect`/`difference` in
+  that region at startup and bias `resolve_place`/`geocode` ranking to it.~~
+  **Shipped differently, and this framing is stale (2026-08-24, #409/#411):**
+  the roots capability itself is deprecated as of spec rev 2026-07-28
+  (SEP-2577; `mcp.server.session.ServerSession.list_roots()` in the pinned
+  SDK carries the deprecation marker directly, `mcp/server/session.py:316`,
+  as does its `ClientSession` mirror in `mcp/client/session.py`).
+  #409 shipped the actual geofence — `PLACEROOT_HOME=<city/area>` bias on
+  `geocode`/`geocode_batch`/`resolve_place`, always-disclosed, never a
+  filter — and left a named, always-`None` `resolve_home_from_roots()` stub
+  rather than build against a capability the SDK is walking back. Nothing
+  further planned here.
+- **Elicitation adoption** — **corrected 2026-08-24 (#411):** spec rev
+  2026-07-28 replaced server-initiated elicitation with Multi Round-Trip
+  Requests (MRTR) and deprecated sampling and logging alongside roots (see
+  mapbox/mcp-server#245, tracking the same migration). The pinned SDK (mcp
+  2.0.0) does expose MRTR via `Annotated[T, Resolve(fn)]` +
+  `Elicit(message, schema)` (`mcp/server/mcpserver/resolve.py`), and #411
+  investigated wiring it into the cold-graph `needs_confirm` gates
+  (`route`/`from_to`/`meeting_point`/`suggest_areas`/`find_places`
+  `within`, plus `warmup_city`'s own confirm gate; `isochrone` carries no
+  such gate). Verified against
+  the running SDK: a `Resolve`-annotated parameter is dropped from the
+  tool's published `inputSchema` entirely (`skip_names` in
+  `mcp/server/mcpserver/tools/base.py:92-99`) and is *always* resolver-filled
+  — a client that omits the elicitation capability gets a hard
+  `MCPError(MISSING_REQUIRED_CLIENT_CAPABILITY)` (`resolve.py:665-700`),
+  not a graceful fallback. Both break this codebase's hard requirement that
+  `confirm` stay client-suppliable and capability-less clients keep
+  today's `needs_confirm` envelope byte-identically. No adoption shipped;
+  revisit only if a future SDK lets a `Resolve`d parameter remain
+  independently settable by the caller. `verify_claims`-via-sampling is
+  dropped from this roadmap outright (sampling deprecated, same spec rev).
+- ~~**Geometry set ops** — implement `union`/`intersect`/`difference` in
   `geometry_op` (today's only "not implemented"); Mapbox ships these as
-  Turf tools and agents do use them.
+  Turf tools and agents do use them.~~ — **done (#404)**, via the DuckDB
+  spatial extension (`ST_Union`/`ST_Intersection`/`ST_Difference`, the same
+  machinery area_suggest.intersect_sheds already used) rather than
+  pure-Python clipping; results pass through the same budget-simplify
+  convention buffer/convex_hull use, and an empty result (disjoint
+  intersect, a fully-covered difference) comes back as an honest
+  `{"empty": true, "note": ...}` rather than null geometry.
 - **`plan_area_visit` prompt, not tool** — the itinerary workflow (§3B) as
-  a seventh workflow prompt; prompts cost zero listing tokens.
+  a seventh workflow prompt; prompts cost zero listing tokens. **Done
+  (#405).**
 - **Transit (exploratory, flag-gated)** — the largest honest capability gap
   vs. keyed servers. GTFS feeds are open and keyless, so it *fits the
   charter*, but it's a new data pipeline with freshness obligations; ship
@@ -627,5 +656,5 @@ that leg" out loud; the candor is the brand.
 | Now → +1 release | Feature 3 (outputSchema, enums, defaults, `from_to` bug), feature 4 (cursors), batch-error envelope — all additive, low-risk |
 | +2 | Feature 5 (`detail` tiers, multi-category), re-capture benchmarks, README repositioning (recommend `core`/`progressive`) |
 | +3 | Feature 1 (LocationRef rollout across tools), deprecation notes for `find_near`/`from_to` |
-| +4 | Feature 2 (`within` reachability filter) + marquee benchmark vs. the field; MCP roots geofence; elicitation upgrade |
-| Exploratory | Transit behind `PLACEROOT_TRANSIT`, geometry set ops, sampling in `verify_claims` |
+| +4 | Feature 2 (`within` reachability filter) + marquee benchmark vs. the field; home-region geofence (shipped as `PLACEROOT_HOME`, #409, not roots — see next-tier note) |
+| Exploratory | Transit behind `PLACEROOT_TRANSIT`, geometry set ops |
