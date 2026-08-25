@@ -112,7 +112,7 @@ Then ask your agent something spatial:
 | 🚴 **Routing** | `route`, `from_to`, `isochrone`, `optimize_route`, `places_along_route`, `distance_matrix`, `travel_time_matrix` | How far to walk from A to B? What's reachable in 15 minutes? Best order for 6 stops? |
 | 🗺️ **Geometry & maps** | `render_map`, `simplify_geometry` | Show me this result as an interactive map |
 
-It also ships five **workflow prompts** (site selection, neighborhood comparison, errand planning, should I live here, get to know my city) and three attachable **resources** — and a `PLACEROOT_TOOLS` setting to load only the tool profiles you need, cutting schema overhead by up to 95%.
+It also ships seven **workflow prompts** (site selection, neighborhood comparison, errand planning, should I live here, get to know my city, verify listing claims, plan area visit) and three attachable **resources** — and a `PLACEROOT_TOOLS` setting to load only the tool profiles you need, cutting schema overhead by up to 95%.
 
 📚 **[Full tool catalog, prompts, resources & configuration → docs/REFERENCE.md](docs/REFERENCE.md)**
 

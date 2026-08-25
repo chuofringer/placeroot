@@ -428,7 +428,17 @@ from pathlib import Path
 
 import duckdb
 
-from placeroot import addresses, cache, geo, manifest, overture, progress, release, trace
+from placeroot import (
+    addresses,
+    cache,
+    geo,
+    home_region,
+    manifest,
+    overture,
+    progress,
+    release,
+    trace,
+)
 from placeroot.errors import AmbiguousArea, AmbiguousPlace
 
 logger = logging.getLogger(__name__)
@@ -674,13 +684,37 @@ def _effective_tier(row: dict, query: str) -> int:
 _STRONG_TIER = 2
 
 
-def _rank_key(row: dict, query: str, region_population: dict[str, int]):
+def _home_bias_flag(row: dict, *, active: bool = True) -> int:
+    """0 when `row` sits inside the configured home region (#406), else 1.
+
+    Same shape as `_well_known_city_near` just above it in the tuple: a
+    bounded, scope-limited nudge inserted into `_rank_key`'s tie-break chain
+    *after* the tier-group term, so it can never let a weak/substring match
+    beat a strong one, and *before* every population-based term, so it can
+    settle same-tier-group ties the way a canonical well-known-city pin
+    already does. When no home is configured (or `active=False`, used to
+    compute the unbiased ordering for the #406 disclosure check) this
+    returns 1 uniformly for every row — a constant term is a no-op for
+    relative sort order, which is what makes "no home configured -> byte-
+    identical behavior" true by construction rather than by a feature flag.
+    """
+    if not active:
+        return 1
+    return 0 if home_region.in_home_region(row.get("lat"), row.get("lon")) else 1
+
+
+def _rank_key(row: dict, query: str, region_population: dict[str, int], *, home_bias: bool = True):
     """Sort key: (#215) literal-over-fuzzy, then (#221) strong-vs-substring
     tier group, then whether a *nonzero* population is known, then the match
     tier, then (#47) whether a population is known at all and its value,
     else a documented proxy chain of subtype rank / hierarchy depth / the
     row's own region's population, then (#53) literal-over-variant, then id
     for full determinism. All ascending (smaller sorts first).
+
+    `home_bias` (#406) inserts one more term, right after the well-known-city
+    pin and ahead of every population term — see `_home_bias_flag`. Pass
+    `home_bias=False` to recompute the *unconfigured* ordering (used only to
+    detect whether the bias changed the winner, for the disclosure note).
 
     Tier vs prominence (#221). Tier used to dominate outright, so any
     exact-tier row beat every prefix-tier row no matter what stood behind
@@ -747,6 +781,7 @@ def _rank_key(row: dict, query: str, region_population: dict[str, int]):
         -(row.get("_similarity") or 0.0),
         0 if tier >= _STRONG_TIER else 1,
         _well_known_city_near(row, query),
+        _home_bias_flag(row, active=home_bias),
         0 if (population or 0) > 0 else 1,
         -tier,
         0 if population is not None else 1,
@@ -757,6 +792,17 @@ def _rank_key(row: dict, query: str, region_population: dict[str, int]):
         1 if row.get("_variant") else 0,
         row["id"],
     )
+
+
+# #406: bounded home-region bonus on rank_score's ~0-1 scale. Sized between
+# the two existing bonuses on this scale: below population_bonus's 0.05
+# ceiling (a home candidate's displayed score still reads as less decisive
+# than genuine population-driven prominence), above the #53 variant penalty
+# of 0.01 (big enough to be a real, visible tiebreak rather than rounding
+# noise). Mirrors, on the display scale, the same tuple position
+# _home_bias_flag occupies in _rank_key: after tier/well-known-city, ahead
+# of population.
+_HOME_BIAS_SCORE_BONUS = 0.03
 
 
 def _rank_score(row: dict, query: str) -> float:
@@ -779,6 +825,8 @@ def _rank_score(row: dict, query: str) -> float:
         # never ties a same-tier literal match's — consistent with the
         # ordering _rank_key already enforces.
         score -= 0.01
+    if _home_bias_flag(row) == 0:
+        score += _HOME_BIAS_SCORE_BONUS
     return round(score, 3)
 
 
@@ -3553,6 +3601,22 @@ def geocode_detailed(
     region_population = _region_population_lookup(local_table)
     divisions.sort(key=lambda r: _rank_key(r, search_query, region_population))
 
+    # #406: cheap on an already-sorted list — the disclosure note only ever
+    # needs to know whether the home bias picked a *different* top division
+    # than an unbiased sort would have, not the full unbiased ordering.
+    # `_home_biased_winner_id` is the division id the disclosure names if it
+    # does turn out to be the final answer's top result (checked once, right
+    # before `out` is built below — a places-fallback row, or a later recall
+    # pass, can still overtake it).
+    _home_biased_winner_id = None
+    if divisions and home_region.home_bias_active():
+        unbiased_top = min(
+            divisions,
+            key=lambda r: _rank_key(r, search_query, region_population, home_bias=False),
+        )
+        if divisions[0]["id"] != unbiased_top["id"]:
+            _home_biased_winner_id = divisions[0]["id"]
+
     # #329: a famous landmark's exact-matching namesake (Colosseo the
     # Frosinone microhood, Colosseum in Queensland) must not stand the
     # places fallback down or win the batch. If we have an alias pin,
@@ -3691,6 +3755,17 @@ def geocode_detailed(
         recalled = _query_divisions(search_query, region_code, None)
         recalled.sort(key=lambda r: _rank_key(r, search_query, region_population))
         candidates = recalled
+        # #406: the recall pass replaces `candidates` wholesale, so redo the
+        # bias-changed-winner check against it rather than trusting the
+        # (now superseded) one computed above.
+        _home_biased_winner_id = None
+        if recalled and home_region.home_bias_active():
+            unbiased_top = min(
+                recalled,
+                key=lambda r: _rank_key(r, search_query, region_population, home_bias=False),
+            )
+            if recalled[0]["id"] != unbiased_top["id"]:
+                _home_biased_winner_id = recalled[0]["id"]
 
     # #410: one lookup for the whole page of division-kind rows about to be
     # returned, keyed by the ids actually surviving [:limit] — not a scan per
@@ -3767,6 +3842,19 @@ def geocode_detailed(
         # produced candidates, the skipped places half isn't what the caller
         # is missing.
         result["note"] = note
+    if (
+        _home_biased_winner_id is not None
+        and out
+        and out[0]["id"] == _home_biased_winner_id
+    ):
+        # #406: only fires when the home-biased division is still the
+        # actual top result after everything else (places fallback, limit
+        # trim) has had its say — never when the bias was overridden by a
+        # stronger later signal. Never a filter: the distant candidates it
+        # displaced are still in `out`, just not first.
+        home = home_region.get_home_region()
+        disclosure = home_region.disclosure_note(home)
+        result["note"] = f"{result['note']} {disclosure}" if result.get("note") else disclosure
     return result
 
 

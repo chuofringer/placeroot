@@ -48,8 +48,10 @@ from placeroot import (
     export,
     geo,
     geometry_ops,
+    geometry_setops,
     gers,
     ground,
+    home_region,
     honesty,
     infrastructure,
     land_use,
@@ -3137,6 +3139,13 @@ def geocode(query: str, limit: int = 5, lang: _LangArg = None) -> dict:
     only when it differs. Default: the stored `preferences()` lang, else
     the primary name unchanged. Never invented or transliterated — only a
     variant actually present in Overture's data is ever returned.
+    `PLACEROOT_HOME=<city/area>` (#406) sets a home region once at startup;
+    a bounded score bonus then nudges same-tier ambiguous namesakes (the
+    "which Springfield" case) toward it — a bias, never a filter, so a
+    distant result stays in the answer, just not first. Only when the bias
+    actually changed the top result does a "note" say so, e.g. "ranked
+    toward your configured home region (Seattle); pass a city/near hint to
+    override". No home configured -> no bias, no note, behavior unchanged.
     """
     lang = preference_store.resolve_lang(lang)
     try:
@@ -3256,6 +3265,11 @@ def resolve_place(
     (from find_places, out of scope for #410 this round) always carry
     their primary name. Default: the stored `preferences()` lang, else the
     primary name unchanged.
+    Division candidates come from geocode() (#406), so a configured
+    `PLACEROOT_HOME` nudges the same ambiguous-namesake ties this tool
+    merges from — see geocode()'s docstring. resolve_place does not add its
+    own disclosure note for that; its own ranking already leads with
+    distance to `near_lat`/`near_lon`/`city` when one is given.
     """
     if near_lat is not None and near_lon is not None:
         coord_error = _invalid_coord(near_lat, near_lon)
@@ -3592,6 +3606,9 @@ _GEOMETRY_OP_REQUIRED: dict[str, tuple[str, ...]] = {
     "point_in_polygon": ("points", "geometry"),
     "nearest_point": ("point", "points"),
     "nearest_point_on_line": ("point", "geometry"),
+    "union": ("geometry", "geometry2"),
+    "intersect": ("geometry", "geometry2"),
+    "difference": ("geometry", "geometry2"),
 }
 _OpArg = Annotated[
     str,
@@ -3647,11 +3664,12 @@ def geometry_op(
     point2: dict | None = None,
     points: list[dict] | None = None,
     geometry: dict | None = None,
+    geometry2: dict | None = None,
     bearing_deg: float | None = None,
     distance_m: float | None = None,
     radius_m: float | None = None,
 ) -> dict:
-    """Offline geometry math and predicates — one tool, many ops, no upstream call.
+    """Geometry math and predicates — one tool, many ops, no Overture scan.
 
     `op` selects the operation; pass only the params it needs (points are
     `{"lat": ..., "lon": ...}`; `geometry` is a GeoJSON object):
@@ -3670,21 +3688,29 @@ def geometry_op(
       holes honored; points capped at 100)
     - `nearest_point(point, points)` -> `{"index", "distance_m"}` (points capped at 100)
     - `nearest_point_on_line(point, geometry)` -> `{"point", "distance_m", "fraction"}` (LineString)
+    - `union(geometry, geometry2)` -> `{"geometry", "area_km2"}` (Polygon/MultiPolygon, either slot)
+    - `intersect(geometry, geometry2)` -> `{"geometry", "area_km2"}`, or `{"empty": true, "note"}`
+      when the two inputs don't overlap
+    - `difference(geometry, geometry2)` -> `{"geometry", "area_km2"}` (geometry minus geometry2),
+      or `{"empty": true, "note"}` when geometry2 fully covers geometry
 
-    `buffer` and `convex_hull` are the only ops that return geometry; that
-    output is simplified to fit the same token budget `simplify_geometry`'s
-    own default targets, so there's no need to chain a second call.
-    `union`/`intersect`/`difference` are not implemented.
+    `buffer`, `convex_hull`, and `union`/`intersect`/`difference` are the
+    ops that return geometry; that output is simplified to fit the same
+    token budget `simplify_geometry`'s own default targets, so there's no
+    need to chain a second call. `union`/`intersect`/`difference` run via
+    the DuckDB spatial extension already loaded for other tools (see
+    geometry_setops.py) rather than geometry_ops.py's pure-Python math.
 
     An unknown op returns `{"error": "bad_request", ...}` listing valid ops.
     Missing/wrong-shaped params for the given op return `{"error":
     "bad_request", ...}` naming exactly what that op needs, e.g. "op=buffer
     needs point and radius_m". Point-like inputs are range-checked (lat in
-    [-90, 90], lon in [-180, 180]); `geometry` gets structural validation
-    only (right type, non-empty numeric coordinates) — see geometry_ops.py's
-    module docstring for the accuracy notes behind area/centroid (a local
-    meters projection, not a geodesic computation) and buffer/convex_hull
-    (planar approximations, fine at city/regional scale).
+    [-90, 90], lon in [-180, 180]); `geometry`/`geometry2` get structural
+    validation only (right type, non-empty numeric coordinates) — see
+    geometry_ops.py's module docstring for the accuracy notes behind
+    area/centroid (a local meters projection, not a geodesic computation)
+    and buffer/convex_hull (planar approximations, fine at city/regional
+    scale).
     """
     if op not in _GEOMETRY_OP_REQUIRED:
         return {
@@ -3697,6 +3723,7 @@ def geometry_op(
         "point2": point2,
         "points": points,
         "geometry": geometry,
+        "geometry2": geometry2,
         "bearing_deg": bearing_deg,
         "distance_m": distance_m,
         "radius_m": radius_m,
@@ -3742,10 +3769,20 @@ def geometry_op(
             result = geometry_ops.point_in_polygon(points, geometry)
         elif op == "nearest_point":
             result = geometry_ops.nearest_point(point, points)
-        else:  # nearest_point_on_line
+        elif op == "nearest_point_on_line":
             result = geometry_ops.nearest_point_on_line(point, geometry)
+        elif op == "union":
+            result = geometry_setops.union(geometry, geometry2)
+        elif op == "intersect":
+            result = geometry_setops.intersect(geometry, geometry2)
+        else:  # difference
+            result = geometry_setops.difference(geometry, geometry2)
     except geometry_ops.InvalidGeometryOp as e:
         return {"error": "bad_request", "detail": e.detail}
+    except overture.UpstreamUnavailable as e:
+        # Only the set ops can raise this: loading the spatial extension can
+        # hit the network once on a cold install (geometry_setops).
+        return _upstream_error(e)
     # point_in_polygon's "results" list is positional (one boolean per input
     # point) and already bounded by geometry_ops.MAX_BATCH_POINTS, so it is
     # never token-budgeted: truncating it would silently misalign results
@@ -5688,6 +5725,21 @@ def _warm_divisions_async() -> None:
     threading.Thread(target=_warm_divisions, daemon=True).start()
 
 
+def _warm_home_async() -> None:
+    """Kick off #406's home-region resolution (PLACEROOT_HOME today; MCP
+    roots stubbed, see home_region.resolve_home_from_roots) on a daemon
+    thread at startup, mirroring _warm_divisions_async.
+
+    Resolving here — rather than waiting for the first geocode/resolve_place
+    call to do it lazily — both warms geocode.py's ranking bias ahead of
+    real traffic and, when it resolves, schedules the same background tile
+    warm a city-scale resolve gets (autowarm.py). Never blocks startup;
+    schedule_autowarm itself already no-ops when PLACEROOT_CACHE=off, so no
+    extra gating is needed here.
+    """
+    threading.Thread(target=home_region.kick_home_autowarm, daemon=True).start()
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="placeroot",
@@ -5731,6 +5783,7 @@ def main() -> None:
     _warm_metadata_async()
     _warm_divisions_async()
     _warm_start()
+    _warm_home_async()
     if args.http:
         logger.info("placeroot: streamable-HTTP on http://%s:%s/mcp", args.host, args.port)
         if args.host not in ("127.0.0.1", "localhost", "::1"):

@@ -72,15 +72,15 @@ ceiling.
 
 <!-- BEGIN GENERATED: benchmarks/token_efficiency.py -->
 
-Generated 2026-08-24 by `uv run python benchmarks/token_efficiency.py --write`.
+Generated 2026-08-25 by `uv run python benchmarks/token_efficiency.py --write`.
 
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-08-19.0`
 - Tools registered: **42**
-- Total schema surface: **32503 tokens** (130079 chars, 130434 bytes)
-- Of which inputSchema: **5381 tokens**, outputSchema: **3891 tokens** (roadmap §4.3, #403) — the rest is names/descriptions/annotations
+- Total schema surface: **32913 tokens** (131718 chars, 132077 bytes)
+- Of which inputSchema: **5419 tokens**, outputSchema: **3891 tokens** (roadmap §4.3, #403) — the rest is names/descriptions/annotations
 - Schema cost per tool: min 261, median 680, max 2971 tokens
-- Median scenario response: **436 tokens** (range 87-540)
+- Median scenario response: **436 tokens** (range 87-538)
 - Break-even: the schema surface costs about as much as **75 median answers**
 
 ### Schema surface (paid once per conversation)
@@ -92,13 +92,13 @@ Generated 2026-08-24 by `uv run python benchmarks/token_efficiency.py --write`.
 | `changes_in_area` | 1161 | 212 | 52 | **1515** | 6060 |
 | `optimize_route` | 799 | 132 | 324 | **1342** | 5371 |
 | `meeting_point` | 1018 | 106 | 52 | **1265** | 5063 |
-| `resolve_place` | 682 | 182 | 206 | **1151** | 4606 |
+| `resolve_place` | 769 | 182 | 206 | **1239** | 4959 |
+| `geocode` | 796 | 114 | 195 | **1180** | 4722 |
+| `geometry_op` | 703 | 328 | 52 | **1162** | 4648 |
 | `compare_areas` | 885 | 105 | 52 | **1122** | 4489 |
 | `travel_time_matrix` | 707 | 139 | 173 | **1099** | 4399 |
-| `geocode` | 667 | 114 | 195 | **1048** | 4193 |
 | `suggest_areas` | 803 | 100 | 52 | **1039** | 4156 |
 | `verify_claims` | 781 | 68 | 52 | **989** | 3957 |
-| `geometry_op` | 559 | 290 | 52 | **972** | 3891 |
 | `from_to` | 450 | 213 | 227 | **957** | 3830 |
 | `render_map` | 597 | 136 | 52 | **857** | 3430 |
 | `isochrone` | 458 | 195 | 127 | **848** | 3393 |
@@ -129,7 +129,7 @@ Generated 2026-08-24 by `uv run python benchmarks/token_efficiency.py --write`.
 | `simplify_geometry` | 129 | 58 | 52 | **297** | 1188 |
 | `admin_lookup` | 145 | 41 | 52 | **296** | 1185 |
 | `reverse_geocode` | 111 | 42 | 52 | **261** | 1044 |
-| **all 42 tools** | 20335 | 5381 | 3891 | **32503** | 130079 |
+| **all 42 tools** | 20695 | 5419 | 3891 | **32913** | 131718 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 
@@ -140,8 +140,8 @@ Generated 2026-08-24 by `uv run python benchmarks/token_efficiency.py --write`.
 | `geocode` | Where is 'Brooklyn'? | **87** | 348 |
 | `place_details` | Tell me about the place named 'Roastery' near the fixture center. | **147** | 588 |
 | `summarize_area` | What's in this 1km area? | **113** | 453 |
-| `route (walk)` | How do I walk from one grid corner to another? | **436** | 1746 |
-| `isochrone (15min walk)` | How far can I walk in 15 minutes from here? | **540** | 2162 |
+| `route (walk)` | How do I walk from one grid corner to another? | **436** | 1747 |
+| `isochrone (15min walk)` | How far can I walk in 15 minutes from here? | **538** | 2154 |
 
 <!-- END GENERATED -->
 
