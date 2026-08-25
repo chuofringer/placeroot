@@ -3619,7 +3619,7 @@ def geometry_op(
     distance_m: float | None = None,
     radius_m: float | None = None,
 ) -> dict:
-    """Offline geometry math and predicates — one tool, many ops, no upstream call.
+    """Geometry math and predicates — one tool, many ops, no Overture scan.
 
     `op` selects the operation; pass only the params it needs (points are
     `{"lat": ..., "lon": ...}`; `geometry` is a GeoJSON object):
@@ -3729,6 +3729,10 @@ def geometry_op(
             result = geometry_setops.difference(geometry, geometry2)
     except geometry_ops.InvalidGeometryOp as e:
         return {"error": "bad_request", "detail": e.detail}
+    except overture.UpstreamUnavailable as e:
+        # Only the set ops can raise this: loading the spatial extension can
+        # hit the network once on a cold install (geometry_setops).
+        return _upstream_error(e)
     # point_in_polygon's "results" list is positional (one boolean per input
     # point) and already bounded by geometry_ops.MAX_BATCH_POINTS, so it is
     # never token-budgeted: truncating it would silently misalign results

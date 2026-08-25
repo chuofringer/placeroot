@@ -491,12 +491,16 @@ def test_intersect_wrong_type_for_geometry2():
     line = {"type": "LineString", "coordinates": [[0.0, 0.0], [1.0, 1.0]]}
     out = server.geometry_op("intersect", geometry=a, geometry2=line)
     assert out["error"] == "bad_request"
+    # The detail must blame geometry2, not geometry — the caller's geometry
+    # is a perfectly good Polygon here.
+    assert "geometry2" in out["detail"]
 
 
 def test_difference_malformed_geometry2():
     a = _unit_square(0, 0, 1, 1)
     out = server.geometry_op("difference", geometry=a, geometry2={"type": "Polygon"})
     assert out["error"] == "bad_request"
+    assert "geometry2" in out["detail"]
 
 
 def test_union_op_appears_in_schema_docs():
