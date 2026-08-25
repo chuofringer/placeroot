@@ -4971,7 +4971,10 @@ _LEADING_INT_RE = re.compile(r"^(\d+)")
 # 1-2 rows the answer actually needs: duplicate contributions (#229's dedup)
 # and multiple postcodes on one number can each cost a slot, and the fetch is
 # a local read against data the exact-match scan already warmed, not a new
-# remote one -- see _scan_street_neighbors_in_bbox.
+# remote one -- see _scan_street_neighbors_in_bbox. Fetched as two same-sized
+# halves, below and above the target, so a street with many points on one
+# side of the miss can never starve the other side out of the fetch and
+# silently downgrade a real bracket to a one-sided answer.
 _ADDRESS_NEIGHBOR_FETCH_LIMIT = 20
 
 
@@ -5001,9 +5004,10 @@ def _scan_street_neighbors_in_bbox(
     rather than distance to the anchor: the exact-number scan already proved
     the anchor-nearest doorways don't include this number, so a distance-first
     order would keep missing it on a long street. Rows whose number has no
-    leading digit run sort last -- they cannot bracket anything -- and are
-    still bounded by _ADDRESS_NEIGHBOR_FETCH_LIMIT so a busy avenue can't turn
-    this into an unbounded fetch.
+    leading digit run are dropped in SQL -- they cannot bracket anything --
+    and the fetch pulls two bounded halves (nearest below the target,
+    nearest above) so a busy avenue can't turn this into an unbounded fetch
+    and a lopsided street can't starve one side of the bracket out of it.
     """
     xmin, ymin, xmax, ymax = bbox
     lat, lon = origin
@@ -5041,16 +5045,25 @@ def _scan_street_neighbors_in_bbox(
                    round(arg_min(lat, d), 6) AS lat,
                    round(arg_min(lon, d), 6) AS lon,
                    round(min(d), 1) AS distance_m,
-                   TRY_CAST(regexp_extract(number, '^(\\d+)', 1) AS DOUBLE) AS leading_int
+                   TRY_CAST(regexp_extract(trim(number), '^(\\d+)', 1) AS DOUBLE)
+                       AS leading_int
             FROM matched GROUP BY number, street, postcode
+        ),
+        below AS (
+            SELECT * FROM grouped WHERE leading_int <= $target
+            ORDER BY locality_rank, $target - leading_int, distance_m
+            LIMIT {_ADDRESS_NEIGHBOR_FETCH_LIMIT // 2}
+        ),
+        above AS (
+            SELECT * FROM grouped WHERE leading_int > $target
+            ORDER BY locality_rank, leading_int - $target, distance_m
+            LIMIT {_ADDRESS_NEIGHBOR_FETCH_LIMIT // 2}
         )
         SELECT number, street, unit, unit_count, postcode, country, lat, lon, distance_m
-        FROM grouped
+        FROM (SELECT * FROM below UNION ALL SELECT * FROM above) sides
         ORDER BY locality_rank,
-                 CASE WHEN leading_int IS NULL THEN 1 ELSE 0 END,
                  abs(leading_int - $target),
                  distance_m
-        LIMIT {_ADDRESS_NEIGHBOR_FETCH_LIMIT}
     """
     try:
         with overture._conn_lock:
@@ -5068,16 +5081,29 @@ def _bracket_numbers(
 
     Only rows whose number has a leading digit run (_parse_leading_int) are
     numeric candidates; the rest cannot honestly be called "nearer" or
-    "farther" than the target and are dropped here (they were never dropped
-    from the count the caller may still report). When both sides have a
-    candidate, the nearest below and nearest above are the answer -- a real
-    bracket. When only one side does (the target is off one end of the
-    street's known range), the 1-2 nearest rows on that side stand in
+    "farther" than the target and are dropped here. Candidates are further
+    restricted to one exact `street` value -- the one carried by the
+    numerically-closest row: street matching upstream is a deliberate prefix
+    match (PENNSYLVANIA AVE NW and ...SE both match "Pennsylvania Ave"), and
+    a "bracket" straddling two different streets would put the true doorway
+    between two points kilometres apart on neither of them. When both sides
+    have a candidate, the nearest below and nearest above are the answer --
+    a real bracket. When only one side does (the target is off one end of
+    the street's known range), the 1-2 nearest rows on that side stand in
     instead, and the caller's note says so differently. `limit` bounds the
-    result the same as every other geocode_address path.
+    result the same as every other geocode_address path; a bracket truncated
+    to one row is reported as unbracketed (`bracketed` describes what the
+    caller can actually see, not what the street theoretically holds).
     """
     parsed = [(_parse_leading_int(r[0]), r) for r in rows]
     parsed = [(n, r) for n, r in parsed if n is not None]
+    if parsed:
+        # rows arrive ordered by numeric closeness to the target, so the
+        # first candidate's street is the street the miss most plausibly
+        # sits on; neighbors from other prefix-matched street variants are
+        # not honest bracket material.
+        anchor_street = parsed[0][1][1]
+        parsed = [(n, r) for n, r in parsed if r[1] == anchor_street]
     below = sorted((p for p in parsed if p[0] <= target), key=lambda p: -p[0])
     above = sorted((p for p in parsed if p[0] > target), key=lambda p: p[0])
     if below and above:
@@ -5094,6 +5120,10 @@ def _bracket_numbers(
     chosen.sort(key=lambda p: abs(p[0] - target))
     chosen = chosen[: max(0, limit)]
     chosen.sort(key=lambda p: p[0])
+    # Re-derive after truncation: a limit-1 answer holds one neighbor, and a
+    # note claiming the doorway "may lie between them" over a single named
+    # number would be nonsense.
+    bracketed = bracketed and len(chosen) > 1
     return [p[1] for p in chosen], bracketed
 
 
@@ -5114,7 +5144,9 @@ def _address_nearest_number_note(
     elif len(chosen) > 1:
         tail = "the true doorway may lie beyond them, or the number may not exist"
     else:
-        tail = "the true doorway may lie beyond it, or the number may not exist"
+        # One surviving neighbor: either a genuinely one-sided street or a
+        # real bracket truncated by limit=1 -- direction-neutral either way.
+        tail = "the true doorway may lie near it, or the number may not exist"
     return (
         f"no address point for {number} {street}; nearest known numbers on that "
         f"street: {names} -- {tail}."

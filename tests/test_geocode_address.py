@@ -744,6 +744,34 @@ def test_the_nearest_number_fallback_respects_limit():
 
     assert result["match"] == "nearest_number"
     assert len(result["results"]) == 1
+    # With one surviving neighbor the note must not claim a two-sided
+    # bracket the caller cannot see.
+    assert "between them" not in result["note"]
+
+
+def _neighbor_row(number: str, street: str = "MAIN ST") -> tuple:
+    return (number, street, None, 1, "00000", "US", 1.0, 2.0, 10.0)
+
+
+def test_bracket_numbers_reports_a_truncated_bracket_as_unbracketed():
+    rows = [_neighbor_row("30"), _neighbor_row("36")]
+    chosen, bracketed = geocode._bracket_numbers(rows, 32, limit=1)
+    assert len(chosen) == 1
+    assert bracketed is False
+
+
+def test_bracket_numbers_never_brackets_across_street_variants():
+    """Prefix street matching can pull PENNSYLVANIA AVE NW and ...SE into
+    one candidate set; a "bracket" straddling the two would place the
+    doorway between points on different streets."""
+    rows = [
+        _neighbor_row("34", "PENNSYLVANIA AVE SE"),
+        _neighbor_row("36", "PENNSYLVANIA AVE NW"),
+    ]
+    chosen, bracketed = geocode._bracket_numbers(rows, 35, limit=5)
+    assert bracketed is False
+    streets = {r[1] for r in chosen}
+    assert streets == {"PENNSYLVANIA AVE SE"}
 
 
 def test_no_points_on_the_street_at_all_is_the_street_tier_not_a_bracket():
