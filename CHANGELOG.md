@@ -9,6 +9,19 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `plan_area_visit(area, interests, mode?)`, a seventh workflow prompt
+  (docs/ROADMAP.md §3B, issue #405) — plans a visit around an area and a
+  list of interests with the post-#398/#399 idioms: `search_categories`
+  only for interest phrases that aren't already known slugs, one
+  `find_places` scan with up to 5 category slugs and
+  `group_by_category=true` (not one call per category), `optimize_route`
+  over the chosen stops' GERS ids/names, then `render_map`. `mode`
+  defaults from stored `preferences()` when omitted, walking otherwise.
+  The final itinerary is compact (ordered stops, one line why each,
+  total time) and surfaces trust tiers/trust_note honesty explicitly,
+  since `optimize_route`'s own `verify_before_going` does not fire for
+  id/name stops. Registered under every profile, like its six siblings;
+  costs zero `tools/list` tokens.
 - `union`/`intersect`/`difference` ops on `geometry_op` (docs/ROADMAP.md
   next-tier "Geometry set ops", #404) — Mapbox ships these as Turf tools
   and agents do use them; they were the tool's only "not implemented"
