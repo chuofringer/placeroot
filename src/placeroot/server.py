@@ -51,6 +51,7 @@ from placeroot import (
     geometry_setops,
     gers,
     ground,
+    home_region,
     honesty,
     infrastructure,
     land_use,
@@ -3110,6 +3111,14 @@ def geocode(query: str, limit: int = 5) -> dict:
     München and "Tokyo" answers 東京都. `name` is always the canonical
     spelling; such rows carry an extra "matched_name" naming the alternate
     that matched.
+
+    `PLACEROOT_HOME=<city/area>` (#406) sets a home region once at startup;
+    a bounded score bonus then nudges same-tier ambiguous namesakes (the
+    "which Springfield" case) toward it — a bias, never a filter, so a
+    distant result stays in the answer, just not first. Only when the bias
+    actually changed the top result does a "note" say so, e.g. "ranked
+    toward your configured home region (Seattle); pass a city/near hint to
+    override". No home configured -> no bias, no note, behavior unchanged.
     """
     try:
         result = geocoding.geocode_detailed(query, limit)
@@ -3221,6 +3230,12 @@ def resolve_place(
     An unresolvable query returns {"results": []} — not an error. Returns a
     structured {"error": ...} instead of raising if the remote scan fails
     or the places dataset is missing columns this tool depends on.
+
+    Division candidates come from geocode() (#406), so a configured
+    `PLACEROOT_HOME` nudges the same ambiguous-namesake ties this tool
+    merges from — see geocode()'s docstring. resolve_place does not add its
+    own disclosure note for that; its own ranking already leads with
+    distance to `near_lat`/`near_lon`/`city` when one is given.
     """
     if near_lat is not None and near_lon is not None:
         coord_error = _invalid_coord(near_lat, near_lon)
@@ -5665,6 +5680,21 @@ def _warm_divisions_async() -> None:
     threading.Thread(target=_warm_divisions, daemon=True).start()
 
 
+def _warm_home_async() -> None:
+    """Kick off #406's home-region resolution (PLACEROOT_HOME today; MCP
+    roots stubbed, see home_region.resolve_home_from_roots) on a daemon
+    thread at startup, mirroring _warm_divisions_async.
+
+    Resolving here — rather than waiting for the first geocode/resolve_place
+    call to do it lazily — both warms geocode.py's ranking bias ahead of
+    real traffic and, when it resolves, schedules the same background tile
+    warm a city-scale resolve gets (autowarm.py). Never blocks startup;
+    schedule_autowarm itself already no-ops when PLACEROOT_CACHE=off, so no
+    extra gating is needed here.
+    """
+    threading.Thread(target=home_region.kick_home_autowarm, daemon=True).start()
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="placeroot",
@@ -5708,6 +5738,7 @@ def main() -> None:
     _warm_metadata_async()
     _warm_divisions_async()
     _warm_start()
+    _warm_home_async()
     if args.http:
         logger.info("placeroot: streamable-HTTP on http://%s:%s/mcp", args.host, args.port)
         if args.host not in ("127.0.0.1", "localhost", "::1"):

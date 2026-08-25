@@ -141,9 +141,9 @@ Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Eve
 - Snapshots captured: **2026-08-08**
 - PlaceRoot's own answers were captured on **macOS-26.3.1-arm64-arm-64bit** (Python 3.11.15, Overture `2026-08-19.0`) and are snapshotted rather than recomputed here: floating-point differences in routing and geometry change digit counts between platforms, so a live rerun costs a few tokens more or less on Linux than on macOS. A tolerance test reruns them for real and fails if this snapshot drifts from what the code now answers.
 - Schema figures are counted twice: over the **common fields** every server here publishes, and **verbatim** over everything it sends. `outputSchema` is one of the common fields now that both sides declare one (roadmap §4.3) — the ratios below are the common-field ones; see the note under the table for the size gap that remains.
-- Schema surface, whole install (common fields): PlaceRoot **32068** tokens (42 tools) · Mapbox **28958** (29 tools) · Google Maps **655** (7 tools)
-- Schema surface, the six tools each server needs for the scenarios below (common fields): PlaceRoot **7396** · Mapbox **13069** (1.8x ours) · Google Maps **500** (5 tools — no isochrone tool exists)
-- Whole-install surface: Mapbox is **0.9x** PlaceRoot's on common fields (both sides' output schemas included), on 29 tools against 42. Verbatim — counting the rest of what each side sends beyond the common fields — it is 0.9x (29295 against 32068), and 1.8x on the six-tool subset.
+- Schema surface, whole install (common fields): PlaceRoot **32290** tokens (42 tools) · Mapbox **28958** (29 tools) · Google Maps **655** (7 tools)
+- Schema surface, the six tools each server needs for the scenarios below (common fields): PlaceRoot **7529** · Mapbox **13069** (1.7x ours) · Google Maps **500** (5 tools — no isochrone tool exists)
+- Whole-install surface: Mapbox is **0.9x** PlaceRoot's on common fields (both sides' output schemas included), on 29 tools against 42. Verbatim — counting the rest of what each side sends beyond the common fields — it is 0.9x (29295 against 32290), and 1.7x on the six-tool subset.
 - Answers, over the 6 scenarios both PlaceRoot and Mapbox answer: PlaceRoot **1685** tokens total, Mapbox **1337** (1219 with pretty-print whitespace removed)
 
 ### Where the competitor numbers come from
@@ -157,7 +157,7 @@ Regenerate with `uv run python benchmarks/competitor_comparison.py --write`. Eve
 
 | server | tools registered | whole install, verbatim | whole install, common fields | the 6-scenario subset | subset verbatim | subset common fields |
 |---|---:|---:|---:|---:|---:|---:|
-| PlaceRoot | 42 | 32068 | **32068** | 6 | 7396 | **7396** |
+| PlaceRoot | 42 | 32290 | **32290** | 6 | 7529 | **7529** |
 | Mapbox MCP | 29 | 29295 | **28958** | 6 | 13129 | **13069** |
 | Google Maps MCP (archived) | 7 | 655 | **655** | 5 | 500 | **500** |
 
