@@ -303,3 +303,37 @@ def test_lang_names_table_is_materialized_beside_the_divisions_table(geocode_cac
 def test_lang_variants_for_empty_without_a_table_or_ids():
     assert geocode._lang_variants_for(None, ["gers-div-munchen"], "en") == {}
     assert geocode._lang_variants_for("/does/not/matter.parquet", [], "en") == {}
+
+
+def test_per_call_lang_is_normalized_at_the_tool_layer(geocode_cache):
+    """resolve_lang strips/lowercases an explicit lang the same way the
+    preferences write path does — " EN " and "en" must behave alike."""
+    result = server.geocode("München", limit=1, lang=" EN ")
+    assert result["results"][0]["name"] == "Munich"
+
+
+def test_junk_per_call_lang_disables_lang_for_that_call(geocode_cache):
+    """An explicit lang that fails the shape check disables lang for the
+    call outright — the stored preference is not silently substituted for a
+    value the caller actually sent."""
+    server.preferences(lang="en")
+    result = server.geocode("München", limit=1, lang="english")
+    top = result["results"][0]
+    assert top["name"] == "München"
+    assert "name_primary" not in top
+
+
+def test_lang_does_not_change_division_match_labels_in_resolve_place(geocode_cache):
+    """#410: match labels (and therefore ranking) grade the caller's query
+    against the *primary* name — a lang-swapped "Munich" must not demote the
+    division the query "München" matched exactly."""
+    base = geocode.resolve_place("München", near_lat=48.14, near_lon=11.58, limit=3)
+    swapped = geocode.resolve_place(
+        "München", near_lat=48.14, near_lon=11.58, limit=3, lang="en",
+    )
+    base_div = next(r for r in base if r["kind"] == "division")
+    swapped_div = next(
+        r for r in swapped
+        if r["kind"] == "division" and r.get("name_primary") == "München"
+    )
+    assert swapped_div["match"] == base_div["match"]

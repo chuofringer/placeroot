@@ -4264,7 +4264,12 @@ def resolve_place(
         if len(tokens) > 1:
             folded_city = {t.lower() for t in tokens}
             for div in division_hits[:1]:
-                folded_city &= {w.lower() for w in (div.get("name") or "").split()}
+                # #410: prune against the *primary* name — under a lang
+                # override div["name"] may be the localized variant
+                # ("Munich"), and the caller's own city word ("München")
+                # must still be recognized and pruned.
+                div_name = div.get("name_primary") or div.get("name") or ""
+                folded_city &= {w.lower() for w in div_name.split()}
             tokens = [t for t in tokens if t.lower() not in folded_city] or tokens
         # #374: the query words a fallback-matched row must account for —
         # the single distinctive tokens that survived the generic/city
@@ -4297,7 +4302,14 @@ def resolve_place(
             "lat": r["lat"], "lon": r["lon"],
             "type": r.get("type"),
             "admin_context": r["admin_context"],
-            "match": _division_match_label(r, query, search_query),
+            # #410: label (and therefore rank) off the primary name — the
+            # caller's query was written against it, and grading "München"
+            # against a lang-swapped "Munich" would demote the correct
+            # division to a substring match below coincidentally-named
+            # places.
+            "match": _division_match_label(
+                {**r, "name": r.get("name_primary") or r["name"]}, query, search_query
+            ),
             "_prominence": r["rank_score"],
         }
         if r.get("name_primary"):

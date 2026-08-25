@@ -204,10 +204,17 @@ def resolve_lang(explicit: str | None) -> str | None:
     per-call `lang` argument; None means omitted, and then the stored
     preference is used if there is one. Neither given returns None — no
     lang override at all, byte-identical to pre-#410 behavior. A corrupt
-    or unreadable preferences file behaves the same as no stored lang.
+    or unreadable preferences file behaves the same as no stored lang. The
+    explicit value is normalized (strip/lower) the same way the stored one
+    was at write time, and a value failing the same is_valid_lang shape
+    check the write path enforces disables lang for that call entirely
+    (the stored preference is not silently substituted for a value the
+    caller explicitly sent) — the lang table's keys are lowercased 2-3
+    letter codes, so junk could never match a variant anyway.
     """
     if explicit is not None:
-        return explicit
+        normalized = str(explicit).strip().lower()
+        return normalized if is_valid_lang(normalized) else None
     try:
         return load().get("lang")
     except PreferencesError:
