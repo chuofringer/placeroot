@@ -91,12 +91,19 @@ def build_place_rows() -> list[tuple]:
     def add(
         name, lat, lon, category, basic_category, status, confidence, alternates=None,
         addresses=None, websites=None, phones=None, socials=None, brand=None, sources=None,
+        common=None,
     ):
+        # #410: `common` mirrors Overture's names.common on a places row —
+        # written for every row (empty when there are no language-tagged
+        # variants) so the fixture's `names` struct has the same shape the
+        # real places theme does and place_details'/resolve_place's lang
+        # lookup runs against it unchanged, the same convention
+        # build_geocode_fixture.py's divisions `common` column already uses.
         index = len(rows)
         rows.append((
             gers_id(index),
             {"xmin": lon, "ymin": lat, "xmax": lon, "ymax": lat},
-            {"primary": name},
+            {"primary": name, "common": common or {}},
             {"primary": category, "alternates": alternates or []},
             basic_category,
             status,
@@ -189,6 +196,19 @@ def build_place_rows() -> list[tuple]:
     add("Dateline West Cafe", 10.001, 179.985, "coffee_shop", "coffee_shop", "open", 0.65)
     add("Dateline East", 10.0, -179.98, "restaurant", "restaurant", "open", 0.7)
     add("Dateline East Bank", 9.999, -179.985, "bank", "bank", "open", 0.65)
+
+    # #410: a place carrying names.common language variants, so place_details'
+    # and resolve_place's lang lookup has a real one to swap in. Appended at
+    # the end (not spliced into the dense cluster, so no earlier row's GERS
+    # id — derived from its insertion index — shifts) AND at an isolated
+    # coordinate well clear of CENTER_LAT/CENTER_LON, HIGH_LAT_CENTER, the
+    # antimeridian cluster and (0.0, 0.0): several tests assert exact place
+    # counts within a radius of those points (e.g. radius_m=100 at CENTER),
+    # and a new row inside any of those windows would silently change them.
+    add(
+        "Kaffeehaus Wien", 5.0, 100.0, "coffee_shop", "coffee_shop", "open", 0.8,
+        common={"en": "Vienna Coffee House", "fr": "Maison du Cafe Viennois"},
+    )
 
     return rows
 
@@ -414,7 +434,7 @@ def build_places(con: duckdb.DuckDBPyConnection) -> None:
         CREATE TABLE places (
             id VARCHAR,
             bbox STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE),
-            names STRUCT("primary" VARCHAR),
+            names STRUCT("primary" VARCHAR, common MAP(VARCHAR, VARCHAR)),
             taxonomy STRUCT("primary" VARCHAR, alternates VARCHAR[]),
             basic_category VARCHAR,
             operating_status VARCHAR,
