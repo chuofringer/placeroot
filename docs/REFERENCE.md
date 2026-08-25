@@ -85,7 +85,7 @@ before 2026-07-28, and the response they get is byte-identical to what it was.
 
 ## Workflow prompts
 
-Six MCP **prompts** ship with the server: canned multi-tool workflows that
+Seven MCP **prompts** ship with the server: canned multi-tool workflows that
 encode which tool to call first, what to do with its output, and what the
 answer should look like. In Claude Code they appear as slash commands; Claude
 Desktop and Cursor surface them in their own prompt pickers.
@@ -98,6 +98,7 @@ Desktop and Cursor surface them in their own prompt pickers.
 | `/mcp__placeroot__should_i_live_here` | `location`, `context` (optional) | `geocode` (if needed) → `neighborhood_verdict` → a verdict, strengths, the weak point, and the one thing to verify in person |
 | `/mcp__placeroot__get_to_know_my_city` | `city` (optional) | `warmup_city` → pre-cache the metro so the first real question is fast |
 | `/mcp__placeroot__verify_listing_claims` | `location`, `claims` | `geocode_address`/`resolve_place` → decompose the listing text into structured checks → `verify_claims` → a claim-by-claim confirmed/stretched/false/unverifiable table |
+| `/mcp__placeroot__plan_area_visit` | `area`, `interests`, `mode` (optional) | `search_categories` as needed → one `find_places` scan with up to 5 categories and `group_by_category` → `optimize_route` over the chosen stops → an ordered itinerary with trust tiers surfaced → `render_map()` so the user leaves with a file |
 
 ```
 /mcp__placeroot__site_selection bike repair shop | Portland, Oregon

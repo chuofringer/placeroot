@@ -308,7 +308,8 @@ answers.
   intersect, a fully-covered difference) comes back as an honest
   `{"empty": true, "note": ...}` rather than null geometry.
 - **`plan_area_visit` prompt, not tool** — the itinerary workflow (§3B) as
-  a seventh workflow prompt; prompts cost zero listing tokens.
+  a seventh workflow prompt; prompts cost zero listing tokens. **Done
+  (#405).**
 - **Transit (exploratory, flag-gated)** — the largest honest capability gap
   vs. keyed servers. GTFS feeds are open and keyless, so it *fits the
   charter*, but it's a new data pipeline with freshness obligations; ship
