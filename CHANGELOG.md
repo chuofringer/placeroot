@@ -9,6 +9,22 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- Result-language preference (#410, north-star: pelias/pelias#979 and #967;
+  competitive: Nominatim's `accept-language`). A `lang` field (2-3 lowercase
+  letters) on the stored `preferences()` document, plus a per-call `lang`
+  override on `geocode`, `resolve_place`, and `place_details` (per-call
+  wins). When Overture's `names.common` carries a language-tagged variant
+  for the matched row, `name` becomes that variant and `name_primary` is
+  added only when it differs from the primary — never invented or
+  transliterated, and never a payload change when no variant exists or no
+  `lang` is given. Divisions get a new small local `lang_names.parquet`
+  table (materialized alongside #214's alt-name table, from the same
+  `names.common` scan) so a lang lookup is one indexed join by the page of
+  result ids, not a second scan; `place_details` piggybacks the variant
+  onto its existing single-row places query as one extra column. Scoped to
+  the four name-heavy answer tools this round — `find_places` rows (and,
+  through it, `resolve_place`'s place-kind candidates) keep primary names,
+  matching `find_places`' own documented scope line.
 - `PLACEROOT_HOME=<city/area>` (#406, docs/ROADMAP.md next tier): a home
   region, resolved once lazily through the same geocode ranking and cached
   for the process, biases `geocode`/`geocode_batch`/`resolve_place` (and

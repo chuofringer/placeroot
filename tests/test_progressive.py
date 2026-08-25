@@ -205,7 +205,7 @@ def test_catalog_summaries_match_the_tools_own_descriptions():
 
 
 def test_required_and_optional_args_are_distinguished():
-    assert server._arg_summary(server._TOOL_FUNCS["geocode"]) == "query,limit?"
+    assert server._arg_summary(server._TOOL_FUNCS["geocode"]) == "query,limit?,lang?"
     assert server._arg_summary(server._TOOL_FUNCS["data_version"]) == ""
 
 
@@ -290,7 +290,7 @@ def test_unknown_tool_is_a_structured_error_listing_the_valid_names():
 def test_unknown_argument_is_a_bad_request_naming_what_the_tool_accepts():
     result = server.placeroot_call("geocode", {"querry": "Brooklyn"})
     assert result["error"] == "bad_request"
-    assert result["accepts"] == "query,limit?"
+    assert result["accepts"] == "query,limit?,lang?"
 
 
 def test_missing_required_argument_is_a_bad_request():
@@ -370,7 +370,7 @@ def test_an_uncoercible_value_is_rejected_by_the_same_model_the_sdk_uses():
     result = server.placeroot_call("geocode", {"query": "x", "limit": "many"})
     assert result["error"] == "bad_request"
     assert "limit" in result["detail"]
-    assert result["accepts"] == "query,limit?"
+    assert result["accepts"] == "query,limit?,lang?"
 
 
 def test_the_validation_detail_is_advice_not_a_pydantic_dump():
