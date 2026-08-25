@@ -36,6 +36,20 @@ fixing behavior is patch.
   through the shared, synchronous ranking path every geocode/resolve_place
   call uses would mean contorting the architecture for a capability the SDK
   itself is walking back. `PLACEROOT_HOME` is the supported path.
+- `union`/`intersect`/`difference` ops on `geometry_op` (docs/ROADMAP.md
+  next-tier "Geometry set ops", #404) — Mapbox ships these as Turf tools
+  and agents do use them; they were the tool's only "not implemented"
+  ops. Each takes `geometry` + the new `geometry2` param (both Polygon or
+  MultiPolygon) and returns `{"geometry", "area_km2"}`, computed via the
+  DuckDB spatial extension already loaded for other tools
+  (`ST_Union`/`ST_Intersection`/`ST_Difference` — the same machinery
+  `area_suggest.intersect_sheds` uses) rather than a hand-rolled
+  pure-Python clipper, since `geometry_ops.py` is deliberately
+  connection-free by design. The result geometry passes through the same
+  vertex-budget/simplify convention `buffer`/`convex_hull` already use — no
+  unbounded coordinate dump. A genuinely empty result (a disjoint
+  `intersect`, or a `difference` fully covered by `geometry2`) returns
+  `{"empty": true, "note": "..."}`, not a null or zero-area geometry.
 - Declared MCP `outputSchema` on all 42 tools (docs/ROADMAP.md §4 feature 3
   / §5.3) — the one MCP-conformance gap docs/benchmarks-vs.md conceded to
   Mapbox is closed. Hand-authored, not derived: every tool returns a bare,
