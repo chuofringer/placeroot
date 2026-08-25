@@ -5228,6 +5228,200 @@ def _scan_addresses_in_bbox(
     return rows, int(rows[0][-2]), int(rows[0][-1]), number_filtered
 
 
+# The leading integer run of a house number: "12" from "12-14", "5" from
+# "5A", nothing from "Lot 4" or a bare letter. This is the *only* numeric
+# comparison the nearest-number fallback makes -- Overture's `number` is a
+# free-text string, and this is the cheapest rule that is still honest about
+# what it compares. See _bracket_numbers.
+_LEADING_INT_RE = re.compile(r"^(\d+)")
+
+# How many of the street's own points the nearest-number fallback pulls back
+# from the tile cache before bracketing in Python. Generous relative to the
+# 1-2 rows the answer actually needs: duplicate contributions (#229's dedup)
+# and multiple postcodes on one number can each cost a slot, and the fetch is
+# a local read against data the exact-match scan already warmed, not a new
+# remote one -- see _scan_street_neighbors_in_bbox. Fetched as two same-sized
+# halves, below and above the target, so a street with many points on one
+# side of the miss can never starve the other side out of the fetch and
+# silently downgrade a real bracket to a one-sided answer.
+_ADDRESS_NEIGHBOR_FETCH_LIMIT = 20
+
+
+def _parse_leading_int(number: str | None) -> int | None:
+    """"12" -> 12, "12-14" -> 12, "5A" -> 5, "Lot 4" -> None, None -> None."""
+    if not number:
+        return None
+    m = _LEADING_INT_RE.match(number.strip())
+    return int(m.group(1)) if m else None
+
+
+def _scan_street_neighbors_in_bbox(
+    bbox: tuple[float, float, float, float],
+    origin: tuple[float, float],
+    street_patterns: list[str],
+    target: int,
+    locality: str | None = None,
+) -> list[tuple]:
+    """The street's own address points, ordered by numeric closeness to
+    `target`, for the nearest-number fallback (#414).
+
+    Same WHERE clause and CTE shape as _scan_addresses_in_bbox -- same tables,
+    same bbox, same street patterns -- with the `number = $number` filter
+    dropped, so this is a second local DuckDB query against the tile-cache
+    parquet the exact-number scan already pulled down, not a second remote
+    scan. Ordered by |leading_int(number) - target| (see _parse_leading_int)
+    rather than distance to the anchor: the exact-number scan already proved
+    the anchor-nearest doorways don't include this number, so a distance-first
+    order would keep missing it on a long street. Rows whose number has no
+    leading digit run are dropped in SQL -- they cannot bracket anything --
+    and the fetch pulls two bounded halves (nearest below the target,
+    nearest above) so a busy avenue can't turn this into an unbounded fetch
+    and a lopsided street can't starve one side of the bracket out of it.
+    """
+    xmin, ymin, xmax, ymax = bbox
+    lat, lon = origin
+    glob = addresses._upstream_glob()
+    missing = set(addresses._check_schema(glob))
+    columns = ", ".join(addresses._column_expr(c, missing) for c in _ADDRESS_SELECT_COLUMNS)
+    params: dict = {
+        "lat": lat, "lon": lon, "xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax,
+        "target": float(target),
+    }
+    street_sql = []
+    for i, pattern in enumerate(street_patterns):
+        params[f"s{i}"] = overture._like_escape(pattern) + "%"
+        street_sql.append(f"street ILIKE ${f's{i}'} ESCAPE '\\'")
+    locality_rank = "0"
+    if locality and "postal_city" not in missing:
+        params["locality"] = locality
+        locality_rank = "CASE WHEN lower(postal_city) = lower($locality) THEN 0 ELSE 1 END"
+    sql = f"""
+        WITH matched AS (
+            SELECT {columns},
+                   bbox.ymin AS lat, bbox.xmin AS lon,
+                   {overture.DISTANCE_EXPR} AS d
+            FROM {addresses._from_source(bbox)}
+            WHERE bbox.xmin BETWEEN $xmin AND $xmax
+              AND bbox.ymin BETWEEN $ymin AND $ymax
+              AND ({" OR ".join(street_sql)})
+        ),
+        grouped AS (
+            SELECT number, street, postcode,
+                   count(DISTINCT unit) AS unit_count,
+                   CASE WHEN count(DISTINCT unit) = 1 THEN min(unit) END AS unit,
+                   arg_min(country, d) AS country,
+                   min({locality_rank}) AS locality_rank,
+                   round(arg_min(lat, d), 6) AS lat,
+                   round(arg_min(lon, d), 6) AS lon,
+                   round(min(d), 1) AS distance_m,
+                   TRY_CAST(regexp_extract(trim(number), '^(\\d+)', 1) AS DOUBLE)
+                       AS leading_int
+            FROM matched GROUP BY number, street, postcode
+        ),
+        below AS (
+            SELECT * FROM grouped WHERE leading_int <= $target
+            ORDER BY locality_rank, $target - leading_int, distance_m
+            LIMIT {_ADDRESS_NEIGHBOR_FETCH_LIMIT // 2}
+        ),
+        above AS (
+            SELECT * FROM grouped WHERE leading_int > $target
+            ORDER BY locality_rank, leading_int - $target, distance_m
+            LIMIT {_ADDRESS_NEIGHBOR_FETCH_LIMIT // 2}
+        )
+        SELECT number, street, unit, unit_count, postcode, country, lat, lon, distance_m
+        FROM (SELECT * FROM below UNION ALL SELECT * FROM above) sides
+        ORDER BY locality_rank,
+                 abs(leading_int - $target),
+                 distance_m
+    """
+    try:
+        with overture._conn_lock:
+            rows = overture.conn().execute(sql, params).fetchall()
+    except duckdb.Error as e:
+        raise overture.UpstreamUnavailable(str(e)) from e
+    return rows
+
+
+def _bracket_numbers(
+    rows: list[tuple], target: int, limit: int
+) -> tuple[list[tuple], bool]:
+    """The neighbor rows to answer a number-miss with, and whether they
+    bracket the target (one below, one above) or sit only on one side.
+
+    Only rows whose number has a leading digit run (_parse_leading_int) are
+    numeric candidates; the rest cannot honestly be called "nearer" or
+    "farther" than the target and are dropped here. Candidates are further
+    restricted to one exact `street` value -- the one carried by the
+    numerically-closest row: street matching upstream is a deliberate prefix
+    match (PENNSYLVANIA AVE NW and ...SE both match "Pennsylvania Ave"), and
+    a "bracket" straddling two different streets would put the true doorway
+    between two points kilometres apart on neither of them. When both sides
+    have a candidate, the nearest below and nearest above are the answer --
+    a real bracket. When only one side does (the target is off one end of
+    the street's known range), the 1-2 nearest rows on that side stand in
+    instead, and the caller's note says so differently. `limit` bounds the
+    result the same as every other geocode_address path; a bracket truncated
+    to one row is reported as unbracketed (`bracketed` describes what the
+    caller can actually see, not what the street theoretically holds).
+    """
+    parsed = [(_parse_leading_int(r[0]), r) for r in rows]
+    parsed = [(n, r) for n, r in parsed if n is not None]
+    if parsed:
+        # rows arrive ordered by numeric closeness to the target, so the
+        # first candidate's street is the street the miss most plausibly
+        # sits on; neighbors from other prefix-matched street variants are
+        # not honest bracket material.
+        anchor_street = parsed[0][1][1]
+        parsed = [(n, r) for n, r in parsed if r[1] == anchor_street]
+    below = sorted((p for p in parsed if p[0] <= target), key=lambda p: -p[0])
+    above = sorted((p for p in parsed if p[0] > target), key=lambda p: p[0])
+    if below and above:
+        chosen = [below[0], above[0]]
+        bracketed = True
+    else:
+        chosen = (below or above)[:2]
+        bracketed = False
+    # `limit` truncates by nearness to the target -- a limit of 1 on a real
+    # bracket keeps whichever of the two immediate neighbors is closer, not
+    # an arbitrary "below wins" pick -- and the survivors are then read out
+    # low-to-high, the order a bracket naturally comes in and the order the
+    # note lists them in.
+    chosen.sort(key=lambda p: abs(p[0] - target))
+    chosen = chosen[: max(0, limit)]
+    chosen.sort(key=lambda p: p[0])
+    # Re-derive after truncation: a limit-1 answer holds one neighbor, and a
+    # note claiming the doorway "may lie between them" over a single named
+    # number would be nonsense.
+    bracketed = bracketed and len(chosen) > 1
+    return [p[1] for p in chosen], bracketed
+
+
+def _address_nearest_number_note(
+    number: str, street: str, chosen: list[tuple], bracketed: bool
+) -> str:
+    """"no address point for 32 W 26th St; nearest known numbers on that
+    street: 30, 36 -- the true doorway may lie between them." -- honest about
+    what is and isn't known: no coordinate is offered for the missing number
+    (there is nothing to interpolate from but a straight line between two
+    other doorways, which is exactly the invented precision #414 rejects),
+    and the neighbors are named by number only, not by a distance to a point
+    that does not exist.
+    """
+    names = ", ".join(r[0] for r in chosen)
+    if bracketed:
+        tail = "the true doorway may lie between them"
+    elif len(chosen) > 1:
+        tail = "the true doorway may lie beyond them, or the number may not exist"
+    else:
+        # One surviving neighbor: either a genuinely one-sided street or a
+        # real bracket truncated by limit=1 -- direction-neutral either way.
+        tail = "the true doorway may lie near it, or the number may not exist"
+    return (
+        f"no address point for {number} {street}; nearest known numbers on that "
+        f"street: {names} -- {tail}."
+    )
+
+
 def _address_row(row: tuple) -> dict:
     """One grouped row -> the response shape. unit/postcode are dropped when
     null, the same padding-is-not-an-answer rule address_at applies.
@@ -5428,11 +5622,36 @@ def geocode_address(
        bbox is not a municipality (#229): without it, the 1 Main St of every
        town the box overlaps collapses into one row.
 
+    A house number that lands on no address point is never interpolated
+    (#414): Overture's addresses theme is points only, so a synthesized
+    doorway between two real ones would be invented precision, not data.
+    Instead the answer carries `match`, one of:
+      - "exact" -- the number was asked for and found.
+      - "nearest_number" -- the number was asked for, missed, and the street
+        has other numbered points; `results` holds the nearest known number
+        below and above it (or the 1-2 nearest, if the miss is off one end
+        of the street's known range), as real rows with their own
+        coordinates -- never the missing number's coordinates, which do not
+        exist. A note names the miss and its neighbors. House numbers
+        compare by their leading integer run ("12-14" -> 12, "5A" -> 5); a
+        number with no leading digits (an alley name, a lot number) cannot
+        be bracketed and falls to "street" instead.
+      - "street" -- everything else: no number asked for, the dataset has
+        no `number` column to filter on, or the street has no numbered
+        point to bracket the miss with. This is today's plain street answer
+        or empty-plus-note, unchanged, now labeled.
+    The nearest-number fallback costs one extra local DuckDB query, run only
+    on a miss, against the same bbox/street tiles the exact-number scan
+    already pulled from the tile cache -- not a second remote scan.
+
     Returns {"results": [{number, street, unit?, postcode?, country,
     distance_m, lat, lon}, ...], "anchor": {name, id, country,
-    admin_context}} plus, when the answer is empty or clipped or the anchor
-    is not the top-ranked candidate, a "note" saying which of the four steps
-    ended it.
+    admin_context}, "match": "exact"|"nearest_number"|"street"} plus, when
+    the answer is empty or clipped or the anchor is not the top-ranked
+    candidate, a "note" saying which of the four steps ended it (or, for
+    "nearest_number", naming the miss and its neighbors). `match` is absent
+    only when no street was scanned at all -- no street name, no city to
+    anchor in, or the city itself did not resolve.
     Raises overture.UpstreamUnavailable / overture.SchemaDegraded, which
     server.py turns into structured errors.
     """
@@ -5514,6 +5733,35 @@ def geocode_address(
     rows, distinct_in_range, matched_rows, number_filtered = _scan_addresses_in_bbox(
         bbox, origin, patterns, number, limit, locality=anchor["name"]
     )
+    # match is answer-level, not per-row: one geocode_address call answers one
+    # query at one tier, and a per-row field would repeat the same value on
+    # every result for no extra information while implying rows could
+    # disagree (they can't -- exact rows are always all-exact, nearest_number
+    # rows are always all-neighbors).
+    match: str | None = None
+    neighbor_note: str | None = None
+    if number is not None and not rows and number_filtered:
+        # The exact number has no address point, but the dataset does carry
+        # one to filter on -- so before calling the street empty, ask
+        # whether the street has any points at all to bracket the miss
+        # with. _scan_street_neighbors_in_bbox re-runs the same WHERE
+        # bbox/street clause with the number filter dropped: a second local
+        # DuckDB query against the parquet the scan above already pulled
+        # into the tile cache (#202/#414), not a second remote scan. Never
+        # run for a street with no numeric target ("Lot 4") -- there is
+        # nothing honest to bracket it with.
+        target = _parse_leading_int(number)
+        if target is not None:
+            neighbor_rows = _scan_street_neighbors_in_bbox(
+                bbox, origin, patterns, target, locality=anchor["name"]
+            )
+            chosen, bracketed = _bracket_numbers(neighbor_rows, target, limit)
+            if chosen:
+                rows = chosen
+                match = "nearest_number"
+                neighbor_note = _address_nearest_number_note(
+                    number, street, chosen, bracketed
+                )
     payload: dict = {
         "results": [_address_row(r) for r in rows],
         # country/admin_context always, never conditionally: the anchor is
@@ -5537,8 +5785,10 @@ def geocode_address(
             f"\"{number}\" could not be matched -- these are the doorways on "
             f"\"{street}\", not that one address."
         )
+        match = "street"
     if not rows:
         notes.append(_address_empty_note(origin, street, anchor))
+        match = "street"
     elif distinct_in_range > len(rows):
         payload["truncated"] = True
         payload["distinct_in_range"] = distinct_in_range
@@ -5548,8 +5798,17 @@ def geocode_address(
             f"{matched_rows} raw address points). Add a house number to land on one "
             f"doorway."
         )
+    if neighbor_note:
+        notes.append(neighbor_note)
     if notes:
         payload["note"] = " ".join(notes)
+    # Every path past the anchor resolves to exactly one tier: a number that
+    # landed on its own address point is "exact"; anything else -- no number
+    # asked for, a number the dataset couldn't filter on, a miss with no
+    # street points to bracket it with -- is "street", the street-level
+    # answer #225 always gave. Set last, once, rather than threaded through
+    # every branch above, so no path can leave it unset or double-set it.
+    payload["match"] = match if match is not None else ("exact" if number is not None else "street")
     if not rows:
         return payload
     degraded = addresses.degraded_fields()

@@ -77,11 +77,11 @@ Generated 2026-08-25 by `uv run python benchmarks/token_efficiency.py --write`.
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-08-19.0`
 - Tools registered: **42**
-- Total schema surface: **32913 tokens** (131718 chars, 132077 bytes)
+- Total schema surface: **33073 tokens** (132358 chars, 132719 bytes)
 - Of which inputSchema: **5419 tokens**, outputSchema: **3891 tokens** (roadmap §4.3, #403) — the rest is names/descriptions/annotations
-- Schema cost per tool: min 261, median 680, max 2971 tokens
+- Schema cost per tool: min 261, median 698, max 2971 tokens
 - Median scenario response: **436 tokens** (range 87-538)
-- Break-even: the schema surface costs about as much as **75 median answers**
+- Break-even: the schema surface costs about as much as **76 median answers**
 
 ### Schema surface (paid once per conversation)
 
@@ -103,6 +103,7 @@ Generated 2026-08-25 by `uv run python benchmarks/token_efficiency.py --write`.
 | `render_map` | 597 | 136 | 52 | **857** | 3430 |
 | `isochrone` | 458 | 195 | 127 | **848** | 3393 |
 | `places_along_route` | 513 | 198 | 52 | **829** | 3316 |
+| `geocode_address` | 562 | 108 | 52 | **790** | 3162 |
 | `water_near` | 530 | 116 | 52 | **769** | 3079 |
 | `infrastructure_at` | 494 | 118 | 52 | **738** | 2953 |
 | `ground_location` | 463 | 150 | 52 | **734** | 2937 |
@@ -110,7 +111,6 @@ Generated 2026-08-25 by `uv run python benchmarks/token_efficiency.py --write`.
 | `place_details` | 342 | 228 | 52 | **680** | 2723 |
 | `find_near` | 242 | 126 | 222 | **651** | 2606 |
 | `within_distance` | 361 | 156 | 52 | **637** | 2549 |
-| `geocode_address` | 407 | 108 | 52 | **630** | 2522 |
 | `address_at` | 427 | 54 | 52 | **597** | 2388 |
 | `gers_lookup` | 385 | 74 | 52 | **575** | 2303 |
 | `preferences` | 206 | 216 | 52 | **532** | 2131 |
@@ -129,7 +129,7 @@ Generated 2026-08-25 by `uv run python benchmarks/token_efficiency.py --write`.
 | `simplify_geometry` | 129 | 58 | 52 | **297** | 1188 |
 | `admin_lookup` | 145 | 41 | 52 | **296** | 1185 |
 | `reverse_geocode` | 111 | 42 | 52 | **261** | 1044 |
-| **all 42 tools** | 20695 | 5419 | 3891 | **32913** | 131718 |
+| **all 42 tools** | 20850 | 5419 | 3891 | **33073** | 132358 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 

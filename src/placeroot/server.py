@@ -3501,9 +3501,18 @@ def geocode_address(
 
     Returns {"results": [{number, street, unit, postcode, country,
     distance_m, lat, lon}, ...], "anchor": {name, id, country,
-    admin_context}}, deduplicated to distinct number+street+postcode and
-    nearest the city's own point first. More matches than `limit` adds
-    "truncated", "distinct_in_range" and a note.
+    admin_context}, "match": "exact"|"nearest_number"|"street"},
+    deduplicated to distinct number+street+postcode and nearest the city's
+    own point first. More matches than `limit` adds "truncated",
+    "distinct_in_range" and a note. `match` is absent only when no street
+    was scanned at all (no street name, no city, or an unresolved anchor).
+
+    A requested number with no address point is never interpolated: when the
+    street has other numbered points, `results` holds the real nearest known
+    numbers bracketing the miss instead (`match: "nearest_number"`, each row
+    its own genuine coordinates, plus a note naming the miss and neighbors)
+    — never a synthesized coordinate for the missing number. No usable
+    numbers on the street falls to `match: "street"`, today's empty-plus-note.
 
     Coverage is alpha: 39 countries, no UK, Ireland, India or China. An empty
     list is a valid answer and always carries a note saying whether the

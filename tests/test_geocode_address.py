@@ -660,3 +660,199 @@ def test_four_token_streets_keep_the_abbreviated_branch():
     variants = {v.lower() for v in geocode._street_variants("West 42nd Street Northwest")}
     assert "w 42nd st nw" in variants
     assert "w 42 st nw" in variants
+
+
+# --- #414: match tiers, honest number-miss fallback ------------------------
+#
+# AMPHITHEATRE PKWY's fixture cluster is deliberately gappy (1600, 1601,
+# 1900 — scripts/build_geocode_fixture.py's STREET_CLUSTERS), which is what
+# makes it the street to bracket a miss against; MARKET ST's cluster is
+# contiguous (1-12) and stays the plain street-search fixture.
+
+
+def test_exact_match_carries_the_tier_and_is_otherwise_unchanged():
+    """The guardrail: an exact-number answer is byte-identical to #225's
+    original shape apart from the additive `match` field."""
+    result = geocode.geocode_address("1600 Amphitheatre Parkway, Mountain View")
+
+    match = result.pop("match")
+    assert match == "exact"
+    assert result == {
+        "results": [{
+            "number": "1600",
+            "street": "AMPHITHEATRE PKWY",
+            "postcode": "94043",
+            "country": "US",
+            "distance_m": 3991.9,
+            "lat": 37.422,
+            "lon": -122.0841,
+        }],
+        "anchor": {
+            "name": "Mountain View",
+            "id": "gers-div-mountain-view",
+            "country": "US",
+            "admin_context": ["United States", "California"],
+        },
+    }
+
+
+def test_a_plain_street_search_carries_the_street_tier():
+    """No number was asked for, so there is nothing to be "exact" about --
+    this is #225's original street-level answer, labeled."""
+    result = geocode.geocode_address("Market Street, San Francisco", limit=5)
+
+    assert result["match"] == "street"
+    assert result["truncated"] is True
+
+
+def test_a_number_miss_with_neighbors_on_both_sides_brackets_it():
+    """1650 falls strictly between the fixture's 1601 and 1900 -- a real
+    bracket, both sides present."""
+    result = geocode.geocode_address("1650 Amphitheatre Pkwy, Mountain View")
+
+    assert result["match"] == "nearest_number"
+    assert _streets(result) == [("1601", "AMPHITHEATRE PKWY"), ("1900", "AMPHITHEATRE PKWY")]
+    # Real rows: each neighbor keeps its own coordinates, not an invented
+    # midpoint -- there is no synthesized point for "1650" anywhere here.
+    for row in result["results"]:
+        assert "lat" in row and "lon" in row and "distance_m" in row
+    assert "no address point for 1650 Amphitheatre Pkwy" in result["note"]
+    assert "1601, 1900" in result["note"]
+    assert "between them" in result["note"]
+
+
+def test_a_number_below_the_streets_known_range_gets_the_nearest_two():
+    """1500 is below the lowest known number (1600) -- no bracket is
+    possible, so the two nearest stand in, and the note says "beyond" rather
+    than "between"."""
+    result = geocode.geocode_address("1500 Amphitheatre Pkwy, Mountain View")
+
+    assert result["match"] == "nearest_number"
+    assert _streets(result) == [("1600", "AMPHITHEATRE PKWY"), ("1601", "AMPHITHEATRE PKWY")]
+    assert "beyond them" in result["note"]
+
+
+def test_a_number_above_the_streets_known_range_gets_the_nearest_two():
+    result = geocode.geocode_address("999999 Amphitheatre Pkwy, Mountain View")
+
+    assert result["match"] == "nearest_number"
+    assert _streets(result) == [("1601", "AMPHITHEATRE PKWY"), ("1900", "AMPHITHEATRE PKWY")]
+
+
+def test_the_nearest_number_fallback_respects_limit():
+    result = geocode.geocode_address("1650 Amphitheatre Pkwy, Mountain View", limit=1)
+
+    assert result["match"] == "nearest_number"
+    assert len(result["results"]) == 1
+    # With one surviving neighbor the note must not claim a two-sided
+    # bracket the caller cannot see.
+    assert "between them" not in result["note"]
+
+
+def _neighbor_row(number: str, street: str = "MAIN ST") -> tuple:
+    return (number, street, None, 1, "00000", "US", 1.0, 2.0, 10.0)
+
+
+def test_bracket_numbers_reports_a_truncated_bracket_as_unbracketed():
+    rows = [_neighbor_row("30"), _neighbor_row("36")]
+    chosen, bracketed = geocode._bracket_numbers(rows, 32, limit=1)
+    assert len(chosen) == 1
+    assert bracketed is False
+
+
+def test_bracket_numbers_never_brackets_across_street_variants():
+    """Prefix street matching can pull PENNSYLVANIA AVE NW and ...SE into
+    one candidate set; a "bracket" straddling the two would place the
+    doorway between points on different streets."""
+    rows = [
+        _neighbor_row("34", "PENNSYLVANIA AVE SE"),
+        _neighbor_row("36", "PENNSYLVANIA AVE NW"),
+    ]
+    chosen, bracketed = geocode._bracket_numbers(rows, 35, limit=5)
+    assert bracketed is False
+    streets = {r[1] for r in chosen}
+    assert streets == {"PENNSYLVANIA AVE SE"}
+
+
+def test_no_points_on_the_street_at_all_is_the_street_tier_not_a_bracket():
+    """A number was asked for, but the street itself has nothing on it --
+    the honest empty from #225, still empty, now labeled "street" rather
+    than silently promoted to a fabricated tier."""
+    result = geocode.geocode_address("999 Nonexistent Avenue, San Francisco")
+
+    assert result["results"] == []
+    assert result["match"] == "street"
+    assert "may be a gap in the data" in result["note"]
+
+
+def test_a_non_numeric_target_cannot_be_bracketed_and_falls_to_street():
+    """"Apt 3"-shaped numbers have no leading digit run to compare
+    against -- see _parse_leading_int -- so there is nothing honest to
+    bracket the miss with."""
+    result = geocode.geocode_address(
+        number="Lot 4", street="Amphitheatre Pkwy", city="Mountain View"
+    )
+
+    assert result["match"] == "street"
+    assert result["results"] == []
+
+
+def test_a_dataset_without_a_number_column_is_the_street_tier(monkeypatch):
+    real = geocode._scan_addresses_in_bbox
+
+    def without_number(*a, **kw):
+        rows, distinct, matched, _ = real(*a, **kw)
+        return rows, distinct, matched, False
+
+    monkeypatch.setattr(geocode, "_scan_addresses_in_bbox", without_number)
+    result = geocode.geocode_address("1600 Amphitheatre Parkway, Mountain View")
+
+    assert result["match"] == "street"
+
+
+def test_no_street_or_no_anchor_carries_no_match_field():
+    """No scan ever ran, so there is no tier to report."""
+    assert "match" not in geocode.geocode_address("Market Street")
+    assert "match" not in geocode.geocode_address(", San Francisco")
+    assert "match" not in geocode.geocode_address("Market Street, Zzzzqqxx")
+
+
+def test_the_neighbor_query_only_runs_on_a_number_miss(monkeypatch):
+    """No cost on the common paths: a hit, or a plain street search, never
+    calls the fallback at all."""
+    calls = []
+    real = geocode._scan_street_neighbors_in_bbox
+
+    def counted(*a, **kw):
+        calls.append(a)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(geocode, "_scan_street_neighbors_in_bbox", counted)
+    geocode.geocode_address("1600 Amphitheatre Parkway, Mountain View")
+    geocode.geocode_address("Market Street, San Francisco")
+    assert calls == []
+    geocode.geocode_address("1650 Amphitheatre Pkwy, Mountain View")
+    assert len(calls) == 1
+
+
+def test_the_neighbor_query_reads_the_same_bbox_the_exact_scan_used():
+    """Same WHERE-clause shape as the exact-number scan -- same bbox, same
+    street patterns -- just the number filter dropped, so it is a second
+    local read against data the first query already pulled through the
+    tile cache, not a new remote scan (#414)."""
+    rows = geocode._scan_street_neighbors_in_bbox(
+        (-122.10, 37.40, -122.06, 37.44),
+        (37.4220, -122.0841),
+        ["Amphitheatre Pkwy"],
+        1650,
+        locality="Mountain View",
+    )
+    assert {r[0] for r in rows} == {"1600", "1601", "1900"}
+
+
+@pytest.mark.parametrize("number,expected", [
+    ("12", 12), ("12-14", 12), ("5A", 5), ("221B", 221),
+    ("Lot 4", None), ("", None), (None, None),
+])
+def test_leading_int_parse(number, expected):
+    assert geocode._parse_leading_int(number) == expected
