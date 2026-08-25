@@ -298,9 +298,15 @@ answers.
   stays as fallback); `verify_claims` optionally uses sampling to
   decompose free-text listings server-side, deleting the client-side
   parsing step its docstring currently delegates.
-- **Geometry set ops** — implement `union`/`intersect`/`difference` in
+- ~~**Geometry set ops** — implement `union`/`intersect`/`difference` in
   `geometry_op` (today's only "not implemented"); Mapbox ships these as
-  Turf tools and agents do use them.
+  Turf tools and agents do use them.~~ — **done (#404)**, via the DuckDB
+  spatial extension (`ST_Union`/`ST_Intersection`/`ST_Difference`, the same
+  machinery area_suggest.intersect_sheds already used) rather than
+  pure-Python clipping; results pass through the same budget-simplify
+  convention buffer/convex_hull use, and an empty result (disjoint
+  intersect, a fully-covered difference) comes back as an honest
+  `{"empty": true, "note": ...}` rather than null geometry.
 - **`plan_area_visit` prompt, not tool** — the itinerary workflow (§3B) as
   a seventh workflow prompt; prompts cost zero listing tokens. **Done
   (#405).**
