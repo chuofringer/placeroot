@@ -410,8 +410,11 @@ def _plan_area_visit(area: str, interests: str, mode: str = "") -> str:
 2. `find_places()` **once** with area (or the resolved point) and
    categories=[the up-to-5 slugs] and group_by_category=true. That is a
    single scan across every interest, not one call per category — the
-   grouped answer comes back as {{category: [rows...]}}, already
-   ranked nearest-first within each bucket.
+   grouped answer comes back as {{category: [rows...]}}. Buckets from a
+   point search are ranked nearest-first with a distance_m on each row;
+   buckets from an area/division search are name-ordered with no
+   distance_m (there is no reference point), so pick those on merit, or
+   search from a resolved point when nearness should drive the choice.
 3. From that one response, pick 1-3 stops per category — prefer rows with
    a "strong" or "ok" trust tier over "weak"/"unknown" ones when a
    category offers a choice — and keep the total around 4-8 stops, a
@@ -425,8 +428,9 @@ def _plan_area_visit(area: str, interests: str, mode: str = "") -> str:
 Then give a compact itinerary: the stops in visiting order, one line on
 why each fits the interest it covers, and the total distance/duration —
 not the raw tool payloads. For any stop whose `find_places()` row carried
-a "weak"/"unknown" trust tier or a trust_note flagging low confidence or
-an uncertain operating status, say so plainly and name it as worth
+a "weak"/"unknown" trust tier — or, if you asked for detail="full", a
+trust_note flagging low confidence or an uncertain operating status —
+say so plainly and name it as worth
 double-checking before the user leaves. `optimize_route()`'s own
 verify_before_going only fires for stops passed as full place lookups,
 not the id/name stops this workflow passes, so this honesty check has to
