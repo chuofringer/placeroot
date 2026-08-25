@@ -98,10 +98,11 @@ PROBE_METROS: list[tuple[str, float, float]] = [
     ("Lagos Island", 6.4550, 3.3841),  # Africa — the metric this gate exists for (#546)
 ]
 
-# geo.bbox_around's half-width scales with radius/111_320m; 5_500m keeps
-# every probe box in the "~0.1 degree class" the issue asked for (about
-# 0.1 deg tall, narrower in longitude away from the equator) while still
-# covering enough of a dense downtown to make row counts meaningful.
+# geo.bbox_around takes a half-width: 5_500m makes each box ~0.1 deg in
+# half-height (~0.2 deg tall in total, wider in longitude *degrees* away
+# from the equator, where a degree of longitude covers fewer meters) —
+# the "~0.1 degree class" the issue asked for, while still covering
+# enough of a dense downtown to make row counts meaningful.
 PROBE_RADIUS_M = 5_500.0
 
 # Relative drop (newest vs pinned) on any one probe metric that flags a
@@ -161,8 +162,18 @@ def probe_bbox_metrics(
     """
     xmin, ymin, xmax, ymax = geo.bbox_around(lat, lon, PROBE_RADIUS_M)
     filter_sql, params = geo.bbox_filter_sql(xmin, ymin, xmax, ymax)
-    places_glob = overture.upstream_glob("places", "place", release=release_name)
-    addresses_glob = overture.upstream_glob("addresses", "address", release=release_name)
+    # Globs built directly from DEFAULT_UPSTREAM_BASE, exactly like the
+    # column probe above: the canary's job is to look at the *live* bucket,
+    # so a runner's PLACEROOT_DATA_PATH* pin or a registered override must
+    # neither redirect these probes nor raise UpstreamUnavailable out of
+    # them (which would abort the run and discard findings already
+    # collected by the other checks).
+    places_glob = (
+        f"{overture.DEFAULT_UPSTREAM_BASE}/{release_name}/theme=places/type=place/*"
+    )
+    addresses_glob = (
+        f"{overture.DEFAULT_UPSTREAM_BASE}/{release_name}/theme=addresses/type=address/*"
+    )
     try:
         n, brand_n, confidence_n, category_n = con.execute(
             f"""
@@ -236,6 +247,18 @@ def compare_bbox_metrics(
                 row["skip_reason"] = f"pinned denominator {denom:g} < MIN_ROWS ({MIN_ROWS})"
                 rows.append(row)
                 continue
+            if metric.endswith("_non_null_rate") and denom is not None:
+                # For the rate metrics the noisy quantity is the *numerator*
+                # (the pinned non-null count), not the row count: 800 places
+                # rows with 6 branded ones still make a -33% "drop" out of
+                # two rows moving. Floor it with the same MIN_ROWS.
+                non_null = pinned_value * denom
+                if non_null < MIN_ROWS:
+                    row["skip_reason"] = (
+                        f"pinned non-null count {non_null:g} < MIN_ROWS ({MIN_ROWS})"
+                    )
+                    rows.append(row)
+                    continue
             if pinned_value == 0:
                 row["skip_reason"] = "pinned value is 0"
                 rows.append(row)

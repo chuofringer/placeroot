@@ -153,6 +153,23 @@ def test_small_denominator_is_skipped_not_flagged():
     assert overture_canary.render_coverage_report(rows, "2026-08-19.0", "2026-09-16.0") == []
 
 
+def test_small_numerator_is_skipped_for_rate_metrics():
+    """The rate metrics' noisy quantity is the pinned non-null *count*: 800
+    places rows with 6 branded ones would turn two rows moving into a -33%
+    "drop". The MIN_ROWS floor applies to that count too."""
+    pinned = {"Lagos": _metrics(800, 6 / 800, 0.9, 0.95, 3_000)}
+    newest = {"Lagos": _metrics(800, 4 / 800, 0.9, 0.95, 3_000)}
+    rows = overture_canary.compare_bbox_metrics(pinned, newest)
+    by_metric = {r["metric"]: r for r in rows}
+    brand = by_metric["brand_non_null_rate"]
+    assert brand["regression"] is False
+    assert brand["skip_reason"] is not None
+    assert brand["delta_pct"] is None
+    # A rate whose pinned non-null count clears the floor is still compared.
+    assert by_metric["confidence_non_null_rate"]["skip_reason"] is None
+    assert by_metric["places_rows"]["skip_reason"] is None
+
+
 def test_pinned_zero_denominator_is_skipped():
     pinned = {"Empty": _metrics(0, 0.0, 0.0, 0.0, 0)}
     newest = {"Empty": _metrics(0, 0.0, 0.0, 0.0, 0)}
