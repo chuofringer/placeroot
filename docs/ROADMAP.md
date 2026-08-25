@@ -291,8 +291,9 @@ answers.
   that region at startup and bias `resolve_place`/`geocode` ranking to it.~~
   **Shipped differently, and this framing is stale (2026-08-24, #409/#411):**
   the roots capability itself is deprecated as of spec rev 2026-07-28
-  (SEP-2577; `mcp.client.session.ServerSession.list_roots()` in the pinned
-  SDK carries the deprecation marker directly, `mcp/client/session.py:1288`).
+  (SEP-2577; `mcp.server.session.ServerSession.list_roots()` in the pinned
+  SDK carries the deprecation marker directly, `mcp/server/session.py:316`,
+  as does its `ClientSession` mirror in `mcp/client/session.py`).
   #409 shipped the actual geofence — `PLACEROOT_HOME=<city/area>` bias on
   `geocode`/`geocode_batch`/`resolve_place`, always-disclosed, never a
   filter — and left a named, always-`None` `resolve_home_from_roots()` stub
@@ -305,7 +306,9 @@ answers.
   2.0.0) does expose MRTR via `Annotated[T, Resolve(fn)]` +
   `Elicit(message, schema)` (`mcp/server/mcpserver/resolve.py`), and #411
   investigated wiring it into the cold-graph `needs_confirm` gates
-  (`route`/`from_to`/`isochrone`/`find_places` `within`). Verified against
+  (`route`/`from_to`/`meeting_point`/`suggest_areas`/`find_places`
+  `within`, plus `warmup_city`'s own confirm gate; `isochrone` carries no
+  such gate). Verified against
   the running SDK: a `Resolve`-annotated parameter is dropped from the
   tool's published `inputSchema` entirely (`skip_names` in
   `mcp/server/mcpserver/tools/base.py:92-99`) and is *always* resolver-filled
