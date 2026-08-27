@@ -25,6 +25,21 @@ fixing behavior is patch.
   keeps its drive default (`from_to` is the same routing defaulting to
   walk). No new tool, so the tool count is unchanged.
 
+- `find_places` gained `where` (#420): the search CENTER as a LocationRef —
+  a `{"lat", "lon"}` dict, a GERS id, or a free-text place name resolved
+  inside the server — so `find_places(where="Alamo Square, SF",
+  category="cafe")` answers a named search in one hop, with every
+  find_places filter, `detail` tier, and `within` reachability filter
+  available to it. Mutually exclusive with `lat`/`lon` and with the area
+  modes (`division_id`, `area`); either mix returns a `bad_request` naming
+  the choice, in the same either-or wording `summarize_area`/`isochrone`
+  use. An id/name `where` adds the standard compact `"resolved"`
+  (`{name, id, lat, lon, matched_by}`) echo; a `{lat,lon}` dict adds
+  nothing, and an ambiguous name returns `ambiguous_place` with
+  candidates rather than picking one. `within.of` — already documented as
+  defaulting to the search center — picks up a `where`-given center too.
+  Additive: every existing call shape is unchanged.
+
 ### Fixed
 - The `from`-keyword schema patch no longer hand-lists the parameters it
   republishes. `from_to`'s model dropped every parameter it forgot, twice
@@ -32,6 +47,14 @@ fixing behavior is patch.
   each model is checked against its function's real signature before it is
   published, so a parameter added to `route` or `from_to` without a matching
   field fails at startup instead of vanishing from `tools/list`.
+
+### Changed
+- Deprecation notes only, no removals: `find_near`'s docstring now points
+  at `find_places(where=..., category=...)` as the canonical form of that
+  search (find_near stays as a thin alias), and `from_to`'s notes that it
+  is `route()` with LocationRef ends and a walk default, with `route` the
+  canonical routing tool (#420). Both tools keep their current schemas and
+  behavior; the actual fold is a future breaking release.
 
 ## [0.10.0] — 2026-08-26
 
