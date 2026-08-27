@@ -3724,13 +3724,25 @@ def geocode_detailed(
             # more confidence. The anchor is the caller's own statement about
             # where they mean; among equally-good name matches, closer to it is
             # closer to what they asked for.
+            #
+            # #429: the bundled alias spellings of a landmark are readings of
+            # the query too, and grading against them is what stops a
+            # world-famous name from losing on a technicality. "Musée du
+            # Louvre" merely *contains* the word "Louvre", so literal grading
+            # made it a substring match and sorted it below every hotel whose
+            # name happens to start with the word; against the alias spelling
+            # "musee du louvre" it is the exact match it actually is.
+            alias_readings = _alias_names_for(search_query)
+
             def _rank_place(r):
                 near = 0.0
                 if anchor is not None:
                     near = geo.haversine_m(anchor[0], anchor[1], r["lat"], r["lon"])
                 return (
-                    -max(_match_tier(r["name"], name_query),
-                         _match_tier(r["name"], search_query)),
+                    -max(
+                        _match_tier(r["name"], reading)
+                        for reading in (name_query, search_query, *alias_readings)
+                    ),
                     round(near / 1000.0),
                     -r["_confidence"],
                     r["id"],
@@ -4044,6 +4056,30 @@ def _place_match_label(name: str, query: str) -> str | None:
     if n_tokens & q_tokens:
         return "substring"
     return None
+
+
+def _best_place_label(name: str, query: str, alternates: list[str]) -> str | None:
+    """The strongest label `name` earns against `query` or any of `alternates`.
+
+    #429: the alternates are other spellings of the same thing the caller
+    asked for — the bundled landmark aliases, and the city-stripped
+    search_query — so the label they earn is a label for the caller's own
+    question, not a consolation prize. Taking the *first* non-None one
+    (the previous rule) meant a literal label, however weak, blocked the
+    alternates from ever being tried: "Louvre" reads as a bare substring of
+    "Musée du Louvre", so the museum was graded a substring match and lost
+    the tier sort to "Louvre Luxury Apartment & SPA", whose name merely
+    starts with the word. Graded against the alias spelling "musee du
+    louvre" it is an exact match, which is what it actually is.
+    """
+    best = _place_match_label(name, query)
+    for alt in alternates:
+        label = _place_match_label(name, alt)
+        if label is not None and (
+            best is None or _MATCH_LABEL_RANK[label] > _MATCH_LABEL_RANK[best]
+        ):
+            best = label
+    return best
 
 
 def _jaro_winkler(a: str, b: str) -> float:
@@ -4440,14 +4476,11 @@ def resolve_place(
             else:
                 continue
         else:
-            label = _place_match_label(r["name"], query)
-            if label is None:
-                for alt in _alias_names_for(query) + (
-                    [search_query] if search_query != query else []
-                ):
-                    label = _place_match_label(r["name"], alt)
-                    if label is not None:
-                        break
+            label = _best_place_label(
+                r["name"],
+                query,
+                _alias_names_for(query) + ([search_query] if search_query != query else []),
+            )
         if label is None:
             continue
         seen_ids.add(r["id"])
@@ -4471,12 +4504,11 @@ def resolve_place(
     for r in geocode_hits:
         if r["type"] != "place" or not r["id"] or r["id"] in seen_ids or not r["name"]:
             continue
-        label = _place_match_label(r["name"], query)
-        if label is None:
-            for alt in _alias_names_for(query) + ([search_query] if search_query != query else []):
-                label = _place_match_label(r["name"], alt)
-                if label is not None:
-                    break
+        label = _best_place_label(
+            r["name"],
+            query,
+            _alias_names_for(query) + ([search_query] if search_query != query else []),
+        )
         if label is None:
             continue
         seen_ids.add(r["id"])
@@ -4719,6 +4751,11 @@ def resolve_named_place(query: str) -> dict | None:
     so a compose tool cannot silently route the wrong city. Includes
     places as well as divisions — "Ferry Building" is not an area.
 
+    When geocode matches no division at all, the places half of the answer
+    comes from resolve_place rather than from geocode's own supplementary
+    places scan — see the #429 block below for why that leg exists and why
+    it is scoped to the no-division case.
+
     A comma-qualified name ("Le Marais, Paris") is read as name-plus-
     qualifier rather than as one opaque string — see the #427 block below
     for the split, the anchor bound, and how the tiers interact.
@@ -4742,9 +4779,15 @@ def resolve_named_place(query: str) -> dict | None:
         r for r in geocode(query, limit=_RESOLVE_OVERFETCH)
         if r.get("lat") is not None and r.get("lon") is not None
     ]
-    if not rows:
-        return None
-    hit = _pick_named_place(query, rows)
+    hit = None
+    if not any(r["type"] != "place" for r in rows) and _has_extra_place_context(query):
+        # #429: no division matched, so this is a places question — and the
+        # places resolver is resolve_place, not geocode. See the block below.
+        hit = _resolve_place_leg(query)
+    if hit is None:
+        if not rows:
+            return None
+        hit = _pick_named_place(query, rows)
     if head is not None:
         # The qualifier named nothing this release knows, so the whole
         # string was searched — today's behavior, and still the best
@@ -4753,6 +4796,85 @@ def resolve_named_place(query: str) -> dict | None:
         # if it had been.
         hit["note"] = f"{qualifier!r} did not resolve as a place or region; searched the full text"
     return hit
+
+
+# --- #429: the places leg of an unqualified name ----------------------------
+#
+# The defect: resolve_named_place had no places search of its own. It read
+# geocode(), whose places half is a *supplement* to the divisions search and
+# is gated accordingly — stood down once an exact or fuzzy division match is
+# in hand, and skipped outright against a remote dataset when no anchor can
+# be derived from the query, because unanchored it is a substring scan of
+# every place on Earth (#105, ~216s measured). "Louvre Museum" derives no
+# anchor: "Museum" is a feature noun, and "Louvre" only prefix-matches the
+# commune of Louvres, which the leading-token rule requires to be exact. So
+# geocode returned nothing and every compose built on this resolver —
+# from_to's ends, meeting_point's origins, optimize_route's stops,
+# find_near's near — answered "no place matched" for a name the places
+# theme carries six times over.
+#
+# resolve_place is the resolver that *does* have a places leg: its own
+# reference derivation, the bundled landmark pins, the #329 last-good city,
+# and a per-token bounded find_places sweep. Everything geocode's places
+# half can reach, resolve_place's merge already includes (it folds
+# geocode()'s own place rows in), so handing the places question to it is
+# strictly more recall, never less.
+#
+# Scoped to "geocode found no division at all": when a division did match,
+# the ranking that chose it stays untouched and the answer is byte-identical
+# to before. This is a fallback, not a second opinion — a query geocode
+# already answers is never re-litigated.
+#
+# Scoped again by _has_extra_place_context, and that one is a cost rule
+# rather than a correctness rule. resolve_place re-runs geocode and then
+# fans out one bounded find_places per significant token. When it would
+# derive the very anchor geocode just used, that fan-out is the same search
+# again at several times the price: "Nowhere At All Xyzzy" (a miss, cold
+# cache) measured 12s before this leg and had not returned after five
+# minutes with it. So the leg runs when resolve_place can bound the search
+# somewhere geocode could not — a bundled landmark pin, or the session's
+# last good city — which is the whole class this issue is about.
+
+
+def _has_extra_place_context(query: str) -> bool:
+    """Whether resolve_place knows a location for `query` that geocode did not."""
+    _place_query, _city, coords = _extract_city_hint(query)
+    if coords is not None:
+        return True
+    with _last_good_lock:
+        last_city = _last_good_city
+    return bool(last_city) and _query_is_poi_shaped(query)
+
+
+def _resolve_place_leg(query: str) -> dict | None:
+    """resolve_place's top place candidate for `query`, or None.
+
+    No ambiguity check: same reading as the anchored path in
+    _resolve_inside_anchor. Several businesses sharing a name in one metro
+    is the ordinary shape of the places theme rather than the "which city
+    did you mean" ambiguity AmbiguousPlace exists to surface, and
+    resolve_place has already ranked them by tier, distance and confidence.
+
+    A degraded places dataset degrades this leg rather than the whole
+    resolve: resolve_place raises SchemaDegraded where geocode does not, and
+    a caller who used to get geocode's own answer (or an honest None) must
+    not start getting an exception because a *supplementary* search failed.
+    """
+    try:
+        hits = resolve_place(query, limit=_RESOLVE_OVERFETCH)
+    except overture.SchemaDegraded as e:
+        logger.info("resolve_named_place: places leg unavailable (%s); using geocode's rows", e)
+        return None
+    for hit in hits:
+        if hit.get("kind") == "place":
+            return {
+                "name": hit["name"],
+                "lat": hit["lat"],
+                "lon": hit["lon"],
+                "id": hit["id"],
+                "type": "place",
+            }
+    return None
 
 
 # --- #427: comma-qualified names ("Le Marais, Paris") -----------------------

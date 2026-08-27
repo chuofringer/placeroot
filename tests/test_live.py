@@ -195,3 +195,21 @@ def test_comma_qualified_name_resolves_inside_its_qualifier():
     resolved = geocode.resolve_named_place("Le Marais, Paris")
     assert resolved is not None
     assert geo.haversine_m(resolved["lat"], resolved["lon"], 48.8566, 2.3522) < 10_000
+
+
+@pytest.mark.live
+def test_ordinary_english_landmark_name_resolves():
+    """#429: the observed defect, live. "Louvre Museum" derives no anchor —
+    "Museum" is a feature noun and "Louvre" only prefix-matches the commune
+    of Louvres — so geocode's places half was skipped and every compose on
+    the shared resolver answered "no place matched".
+
+    Assert on where the pin lands, not on which row wins it: Overture
+    carries six businesses named exactly "Louvre Museum" (ticket resellers,
+    scattered across the metro) alongside the Musée du Louvre itself, and
+    which of them ranks first is a data question. Within 500 m of the
+    pyramid is the answer being right.
+    """
+    resolved = geocode.resolve_named_place("Louvre Museum")
+    assert resolved is not None
+    assert geo.haversine_m(resolved["lat"], resolved["lon"], 48.8606, 2.3376) < 500
