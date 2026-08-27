@@ -3945,17 +3945,27 @@ def isochrone(
 
 @_tool("Route between two points")
 def route(
-    from_lat: float,
-    from_lon: float,
-    to_lat: float,
-    to_lon: float,
+    from_lat: float | None = None,
+    from_lon: float | None = None,
+    to_lat: float | None = None,
+    to_lon: float | None = None,
     mode: _ModeArgDriveDefault = None,
     include_path: bool = False,
     include_elevation: bool = False,
     prefer: _PreferArg = None,
     confirm: bool = False,
+    from_: str | dict | None = None,
+    to: str | dict | None = None,
 ) -> dict:
     """Route: shortest-path distance and duration between two points, by mode.
+
+    Give the two ends as from_lat/from_lon and to_lat/to_lon, or as
+    from/to — each a {"lat", "lon"} dict, a GERS id, or a free-text place
+    name — but not both (and not neither); either way returns
+    {"error": "bad_request"} naming the choice. Do not call geocode(),
+    resolve_place(), or geocode_batch() first: names and ids resolve in
+    parallel inside this call, and the "from"/"to" blocks come back
+    carrying whatever each end resolved to.
 
     Compact directions, not turn-by-turn: builds a street graph from
     Overture's transportation theme around the two points and returns
@@ -4028,10 +4038,47 @@ def route(
     and they said yes. A warm or cached graph never needs it.
     Omit confirm unless you just asked and they said yes.
 
-    route takes coordinates only. For a name or GERS id endpoint, use
-    from_to instead — same routing, but each end accepts a {"lat", "lon"}
-    dict, a GERS id, or a free-text place name.
+    A from/to name matching several equally-ranked places returns
+    {"error": "ambiguous_place", "candidates": [...]} instead of picking a
+    city; an unresolvable name or id returns {"error": "not_found"}; a
+    malformed one (empty string, dict missing lat/lon, wrong type) returns
+    {"error": "bad_request"} — the offending side is named in "field".
+    Ends that resolve a city apart return {"error": "too_far"} with both
+    ends and the mode cap, before any graph is built. from_to is this same
+    routing with a walk default.
     """
+    have_ref = from_ is not None or to is not None
+    have_scalar = any(v is not None for v in (from_lat, from_lon, to_lat, to_lon))
+    if have_ref and have_scalar:
+        return {
+            "error": "bad_request",
+            "detail": (
+                "pass either from_lat/from_lon and to_lat/to_lon, or from and to — not both"
+            ),
+        }
+    if have_ref:
+        if from_ is None or to is None:
+            return {
+                "error": "bad_request",
+                "detail": "route needs both from and to",
+                "field": "from" if from_ is None else "to",
+            }
+        return _route_between_refs(
+            from_,
+            to,
+            mode=mode,
+            default_mode=preference_store.DEFAULT_MODE_ROUTE,
+            include_path=include_path,
+            include_elevation=include_elevation,
+            prefer=prefer,
+            confirm=confirm,
+            tool="route",
+        )
+    if not all(v is not None for v in (from_lat, from_lon, to_lat, to_lon)):
+        return {
+            "error": "bad_request",
+            "detail": "route needs from_lat, from_lon, to_lat and to_lon, or from and to",
+        }
     for lat, lon in ((from_lat, from_lon), (to_lat, to_lon)):
         coord_error = _invalid_coord(lat, lon)
         if coord_error is not None:
@@ -4183,6 +4230,41 @@ def from_to(
     and they said yes. A warm or cached graph never needs it.
     Omit confirm unless you just asked and they said yes.
     """
+    return _route_between_refs(
+        from_,
+        to,
+        mode=mode,
+        default_mode="walk",
+        include_path=include_path,
+        include_elevation=include_elevation,
+        prefer=prefer,
+        confirm=confirm,
+        tool="from_to",
+    )
+
+
+def _route_between_refs(
+    from_,
+    to,
+    *,
+    mode,
+    default_mode: str,
+    include_path: bool,
+    include_elevation: bool,
+    prefer,
+    confirm: bool,
+    tool: str,
+) -> dict:
+    """Resolve two LocationRefs, then route between them — from_to's body, shared.
+
+    route() reaches this when it is called with from/to instead of the four
+    scalars (#419); from_to() is this call with a walk default. The two
+    differ only in `default_mode` and the tool named in the too_far detail,
+    so the resolution semantics — parallel resolve of plain-name pairs,
+    per-side "field", the too_far guard before any graph is extracted, and
+    the resolved name/id echoed onto the answer's "from"/"to" — are one
+    implementation rather than two that can drift.
+    """
     if isinstance(from_, str) and not from_.strip():
         return {
             "error": "bad_request",
@@ -4214,7 +4296,7 @@ def from_to(
         dest, dest_error = _resolve_location_ref(to)
         if dest_error is not None:
             return {**dest_error, "field": "to"}
-    mode = preference_store.resolve_mode(mode, "walk")
+    mode = preference_store.resolve_mode(mode, default_mode)
     if mode not in routing.MODE_CONFIG:
         return {
             "error": "unsupported_mode",
@@ -4230,7 +4312,7 @@ def from_to(
             "error": "too_far",
             "detail": (
                 f"{origin_label!r} and {dest_label!r} are {round(straight_m)} m "
-                f"apart; from_to stays inside one city ({mode} cap {round(cap_m)} m)"
+                f"apart; {tool} stays inside one city ({mode} cap {round(cap_m)} m)"
             ),
             "from": origin,
             "to": dest,
@@ -5264,7 +5346,7 @@ def placeroot_call(tool: str, args: dict | None = None) -> dict:
             "valid_tools": sorted(_TOOL_FUNCS),
         }
     call_args = {} if args is None else args
-    if tool == "from_to" and isinstance(call_args, dict) and "from" in call_args:
+    if tool in ("from_to", "route") and isinstance(call_args, dict) and "from" in call_args:
         call_args = {**call_args, "from_": call_args["from"]}
         call_args.pop("from", None)
     if not isinstance(call_args, dict):
@@ -5454,47 +5536,94 @@ async def _trace_middleware(ctx, call_next):
     return result
 
 
-def _publish_from_keyword(mcp_server) -> None:
-    """Advertise from_to's origin as `from` — a reserved word in Python.
+def _from_alias_base():
+    """The ArgModelBase subclass that maps a published `from` back to `from_`.
 
-    The implementation parameter is from_. The public schema and the
-    validator both use from so the agent never sees the underscore.
+    ArgModelBase.model_dump_one_level keys its kwargs by alias, which would
+    call the tool with from=... — a syntax error waiting to happen. This
+    keys them by field name instead, for every declared field, so a
+    parameter can never be dropped from the dump by being forgotten in a
+    hand-written dict (the #328/#395 bug class).
+
+    Imported lazily: placeroot.server imports without mcp installed
+    (test_import_hardening), and only server construction needs this.
+    """
+    from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase
+
+    class _FromAliasArguments(ArgModelBase):
+        def model_dump_one_level(self) -> dict:
+            return {name: getattr(self, name) for name in type(self).model_fields}
+
+    return _FromAliasArguments
+
+
+def _from_to_arg_model():
+    """from_to's published argument model: every parameter, `from_` as `from`."""
+    from pydantic import ConfigDict, Field
+
+    class FromToArguments(_from_alias_base()):
+        model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
+        from_: str | dict = Field(alias="from")
+        to: str | dict
+        mode: _ModeArgWalkDefault = None
+        include_path: bool = False
+        include_elevation: bool = False
+        prefer: _PreferArg = None
+        confirm: bool = False
+
+    return FromToArguments
+
+
+def _route_arg_model():
+    """route's published argument model: the four scalars, from/to, and the rest (#419)."""
+    from pydantic import ConfigDict, Field
+
+    class RouteArguments(_from_alias_base()):
+        model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
+        from_lat: float | None = None
+        from_lon: float | None = None
+        to_lat: float | None = None
+        to_lon: float | None = None
+        mode: _ModeArgDriveDefault = None
+        include_path: bool = False
+        include_elevation: bool = False
+        prefer: _PreferArg = None
+        confirm: bool = False
+        from_: str | dict | None = Field(default=None, alias="from")
+        to: str | dict | None = None
+
+    return RouteArguments
+
+
+def _publish_from_keyword(mcp_server) -> None:
+    """Advertise from_to's and route's origin as `from` — a reserved word in Python.
+
+    The implementation parameter is from_ on both tools. The public schema
+    and the validator both use from so the agent never sees the underscore.
+
+    Each model is checked against the function's real signature before it is
+    published: a hand-written arg model that forgets a parameter silently
+    deletes it from the published schema, which is exactly what #328/#395
+    shipped and had to be fixed twice.
 
     Patches mcp 2.0.0 private internals (pinned in uv.lock). If those
     move, fail with a clear assertion rather than a raw AttributeError.
     """
-    try:
-        tool = mcp_server._tool_manager.get_tool("from_to")
-        if tool is None:
-            return
-        from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase
-        from pydantic import ConfigDict, Field
-
-        class FromToArguments(ArgModelBase):
-            model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
-            from_: str | dict = Field(alias="from")
-            to: str | dict
-            mode: _ModeArgWalkDefault = None
-            include_path: bool = False
-            include_elevation: bool = False
-            prefer: _PreferArg = None
-            confirm: bool = False
-
-            def model_dump_one_level(self) -> dict:
-                return {
-                    "from_": self.from_,
-                    "to": self.to,
-                    "mode": self.mode,
-                    "include_path": self.include_path,
-                    "include_elevation": self.include_elevation,
-                    "prefer": self.prefer,
-                    "confirm": self.confirm,
-                }
-
-        tool.fn_metadata = tool.fn_metadata.model_copy(update={"arg_model": FromToArguments})
-        tool.parameters = FromToArguments.model_json_schema(by_alias=True)
-    except (AttributeError, ImportError) as e:
-        raise AssertionError("from_to schema patch failed; mcp internals changed") from e
+    for name, fn, build in (
+        ("from_to", from_to, _from_to_arg_model),
+        ("route", route, _route_arg_model),
+    ):
+        try:
+            tool = mcp_server._tool_manager.get_tool(name)
+            if tool is None:
+                continue
+            model = build()
+            missing = set(inspect.signature(fn).parameters) - set(model.model_fields)
+            assert not missing, f"{name} schema patch drops {sorted(missing)}"
+            tool.fn_metadata = tool.fn_metadata.model_copy(update={"arg_model": model})
+            tool.parameters = model.model_json_schema(by_alias=True)
+        except (AttributeError, ImportError) as e:
+            raise AssertionError(f"{name} schema patch failed; mcp internals changed") from e
 
 
 class _PermissiveOutput(BaseModel):

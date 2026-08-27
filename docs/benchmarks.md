@@ -72,23 +72,23 @@ ceiling.
 
 <!-- BEGIN GENERATED: benchmarks/token_efficiency.py -->
 
-Generated 2026-08-26 by `uv run python benchmarks/token_efficiency.py --write`.
+Generated 2026-08-27 by `uv run python benchmarks/token_efficiency.py --write`.
 
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-08-19.0`
 - Tools registered: **42**
-- Total schema surface: **33073 tokens** (132358 chars, 132719 bytes)
-- Of which inputSchema: **5419 tokens**, outputSchema: **3891 tokens** (roadmap §4.3, #403) — the rest is names/descriptions/annotations
+- Total schema surface: **33378 tokens** (133579 chars, 133944 bytes)
+- Of which inputSchema: **5512 tokens**, outputSchema: **3891 tokens** (roadmap §4.3, #403) — the rest is names/descriptions/annotations
 - Schema cost per tool: min 261, median 698, max 2971 tokens
 - Median scenario response: **436 tokens** (range 87-540)
-- Break-even: the schema surface costs about as much as **76 median answers**
+- Break-even: the schema surface costs about as much as **77 median answers**
 
 ### Schema surface (paid once per conversation)
 
 | tool | description tokens | inputSchema tokens | outputSchema tokens | total tokens | total chars |
 |---|---:|---:|---:|---:|---:|
 | `find_places` | 2000 | 586 | 277 | **2971** | 11885 |
-| `route` | 1214 | 218 | 227 | **1750** | 7002 |
+| `route` | 1416 | 311 | 227 | **2055** | 8223 |
 | `changes_in_area` | 1161 | 212 | 52 | **1515** | 6060 |
 | `optimize_route` | 799 | 132 | 324 | **1342** | 5371 |
 | `meeting_point` | 1018 | 106 | 52 | **1265** | 5063 |
@@ -129,7 +129,7 @@ Generated 2026-08-26 by `uv run python benchmarks/token_efficiency.py --write`.
 | `simplify_geometry` | 129 | 58 | 52 | **297** | 1188 |
 | `admin_lookup` | 145 | 41 | 52 | **296** | 1185 |
 | `reverse_geocode` | 111 | 42 | 52 | **261** | 1044 |
-| **all 42 tools** | 20850 | 5419 | 3891 | **33073** | 132358 |
+| **all 42 tools** | 21052 | 5512 | 3891 | **33378** | 133579 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 
