@@ -77,28 +77,28 @@ Generated 2026-08-27 by `uv run python benchmarks/token_efficiency.py --write`.
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-08-19.0`
 - Tools registered: **42**
-- Total schema surface: **34029 tokens** (136182 chars, 136561 bytes)
-- Of which inputSchema: **5577 tokens**, outputSchema: **3891 tokens** (roadmap §4.3, #403) — the rest is names/descriptions/annotations
+- Total schema surface: **34515 tokens** (138125 chars, 138506 bytes)
+- Of which inputSchema: **5743 tokens**, outputSchema: **3933 tokens** (roadmap §4.3, #403) — the rest is names/descriptions/annotations
 - Schema cost per tool: min 261, median 703, max 3177 tokens
 - Median scenario response: **436 tokens** (range 87-540)
-- Break-even: the schema surface costs about as much as **78 median answers**
+- Break-even: the schema surface costs about as much as **79 median answers**
 
 ### Schema surface (paid once per conversation)
 
 | tool | description tokens | inputSchema tokens | outputSchema tokens | total tokens | total chars |
 |---|---:|---:|---:|---:|---:|
 | `find_places` | 2166 | 618 | 277 | **3177** | 12711 |
-| `route` | 1416 | 311 | 227 | **2055** | 8223 |
+| `route` | 1643 | 394 | 248 | **2393** | 9572 |
 | `optimize_route` | 1100 | 165 | 324 | **1683** | 6733 |
 | `changes_in_area` | 1161 | 212 | 52 | **1515** | 6060 |
 | `meeting_point` | 1018 | 106 | 52 | **1265** | 5063 |
 | `resolve_place` | 769 | 182 | 206 | **1239** | 4959 |
 | `geocode` | 796 | 114 | 195 | **1180** | 4722 |
 | `geometry_op` | 703 | 328 | 52 | **1162** | 4648 |
+| `from_to` | 544 | 296 | 248 | **1157** | 4630 |
 | `compare_areas` | 885 | 105 | 52 | **1122** | 4489 |
 | `travel_time_matrix` | 707 | 139 | 173 | **1099** | 4399 |
 | `suggest_areas` | 803 | 100 | 52 | **1039** | 4156 |
-| `from_to` | 500 | 213 | 227 | **1009** | 4036 |
 | `verify_claims` | 781 | 68 | 52 | **989** | 3957 |
 | `render_map` | 597 | 136 | 52 | **857** | 3430 |
 | `isochrone` | 458 | 195 | 127 | **848** | 3393 |
@@ -129,7 +129,7 @@ Generated 2026-08-27 by `uv run python benchmarks/token_efficiency.py --write`.
 | `simplify_geometry` | 129 | 58 | 52 | **297** | 1188 |
 | `admin_lookup` | 145 | 41 | 52 | **296** | 1185 |
 | `reverse_geocode` | 111 | 42 | 52 | **261** | 1044 |
-| **all 42 tools** | 21621 | 5577 | 3891 | **34029** | 136182 |
+| **all 42 tools** | 21892 | 5743 | 3933 | **34515** | 138125 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 

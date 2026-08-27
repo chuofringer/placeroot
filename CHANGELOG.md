@@ -9,6 +9,26 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `avoid` on `route` and `from_to` (#425): `avoid=["motorway"]` (and/or
+  `"trunk"`) keeps a drive off those road classes and their on/off ramps —
+  the "no highways" ask Google Directions, Mapbox and Valhalla all answer
+  and PlaceRoot could not. It is an overlay on the mode's own class
+  exclusions at graph-build time, so an avoiding route builds and caches
+  its own street graph: different avoid sets never share a graph in memory
+  or on disk, and an avoid set that misses the warm cache is a cold build
+  that the existing `needs_confirm` gate asks about. On `walk` and `cycle`
+  it is a documented no-op (both already exclude motorways and trunks) —
+  echoed back with an `avoid_note`, never an error, and reusing the plain
+  graph rather than building an identical copy. An unsupported value
+  returns `bad_request` listing the supported ones; if the avoided roads
+  were the only link between the ends, the existing `no_route` answer comes
+  back with its `try` naming the avoid set. Deliberately no toll or ferry
+  option: Overture's road data carries no toll attribute anywhere (release
+  2026-08-19.0 — verified over a motorway corridor: 1,019 motorway
+  segments, none toll-flagged), and the graph is road-subtype only, so
+  ferries are never routed over in the first place. Both docstrings say so
+  plainly rather than letting an agent approximate either with
+  `avoid=["motorway"]`. `optimize_route` is follow-up scope.
 - `route` accepts LocationRefs (#419), finishing the rollout roadmap §4.1
   started: the two ends can now be given as `from`/`to` — each a
   `{"lat", "lon"}` dict, a GERS id, or a free-text place name — instead of

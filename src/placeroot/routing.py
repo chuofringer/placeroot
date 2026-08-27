@@ -113,6 +113,7 @@ import os
 import pickle
 import threading
 from collections import OrderedDict
+from collections.abc import Iterable
 from pathlib import Path
 
 import duckdb
@@ -336,6 +337,62 @@ ESTIMATED_DRIVE_SPEED_M_S = DRIVE_CLASS_SPEEDS_M_S["residential"]
 # tours (the same legs added in a different order).
 OPTIMIZE_TIE_EPSILON_S = 1e-6
 
+# Class-based road avoidance (#425): route()/from_to()'s avoid=["motorway", ...].
+#
+# Only the two freeway-grade classes are offered, and deliberately nothing
+# else. Overture's road `class` is fully populated, so keeping a route off
+# motorways/trunks is a filter this data actually supports. Two neighbours
+# in the same feature family are NOT offered, because the open data does not
+# carry them (release 2026-08-19.0, verified over a motorway corridor):
+#   - tolls: road_flags has no toll attribute anywhere in the schema
+#     (is_bridge/is_tunnel/is_link/is_covered/is_indoor/is_abandoned/
+#     is_under_construction). Inferring "toll" from class would be a guess
+#     dressed up as a filter, so there is no avoid="tolls".
+#   - ferries: the graph is road-subtype only (build_graph's subtype_filter),
+#     so a ferry is never routed over in the first place — nothing to avoid.
+AVOIDABLE_CLASSES = ("motorway", "trunk")
+
+
+def _avoid_expanded(classes: Iterable[str]) -> set[str]:
+    """The full class set an avoid entry removes: the class and its _link ramps.
+
+    A motorway_link exists only to get on or off a motorway, so avoiding
+    "motorway" while still routing over its ramps would produce nonsense
+    (a ramp to nowhere). This mirrors EXCLUDED_WALK_CLASSES, which already
+    pairs each freeway class with its link.
+    """
+    return {cls for name in classes for cls in (name, f"{name}_link")}
+
+
+def normalize_avoid(avoid: object) -> tuple[str, ...]:
+    """Validate an avoid argument into a sorted, deduplicated class tuple.
+
+    None (or an empty list) is (), the "no avoidance" case every existing
+    caller takes. Raises ValueError naming AVOIDABLE_CLASSES for anything
+    else — a non-list, a non-string entry, or a class outside the offered
+    vocabulary — so the caller can turn it into a structured bad_request.
+    """
+    if avoid is None:
+        return ()
+    if isinstance(avoid, (str, bytes)) or not isinstance(avoid, (list, tuple, set, frozenset)):
+        raise ValueError(
+            f"avoid must be a list of road classes; supported: {list(AVOIDABLE_CLASSES)}"
+        )
+    classes = set()
+    for entry in avoid:
+        if not isinstance(entry, str) or entry not in AVOIDABLE_CLASSES:
+            raise ValueError(
+                f"unsupported avoid entry {entry!r}; supported: {list(AVOIDABLE_CLASSES)}"
+            )
+        classes.add(entry)
+    return tuple(sorted(classes))
+
+
+def _excluded_classes_for(mode: str, avoid: Iterable[str] = ()) -> set[str]:
+    """The mode's own excluded classes, overlaid with the caller's avoid set."""
+    return set(MODE_CONFIG[mode]["excluded_classes"]) | _avoid_expanded(avoid)
+
+
 # Comfort-aware routing (#313): route()/from_to()'s prefer="flat" preference
 # and include_elevation profile.
 PREFER_FLAT = "flat"
@@ -441,10 +498,12 @@ GRAPH_CACHE_MARGIN = 1.3  # over-fetch factor so nearby repeat queries hit the c
 # restart here; they are NOT tiles and must not live inside the tile LRU
 # that evicts parquet. Path:
 #   {cache_dir}/{release}/graphs/{mode}_{speed}_{shapes}_r{radius}_t{ty}_{tx}.pkl
+# ...with an "_avoid-{classes}" suffix on a class-avoiding graph (#425).
 # Own file-count cap, independent of PLACEROOT_CACHE_MAX_MB.
 GRAPH_DISK_FORMAT = 1
 GRAPH_DISK_MAX_FILES = 16
 GRAPH_DISK_SUBDIR = "graphs"
+GRAPH_DISK_AVOID_MARKER = "avoid-"
 
 REQUIRED_COLUMNS = ["id", "geometry", "bbox", "class", "connectors"]
 ESSENTIAL_COLUMNS = {"geometry", "bbox"}
@@ -949,6 +1008,7 @@ def build_graph(
     speed_m_s: float | None = None,
     want_shapes: bool = False,
     radius_cap_m: float | None = None,
+    avoid: Iterable[str] = (),
 ) -> Graph:
     """Street graph for `mode` within radius_m of (lat, lon).
 
@@ -963,6 +1023,15 @@ def build_graph(
     radius_cap_m overrides the mode's MODE_CONFIG max_radius_m as the largest
     radius this extraction may use; optimize_route passes the wider
     STOPS_MAX_EXTRACTION_RADIUS_M for n >= 3 stops (see that constant).
+
+    avoid (#425) overlays extra road classes onto the mode's own exclusion
+    set — see AVOIDABLE_CLASSES and _excluded_classes_for. Only "motorway"
+    and "trunk" are accepted (each also removing its _link ramps); an avoid
+    class the mode already excludes (walk/cycle exclude both) changes
+    nothing, and the resulting graph is the mode's plain graph. Callers pass
+    an already-validated tuple from normalize_avoid; the caching layer keys
+    on the *effective* exclusion difference, so a no-op avoid shares the
+    plain graph's cache slot rather than rebuilding an identical graph.
 
     Raises RadiusTooLarge if radius_m exceeds that cap,
     SchemaDegraded if the transportation dataset is missing geometry/bbox,
@@ -1067,7 +1136,7 @@ def build_graph(
     graph.has_shapes = want_shapes
     graph.weight_is_time = bake_time
     graph.truncated = truncated
-    excluded_classes = config["excluded_classes"]
+    excluded_classes = _excluded_classes_for(mode, avoid)
     respects_oneway = config["respects_oneway"]
     for _id, cls, connectors, speed_limits, access_restrictions, wkt in rows:
         if cls is not None and cls in excluded_classes:
@@ -1614,6 +1683,21 @@ def _graph_cache_speed_tag(mode: str, speed_m_s: float | None) -> str:
     return "baked" if (mode == "drive" and speed_m_s is None) else "raw"
 
 
+def _graph_cache_avoid_tag(mode: str, avoid: Iterable[str] = ()) -> str:
+    """Cache-key discriminator for an avoid set (#425): "" when it changes nothing.
+
+    An avoiding graph is a *different graph* — fewer edges, different
+    shortest paths — so it can never share a cache slot (memory or disk)
+    with the plain one. But the tag is built from the classes the avoid set
+    actually removes beyond what the mode already excludes, not from the
+    caller's raw list, so avoid=["motorway"] on walk/cycle (which exclude
+    motorway/trunk outright) is a genuine no-op that reuses the plain
+    graph rather than building an identical copy under a second key.
+    """
+    extra = _avoid_expanded(avoid) - set(MODE_CONFIG[mode]["excluded_classes"])
+    return "-".join(sorted(extra))
+
+
 def _graph_cache_tile(lat: float, lon: float, tile_deg: float = 0.05) -> tuple[int, int]:
     return math.floor(lat / tile_deg), math.floor(lon / tile_deg)
 
@@ -1635,11 +1719,36 @@ def _graph_disk_root(release_key: str) -> Path:
 
 
 def _graph_disk_name(
-    mode: str, speed_tag: str, tile: tuple[int, int], radius_m: float, has_shapes: bool
+    mode: str,
+    speed_tag: str,
+    tile: tuple[int, int],
+    radius_m: float,
+    has_shapes: bool,
+    avoid_tag: str = "",
 ) -> str:
+    """Persist filename. An avoid graph (#425) gets an "_avoid-..." suffix.
+
+    The suffix is appended rather than woven into the stem so every graph
+    persisted before #425 keeps its exact filename and stays reusable. It
+    also means the plain-graph glob prefix still matches avoid files, so
+    every candidate is filtered through _disk_name_avoid_tag below — a
+    plain request must never be served an avoiding graph.
+    """
     ty, tx = tile
     flag = "s" if has_shapes else "n"
-    return f"{mode}_{speed_tag}_{flag}_r{int(round(radius_m))}_t{ty}_{tx}.pkl"
+    name = f"{mode}_{speed_tag}_{flag}_r{int(round(radius_m))}_t{ty}_{tx}"
+    if avoid_tag:
+        name = f"{name}_{GRAPH_DISK_AVOID_MARKER}{avoid_tag}"
+    return f"{name}.pkl"
+
+
+def _disk_name_avoid_tag(name: str) -> str:
+    """The avoid tag a persisted graph's filename encodes ("" for a plain graph)."""
+    stem = name[: -len(".pkl")] if name.endswith(".pkl") else name
+    marker_at = stem.find(f"_{GRAPH_DISK_AVOID_MARKER}")
+    if marker_at < 0:
+        return ""
+    return stem[marker_at + len(GRAPH_DISK_AVOID_MARKER) + 1 :]
 
 
 def _evict_disk_graphs(root: Path) -> None:
@@ -1668,10 +1777,10 @@ def _persist_graph_to_disk(
     """Atomic pickle next to tiles. Never holds conn_lock. Best-effort."""
     if not cache.enabled() or graph.node_count() == 0:
         return
-    release_key, _upstream, mode, speed_tag = key_prefix
+    release_key, _upstream, mode, speed_tag, avoid_tag = key_prefix
     root = _graph_disk_root(release_key)
     path = root / _graph_disk_name(
-        mode, speed_tag, _graph_cache_tile(lat, lon), radius_m, graph.has_shapes
+        mode, speed_tag, _graph_cache_tile(lat, lon), radius_m, graph.has_shapes, avoid_tag
     )
     payload = {
         "format": GRAPH_DISK_FORMAT,
@@ -1725,11 +1834,15 @@ def _load_graph_from_disk(
 
     Tries the exact tile filename first, then scans the small graphs dir
     (capped at GRAPH_DISK_MAX_FILES). A shapeless file never satisfies
-    want_shapes=True — same subsumption rule as the in-memory LRU.
+    want_shapes=True — same subsumption rule as the in-memory LRU. A file
+    whose avoid tag isn't this request's is skipped outright (#425): unlike
+    shapes, an avoid set is not a subsumption dimension in either direction
+    (an avoiding graph is missing edges a plain request needs, and a plain
+    graph carries edges an avoiding request asked to be rid of).
     """
     if not cache.enabled():
         return None
-    release_key, _upstream, mode, speed_tag = key_prefix
+    release_key, _upstream, mode, speed_tag, avoid_tag = key_prefix
     root = _graph_disk_root(release_key)
     if not root.is_dir():
         return None
@@ -1738,7 +1851,7 @@ def _load_graph_from_disk(
     cap_m = MODE_CONFIG[mode]["max_radius_m"]
     preferred = [
         root / _graph_disk_name(
-            mode, speed_tag, tile, min(r * GRAPH_CACHE_MARGIN, cap_m), shapes
+            mode, speed_tag, tile, min(r * GRAPH_CACHE_MARGIN, cap_m), shapes, avoid_tag
         )
         for r in (WALK_MAX_RADIUS_M, 5000.0, 8000.0)
         for shapes in (True, False)
@@ -1758,6 +1871,8 @@ def _load_graph_from_disk(
             seen.add(path)
             candidates.append(path)
     for path in candidates:
+        if _disk_name_avoid_tag(path.name) != avoid_tag:
+            continue
         loaded = _load_one_graph_file(path)
         if loaded is None:
             continue
@@ -1794,6 +1909,7 @@ def _memory_graph_for(
     want_shapes: bool = False,
     *,
     touch: bool = True,
+    avoid: Iterable[str] = (),
 ) -> Graph | None:
     """In-memory LRU hit whose bbox covers this extraction, or None.
 
@@ -1801,11 +1917,17 @@ def _memory_graph_for(
     """
     release_key = release.resolve_release()
     upstream = _upstream_glob()
-    key_prefix = (release_key, upstream, mode, _graph_cache_speed_tag(mode, speed_m_s))
+    key_prefix = (
+        release_key,
+        upstream,
+        mode,
+        _graph_cache_speed_tag(mode, speed_m_s),
+        _graph_cache_avoid_tag(mode, avoid),
+    )
     needed_bbox = _bbox_around(lat, lon, extraction_radius_m)
     with _graph_cache_lock:
         for key, entry in _graph_cache.items():
-            if key[:4] != key_prefix:
+            if key[: len(key_prefix)] != key_prefix:
                 continue
             if want_shapes and not entry.graph.has_shapes:
                 continue
@@ -1824,6 +1946,7 @@ def graph_is_cached(
     *,
     want_shapes: bool = False,
     speed_m_s: float | None = None,
+    avoid: Iterable[str] = (),
 ) -> bool:
     """True if a street graph covering this point (or radius) is already built.
 
@@ -1831,19 +1954,41 @@ def graph_is_cached(
     parked in the LRU so a follow-up route() does not unpickle twice. Does
     not extract a new graph. A miss is False, not an error. radius_m=None
     means "is this point inside any cached graph for mode".
+
+    avoid (#425) is part of the identity of the graph being looked for, in
+    memory and on disk alike: an avoid set whose graph has never been built
+    here is a miss even when the plain graph for the same area is warm, so
+    the needs_confirm gates above this call still ask before paying for the
+    cold build. An avoid set the mode already excludes tags as plain (see
+    _graph_cache_avoid_tag), so it hits the warm graph like any other
+    no-op argument. An invalid avoid value is False, not an error — same
+    convention as an unknown mode.
     """
     if mode not in MODE_CONFIG:
+        return False
+    try:
+        avoid_classes = normalize_avoid(avoid)
+    except ValueError:
         return False
     if not _is_finite_number(lat) or not _is_finite_number(lon):
         return False
     if radius_m is not None and not _is_finite_number(radius_m):
         return False
     r = 0.0 if radius_m is None else float(radius_m)
-    if _memory_graph_for(lat, lon, r, mode, speed_m_s, want_shapes, touch=False) is not None:
+    memory_hit = _memory_graph_for(
+        lat, lon, r, mode, speed_m_s, want_shapes, touch=False, avoid=avoid_classes
+    )
+    if memory_hit is not None:
         return True
     release_key = release.resolve_release()
     upstream = _upstream_glob()
-    key_prefix = (release_key, upstream, mode, _graph_cache_speed_tag(mode, speed_m_s))
+    key_prefix = (
+        release_key,
+        upstream,
+        mode,
+        _graph_cache_speed_tag(mode, speed_m_s),
+        _graph_cache_avoid_tag(mode, avoid_classes),
+    )
     needed_bbox = _bbox_around(lat, lon, r)
     loaded = _load_graph_from_disk(key_prefix, needed_bbox, want_shapes, lat, lon)
     if loaded is None:
@@ -1898,11 +2043,13 @@ def route_graph_is_cached(
     mode: str,
     *,
     want_shapes: bool = False,
+    avoid: Iterable[str] = (),
 ) -> bool:
     """True if this A→B route would reuse a cached street graph.
 
     Uses the same midpoint and extraction radius route() would ask for, so
-    a True here means the next route() call will not extract.
+    a True here means the next route() call will not extract. avoid (#425)
+    is forwarded because it selects a different graph — see graph_is_cached.
     """
     if mode not in MODE_CONFIG:
         return False
@@ -1917,7 +2064,12 @@ def route_graph_is_cached(
         straight_line_m / 2.0 * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M
     )
     return graph_is_cached(
-        center_lat, center_lon, mode, radius_m=base_radius_m, want_shapes=want_shapes
+        center_lat,
+        center_lon,
+        mode,
+        radius_m=base_radius_m,
+        want_shapes=want_shapes,
+        avoid=avoid,
     )
 
 
@@ -1963,13 +2115,14 @@ def _get_or_build_graph(
     speed_m_s: float | None,
     want_shapes: bool = False,
     radius_cap_m: float | None = None,
+    avoid: Iterable[str] = (),
 ) -> Graph:
     """build_graph(...), reusing a cached graph when possible (#39).
 
     A cached graph is reused when its (deliberately over-fetched, by
     GRAPH_CACHE_MARGIN) extraction bbox fully contains the bbox this query
     actually needs, and the cache key (release, upstream source, mode,
-    speed-baking) matches exactly. Memory is checked first; on a miss the
+    speed-baking, avoid overlay) matches exactly. Memory is checked first; on a miss the
     on-disk walk-graph sibling is tried before rebuild (#330). On a miss,
     a fresh graph is built for
     GRAPH_CACHE_MARGIN x the requested radius (capped at radius_cap_m) so
@@ -2003,12 +2156,18 @@ def _get_or_build_graph(
     """
     release_key = release.resolve_release()
     upstream = _upstream_glob()
-    key_prefix = (release_key, upstream, mode, _graph_cache_speed_tag(mode, speed_m_s))
+    key_prefix = (
+        release_key,
+        upstream,
+        mode,
+        _graph_cache_speed_tag(mode, speed_m_s),
+        _graph_cache_avoid_tag(mode, avoid),
+    )
     needed_bbox = _bbox_around(lat, lon, extraction_radius_m)
 
     with _graph_cache_lock:
         for key, entry in _graph_cache.items():
-            if key[:4] != key_prefix:
+            if key[: len(key_prefix)] != key_prefix:
                 continue
             if want_shapes and not entry.graph.has_shapes:
                 continue
@@ -2030,7 +2189,14 @@ def _get_or_build_graph(
     # MODE_CONFIG lookup.
     extra = {} if radius_cap_m is None else {"radius_cap_m": radius_cap_m}
     graph = build_graph(
-        lat, lon, padded_radius_m, mode=mode, speed_m_s=speed_m_s, want_shapes=want_shapes, **extra
+        lat,
+        lon,
+        padded_radius_m,
+        mode=mode,
+        speed_m_s=speed_m_s,
+        want_shapes=want_shapes,
+        avoid=avoid,
+        **extra,
     )
     extraction_bbox = _bbox_around(lat, lon, padded_radius_m)
     # Persist off the lock — pickle I/O must not hold conn_lock either
@@ -2576,6 +2742,7 @@ def route(
     include_path: bool = False,
     include_elevation: bool = False,
     prefer: str | None = None,
+    avoid: object = None,
 ) -> dict:
     """Shortest-path distance + duration between two points, by mode; geometry on request (#161).
 
@@ -2612,8 +2779,21 @@ def route(
     both points are known to be on real street graphs and simply
     disconnected, which is the accurate answer.
 
+    avoid (#425) is a list of road classes to keep the route off —
+    AVOIDABLE_CLASSES, i.e. "motorway" and/or "trunk", each also removing
+    its _link ramps. Raises ValueError naming the supported values for
+    anything else. It filters the extracted graph (see build_graph), so an
+    avoiding route builds and caches its own graph rather than reusing the
+    plain one. On walk and cycle it is a documented no-op (both modes
+    already exclude those classes), echoed back with an "avoid_note" rather
+    than rejected. If the avoid set disconnects the two ends, the ordinary
+    no_route result comes back with its "try" naming avoid as the likely
+    cause. There is no avoid for tolls or ferries: see AVOIDABLE_CLASSES
+    for why the open data cannot support either honestly.
+
     On success returns {"distance_m", "duration_s", "mode", "from", "to"},
-    plus "truncated"/"note" if the extraction graph hit MAX_GRAPH_SEGMENTS.
+    plus "truncated"/"note" if the extraction graph hit MAX_GRAPH_SEGMENTS,
+    and "avoid" echoing the classes when one was given.
 
     include_path=True additionally returns "path", a GeoJSON LineString
     tracing the route from A's snapped node to B's — following each
@@ -2676,11 +2856,19 @@ def route(
             f"prefer='flat' is only supported for mode in {sorted(FLAT_PREFERENCE_MODES)}, "
             f"got mode={mode!r}"
         )
+    avoid_classes = normalize_avoid(avoid)
     graph, found, meta = _shortest_path(
-        from_lat, from_lon, to_lat, to_lon, mode, want_shapes=include_path, prefer=prefer
+        from_lat,
+        from_lon,
+        to_lat,
+        to_lon,
+        mode,
+        want_shapes=include_path,
+        prefer=prefer,
+        avoid=avoid_classes,
     )
     if found is None:
-        return _no_route_result(from_lat, from_lon, to_lat, to_lon, mode)
+        return _no_route_result(from_lat, from_lon, to_lat, to_lon, mode, avoid=avoid_classes)
 
     duration_s, distance_m, path = found
     result = {
@@ -2692,6 +2880,13 @@ def route(
     }
     if prefer is not None:
         result["prefer"] = prefer
+    if avoid_classes:
+        result["avoid"] = list(avoid_classes)
+        if not _graph_cache_avoid_tag(mode, avoid_classes):
+            result["avoid_note"] = (
+                f"mode {mode!r} already excludes {list(avoid_classes)}; "
+                "the route is unchanged by avoid"
+            )
     if meta.get("prefer_flat_note"):
         result["prefer_note"] = meta["prefer_flat_note"]
     if graph.truncated:
@@ -2767,19 +2962,40 @@ _NO_ROUTE_TRY = {
 
 
 def _no_route_result(
-    from_lat: float, from_lon: float, to_lat: float, to_lon: float, mode: str
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+    mode: str,
+    avoid: Iterable[str] = (),
 ) -> dict:
     """The structured "both points snapped, nothing connects them" answer,
     shared by route() and places_along_route(). Carries "try" naming the
-    next move, tuned per mode (roadmap §4)."""
-    return {
+    next move, tuned per mode (roadmap §4).
+
+    When the call carried an avoid set (#425), that is named first as the
+    likely cause: removing motorways can genuinely cut a pair apart (a
+    bridge or bypass may be the only link), and "drop avoid and retry" is
+    a next move the caller can act on immediately, unlike "check the two
+    points are on the same landmass"."""
+    avoid_classes = tuple(avoid)
+    hint = _NO_ROUTE_TRY.get(mode, _NO_ROUTE_TRY["walk"])
+    if avoid_classes:
+        hint = (
+            f"avoid={list(avoid_classes)} removed those road classes from the graph and "
+            f"may be what disconnects the two ends — retry without avoid; failing that, {hint}"
+        )
+    result = {
         "error": "no_route",
         "detail": "no path found between the points in the searched area",
         "mode": mode,
         "from": {"lat": from_lat, "lon": from_lon},
         "to": {"lat": to_lat, "lon": to_lon},
-        "try": _NO_ROUTE_TRY.get(mode, _NO_ROUTE_TRY["walk"]),
+        "try": hint,
     }
+    if avoid_classes:
+        result["avoid"] = list(avoid_classes)
+    return result
 
 
 def _shortest_path(
@@ -2790,6 +3006,7 @@ def _shortest_path(
     mode: str,
     want_shapes: bool = False,
     prefer: str | None = None,
+    avoid: Iterable[str] = (),
 ) -> tuple[Graph, tuple[float, float, list[tuple[str, float]]] | None, dict]:
     """(graph, (duration_s, distance_m, path), meta) for the A->B min-time path.
 
@@ -2814,6 +3031,12 @@ def _shortest_path(
     in the extraction area, or the elevation service couldn't be reached),
     in which case it carries "prefer_flat_note" explaining why — route()
     surfaces that as "prefer_note" rather than silently ignoring the ask.
+    avoid (#425) is an already-validated class tuple (normalize_avoid) that
+    is forwarded to the extraction: the search itself is unchanged, the
+    graph it searches is simply missing those classes' edges. It selects a
+    different cache slot, so an avoiding route over a warm plain area still
+    pays one cold build.
+
     Validating that mode supports prefer="flat" is the caller's job (route()
     does it before calling here); this function assumes it's already valid.
     """
@@ -2869,7 +3092,13 @@ def _shortest_path(
         # area — reuse one extraction instead of paying a fresh multi-second
         # upstream scan each call.
         graph = _get_or_build_graph(
-            center_lat, center_lon, radius_m, mode, speed_m_s=None, want_shapes=want_shapes
+            center_lat,
+            center_lon,
+            radius_m,
+            mode,
+            speed_m_s=None,
+            want_shapes=want_shapes,
+            avoid=avoid,
         )
         if graph.node_count() == 0:
             if is_last and not snapped_both:

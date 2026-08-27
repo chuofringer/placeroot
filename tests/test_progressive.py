@@ -33,8 +33,12 @@ STANDING_COST_CEILING = 1500
 # so it is budgeted like a response, not like documentation. A new tool
 # that doesn't fit under this belongs in a shorter one-liner, not a raised
 # ceiling. 42 tools (suggest_areas joining the 2026-08 train's 41)
-# measure 1412 — each entry is already a one-liner, so the growth here
-# is genuinely tool count, not verbosity.
+# measure 1451 — each entry is already a one-liner, so the growth here
+# is genuinely tool count and argument count, not verbosity. (The 1412
+# figure this comment carried was already stale at 1447 before #425; the
+# +4 here is route's and from_to's new `avoid?` argument names.) The
+# headroom is deliberately small: the next few arguments fit, a new tool
+# does not without a look at what it costs.
 CATALOG_CEILING = 1475
 
 # The subset note's opening words, rendered by the renderer itself rather than
