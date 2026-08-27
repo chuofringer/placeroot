@@ -39,6 +39,22 @@ fixing behavior is patch.
   candidates rather than picking one. `within.of` — already documented as
   defaulting to the search center — picks up a `where`-given center too.
   Additive: every existing call shape is unchanged.
+- `optimize_route` gained `keep_order` (#423): the fixed-order multi-stop
+  route every major routing surface ships (Google Directions `waypoints`,
+  Mapbox multi-coordinate, OSRM `via`, Valhalla `locations[]`) and
+  PlaceRoot had no answer for. `keep_order=true` skips the TSP and visits
+  the stops exactly as given, returning the same `legs` / totals / `export`
+  vocabulary the optimizing call already speaks — so an itinerary the user
+  dictated ("bank, then school, then home") costs one shared street-graph
+  build instead of the n-1 chained `route()` calls with re-typed
+  coordinates it used to. Everything else is the same machinery: one
+  extraction, one snap per stop, the same directed cost matrices and
+  estimated-leg fallback. The response echoes `"keep_order": true` and
+  `order` is then just `0..n-1`; `start_index` must stay 0 (the given order
+  already starts where it starts) and `roundtrip` still chooses whether the
+  last leg closes back to the first stop. Stop resolution is unchanged —
+  `{lat, lon}`, GERS id, or name, with indexed `stops[i]` errors and
+  `ambiguous_place` candidates.
 
 ### Fixed
 - The `from`-keyword schema patch no longer hand-lists the parameters it
@@ -55,6 +71,15 @@ fixing behavior is patch.
   is `route()` with LocationRef ends and a walk default, with `route` the
   canonical routing tool (#420). Both tools keep their current schemas and
   behavior; the actual fold is a future breaking release.
+- `optimize_route` now takes `confirm` and returns `needs_confirm` before a
+  cold street-graph build, closing the last routing tool that could hang
+  5–25 seconds without asking (#336's predict-then-ask pattern, #423).
+  ONE gate for the whole call: every stop rides a single shared extraction,
+  so it asks once, never once per leg. A warm or on-disk cached graph never
+  asks, and a call that will fail before extracting anything (a span past
+  the mode's cap, an unresolvable stop) still reports its own structured
+  error rather than asking the user to confirm a build that would never
+  happen.
 
 ## [0.10.0] — 2026-08-26
 

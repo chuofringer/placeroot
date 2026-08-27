@@ -44,7 +44,7 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `ground_location` | One-hop point grounding: where (reverse geocode), surroundings (area summary at 500m), reach (reachable-area stats for N minutes by mode, no geometry), and the nearest few named places — each section degrades independently to a note rather than failing the call |
 | `neighborhood_verdict` | Should I live here? A ranked verdict from life context (household, mobility, priorities) — strengths, weak points, one thing to verify in person |
 | `verify_claims` | Grade a listing's spatial claims (travel time, nearby counts, distances) against real routing and places data — confirmed / stretched / false / unverifiable, claimed vs. measured |
-| `optimize_route` | Best order to visit 2–10 stops, solved exactly over the street graph — order, per-leg distance/duration, totals, an `export` object (Google/Apple Maps links, GPX, printable stop list), and `verify_before_going` when stops already carry confidence/operating_status |
+| `optimize_route` | Best order to visit 2–10 stops, solved exactly over the street graph — order, per-leg distance/duration, totals, an `export` object (Google/Apple Maps links, GPX, printable stop list), and `verify_before_going` when stops already carry confidence/operating_status. `keep_order=true` skips the reordering and routes the stops as given, for an itinerary the user dictated |
 | `meeting_point` | Travel-time-fair meeting point for 2–5 people (walk/cycle/drive per person): minimizes the worst-off participant's routed time, tie-broken by spread then total, and returns ranked candidate venues with per-person times |
 | `render_map` | Any result → a shareable one-pager (interactive map, verdict, stop list, and Overture/OSM attribution); optional `summary` for the verdict, otherwise a short fallback is composed from the payload; optional `legend` gives points carrying a `"class"` property a contrasting marker color and an on-page legend box; shape `role: "shed"`/`"outline"` styles it, `label`/`callout` chip a note onto it |
 | `simplify_geometry` | Any geometry → simplified to fit a token budget |
@@ -56,13 +56,13 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 
 ## Confirming a slow hop
 
-`route`, `from_to`, and a first `warmup_city` take optional `confirm` (bool, default false). A cold street-graph build or a first tile COPY returns immediately:
+`route`, `from_to`, `optimize_route`, and a first `warmup_city` take optional `confirm` (bool, default false). A cold street-graph build or a first tile COPY returns immediately:
 
 ```json
 {"error":"needs_confirm","eta":"about 5–25 seconds","eta_s":[5,25],"detail":"Ask the user if they want to wait, then call the same tool again with confirm=true."}
 ```
 
-Ask the user, then call the same tool again with `confirm=true`. A warm or on-disk cached graph never asks. Long answers also carry `status` (string) and `progress` (a short list of phase strings) so a host without a progressToken can still show what is happening. Fast lookups stay clean.
+Ask the user, then call the same tool again with `confirm=true`. A warm or on-disk cached graph never asks. `optimize_route` asks once for the whole stop set — every stop rides one shared graph, so it never asks per leg. Long answers also carry `status` (string) and `progress` (a short list of phase strings) so a host without a progressToken can still show what is happening. Fast lookups stay clean.
 
 ## Tool annotations and listing cache hints
 
@@ -167,12 +167,12 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 42 | ~33,378 | — |
-| `search` | 13 | ~11,420 | 66% |
-| `core` | 15 | ~15,077 | 55% |
-| `routing` | 9 | ~10,182 | 70% |
-| `analysis` | 12 | ~9,280 | 72% |
-| `geometry` | 3 | ~3,203 | 90% |
+| unset / `all` (default) | 42 | ~34,029 | — |
+| `search` | 13 | ~11,678 | 66% |
+| `core` | 15 | ~15,387 | 55% |
+| `routing` | 9 | ~10,575 | 69% |
+| `analysis` | 12 | ~9,280 | 73% |
+| `geometry` | 3 | ~3,203 | 91% |
 | `progressive` | 4 (all 42 reachable) | ~1,320 | 96% |
 
 - **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `from_to`, `find_near`, `places_along_route`, `neighborhood_verdict`, `verify_claims`, `warmup_city`, `ground_location`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.

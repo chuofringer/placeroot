@@ -1921,6 +1921,40 @@ def route_graph_is_cached(
     )
 
 
+def stops_graph_needs_cold_build(stops: list[tuple[float, float]], mode: str) -> bool:
+    """True if an optimize_route over this stop set would extract a new graph.
+
+    The multi-stop twin of route_graph_is_cached, stated the way the confirm
+    gate needs it — "will this call pay for a build" rather than "is
+    something cached" — because the two are not opposites here: a stop set
+    optimize_route rejects outright has no cached graph and still builds
+    nothing. Same center and base radius _snap_and_cost_stops would ask for
+    (via _stops_extraction_geometry), so a False means the next
+    optimize_route does not extract. ONE check for the whole stop set,
+    because ONE graph covers the whole stop set — that is what lets the gate
+    ask once per call rather than once per leg (#423).
+
+    Anything the call is about to refuse on its own — a bad mode, a bad stop
+    count, a non-finite coordinate, a span past the mode's cap — is False,
+    not an error: those return their own structured error before any
+    extraction, and asking the user to confirm a build that will never
+    happen would be the wrong question.
+    """
+    if mode not in MODE_CONFIG:
+        return False
+    if not OPTIMIZE_MIN_STOPS <= len(stops) <= OPTIMIZE_MAX_STOPS:
+        return False
+    for lat, lon in stops:
+        if not _is_finite_number(lat) or not _is_finite_number(lon):
+            return False
+    points = [(float(lat), float(lon)) for lat, lon in stops]
+    try:
+        center_lat, center_lon, base_radius_m = _stops_extraction_geometry(points, mode)
+    except RouteTooLong:
+        return False
+    return not graph_is_cached(center_lat, center_lon, mode, radius_m=base_radius_m)
+
+
 def _get_or_build_graph(
     lat: float,
     lon: float,
@@ -3641,6 +3675,7 @@ def optimize_route(
     mode: str = "drive",
     roundtrip: bool = True,
     start_index: int = 0,
+    keep_order: bool = False,
 ) -> dict:
     """Cheapest visiting order over 2-10 stops — a small, exactly-solved TSP (#177).
 
@@ -3666,6 +3701,18 @@ def optimize_route(
     is not repeated in "order" — while roundtrip=False leaves an open path
     ending wherever is cheapest.
 
+    keep_order=True skips the TSP entirely (#423): the stops are visited in
+    the order they were given, and everything else — the one shared graph,
+    the snapping, the directed matrices, the legs and totals, the estimated
+    fallback — is the same machinery, so a fixed-order itinerary costs one
+    extraction rather than the n-1 cold route() calls a caller would
+    otherwise chain. Only the legs the itinerary actually walks are read out
+    of the matrices; the rest of the n x n fill is the shared Dijkstra
+    sweep's own by-product, not extra work. Because the given order IS the
+    answer, start_index has nothing to fix and must stay 0 (ValueError
+    otherwise); roundtrip still chooses whether the last leg closes back to
+    the first stop.
+
     A pair of stops that nothing connects does not fail the call: that cell
     falls back to straight-line distance x UNROUTABLE_DETOUR_FACTOR, its
     leg carries "estimated": true, and the response carries a note naming
@@ -3678,8 +3725,9 @@ def optimize_route(
     usable street node.
 
     Returns {"order", "legs", "total_distance_m", "total_duration_s",
-    "mode", "roundtrip"}, plus "truncated"/"note" when the street graph hit
-    its size cap or any leg is estimated.
+    "mode", "roundtrip"}, plus "keep_order": True when the order was fixed
+    by the caller, and "truncated"/"note" when the street graph hit its size
+    cap or any leg is estimated.
     """
     if mode not in MODE_CONFIG:
         raise UnsupportedMode(mode)
@@ -3698,11 +3746,19 @@ def optimize_route(
         raise ValueError(
             f"start_index={start_index} is out of range for {len(stops)} stops"
         )
+    if keep_order and start_index != 0:
+        raise ValueError(
+            "keep_order=True visits the stops as given, so start_index must be 0, "
+            f"got {start_index}"
+        )
 
     points = [(float(lat), float(lon)) for lat, lon in stops]
     graph, time_m, dist_m, estimated = _snap_and_cost_stops(points, mode)
 
-    order = solve_tsp(time_m, start_index=start_index, roundtrip=roundtrip)
+    if keep_order:
+        order = list(range(len(points)))
+    else:
+        order = solve_tsp(time_m, start_index=start_index, roundtrip=roundtrip)
     pairs = list(zip(order, order[1:]))
     if roundtrip:
         pairs.append((order[-1], order[0]))
@@ -3733,6 +3789,8 @@ def optimize_route(
         "mode": mode,
         "roundtrip": roundtrip,
     }
+    if keep_order:
+        result["keep_order"] = True
 
     notes = []
     truncated = False
@@ -3742,16 +3800,26 @@ def optimize_route(
         # would be wrong here. A separate top-level flag plus a note naming
         # the legs says exactly what happened.
         result["estimated"] = True
+        # No order was chosen under keep_order, so the usual "may not be
+        # optimal" tail would be describing a decision nobody made.
+        tail = (
+            "so those legs' numbers are approximate"
+            if keep_order
+            else "so the chosen order may not be optimal"
+        )
         notes.append(
             f"no route connects {len(estimated_legs)} leg(s) ({', '.join(estimated_legs)}); "
             f"their distance is a straight-line estimate x{UNROUTABLE_DETOUR_FACTOR} "
-            "(flagged \"estimated\": true), so the chosen order may not be optimal"
+            f'(flagged "estimated": true), {tail}'
         )
     if graph.truncated:
         truncated = True
-        notes.append(
-            "the street graph hit its size cap; this order may be suboptimal or incomplete"
+        cap_tail = (
+            "these legs may be incomplete"
+            if keep_order
+            else "this order may be suboptimal or incomplete"
         )
+        notes.append(f"the street graph hit its size cap; {cap_tail}")
 
     def finish(payload: dict, extra_notes: list[str], is_truncated: bool) -> dict:
         """The response exactly as it will be returned — notes and flag included."""

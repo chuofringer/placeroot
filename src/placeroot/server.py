@@ -4807,6 +4807,8 @@ def optimize_route(
     mode: _ModeArgDriveDefault = None,
     roundtrip: bool = True,
     start_index: int = 0,
+    keep_order: bool = False,
+    confirm: bool = False,
 ) -> dict:
     """Best order to visit several stops: multi-stop route ordering (a small TSP).
 
@@ -4835,6 +4837,18 @@ def optimize_route(
     "matched_by"}, ...] for just those stops — plain {lat,lon} stops need
     no echo and the key is absent when every stop was already coordinates.
 
+    keep_order=true visits the stops in the order you gave and never
+    reorders them: the itinerary is the caller's, and this tool supplies
+    routed (not straight-line) per-leg numbers, the totals, and the export
+    for it — one street-graph build for the whole run instead of chaining
+    `route` per leg. Use it whenever the order came from the user ("first
+    the bank, then the school, then home"); leave it off to be told the
+    cheapest order. The response echoes "keep_order": true, and "order" is
+    then just 0..n-1. start_index must stay 0 with it (there is nothing to
+    fix — the given order already starts where it starts), and roundtrip
+    still chooses whether the last leg closes back to the first stop, so a
+    one-way itinerary wants roundtrip=false.
+
     start_index (default 0) is fixed as the first stop. roundtrip=true (the
     default) returns to it; the closing leg is in "legs" but the start is not
     repeated in "order". roundtrip=false is an open path that ends wherever
@@ -4849,9 +4863,16 @@ def optimize_route(
     "estimated": true plus a note naming the estimated legs — so a flagged
     approximation, never a crash.
 
+    confirm=true after the user agreed to wait for a first-time street-graph
+    build (about 5–25 seconds). Pass it only after a needs_confirm reply
+    and they said yes. One gate for the whole call — every stop rides the
+    same graph, so it asks once, never once per leg. A warm or cached graph
+    never needs it. Omit confirm unless you just asked and they said yes.
+
     Errors are structured, not raised: fewer than 2 or more than 10 stops, a
-    stop that is not a valid location reference, or an out-of-range
-    start_index return {"error": "bad_request"} naming the offending stop
+    stop that is not a valid location reference, an out-of-range
+    start_index, or keep_order=true with a non-zero start_index return
+    {"error": "bad_request"} naming the offending stop
     index; an unresolvable name/id returns {"error": "not_found"} or
     {"error": "ambiguous_place", "candidates": [...]}, indexed the same way;
     an unknown mode returns {"error": "unsupported_mode"}; a stop set whose
@@ -4889,11 +4910,30 @@ def optimize_route(
             "error": "bad_request",
             "detail": f"start_index={start_index} is out of range for {len(points)} stops",
         }
+    keep_order = bool(keep_order)
+    if keep_order and start_index != 0:
+        return {
+            "error": "bad_request",
+            "detail": (
+                "keep_order=true visits the stops as given, so start_index must be 0, "
+                f"got {start_index}"
+            ),
+        }
+
+    mode = preference_store.resolve_mode(mode, preference_store.DEFAULT_MODE_ROUTE)
+    # One gate for the whole call (#336's pattern, #423): every stop shares
+    # a single extraction, so the cold-build question is asked once here —
+    # before any graph is built — not once per leg.
+    if not confirm and routing.stops_graph_needs_cold_build(points, mode):
+        return _needs_confirm_graph(mode)
 
     try:
-        mode = preference_store.resolve_mode(mode, preference_store.DEFAULT_MODE_ROUTE)
         result = routing.optimize_route(
-            points, mode=mode, roundtrip=bool(roundtrip), start_index=start_index
+            points,
+            mode=mode,
+            roundtrip=bool(roundtrip),
+            start_index=start_index,
+            keep_order=keep_order,
         )
     except routing.UnsupportedMode as e:
         return {

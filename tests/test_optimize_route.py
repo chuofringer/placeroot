@@ -18,13 +18,14 @@ Two properties of that fixture do most of the work here:
   rather than a mock.
 """
 
+import asyncio
 import itertools
 import math
 import random
 
 import pytest
 
-from placeroot import errors, geocode, gers, routing, server, tool_profiles
+from placeroot import errors, geocode, gers, progress, routing, server, tool_profiles
 
 from ._routing_fixture import build_routing_fixture as fx
 
@@ -719,7 +720,7 @@ def test_stop_with_no_street_nearby_names_its_index():
 def test_no_graph_nearby_is_structured_at_the_tool_boundary():
     stops = list(LINE_STOPS)
     stops[2] = (fx.ORIGIN_LAT + 0.05, fx.ORIGIN_LON + 0.05)
-    result = server.optimize_route(_as_dicts(stops), mode="walk")
+    result = server.optimize_route(_as_dicts(stops), mode="walk", confirm=True)
     assert result["error"] == "no_graph_nearby"
     assert "stops[2]" in result["detail"]
 
@@ -780,7 +781,7 @@ def test_optimize_route_is_in_the_routing_profile():
 def test_pure_coordinate_stops_have_no_resolved_key():
     """Coordinate-only input must be byte-identical to before this feature:
     no new "resolved" key on the answer."""
-    result = server.optimize_route(_as_dicts(SQUARE_STOPS), mode="walk")
+    result = server.optimize_route(_as_dicts(SQUARE_STOPS), mode="walk", confirm=True)
     assert "error" not in result
     assert "resolved" not in result
 
@@ -809,7 +810,7 @@ def test_mixed_stops_resolve_names_and_gers_ids(monkeypatch):
 
     coord_lat, coord_lon = fx.node_latlon(2, 2)
     stops = [{"lat": coord_lat, "lon": coord_lon}, "Coffee Place", fake_id]
-    result = server.optimize_route(stops, mode="walk")
+    result = server.optimize_route(stops, mode="walk", confirm=True)
     assert "error" not in result
     assert result["resolved"] == [
         {
@@ -843,3 +844,187 @@ def test_bad_ref_form_stop_is_bad_request():
     result = server.optimize_route(stops, mode="walk")
     assert result["error"] == "bad_request"
     assert result["detail"].startswith("stops[1]: ")
+
+
+# --- keep_order: the caller's itinerary, not the cheapest one (#423) ------
+#
+# Three corners of the 300m square, given in an order that deliberately
+# crosses it: (2,2) -> (5,5) -> (2,5). The optimizer would never choose that
+# — walking the two sides in the other order is 300m shorter — so every test
+# here that gets the given order back has *proved* nothing reordered it.
+FIXED_ORDER_NODES = [(2, 2), (5, 5), (2, 5)]
+FIXED_ORDER_STOPS = [fx.node_latlon(*node) for node in FIXED_ORDER_NODES]
+
+
+def test_keep_order_returns_the_given_order_with_routed_legs_and_export():
+    result = server.optimize_route(
+        _as_dicts(FIXED_ORDER_STOPS),
+        mode="walk",
+        roundtrip=False,
+        keep_order=True,
+        confirm=True,
+    )
+    assert "error" not in result
+    assert result["order"] == [0, 1, 2]
+    assert result["keep_order"] is True
+    assert [(leg["from_idx"], leg["to_idx"]) for leg in result["legs"]] == [(0, 1), (1, 2)]
+    # The first leg crosses the square. Its cost is what the street grid
+    # charges to get across, comfortably above the straight line between the
+    # same two points — so these numbers could not have come from haversine.
+    diagonal_m = routing._haversine_m(*FIXED_ORDER_STOPS[0], *FIXED_ORDER_STOPS[1])
+    assert result["legs"][0]["distance_m"] > diagonal_m * 1.2
+    assert result["legs"][1]["distance_m"] == pytest.approx(300.0, rel=0.02)
+    assert result["total_distance_m"] == pytest.approx(
+        sum(leg["distance_m"] for leg in result["legs"]), rel=1e-6
+    )
+    assert result["total_duration_s"] == pytest.approx(
+        sum(leg["duration_s"] for leg in result["legs"]), rel=1e-6
+    )
+    # One combined handoff for the whole run, not one per leg.
+    assert result["export"]["maps_link"]["google"]
+    assert result["export"]["gpx"]
+    assert result["export"]["text"]
+
+
+def test_keep_order_holds_the_order_the_optimizer_would_change():
+    """The contrast that makes the flag worth having."""
+    stops = _as_dicts(FIXED_ORDER_STOPS)
+    kept = server.optimize_route(stops, mode="walk", roundtrip=False, keep_order=True, confirm=True)
+    optimized = server.optimize_route(stops, mode="walk", roundtrip=False, confirm=True)
+
+    assert kept["order"] == [0, 1, 2]
+    assert optimized["order"] == [0, 2, 1]
+    # Cheaper is exactly why the optimizer moved it — and exactly why a
+    # caller who dictated the order must not get that answer.
+    assert optimized["total_distance_m"] < kept["total_distance_m"]
+    assert optimized["total_distance_m"] == pytest.approx(600.0, rel=0.02)
+
+
+def test_keep_order_roundtrip_closes_back_to_the_first_stop():
+    result = server.optimize_route(
+        _as_dicts(FIXED_ORDER_STOPS),
+        mode="walk",
+        roundtrip=True,
+        keep_order=True,
+        confirm=True,
+    )
+    assert result["order"] == [0, 1, 2]
+    assert len(result["legs"]) == len(FIXED_ORDER_STOPS)
+    assert result["legs"][-1]["to_idx"] == 0
+
+
+def test_keep_order_is_absent_from_an_ordinary_call():
+    """Existing call shapes stay byte-identical: no new key unless asked."""
+    result = server.optimize_route(
+        _as_dicts(SQUARE_STOPS), mode="walk", roundtrip=True, confirm=True
+    )
+    assert "keep_order" not in result
+
+
+def test_keep_order_rejects_a_non_zero_start_index():
+    result = server.optimize_route(
+        _as_dicts(FIXED_ORDER_STOPS), mode="walk", keep_order=True, start_index=2
+    )
+    assert result["error"] == "bad_request"
+    assert "keep_order" in result["detail"]
+    assert "start_index" in result["detail"]
+
+
+def test_keep_order_resolves_stops_by_name_with_indexed_errors(monkeypatch):
+    def fake_resolve(query):
+        raise errors.AmbiguousPlace(query, candidates=[{"name": "X"}, {"name": "Y"}])
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    stops = _as_dicts(FIXED_ORDER_STOPS)
+    stops[1] = "Ambiguous Name"
+    result = server.optimize_route(stops, mode="walk", keep_order=True)
+    assert result["error"] == "ambiguous_place"
+    assert result["index"] == 1
+    assert result["detail"].startswith("stops[1]: ")
+    assert result["candidates"]
+
+
+def test_keep_order_over_names_reports_the_resolved_stops(monkeypatch):
+    lat, lon = FIXED_ORDER_STOPS[1]
+
+    def fake_resolve(query):
+        assert query == "Corner Shop"
+        return {
+            "name": "Corner Shop",
+            "lat": lat,
+            "lon": lon,
+            "id": "gers-corner",
+            "type": "place",
+        }
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    stops = _as_dicts(FIXED_ORDER_STOPS)
+    stops[1] = "Corner Shop"
+    result = server.optimize_route(
+        stops, mode="walk", roundtrip=False, keep_order=True, confirm=True
+    )
+    assert "error" not in result
+    assert result["order"] == [0, 1, 2]
+    assert [row["stop"] for row in result["resolved"]] == [1]
+    assert result["resolved"][0]["matched_by"] == "name"
+
+
+# --- one confirm for the whole call (#336's gate, #423) ------------------
+
+
+def test_cold_graph_asks_once_for_the_whole_call(monkeypatch):
+    """A three-stop run is one shared extraction, so it asks once — never
+    once per leg — and builds nothing until the caller says yes."""
+    routing.clear_graph_cache()
+    builds = []
+    real_build_graph = routing.build_graph
+
+    def counting_build_graph(lat, lon, radius_m, **kwargs):
+        builds.append((lat, lon, radius_m))
+        return real_build_graph(lat, lon, radius_m, **kwargs)
+
+    monkeypatch.setattr(routing, "build_graph", counting_build_graph)
+
+    asked = server.optimize_route(_as_dicts(FIXED_ORDER_STOPS), mode="walk", keep_order=True)
+    assert asked["error"] == "needs_confirm"
+    assert asked["eta_s"] == [int(progress.GRAPH_BUILD_S[0]), int(progress.GRAPH_BUILD_S[1])]
+    assert "confirm=true" in asked["detail"]
+    assert builds == []
+
+    confirmed = server.optimize_route(
+        _as_dicts(FIXED_ORDER_STOPS), mode="walk", keep_order=True, confirm=True
+    )
+    assert "error" not in confirmed
+    assert len(builds) == 1
+
+
+def test_a_warm_graph_never_asks():
+    routing.clear_graph_cache()
+    stops = _as_dicts(FIXED_ORDER_STOPS)
+    assert "error" not in server.optimize_route(stops, mode="walk", confirm=True)
+    assert not routing.stops_graph_needs_cold_build(FIXED_ORDER_STOPS, "walk")
+    assert "error" not in server.optimize_route(stops, mode="walk")
+
+
+def test_a_call_that_can_never_build_reports_its_own_error_not_needs_confirm():
+    """route_too_long is decided before any extraction, so the gate must not
+    ask the user to confirm a build that will never happen."""
+    routing.clear_graph_cache()
+    far = [(0.0, 0.0), (0.0, 0.2)]  # ~22km apart, past walk's 7.5km cap
+    result = server.optimize_route(_as_dicts(far), mode="walk")
+    assert result["error"] == "route_too_long"
+
+
+# --- published schema ----------------------------------------------------
+
+
+@pytest.mark.parametrize("param", ["keep_order", "confirm"])
+def test_schema_exposes_the_new_flags_defaulting_to_false(param):
+    tools = asyncio.run(server.mcp.list_tools())
+    tool = next(t for t in tools if t.name == "optimize_route")
+    schema = tool.model_dump(mode="json", by_alias=True, exclude_none=True)["inputSchema"]
+    prop = schema["properties"][param]
+    assert prop.get("type") == "boolean"
+    assert prop.get("default") is False
+    assert param not in schema.get("required", [])
+    assert "keep_order=true" in (tool.description or "")
