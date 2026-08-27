@@ -584,13 +584,17 @@ def _resolve_named_place(query: str) -> dict:
     Shared by from_to and find_near. Ambiguous same-score names return
     candidates instead of silently picking a city. An unresolvable name
     returns {"error": "not_found", "detail", "try"} — "try" names the next
-    move (roadmap §4).
+    move (roadmap §4). A comma-qualified name whose qualifier resolved but
+    held nothing (#427) says so by naming the qualifier it searched,
+    instead of reporting a same-ish name from the other side of the world.
     """
     if not isinstance(query, str) or not query.strip():
         return {"error": "bad_request", "detail": "place name must be a non-empty string"}
     query = query.strip()
     try:
         resolved = geocoding.resolve_named_place(query)
+    except errors.AnchoredNotFound as e:
+        return {"error": "not_found", "detail": e.detail, "try": _NAME_NOT_FOUND_TRY}
     except errors.AmbiguousPlace as e:
         return {
             "error": "ambiguous_place",
@@ -705,13 +709,20 @@ def _resolve_location_ref(ref) -> tuple[dict | None, dict | None]:
         hit = _resolve_named_place(text)
         if "error" in hit:
             return None, hit
-        return {
+        item = {
             "id": hit.get("id"),
             "name": hit.get("name"),
             "lat": hit["lat"],
             "lon": hit["lon"],
             "matched_by": "name",
-        }, None
+        }
+        if hit.get("note"):
+            # #427: the name carried a qualifier that resolved to nothing,
+            # so the whole string was searched instead. Non-fatal, but the
+            # caller stated something that was not honored and has to hear
+            # it — the echo is where it stays visible.
+            item["note"] = hit["note"]
+        return item, None
     return None, _LOCATION_REF_BAD_REQUEST
 
 
@@ -777,15 +788,19 @@ def _location_ref_echo(item: dict) -> dict:
 
     Only called for items that carry `matched_by` — coordinate inputs never
     reach this (see _resolve_location_ref's contract), which is what keeps
-    the `resolved` echo absent for pure-coordinate calls.
+    the `resolved` echo absent for pure-coordinate calls. Plus `note` when
+    the resolution has something non-fatal to disclose (#427).
     """
-    return {
+    echo = {
         "name": item.get("name"),
         "id": item.get("id"),
         "lat": item["lat"],
         "lon": item["lon"],
         "matched_by": item["matched_by"],
     }
+    if item.get("note"):
+        echo["note"] = item["note"]
+    return echo
 
 
 def _category_slug(category: str) -> str:
@@ -4305,6 +4320,8 @@ def from_to(
     block carrying whatever the input resolved to (name/id when it was a
     name or GERS id, lat/lon always).
 
+    A comma qualifies: "Alamo Square, SF" searches inside SF only.
+
     If a name matches several equally-ranked places, returns
     {"error": "ambiguous_place", "candidates": [...]} instead of picking
     a city. If the two ends resolve a city apart, returns
@@ -4458,6 +4475,8 @@ def find_near(
     near a named landmark. Resolves near, then searches like a point
     find. Returns compact rows (name, category, distance, trust_note)
     plus the resolved near (name and coordinates).
+
+    A comma qualifies: "Le Marais, Paris" searches inside Paris only.
 
     If near matches several equally-ranked places, returns
     {"error": "ambiguous_place", "candidates": [...]} instead of picking
