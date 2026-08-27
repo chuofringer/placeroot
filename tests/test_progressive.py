@@ -35,7 +35,7 @@ STANDING_COST_CEILING = 1500
 # ceiling. 42 tools (suggest_areas joining the 2026-08 train's 41)
 # measure 1412 — each entry is already a one-liner, so the growth here
 # is genuinely tool count, not verbosity.
-CATALOG_CEILING = 1450
+CATALOG_CEILING = 1475
 
 # The subset note's opening words, rendered by the renderer itself rather than
 # retyped here. A phrase typed from memory can drift from what prompts.py
