@@ -72,7 +72,9 @@ _CHIP_TOOL_SPAN = '<span style="color:#8fbf96">{name}</span>'
 # current surface comes from real MCP introspection. Matches both decorator
 # spellings: `@mcp.tool()` (through v0.5.0) and `@_tool` (the profile-aware
 # registration that replaced it in #182).
-_REGISTERED_AT_REV_RE = re.compile(r"@(?:mcp\.tool\(\)|_tool)\s*\ndef\s+([a-zA-Z0-9_]+)\s*\(")
+_REGISTERED_AT_REV_RE = re.compile(
+    r"@(?:mcp\.tool\(\)|_tool(?:\([^\n]*\))?)\s*\ndef\s+([a-zA-Z0-9_]+)\s*\("
+)
 
 # Shown when a release adds no tools and the caller passed no --highlight.
 DEFAULT_HIGHLIGHT = "correctness &amp; performance fixes"

@@ -5166,7 +5166,7 @@ def data_version() -> dict:
 def _arg_summary(fn: Callable) -> str:
     """A tool's parameters as `required,optional?` — the catalog's arg column.
 
-    Names only, no types: the catalog's budget is the whole point (31 tools
+    Names only, no types: the catalog's budget is the whole point (42 tools
 have to fit in about 1.1k tokens), and the names here are already
     self-describing (lat, radius_m, limit, category). A caller that guesses
     a type wrong gets placeroot_call's bad_request naming what the tool
@@ -5309,7 +5309,7 @@ _UNSET = object()
 # — so the only event that invalidates a cached listing is the operator
 # upgrading the package. TTL is therefore a bound on how long a client could
 # keep showing a pre-upgrade tool list, and one day is the honest trade: it
-# spares a re-fetch of a ~14.4k-token schema surface on every session within a
+# spares a re-fetch of a ~33k-token schema surface on every session within a
 # day, while an upgrade is visible by the next one. A week would buy almost
 # nothing extra (sessions cluster well inside a day) for seven times the
 # staleness window; 0 is what we'd declare if the surface could move at
