@@ -418,6 +418,30 @@ def _with_within_extras(payload: dict, resolved_echo: dict | None, note: str | N
     return payload
 
 
+def _with_center_resolved(
+    payload: dict, center_echo: dict | None, within_echo: dict | None
+) -> dict:
+    """Attach find_places' compact "resolved" echo for a `where` search center.
+
+    "resolved" belongs to the center: that is the point the caller named,
+    and the one whose ambiguity they need to see. `within.of` writes to the
+    same key (_with_within_extras), so when both were given as an id/name
+    the `of` match moves into the note rather than being dropped — two
+    different points can't share one echo, and inventing a second key to
+    hold a redundant `of` (it defaults to the center anyway) would cost
+    every other answer nothing but schema.
+    """
+    if center_echo is None:
+        return payload
+    if within_echo is not None:
+        label = within_echo.get("name") or f"({within_echo['lat']}, {within_echo['lon']})"
+        payload["note"] = "; ".join(
+            filter(None, [payload.get("note"), f"within.of resolved to {label}"])
+        )
+    payload["resolved"] = center_echo
+    return payload
+
+
 def _project_place_row(row: dict, detail: str) -> dict:
     """Shrink one find_places row to `detail`'s tier (roadmap §4.5).
 
@@ -839,12 +863,20 @@ def find_places(
     group_by_category: bool = False,
     within: dict | None = None,
     confirm: bool = False,
+    where: dict | str | None = None,
 ) -> dict:
     """Find named places, either near a point or inside an area's boundary.
 
     Three mutually exclusive modes:
-    - Point + radius: pass lat and lon (radius_m defaults to 1000m).
-      Results are nearest-first, within a circle around (lat, lon).
+    - Point + radius: pass lat and lon (radius_m defaults to 1000m), or the
+      same center as `where` — a {"lat", "lon"} dict, a GERS id, or a
+      free-text place name ("Alamo Square, SF"), resolved here, so a named
+      search is one hop: no geocode()/resolve_place() call first. lat/lon
+      or where, not both, and neither with division_id/area. An id/name
+      `where` adds a compact "resolved": {"name", "id", "lat", "lon",
+      "matched_by"} (absent for lat/lon or a {lat,lon} where); an ambiguous
+      name returns {"error": "ambiguous_place", "candidates": [...]} rather
+      than picking one. Results are nearest-first around that center.
     - Division polygon: pass division_id (a GERS division id, e.g. one from
       an admin-hierarchy chain) instead of lat/lon. Results are every matching place whose
       point falls inside that division's true boundary polygon — no radius
@@ -961,23 +993,30 @@ def find_places(
     within = {"minutes", "mode"?, "of"?} (roadmap §4.2) keeps only results
     truly reachable from `of` within `minutes` by street-graph `mode` —
     the real graph, not a radius guess; radius_m is ignored when set. `of`
-    (a LocationRef) defaults to the search center; required in
-    division_id/area mode. An id/name `of` adds a "resolved" echo; the
-    answer gets a short reachability note. A cold graph returns
+    (a LocationRef) defaults to the search center — lat/lon or whatever
+    `where` resolved to; required in division_id/area mode. An id/name `of`
+    adds a "resolved" echo, unless `where` already claimed that key, in
+    which case `of`'s match is named in the note. The answer gets a short
+    reachability note. A cold graph returns
     {"error": "needs_confirm", ...} — retry with confirm=true once the
     user agrees to wait (5-25s).
     """
     point_given = lat is not None or lon is not None
-    modes_given = sum([point_given, division_id is not None, area is not None])
+    if where is not None and point_given:
+        return {
+            "error": "bad_request",
+            "detail": "pass either lat and lon, or where — not both",
+        }
+    modes_given = sum([point_given or where is not None, division_id is not None, area is not None])
     if modes_given > 1:
         return {
             "error": "bad_request",
-            "detail": "pass exactly one of lat/lon (+radius_m), division_id, or area",
+            "detail": "pass exactly one of lat/lon or where (+radius_m), division_id, or area",
         }
     if modes_given == 0:
         return {
             "error": "bad_request",
-            "detail": "pass one of lat/lon (+radius_m), division_id, or area",
+            "detail": "pass one of lat/lon or where (+radius_m), division_id, or area",
         }
     if detail is not None and detail not in _DETAIL_ENUM:
         return {
@@ -1009,6 +1048,21 @@ def find_places(
                 "detail": "group_by_category has no cursor; drop cursor or set "
                 "group_by_category=false",
             }
+
+    # `where` becomes lat/lon here, before within and params_key: the rest
+    # of the point path — within's "of" default, the cursor's query
+    # identity, the scan itself — then sees an ordinary numeric center and
+    # needs no knowledge of how it was given. Resolving after the cheap
+    # argument checks above keeps a malformed call from paying for a
+    # network resolve first.
+    center_resolved_echo = None
+    if where is not None:
+        item, ref_error = _resolve_location_ref(where)
+        if ref_error is not None:
+            return ref_error
+        lat, lon = item["lat"], item["lon"]
+        if "matched_by" in item:
+            center_resolved_echo = _location_ref_echo(item)
 
     # within (roadmap §4.2's reachability filter) is resolved to a numeric
     # "of" point BEFORE params_key, below — not the raw LocationRef, which
@@ -1277,6 +1331,7 @@ def find_places(
         payload = _with_categories_hint(payload, categories, widen_hint="widen radius_m")
         payload = _with_detail_legend(payload, effective_detail)
         payload = _with_within_extras(payload, within_resolved_echo, within_note)
+        payload = _with_center_resolved(payload, center_resolved_echo, within_resolved_echo)
         return payload
     try:
         rows = overture.find_places(
@@ -1307,6 +1362,7 @@ def find_places(
     payload = _with_categories_hint(payload, categories, widen_hint="widen radius_m")
     payload = _with_detail_legend(payload, effective_detail)
     payload = _with_within_extras(payload, within_resolved_echo, within_note)
+    payload = _with_center_resolved(payload, center_resolved_echo, within_resolved_echo)
     if not used_name_fallback:
         payload = cursor_mod.attach_cursor(
             payload, "results", params_key, current_release, start_offset, has_more
@@ -4200,6 +4256,10 @@ def from_to(
 ) -> dict:
     """Shortest-path walk, cycle, or drive between two places.
 
+    from_to is route() with LocationRef ends and a walk default; route is
+    the canonical routing tool and is growing the same from/to ends, so
+    prefer route(from=..., to=...) once it takes them.
+
     Pass each of from/to as a free-text place name, a {"lat", "lon"} dict,
     or a GERS id — mixed freely. Do not call geocode(), resolve_place(), or
     geocode_batch() first. Plain names resolve in parallel exactly as
@@ -4347,6 +4407,10 @@ def find_near(
     cursor: _CursorArg = None,
 ) -> dict:
     """Places of a category near a named place or city.
+
+    Prefer find_places(where=..., category=...): it is the canonical form of
+    this search — the same one hop, plus every find_places filter, detail
+    tier, and mode. find_near stays as a thin alias.
 
     Pass the user's place name as near. Do not call geocode(),
     resolve_place(), or geocode_batch() first. One hop for a category

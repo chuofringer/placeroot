@@ -77,9 +77,9 @@ Generated 2026-08-27 by `uv run python benchmarks/token_efficiency.py --write`.
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-08-19.0`
 - Tools registered: **42**
-- Total schema surface: **33378 tokens** (133579 chars, 133944 bytes)
-- Of which inputSchema: **5512 tokens**, outputSchema: **3891 tokens** (roadmap §4.3, #403) — the rest is names/descriptions/annotations
-- Schema cost per tool: min 261, median 698, max 2971 tokens
+- Total schema surface: **33688 tokens** (134820 chars, 135191 bytes)
+- Of which inputSchema: **5544 tokens**, outputSchema: **3891 tokens** (roadmap §4.3, #403) — the rest is names/descriptions/annotations
+- Schema cost per tool: min 261, median 703, max 3177 tokens
 - Median scenario response: **436 tokens** (range 87-540)
 - Break-even: the schema surface costs about as much as **77 median answers**
 
@@ -87,7 +87,7 @@ Generated 2026-08-27 by `uv run python benchmarks/token_efficiency.py --write`.
 
 | tool | description tokens | inputSchema tokens | outputSchema tokens | total tokens | total chars |
 |---|---:|---:|---:|---:|---:|
-| `find_places` | 2000 | 586 | 277 | **2971** | 11885 |
+| `find_places` | 2166 | 618 | 277 | **3177** | 12711 |
 | `route` | 1416 | 311 | 227 | **2055** | 8223 |
 | `changes_in_area` | 1161 | 212 | 52 | **1515** | 6060 |
 | `optimize_route` | 799 | 132 | 324 | **1342** | 5371 |
@@ -98,8 +98,8 @@ Generated 2026-08-27 by `uv run python benchmarks/token_efficiency.py --write`.
 | `compare_areas` | 885 | 105 | 52 | **1122** | 4489 |
 | `travel_time_matrix` | 707 | 139 | 173 | **1099** | 4399 |
 | `suggest_areas` | 803 | 100 | 52 | **1039** | 4156 |
+| `from_to` | 500 | 213 | 227 | **1009** | 4036 |
 | `verify_claims` | 781 | 68 | 52 | **989** | 3957 |
-| `from_to` | 450 | 213 | 227 | **957** | 3830 |
 | `render_map` | 597 | 136 | 52 | **857** | 3430 |
 | `isochrone` | 458 | 195 | 127 | **848** | 3393 |
 | `places_along_route` | 513 | 198 | 52 | **829** | 3316 |
@@ -107,9 +107,9 @@ Generated 2026-08-27 by `uv run python benchmarks/token_efficiency.py --write`.
 | `water_near` | 530 | 116 | 52 | **769** | 3079 |
 | `infrastructure_at` | 494 | 118 | 52 | **738** | 2953 |
 | `ground_location` | 463 | 150 | 52 | **734** | 2937 |
+| `find_near` | 294 | 126 | 222 | **703** | 2815 |
 | `distance_matrix` | 401 | 93 | 136 | **698** | 2795 |
 | `place_details` | 342 | 228 | 52 | **680** | 2723 |
-| `find_near` | 242 | 126 | 222 | **651** | 2606 |
 | `within_distance` | 361 | 156 | 52 | **637** | 2549 |
 | `address_at` | 427 | 54 | 52 | **597** | 2388 |
 | `gers_lookup` | 385 | 74 | 52 | **575** | 2303 |
@@ -129,7 +129,7 @@ Generated 2026-08-27 by `uv run python benchmarks/token_efficiency.py --write`.
 | `simplify_geometry` | 129 | 58 | 52 | **297** | 1188 |
 | `admin_lookup` | 145 | 41 | 52 | **296** | 1185 |
 | `reverse_geocode` | 111 | 42 | 52 | **261** | 1044 |
-| **all 42 tools** | 21052 | 5512 | 3891 | **33378** | 133579 |
+| **all 42 tools** | 21320 | 5544 | 3891 | **33688** | 134820 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 
