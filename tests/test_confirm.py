@@ -113,10 +113,15 @@ def test_warmup_cache_off_never_asks(monkeypatch):
     assert result.get("error") != "needs_confirm"
 
 
-def test_route_confirm_docstring_does_not_mention_geocode():
+def test_route_confirm_docstring_does_not_send_the_agent_to_geocode_first():
     doc = server.route.__doc__.lower()
     assert "confirm=true after the user agreed" in doc
-    assert "geocode" not in doc
+    # #419: route resolves names/ids itself, so the only geocode mention it
+    # may carry is the instruction not to pre-resolve — same as from_to's.
+    assert (
+        "do not call geocode(), resolve_place(), or geocode_batch() first"
+        in " ".join(doc.split())
+    )
 
 
 def _tool(name):

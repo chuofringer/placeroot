@@ -6,6 +6,33 @@ semver as it applies to an MCP server: removing a tool or changing a
 response shape is breaking, adding a tool is minor, loosening a filter or
 fixing behavior is patch.
 
+## [Unreleased]
+
+### Added
+- `route` accepts LocationRefs (#419), finishing the rollout roadmap §4.1
+  started: the two ends can now be given as `from`/`to` — each a
+  `{"lat", "lon"}` dict, a GERS id, or a free-text place name — instead of
+  `from_lat`/`from_lon` + `to_lat`/`to_lon`, so "drive from the Louvre to
+  Gare du Nord" is one call rather than a geocode round-trip first. The
+  four scalars keep working unchanged; mixing the two forms (or giving
+  neither complete one) returns `bad_request` naming the choice, the same
+  either-or wording `summarize_area` and `within_distance` use. Resolution
+  is `from_to`'s, shared rather than reimplemented: plain-name pairs
+  resolve in parallel, an ambiguous name returns `ambiguous_place` with
+  candidates and the offending `field`, ends that resolve a city apart
+  return `too_far` before any graph is extracted, and the answer's
+  `from`/`to` blocks carry the name and id each end resolved to. `route`
+  keeps its drive default (`from_to` is the same routing defaulting to
+  walk). No new tool, so the tool count is unchanged.
+
+### Fixed
+- The `from`-keyword schema patch no longer hand-lists the parameters it
+  republishes. `from_to`'s model dropped every parameter it forgot, twice
+  (#328, #395); the shared base now dumps every declared field by name, and
+  each model is checked against its function's real signature before it is
+  published, so a parameter added to `route` or `from_to` without a matching
+  field fails at startup instead of vanishing from `tools/list`.
+
 ## [0.10.0] — 2026-08-26
 
 ### Added

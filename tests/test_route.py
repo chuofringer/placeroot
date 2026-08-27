@@ -8,11 +8,12 @@ fixture for every test in this file, same as test_routing.py.
 """
 
 import asyncio
+import inspect
 import math
 
 import pytest
 
-from placeroot import budget, routing, server, simplify
+from placeroot import budget, errors, geocode, routing, server, simplify
 
 from ._routing_fixture import build_routing_fixture as fx
 
@@ -699,7 +700,9 @@ def test_server_route_schema_exposes_confirm_defaulting_to_false():
     assert "confirm" not in schema.get("required", [])
     desc = (tool.description or "").lower()
     assert "confirm=true after the user agreed" in desc
-    assert "geocode" not in desc
+    # #419: route accepts names/ids itself now, so geocode may only appear as
+    # the instruction *not* to pre-resolve — never as a step to take first.
+    assert "do not call geocode()" in " ".join(desc.split())
 
 
 # --- shape identity: the geometry emitted must be the edge dijkstra used ----
@@ -902,3 +905,206 @@ def test_path_deviation_sums_pruning_and_simplification():
     assert simplify_dev > 0
     assert tight_dev == pytest.approx(simplify_dev + dropped_m)
     assert tight_dev > max(simplify_dev, dropped_m)  # the old, understating rule
+
+
+# --- from/to as LocationRefs (#419) ------------------------------------------
+#
+# route's two ends now take the same {"lat","lon"} dict | GERS id |
+# free-text name refs from_to takes, resolved by the same machinery; the
+# four scalars keep working untouched. Resolves are mocked here for the
+# same reason test_from_to.py mocks them: the street graph is the committed
+# fixture, and nothing in this file should need live geocoding.
+
+
+def _hit(name, lat, lon, id_="gers-x"):
+    return {"name": name, "lat": lat, "lon": lon, "id": id_, "type": "place"}
+
+
+def _ab(query):
+    if query == "A":
+        return _hit(query, FROM_LAT, FROM_LON, id_="gers-a")
+    return _hit(query, TO_LAT, TO_LON, id_="gers-b")
+
+
+def test_route_resolves_name_refs_for_both_ends(monkeypatch):
+    monkeypatch.setattr(geocode, "resolve_named_place", _ab)
+    result = server.route(from_="A", to="B", mode="walk", confirm=True)
+    assert "error" not in result
+    assert result["distance_m"] > 0
+    assert result["mode"] == "walk"
+    assert result["from"]["name"] == "A"
+    assert result["from"]["id"] == "gers-a"
+    assert result["to"]["name"] == "B"
+    assert result["to"]["lat"] == TO_LAT
+    # The named endpoints reach the handoff, not bare coordinates.
+    assert "A" in result["export"]["text"]
+
+
+def test_route_refs_keep_routes_drive_default(monkeypatch):
+    """from_to defaults to walk; route stays drive, refs or not."""
+    monkeypatch.setattr(geocode, "resolve_named_place", _ab)
+    result = server.route(from_="A", to="B", confirm=True)
+    assert "error" not in result
+    assert result["mode"] == "drive"
+
+
+def test_route_resolves_gers_id_refs(monkeypatch):
+    from_id = "a" * 32
+    to_id = "b" * 32
+
+    def fake_lookup(id_, near_lat=None, near_lon=None):
+        lat, lon = (FROM_LAT, FROM_LON) if id_ == from_id else (TO_LAT, TO_LON)
+        name = "Origin GERS" if id_ == from_id else "Dest GERS"
+        return {
+            "id": id_, "theme": "places", "type": "place", "name": name,
+            "lat": lat, "lon": lon, "summary": {}, "related": {},
+        }
+
+    monkeypatch.setattr(server.gers, "gers_lookup", fake_lookup)
+    result = server.route(from_=from_id, to=to_id, mode="walk", confirm=True)
+    assert "error" not in result
+    assert result["from"]["id"] == from_id
+    assert result["from"]["name"] == "Origin GERS"
+    assert result["to"]["id"] == to_id
+
+
+def test_route_accepts_coordinate_dict_refs():
+    result = server.route(
+        from_={"lat": FROM_LAT, "lon": FROM_LON}, to={"lat": TO_LAT, "lon": TO_LON},
+        mode="walk", confirm=True,
+    )
+    assert "error" not in result
+    assert result["distance_m"] > 0
+    # A bare coordinate endpoint carries nothing to echo — no payload growth.
+    assert result["from"] == {"lat": FROM_LAT, "lon": FROM_LON}
+    assert result["to"] == {"lat": TO_LAT, "lon": TO_LON}
+
+
+def test_route_mixing_refs_and_scalars_is_bad_request():
+    result = server.route(from_lat=FROM_LAT, from_lon=FROM_LON, to={"lat": TO_LAT, "lon": TO_LON})
+    assert result["error"] == "bad_request"
+    assert "not both" in result["detail"]
+    assert "from_lat" in result["detail"] and "from and to" in result["detail"]
+
+
+def test_route_with_neither_form_is_bad_request():
+    result = server.route()
+    assert result["error"] == "bad_request"
+    assert "from_lat" in result["detail"] and "from and to" in result["detail"]
+    # Half a scalar pair is still the scalar form, and still incomplete.
+    partial = server.route(from_lat=FROM_LAT, from_lon=FROM_LON)
+    assert partial["error"] == "bad_request"
+
+
+def test_route_with_one_ref_side_names_the_missing_side():
+    result = server.route(from_="A")
+    assert result["error"] == "bad_request"
+    assert result["field"] == "to"
+    assert server.route(to="B")["field"] == "from"
+
+
+def test_route_ambiguous_name_ref_returns_candidates(monkeypatch):
+    def fake_resolve(query):
+        if query == "A":
+            raise errors.AmbiguousPlace(query, candidates=[{"name": "A1"}, {"name": "A2"}])
+        return _ab(query)
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    result = server.route(from_="A", to="B", mode="walk", confirm=True)
+    assert result["error"] == "ambiguous_place"
+    assert result["field"] == "from"
+    assert result["candidates"] == [{"name": "A1"}, {"name": "A2"}]
+
+
+def test_route_far_apart_refs_are_too_far_without_building_a_graph(monkeypatch):
+    def fake_resolve(query):
+        if "Tokyo" in query:
+            return _hit("Tokyo", 35.68, 139.69)
+        return _hit("New York", 40.71, -74.01)
+
+    def boom(*_a, **_k):
+        raise AssertionError("must not build a continent graph")
+
+    monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
+    monkeypatch.setattr(routing, "route", boom)
+    result = server.route(from_="Tokyo", to="New York", mode="walk")
+    assert result["error"] == "too_far"
+    assert "route stays inside one city" in result["detail"]
+    assert result["from"]["name"] == "Tokyo"
+    assert result["max_distance_m"] == pytest.approx(routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"])
+
+
+def test_route_bad_dict_ref_is_bad_request():
+    result = server.route(from_={"lat": 91.0, "lon": 0.0}, to={"lat": TO_LAT, "lon": TO_LON})
+    assert result["error"] == "bad_request"
+    assert result["field"] == "from"
+
+
+def test_route_legacy_scalar_call_is_unchanged(monkeypatch):
+    """Regression: the four scalars route exactly as before — no resolver
+    touched, no resolved blocks, positional and keyword calls identical."""
+
+    def boom(*_a, **_k):
+        raise AssertionError("a coordinate route must not resolve anything")
+
+    monkeypatch.setattr(geocode, "resolve_named_place", boom)
+    positional = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", confirm=True)
+    keyword = server.route(
+        from_lat=FROM_LAT, from_lon=FROM_LON, to_lat=TO_LAT, to_lon=TO_LON,
+        mode="walk", confirm=True,
+    )
+    assert positional["from"] == {"lat": FROM_LAT, "lon": FROM_LON}
+    assert positional["distance_m"] == keyword["distance_m"]
+    assert positional["duration_s"] == keyword["duration_s"]
+    assert "resolved" not in positional
+
+
+def test_route_dispatch_maps_the_published_from_to_the_python_keyword(monkeypatch):
+    monkeypatch.setattr(geocode, "resolve_named_place", _ab)
+    result = server.placeroot_call(
+        "route", {"from": "A", "to": "B", "mode": "walk", "confirm": True}
+    )
+    assert "error" not in result
+    assert result["from"]["name"] == "A"
+
+
+# --- published schema: every accepted parameter is visible (#328/#395/#419) ---
+
+
+def test_server_route_schema_publishes_from_to_and_every_other_parameter():
+    """The from/to alias patch must not delete parameters from the schema —
+    the exact bug #328 and #395 each shipped once. Assert the published
+    property set is the function's own signature, `from_` spelled `from`."""
+    tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
+    props = tools["route"].input_schema["properties"]
+    accepted = {
+        "from" if name == "from_" else name
+        for name in inspect.signature(server.route).parameters
+    }
+    assert set(props) == accepted
+    assert "from_" not in props
+    for name in ("from", "to", "from_lat", "from_lon", "to_lat", "to_lon"):
+        assert name in props
+    for name in ("include_path", "include_elevation", "prefer", "mode", "confirm"):
+        assert name in props
+    assert props["mode"]["enum"] == ["cycle", "drive", "walk"]
+    assert props["prefer"]["enum"] == ["flat"]
+    for name in ("from", "to"):
+        types = {branch.get("type") for branch in props[name]["anyOf"]}
+        assert {"string", "object"} <= types
+    # Both forms are optional; the tool decides which pair it got.
+    assert not set(tools["route"].input_schema.get("required") or [])
+
+
+def test_route_published_validator_passes_every_argument_through():
+    """Not just the schema: the patched arg model is what the SDK validates a
+    tools/call against, so its dump must reach route() with every keyword."""
+    tool = server.mcp._tool_manager.get_tool("route")
+    kwargs = tool.fn_metadata.validate_arguments(
+        {"from": "A", "to": "B", "mode": "walk", "include_path": True, "confirm": True}
+    )
+    assert set(kwargs) == set(inspect.signature(server.route).parameters)
+    assert kwargs["from_"] == "A"
+    assert kwargs["to"] == "B"
+    assert kwargs["include_path"] is True
+    assert kwargs["from_lat"] is None

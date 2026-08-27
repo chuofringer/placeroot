@@ -213,7 +213,9 @@ def test_route_advertised_params_keep_from_lat():
     """from_ alias is the exact token only; route still advertises from_lat."""
     advertised = server._arg_summary(server._TOOL_FUNCS["route"])
     tokens = advertised.split(",")
-    assert "from_lat" in tokens
+    # Optional since #419: either the four scalars or from/to, never both.
+    assert "from_lat?" in tokens
+    assert "from?" in tokens
     assert "fromlat" not in advertised
     catalog = next(e for e in server.placeroot_capabilities()["tools"] if e.startswith("route("))
     assert "from_lat" in catalog
