@@ -3810,7 +3810,7 @@ def optimize_route(
         notes.append(
             f"no route connects {len(estimated_legs)} leg(s) ({', '.join(estimated_legs)}); "
             f"their distance is a straight-line estimate x{UNROUTABLE_DETOUR_FACTOR} "
-            f"(flagged \"estimated\": true), {tail}"
+            f'(flagged "estimated": true), {tail}'
         )
     if graph.truncated:
         truncated = True
