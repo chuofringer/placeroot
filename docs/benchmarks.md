@@ -77,11 +77,11 @@ Generated 2026-08-27 by `uv run python benchmarks/token_efficiency.py --write`.
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-08-19.0`
 - Tools registered: **42**
-- Total schema surface: **33688 tokens** (134820 chars, 135191 bytes)
-- Of which inputSchema: **5544 tokens**, outputSchema: **3891 tokens** (roadmap §4.3, #403) — the rest is names/descriptions/annotations
+- Total schema surface: **34029 tokens** (136182 chars, 136561 bytes)
+- Of which inputSchema: **5577 tokens**, outputSchema: **3891 tokens** (roadmap §4.3, #403) — the rest is names/descriptions/annotations
 - Schema cost per tool: min 261, median 703, max 3177 tokens
 - Median scenario response: **436 tokens** (range 87-540)
-- Break-even: the schema surface costs about as much as **77 median answers**
+- Break-even: the schema surface costs about as much as **78 median answers**
 
 ### Schema surface (paid once per conversation)
 
@@ -89,8 +89,8 @@ Generated 2026-08-27 by `uv run python benchmarks/token_efficiency.py --write`.
 |---|---:|---:|---:|---:|---:|
 | `find_places` | 2166 | 618 | 277 | **3177** | 12711 |
 | `route` | 1416 | 311 | 227 | **2055** | 8223 |
+| `optimize_route` | 1100 | 165 | 324 | **1683** | 6733 |
 | `changes_in_area` | 1161 | 212 | 52 | **1515** | 6060 |
-| `optimize_route` | 799 | 132 | 324 | **1342** | 5371 |
 | `meeting_point` | 1018 | 106 | 52 | **1265** | 5063 |
 | `resolve_place` | 769 | 182 | 206 | **1239** | 4959 |
 | `geocode` | 796 | 114 | 195 | **1180** | 4722 |
@@ -129,7 +129,7 @@ Generated 2026-08-27 by `uv run python benchmarks/token_efficiency.py --write`.
 | `simplify_geometry` | 129 | 58 | 52 | **297** | 1188 |
 | `admin_lookup` | 145 | 41 | 52 | **296** | 1185 |
 | `reverse_geocode` | 111 | 42 | 52 | **261** | 1044 |
-| **all 42 tools** | 21320 | 5544 | 3891 | **33688** | 134820 |
+| **all 42 tools** | 21621 | 5577 | 3891 | **34029** | 136182 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 

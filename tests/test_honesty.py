@@ -284,6 +284,7 @@ def test_server_optimize_route_adds_verify_line_from_stop_fields():
         ],
         mode="walk",
         roundtrip=False,
+        confirm=True,
     )
     assert "error" not in result
     assert result["verify_before_going"] == "Verify before going: Shaky Café (low confidence)."
@@ -316,6 +317,7 @@ def test_server_optimize_route_bare_coords_have_no_verify_line():
         [{"lat": a[0], "lon": a[1]}, {"lat": b[0], "lon": b[1]}],
         mode="walk",
         roundtrip=False,
+        confirm=True,
     )
     assert "error" not in result
     assert "verify_before_going" not in result

@@ -372,7 +372,9 @@ def test_distance_matrix(srv):
 def test_optimize_route(srv):
     schema = _schema_for(srv, "optimize_route")
     success = _call(
-        srv, "optimize_route", {"stops": LINE_STOPS, "mode": "walk", "roundtrip": False}
+        srv,
+        "optimize_route",
+        {"stops": LINE_STOPS, "mode": "walk", "roundtrip": False, "confirm": True},
     )
     assert "error" not in success
     _validate(schema, success)

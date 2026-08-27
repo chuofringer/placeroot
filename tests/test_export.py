@@ -323,6 +323,7 @@ def test_server_optimize_route_multi_stop_link_and_every_named_stop():
         mode="walk",
         roundtrip=False,
         start_index=LINE_START_INDEX,
+        confirm=True,
     )
     assert "error" not in result
     assert result["order"] == LINE_EXPECTED_ORDER
@@ -355,6 +356,6 @@ def test_server_optimize_route_error_has_no_export():
 def test_server_optimize_export_fits_the_default_token_budget():
     """Handoff is cheap: 10 stops + export still fits the conversational budget."""
     stops = _as_dicts([fx.node_latlon(2, j) for j in range(0, 20, 2)])
-    result = server.optimize_route(stops, mode="walk", roundtrip=True)
+    result = server.optimize_route(stops, mode="walk", roundtrip=True, confirm=True)
     assert "export" in result
     assert budget.estimate_tokens(result) <= budget.token_budget()
