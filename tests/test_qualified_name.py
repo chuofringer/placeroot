@@ -264,6 +264,7 @@ def test_optimize_route_resolves_a_qualified_stop(monkeypatch):
     })
     result = server.optimize_route(
         [{"lat": FROM_LAT, "lon": FROM_LON}, "Hilltop, Brooklyn"], mode="walk",
+        confirm=True,
     )
     assert "error" not in result
     assert result["resolved"] == [
