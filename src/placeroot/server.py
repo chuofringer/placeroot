@@ -225,6 +225,18 @@ _PreferArg = Annotated[
         json_schema_extra={"enum": sorted(routing.SUPPORTED_PREFERENCES)},
     ),
 ]
+# #425: the enum lives on `items` (this is an array), and the runtime type
+# stays a plain list so an unsupported class reaches the function and comes
+# back as a self-correcting bad_request naming the supported values.
+_AvoidArg = Annotated[
+    list | None,
+    Field(
+        description="Road classes to keep the route off. No toll or ferry option exists: "
+        "Overture carries no toll attribute, and the graph is road-only. "
+        "Default: none (no class avoided).",
+        json_schema_extra={"items": {"type": "string", "enum": list(routing.AVOIDABLE_CLASSES)}},
+    ),
+]
 # neighborhood_verdict doesn't consult stored preferences; its default is
 # inferred from free-text context (no car -> walk, bike -> cycle, car ->
 # drive), falling back to walk.
@@ -4009,6 +4021,7 @@ def route(
     include_path: bool = False,
     include_elevation: bool = False,
     prefer: _PreferArg = None,
+    avoid: _AvoidArg = None,
     confirm: bool = False,
     from_: str | dict | None = None,
     to: str | dict | None = None,
@@ -4089,6 +4102,20 @@ def route(
     appear on a "flat" route if it's short and roughly level. Don't offer
     this as an accessibility guarantee to the user; it isn't one.
 
+    avoid=["motorway"] (and/or "trunk") is the "no highways" ask: those
+    classes and their on/off ramps are dropped from the street graph before
+    the search, and the answer echoes "avoid". Those two values are the
+    whole vocabulary — anything else is a bad_request listing them. There is
+    no toll or ferry option, deliberately: Overture's road data carries no
+    toll attribute at all, and this graph is road-only so ferries are never
+    routed over. Tell the user that rather than approximating either with
+    avoid=["motorway"]. On walk and cycle it is a no-op (both already
+    exclude those classes) and says so in "avoid_note" instead of erroring.
+    An avoiding route is a different graph, so the first one in an area can
+    need its own confirm even where a plain route is warm; if the avoided
+    roads were the only link, the usual no_route comes back with "try"
+    naming avoid.
+
     confirm=true after the user agreed to wait for a first-time street-graph
     build (about 5–25 seconds). Pass it only after a needs_confirm reply
     and they said yes. A warm or cached graph never needs it.
@@ -4127,6 +4154,7 @@ def route(
             include_path=include_path,
             include_elevation=include_elevation,
             prefer=prefer,
+            avoid=avoid,
             confirm=confirm,
             tool="route",
         )
@@ -4162,6 +4190,14 @@ def route(
                 f"{sorted(routing.FLAT_PREFERENCE_MODES)}, got mode={mode!r}"
             ),
         }
+    try:
+        avoid_classes = routing.normalize_avoid(avoid)
+    except ValueError as e:
+        return {
+            "error": "bad_request",
+            "detail": str(e),
+            "supported": list(routing.AVOIDABLE_CLASSES),
+        }
     straight_m = routing._haversine_m(from_lat, from_lon, to_lat, to_lon)
     cap_m = routing.ROUTE_MAX_STRAIGHT_LINE_M[mode]
     if straight_m > cap_m:
@@ -4174,7 +4210,7 @@ def route(
             "max_distance_m": cap_m,
         }
     cached = routing.route_graph_is_cached(
-        from_lat, from_lon, to_lat, to_lon, mode, want_shapes=include_path
+        from_lat, from_lon, to_lat, to_lon, mode, want_shapes=include_path, avoid=avoid_classes
     )
     if not cached and not confirm:
         return _needs_confirm_graph(mode)
@@ -4184,7 +4220,7 @@ def route(
         result = _run_route(
             from_lat, from_lon, to_lat, to_lon,
             mode=mode, include_path=include_path,
-            include_elevation=include_elevation, prefer=prefer,
+            include_elevation=include_elevation, prefer=prefer, avoid=avoid_classes,
             cap_confirm_build=confirm and not cached,
         )
     except routing.UnsupportedMode as e:
@@ -4252,6 +4288,7 @@ def from_to(
     include_path: bool = False,
     include_elevation: bool = False,
     prefer: _PreferArg = None,
+    avoid: _AvoidArg = None,
     confirm: bool = False,
 ) -> dict:
     """Shortest-path walk, cycle, or drive between two places.
@@ -4280,10 +4317,12 @@ def from_to(
     named in "field": "from" | "to". Omit mode to use the stored
     preferences mode, else walk.
 
-    include_path, include_elevation, and prefer pass straight through to
-    route() — see that tool's docstring for what each returns/means
+    include_path, include_elevation, prefer, and avoid pass straight through
+    to route() — see that tool's docstring for what each returns/means
     ("elevation" climb profile, prefer="flat" grade-avoiding preference and
-    its honest step-free/accessibility caveats).
+    its honest step-free/accessibility caveats, avoid=["motorway"|"trunk"]
+    class avoidance and why no toll or ferry option exists). avoid needs
+    mode="drive": the walk default already excludes those classes.
 
     confirm=true after the user agreed to wait for a first-time street-graph
     build (about 5–25 seconds). Pass it only after a needs_confirm reply
@@ -4298,6 +4337,7 @@ def from_to(
         include_path=include_path,
         include_elevation=include_elevation,
         prefer=prefer,
+        avoid=avoid,
         confirm=confirm,
         tool="from_to",
     )
@@ -4312,6 +4352,7 @@ def _route_between_refs(
     include_path: bool,
     include_elevation: bool,
     prefer,
+    avoid=None,
     confirm: bool,
     tool: str,
 ) -> dict:
@@ -4383,7 +4424,7 @@ def _route_between_refs(
     result = route(
         origin["lat"], origin["lon"], dest["lat"], dest["lon"], mode=mode,
         include_path=include_path, include_elevation=include_elevation, prefer=prefer,
-        confirm=confirm,
+        avoid=avoid, confirm=confirm,
     )
     for key, place in (("from", origin), ("to", dest)):
         point = result.get(key)
@@ -5066,13 +5107,14 @@ def _run_route(
     include_path: bool,
     include_elevation: bool = False,
     prefer: str | None = None,
+    avoid: tuple[str, ...] = (),
     cap_confirm_build: bool,
 ) -> dict:
     """routing.route, with a 2x-ETA cap on a confirmed cold graph build."""
     if not cap_confirm_build:
         return routing.route(
             from_lat, from_lon, to_lat, to_lon, mode=mode, include_path=include_path,
-            include_elevation=include_elevation, prefer=prefer,
+            include_elevation=include_elevation, prefer=prefer, avoid=avoid,
         )
     limit_s = _confirm_graph_cap_s()
     # Install a log list before copy so worker report() appends are visible
@@ -5086,7 +5128,7 @@ def _run_route(
             routing.route,
             from_lat, from_lon, to_lat, to_lon,
             mode=mode, include_path=include_path,
-            include_elevation=include_elevation, prefer=prefer,
+            include_elevation=include_elevation, prefer=prefer, avoid=avoid,
         )
         try:
             return fut.result(timeout=limit_s)
@@ -5673,6 +5715,7 @@ def _from_to_arg_model():
         include_path: bool = False
         include_elevation: bool = False
         prefer: _PreferArg = None
+        avoid: _AvoidArg = None
         confirm: bool = False
 
     return FromToArguments
@@ -5692,6 +5735,7 @@ def _route_arg_model():
         include_path: bool = False
         include_elevation: bool = False
         prefer: _PreferArg = None
+        avoid: _AvoidArg = None
         confirm: bool = False
         from_: str | dict | None = Field(default=None, alias="from")
         to: str | dict | None = None

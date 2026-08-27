@@ -267,6 +267,8 @@ _ROUTE_SUCCESS = {
         "elevation": {"type": "object"},
         "elevation_omitted": {"type": "boolean"},
         "prefer_note": {"type": "string"},
+        "avoid": {"type": "array", "items": {"type": "string"}},
+        "avoid_note": {"type": "string"},
         "truncated": {"type": "boolean"},
         "resolved": {"type": "object"},
     },

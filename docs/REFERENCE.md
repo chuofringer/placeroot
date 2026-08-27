@@ -36,9 +36,9 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `gers_lookup` | Any GERS id → the entity it names (place, division, or building), what it's inside, and the building at its point |
 | `search_categories` | Free text (including phrase intents like "fix my cracked phone screen") → ranked Overture category slugs with confidence, to filter `find_places` by |
 | `isochrone` | The area reachable within N minutes on foot, bike, or car |
-| `route` | Shortest-path distance and duration between two points, on foot, bike, or car. Ends given as `from_lat`/`from_lon` + `to_lat`/`to_lon`, or as `from`/`to` — each a `{lat, lon}` dict, a GERS id, or a place name, resolved in parallel here rather than in a prior `geocode` call (not both forms; `too_far` if the ends are a city apart); `include_path=true` adds the simplified route polyline; also returns an `export` object (Google/Apple Maps links, GPX, printable stop list). Optional `confirm` (bool, default false): a cold street-graph build returns `needs_confirm` with an ETA instead of blocking |
+| `route` | Shortest-path distance and duration between two points, on foot, bike, or car. Ends given as `from_lat`/`from_lon` + `to_lat`/`to_lon`, or as `from`/`to` — each a `{lat, lon}` dict, a GERS id, or a place name, resolved in parallel here rather than in a prior `geocode` call (not both forms; `too_far` if the ends are a city apart); `include_path=true` adds the simplified route polyline; `avoid=["motorway"|"trunk"]` keeps a drive off those road classes and their ramps (no toll or ferry option exists — Overture carries no toll attribute and the graph is road-only); also returns an `export` object (Google/Apple Maps links, GPX, printable stop list). Optional `confirm` (bool, default false): a cold street-graph build returns `needs_confirm` with an ETA instead of blocking |
 | `elevation_at` | Ground elevation in meters at a point, from Copernicus GLO-30 (~30 m resolution); null with a note where there's no coverage (ocean, or a tile excluded from the public release) |
-| `from_to` | Named-place walk/cycle/drive: resolve A and B in parallel, one graph, same shape as `route` including `export` maps/gpx/text. Fails with `too_far` if the ends are a city apart. Same optional `confirm` / `needs_confirm` gate as `route` |
+| `from_to` | Named-place walk/cycle/drive: resolve A and B in parallel, one graph, same shape as `route` including `export` maps/gpx/text and `avoid`. Fails with `too_far` if the ends are a city apart. Same optional `confirm` / `needs_confirm` gate as `route` |
 | `find_near` | Category near a named place or city — one hop for "coffee shops near the Eiffel Tower"; compact rows with `trust_note`. Prefer `find_places(where=..., category=...)`, the canonical form; `find_near` stays as a thin alias |
 | `places_along_route` | Places on the way from A to B: corridor search along the route, with each result's detour and how far along it sits, compact trust notes on results, and a verify-before-going line for the weakest stops |
 | `ground_location` | One-hop point grounding: where (reverse geocode), surroundings (area summary at 500m), reach (reachable-area stats for N minutes by mode, no geometry), and the nearest few named places — each section degrades independently to a note rather than failing the call |
@@ -79,7 +79,7 @@ PlaceRoot also speaks the MCP 2026-07-28 revision's listing cache hints:
 `tools/list` (and the prompt and resource listings) come back with
 `ttlMs: 86400000` and `cacheScope: "public"`. The listings are frozen at build
 time — nothing at runtime can change them — so a client is free to reuse them
-for a day instead of re-reading a ~33.4k-token schema surface every session.
+for a day instead of re-reading a ~33.9k-token schema surface every session.
 Clients that speak an older revision are unaffected: those fields did not exist
 before 2026-07-28, and the response they get is byte-identical to what it was.
 
@@ -144,8 +144,8 @@ without them registered.
 
 ## Loading fewer tools (`PLACEROOT_TOOLS`)
 
-All 42 tool schemas cost roughly **33.4k tokens** of every conversation's
-context, paid before the agent asks anything — about the cost of 77 median
+All 42 tool schemas cost roughly **33.9k tokens** of every conversation's
+context, paid before the agent asks anything — about the cost of 78 median
 answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS`
 selects which tools get registered. Unselected tools are never registered and
 never appear in `tools/list`.
@@ -167,10 +167,10 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 42 | ~34,029 | — |
+| unset / `all` (default) | 42 | ~34,515 | — |
 | `search` | 13 | ~11,678 | 66% |
-| `core` | 15 | ~15,387 | 55% |
-| `routing` | 9 | ~10,575 | 69% |
+| `core` | 15 | ~15,873 | 54% |
+| `routing` | 9 | ~11,061 | 68% |
 | `analysis` | 12 | ~9,280 | 73% |
 | `geometry` | 3 | ~3,203 | 91% |
 | `progressive` | 4 (all 42 reachable) | ~1,320 | 96% |
@@ -180,7 +180,7 @@ union of everything named:
 - **`routing`** — `route`, `from_to`, `isochrone`, `distance_matrix`, `travel_time_matrix`, `within_distance`, `optimize_route`, `elevation_at`, `meeting_point`.
 - **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `suggest_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`, `neighborhood_verdict`, `changes_in_area`, `verify_claims`.
 - **`geometry`** — `simplify_geometry`, `render_map`, `geometry_op`.
-- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 42 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 33.4k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
+- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 42 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 33.9k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 
 `data_version` and `preferences` are registered under every profile.
 `data_version` is ~360 tokens and the only way an agent can tell which
