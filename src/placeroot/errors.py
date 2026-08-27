@@ -54,6 +54,25 @@ class AmbiguousArea(Exception):
         self.candidates = candidates
 
 
+class AnchoredNotFound(Exception):
+    """A comma-qualified name resolved its qualifier, and nothing was inside it.
+
+    Raised by geocode.resolve_named_place (#427) instead of returning a
+    bare None, so the caller can say which qualifier was actually searched
+    — "no 'Le Marais' division or place found in or near 'Paris'" — rather
+    than reporting the global fuzzy homonyms ("Le Mauvais Pas", 400 km
+    away) that whole-string resolution used to fall back on.
+    """
+
+    def __init__(self, query: str, name: str, anchor: str):
+        detail = f"no {name!r} division or place found in or near {anchor!r}"
+        super().__init__(detail)
+        self.detail = detail
+        self.query = query
+        self.name = name
+        self.anchor = anchor
+
+
 class AmbiguousPlace(Exception):
     """A free-text place name matched several equally-ranked candidates."""
 

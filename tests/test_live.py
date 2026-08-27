@@ -182,3 +182,16 @@ def test_diff_places_end_to_end_against_real_overture_releases():
     assert isinstance(result["counts"]["unchanged"], int)
     for bucket in ("appeared", "disappeared", "changed"):
         assert len(result[bucket]) <= 20
+
+
+@pytest.mark.live
+def test_comma_qualified_name_resolves_inside_its_qualifier():
+    """#427: the observed defect, live. "Le Marais, Paris" used to fuzz
+    across the comma and answer with three villages named "Le Mauvais Pas",
+    none of them within 300 km of Paris. Assert on where the pin lands
+    rather than on which feature wins it: the Marais is a place-theme name,
+    and which of its rows ranks first is Overture's business, not ours.
+    """
+    resolved = geocode.resolve_named_place("Le Marais, Paris")
+    assert resolved is not None
+    assert geo.haversine_m(resolved["lat"], resolved["lon"], 48.8566, 2.3522) < 10_000

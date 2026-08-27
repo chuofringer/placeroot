@@ -439,7 +439,7 @@ from placeroot import (
     release,
     trace,
 )
-from placeroot.errors import AmbiguousArea, AmbiguousPlace
+from placeroot.errors import AmbiguousArea, AmbiguousPlace, AnchoredNotFound
 
 logger = logging.getLogger(__name__)
 
@@ -4132,6 +4132,20 @@ def _fuzzy_place_covers_query(name: str, tokens: list[str]) -> bool:
 # by "the city".
 _CITY_HINT_SUBTYPES = frozenset({"locality", "localadmin"})
 
+# #427: how deep to look for the division a comma qualifier names. Same
+# depth resolve_place's own `city` hint uses — enough for _pick_city_hint_row
+# to find a city-level hit under a same-named region, not so deep that a
+# qualifier turns into a survey.
+_ANCHOR_LOOKUP_LIMIT = 10
+
+# #427: how many candidates the anchored division pass asks geocode() for.
+# Deliberately far above _RESOLVE_OVERFETCH: geocode ranks by prominence,
+# with no idea an anchor is in play, and a name like "Hilltop" or "Le
+# Marais" has dozens of homonyms worldwide — the one inside the anchor is
+# routinely past the first ten. The rows are already ranked and in memory
+# by then, so a deeper page costs a slice, not a scan.
+_ANCHORED_OVERFETCH = 50
+
 
 def _pick_city_hint_row(hits: list[dict]) -> dict:
     """Pick the row a `city` hint means, from geocode()'s ranked hits.
@@ -4705,12 +4719,24 @@ def resolve_named_place(query: str) -> dict | None:
     so a compose tool cannot silently route the wrong city. Includes
     places as well as divisions — "Ferry Building" is not an area.
 
+    A comma-qualified name ("Le Marais, Paris") is read as name-plus-
+    qualifier rather than as one opaque string — see the #427 block below
+    for the split, the anchor bound, and how the tiers interact.
+
     Returns {name, lat, lon, id, type, admin_context} or None if nothing
-    matched. Raises AmbiguousPlace or overture.UpstreamUnavailable.
+    matched, plus a non-fatal "note" when a qualifier was present but did
+    not resolve. Raises AmbiguousPlace, AnchoredNotFound (nothing inside a
+    qualifier that did resolve), or overture.UpstreamUnavailable.
     """
     query = query.strip()
     if not query:
         return None
+
+    head, qualifier = _split_qualifier(query)
+    if head is not None:
+        anchor = _resolve_qualifier_anchor(qualifier)
+        if anchor is not None:
+            return _resolve_inside_anchor(query, head, anchor)
 
     rows = [
         r for r in geocode(query, limit=_RESOLVE_OVERFETCH)
@@ -4718,7 +4744,74 @@ def resolve_named_place(query: str) -> dict | None:
     ]
     if not rows:
         return None
+    hit = _pick_named_place(query, rows)
+    if head is not None:
+        # The qualifier named nothing this release knows, so the whole
+        # string was searched — today's behavior, and still the best
+        # available answer. But the caller stated a location that was not
+        # honored, and has to hear that rather than be handed a homonym as
+        # if it had been.
+        hit["note"] = f"{qualifier!r} did not resolve as a place or region; searched the full text"
+    return hit
 
+
+# --- #427: comma-qualified names ("Le Marais, Paris") -----------------------
+#
+# The defect: the whole string went to geocode() as one opaque name, no
+# literal tier matched it, and the #215 typo tier then fuzzed across the
+# comma — "Le Marais, Paris" came back as three villages named "Le Mauvais
+# Pas", the qualifier the caller supplied thrown away entirely.
+#
+# Which comma: the FIRST one, with everything after it kept together as the
+# qualifier. The issue proposed the last comma; the first is what
+# geocode_address already does (its city anchor is the whole tail), and it
+# reads "Grand Army Plaza, Brooklyn, NY" the way a caller means it — head
+# "Grand Army Plaza", qualifier "Brooklyn, NY", which the anchor lookup
+# then resolves as a name plus a region suffix on its own. A last-comma
+# split would instead go looking for something named "Grand Army Plaza,
+# Brooklyn".
+#
+# Which commas are ours: only the ones geocode() does not already
+# understand. "Austin, TX" / "London, Ontario" are a name plus a region
+# suffix, which _parse_region_suffix has recognized since #46 — it searches
+# the name half alone, constrained to that region, so the comma is never
+# crossed and there is nothing here to improve. _split_qualifier hands those
+# back as unqualified, which is what keeps that whole family (and every
+# typo correction inside it, "Berekley, CA") byte-identical.
+#
+# Tier interaction: for the qualifiers that are ours, the full ladder
+# (exact -> alt -> typo) runs on the HEAD alone, inside the anchor bound —
+# so no candidate can be reached by fuzzing a string that spans the comma.
+# That is the "Le Mauvais Pas" class, impossible by construction rather
+# than filtered out afterwards. The one path that still searches the whole
+# string is the fallback below, taken only when the qualifier resolves to
+# nothing at all, and it says so in a note.
+#
+# Anchor bound: a candidate is inside the anchor when the anchor's resolved
+# name appears in the candidate's admin_context chain, or when it sits
+# within _CITY_HINT_RADIUS_M of the anchor's point. Containment alone is
+# too narrow (a place row carries no chain); radius alone is wrong for a
+# region or country anchor, whose centroid can be hundreds of km from every
+# real answer inside it.
+
+
+def _split_qualifier(query: str) -> tuple[str | None, str | None]:
+    """(head, qualifier) for a comma-qualified name, else (None, None).
+
+    (None, None) for a query with no comma, and for one whose tail is a
+    region suffix geocode() already resolves against — see the block above.
+    """
+    head, sep, tail = query.partition(",")
+    head, tail = head.strip(), tail.strip()
+    if not sep or not head or not tail:
+        return None, None
+    if _parse_region_suffix(query, _local_divisions_table())[1] is not None:
+        return None, None
+    return head, tail
+
+
+def _pick_named_place(query: str, rows: list[dict]) -> dict:
+    """The winner among ranked candidates, or AmbiguousPlace on a same-name tie."""
     top = rows[0]
     top_name = _normalize_for_match(top["name"])
     tied = [
@@ -4728,8 +4821,103 @@ def resolve_named_place(query: str) -> dict | None:
     ]
     if len(tied) > 1:
         raise AmbiguousPlace(query, [_named_candidate(r) for r in tied[:_AREA_MAX_CANDIDATES]])
-
     return _named_candidate(top)
+
+
+def _resolve_qualifier_anchor(text: str) -> dict | None:
+    """The city/region a qualifier names, or None if it names nothing.
+
+    The name has to match exactly (folded, or through one of #214's
+    alternates): a qualifier is the caller telling us where, so answering
+    it with a prefix or fuzzy neighbor is the same class of mistake this
+    whole path exists to stop — "Paris, France" anchored on *Franceville*
+    before this rule, because geocode ranks a city above a country and
+    "France" is a prefix of the one in Gabon.
+
+    Place-kind hits are not anchors either: a qualifier says *where*, and a
+    business that happens to share the word would bound the search on a
+    storefront. When the qualifier is itself comma-separated and resolves
+    as a whole ("Brooklyn, NY"), that is the anchor; only if it does not
+    is its last segment tried on its own.
+    """
+    for candidate in _qualifier_texts(text):
+        folded = _normalize_for_match(candidate)
+        hits = [
+            h for h in geocode(candidate, limit=_ANCHOR_LOOKUP_LIMIT)
+            if h.get("type") != "place"
+            and h.get("lat") is not None
+            and h.get("lon") is not None
+            and _names_qualifier(h, folded)
+        ]
+        if hits:
+            pin = _pick_city_hint_row(hits)
+            return {
+                "name": pin["name"],
+                "lat": pin["lat"],
+                "lon": pin["lon"],
+                "folded_name": _normalize_for_match(pin["name"]),
+            }
+    return None
+
+
+def _names_qualifier(row: dict, folded: str) -> bool:
+    """Whether `row` is named exactly `folded`, canonically or through a #214 alternate."""
+    names = {_normalize_for_match(n) for n in (row.get("name"), row.get("matched_name")) if n}
+    return folded in names
+
+
+def _qualifier_texts(text: str):
+    yield text
+    last = text.rsplit(",", 1)[-1].strip()
+    if last and last != text:
+        yield last
+
+
+def _inside_anchor(row: dict, anchor: dict) -> bool:
+    """Whether `row` is inside the qualifier, by admin chain or by distance.
+
+    A row that carries an admin chain is judged on it alone, never on
+    distance: "Le Marais, Paris" has a locality named Le Marais 45 km
+    outside Paris and administratively in Essonne, well inside any
+    city-scale radius, and taking it is the same wrong answer in a nearer
+    village. A row with no chain to judge — a places-theme row from
+    geocode's own fallback, or a country whose chain is just itself —
+    falls back to the radius.
+    """
+    chain = {_normalize_for_match(n) for n in (row.get("admin_context") or []) if n}
+    if chain:
+        return anchor["folded_name"] in chain
+    distance_m = geo.haversine_m(anchor["lat"], anchor["lon"], row["lat"], row["lon"])
+    return distance_m <= _CITY_HINT_RADIUS_M
+
+
+def _resolve_inside_anchor(query: str, head: str, anchor: dict) -> dict:
+    """The full tier ladder on `head` alone, bounded by a resolved anchor."""
+    rows = [
+        r for r in geocode(head, limit=_ANCHORED_OVERFETCH)
+        if r.get("lat") is not None and r.get("lon") is not None and _inside_anchor(r, anchor)
+    ]
+    if rows:
+        return _pick_named_place(query, rows)
+
+    # No division inside the anchor. The neighborhood spellings this fix
+    # exists for ("Le Marais") live in the places theme, not the divisions
+    # one, so the anchored places search is the answer rather than a
+    # consolation prize — bounded by the same anchor, never worldwide.
+    anchored = resolve_place(
+        head, near_lat=anchor["lat"], near_lon=anchor["lon"], limit=_RESOLVE_OVERFETCH
+    )
+    places = [p for p in anchored if p.get("kind") == "place"]
+    if not places:
+        raise AnchoredNotFound(query, head, anchor["name"])
+    top = places[0]
+    return {
+        "name": top["name"],
+        "lat": top["lat"],
+        "lon": top["lon"],
+        "id": top["id"],
+        "type": "place",
+    }
 
 
 def _named_candidate(row: dict) -> dict:
