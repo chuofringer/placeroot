@@ -6,7 +6,7 @@ semver as it applies to an MCP server: removing a tool or changing a
 response shape is breaking, adding a tool is minor, loosening a filter or
 fixing behavior is patch.
 
-## [Unreleased]
+## [0.10.0] — 2026-08-26
 
 ### Added
 - `scripts/overture_canary.py` (#219) gained a field-coverage regression

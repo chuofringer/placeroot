@@ -72,7 +72,7 @@ ceiling.
 
 <!-- BEGIN GENERATED: benchmarks/token_efficiency.py -->
 
-Generated 2026-08-25 by `uv run python benchmarks/token_efficiency.py --write`.
+Generated 2026-08-26 by `uv run python benchmarks/token_efficiency.py --write`.
 
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-08-19.0`
@@ -80,7 +80,7 @@ Generated 2026-08-25 by `uv run python benchmarks/token_efficiency.py --write`.
 - Total schema surface: **33073 tokens** (132358 chars, 132719 bytes)
 - Of which inputSchema: **5419 tokens**, outputSchema: **3891 tokens** (roadmap §4.3, #403) — the rest is names/descriptions/annotations
 - Schema cost per tool: min 261, median 698, max 2971 tokens
-- Median scenario response: **436 tokens** (range 87-538)
+- Median scenario response: **436 tokens** (range 87-540)
 - Break-even: the schema surface costs about as much as **76 median answers**
 
 ### Schema surface (paid once per conversation)
@@ -140,8 +140,8 @@ Generated 2026-08-25 by `uv run python benchmarks/token_efficiency.py --write`.
 | `geocode` | Where is 'Brooklyn'? | **87** | 348 |
 | `place_details` | Tell me about the place named 'Roastery' near the fixture center. | **147** | 588 |
 | `summarize_area` | What's in this 1km area? | **113** | 453 |
-| `route (walk)` | How do I walk from one grid corner to another? | **436** | 1747 |
-| `isochrone (15min walk)` | How far can I walk in 15 minutes from here? | **538** | 2154 |
+| `route (walk)` | How do I walk from one grid corner to another? | **436** | 1746 |
+| `isochrone (15min walk)` | How far can I walk in 15 minutes from here? | **540** | 2162 |
 
 <!-- END GENERATED -->
 
