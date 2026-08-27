@@ -4064,9 +4064,15 @@ def route(
                 "field": "from" if from_ is None else "to",
             }
         return _route_between_refs(
-            from_, to, mode=mode, default_mode=preference_store.DEFAULT_MODE_ROUTE,
-            include_path=include_path, include_elevation=include_elevation, prefer=prefer,
-            confirm=confirm, tool="route",
+            from_,
+            to,
+            mode=mode,
+            default_mode=preference_store.DEFAULT_MODE_ROUTE,
+            include_path=include_path,
+            include_elevation=include_elevation,
+            prefer=prefer,
+            confirm=confirm,
+            tool="route",
         )
     if not all(v is not None for v in (from_lat, from_lon, to_lat, to_lon)):
         return {
@@ -4225,8 +4231,15 @@ def from_to(
     Omit confirm unless you just asked and they said yes.
     """
     return _route_between_refs(
-        from_, to, mode=mode, default_mode="walk", include_path=include_path,
-        include_elevation=include_elevation, prefer=prefer, confirm=confirm, tool="from_to",
+        from_,
+        to,
+        mode=mode,
+        default_mode="walk",
+        include_path=include_path,
+        include_elevation=include_elevation,
+        prefer=prefer,
+        confirm=confirm,
+        tool="from_to",
     )
 
 

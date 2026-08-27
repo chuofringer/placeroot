@@ -956,8 +956,14 @@ def test_route_resolves_gers_id_refs(monkeypatch):
         lat, lon = (FROM_LAT, FROM_LON) if id_ == from_id else (TO_LAT, TO_LON)
         name = "Origin GERS" if id_ == from_id else "Dest GERS"
         return {
-            "id": id_, "theme": "places", "type": "place", "name": name,
-            "lat": lat, "lon": lon, "summary": {}, "related": {},
+            "id": id_,
+            "theme": "places",
+            "type": "place",
+            "name": name,
+            "lat": lat,
+            "lon": lon,
+            "summary": {},
+            "related": {},
         }
 
     monkeypatch.setattr(server.gers, "gers_lookup", fake_lookup)
@@ -970,8 +976,10 @@ def test_route_resolves_gers_id_refs(monkeypatch):
 
 def test_route_accepts_coordinate_dict_refs():
     result = server.route(
-        from_={"lat": FROM_LAT, "lon": FROM_LON}, to={"lat": TO_LAT, "lon": TO_LON},
-        mode="walk", confirm=True,
+        from_={"lat": FROM_LAT, "lon": FROM_LON},
+        to={"lat": TO_LAT, "lon": TO_LON},
+        mode="walk",
+        confirm=True,
     )
     assert "error" not in result
     assert result["distance_m"] > 0
@@ -1050,8 +1058,12 @@ def test_route_legacy_scalar_call_is_unchanged(monkeypatch):
     monkeypatch.setattr(geocode, "resolve_named_place", boom)
     positional = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", confirm=True)
     keyword = server.route(
-        from_lat=FROM_LAT, from_lon=FROM_LON, to_lat=TO_LAT, to_lon=TO_LON,
-        mode="walk", confirm=True,
+        from_lat=FROM_LAT,
+        from_lon=FROM_LON,
+        to_lat=TO_LAT,
+        to_lon=TO_LON,
+        mode="walk",
+        confirm=True,
     )
     assert positional["from"] == {"lat": FROM_LAT, "lon": FROM_LON}
     assert positional["distance_m"] == keyword["distance_m"]
@@ -1078,8 +1090,7 @@ def test_server_route_schema_publishes_from_to_and_every_other_parameter():
     tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
     props = tools["route"].input_schema["properties"]
     accepted = {
-        "from" if name == "from_" else name
-        for name in inspect.signature(server.route).parameters
+        "from" if name == "from_" else name for name in inspect.signature(server.route).parameters
     }
     assert set(props) == accepted
     assert "from_" not in props

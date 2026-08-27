@@ -118,9 +118,8 @@ def test_route_confirm_docstring_does_not_send_the_agent_to_geocode_first():
     assert "confirm=true after the user agreed" in doc
     # #419: route resolves names/ids itself, so the only geocode mention it
     # may carry is the instruction not to pre-resolve — same as from_to's.
-    assert (
-        "do not call geocode(), resolve_place(), or geocode_batch() first"
-        in " ".join(doc.split())
+    assert "do not call geocode(), resolve_place(), or geocode_batch() first" in " ".join(
+        doc.split()
     )
 
 
