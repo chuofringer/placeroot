@@ -213,3 +213,52 @@ def test_ordinary_english_landmark_name_resolves():
     resolved = geocode.resolve_named_place("Louvre Museum")
     assert resolved is not None
     assert geo.haversine_m(resolved["lat"], resolved["lon"], 48.8606, 2.3376) < 500
+
+
+@pytest.mark.live
+def test_half_matched_fuzzy_name_is_refused_rather_than_answered():
+    """#431: the observed defect, live. "Gare du Nord" answered "Garen Du",
+    a hamlet in Côtes-d'Armor, because _parse_region_suffix read the
+    trailing "Nord" as Cameroon's CM-NO and the typo tier then scored a
+    0.975 match against what was left of the query. A third of the string
+    was never matched by anything, so the honest answer is no answer.
+
+    Asserted as None rather than as "not Garen Du": whichever hamlet the
+    current release happens to rank first, a fuzzy row that only covers
+    part of the query is not this resolver's answer. The caller's
+    not_found carries the try hint that asks for city/near context.
+
+    The session is cleared first because #429's places leg reads it: this
+    is the unpinned, no-city case the issue reports, and the next test is
+    what the same query does once a city is known.
+    """
+    geocode.clear_resolve_session()
+    assert geocode.resolve_named_place("Gare du Nord") is None
+
+
+@pytest.mark.live
+def test_refusing_the_hamlet_lets_the_places_leg_find_the_station():
+    """#431 composed with #429, live. Refusing the fuzzy division is not
+    only an honest miss — it is what lets the places leg run at all. That
+    leg is gated on geocode having matched no division, and "Garen Du" was
+    a division, so it stood in front of the search that can actually answer
+    this. With a Paris session in hand, the same query now lands on the
+    station itself.
+    """
+    geocode.clear_resolve_session()
+    assert geocode.resolve_place("Louvre Museum", city="Paris")
+    resolved = geocode.resolve_named_place("Gare du Nord")
+    assert resolved is not None
+    assert geo.haversine_m(resolved["lat"], resolved["lon"], 48.8809, 2.3553) < 1000
+
+
+@pytest.mark.live
+def test_real_typo_corrections_survive_the_refusal():
+    """#431's other half, live: the #215 tier still corrects genuine
+    misspellings, including the one whose typo token is unrecognizable on
+    its own ("Sna"/"san" scores 0.556 as a lone word, so this pair passes
+    only on whole-query similarity) and the "City, ST" form whose region
+    suffix is legitimately consumed before scoring.
+    """
+    assert geocode.resolve_named_place("Sna Francisco")["name"] == "San Francisco"
+    assert geocode.resolve_named_place("Berekley, CA")["name"] == "Berkeley"
