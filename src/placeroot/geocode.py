@@ -4778,6 +4778,9 @@ def resolve_named_place(query: str) -> dict | None:
     rows = [
         r for r in geocode(query, limit=_RESOLVE_OVERFETCH)
         if r.get("lat") is not None and r.get("lon") is not None
+        # #431: a fuzzy row that only ever proved itself against part of
+        # what the caller typed is not an answer. See the block below.
+        and not _fuzzy_row_is_too_weak(query, r)
     ]
     hit = None
     if not any(r["type"] != "place" for r in rows) and _has_extra_place_context(query):
@@ -4796,6 +4799,124 @@ def resolve_named_place(query: str) -> dict | None:
         # if it had been.
         hit["note"] = f"{qualifier!r} did not resolve as a place or region; searched the full text"
     return hit
+
+
+# --- #431: the typo tier refuses a match it only half earned ----------------
+#
+# The defect: resolve_named_place("Gare du Nord") answered "Garen Du", a
+# hamlet in Côtes-d'Armor, and from_to("Louvre Museum" -> "Gare du Nord")
+# then routed 430 km to it and said too_far. Not a threshold that was set
+# too low — the row scored 0.975, comfortably over _FUZZY_SIMILARITY_
+# THRESHOLD. It scored that against "Gare du". _parse_region_suffix reads
+# the trailing "Nord" as Cameroon's CM-NO, the region-filtered fuzzy pass
+# finds nothing there, and the retry that drops the filter (see the #215
+# block in geocode()) then scores the shortened base_query against every
+# name in the table. The suffix was misread, so a third of the query was
+# never matched by anything, and the caller is handed the result as a fact.
+#
+# So the test is not "how close is this row to the string the pass happened
+# to score" but "how close is it to what the caller actually typed". Two
+# measures, both needed — neither separates the sets alone:
+#
+#   coverage: is every query token in the row's name, or typo-close to one
+#             of its words (the #374 measure, same 0.92 bar)? A recognized
+#             region suffix is excluded, but only when the row genuinely
+#             lies in that region ("Berekley, CA" -> Berkeley, whose
+#             admin_context names California; "Gare du Nord" -> Garen Du,
+#             whose context names Bretagne, does not get the exemption).
+#   whole:    jaro-winkler of the row's folded name against the folded
+#             query, region suffix dropped only under that same exemption.
+#
+# Measured on release 2026-08-19.0 (fuzzy top-1 per query, "whole" column):
+#
+#   KEEP  Sao Paluo -> São Paulo          0.978  covered
+#         New Yrok -> New York            0.975  covered
+#         Rio de Janiero -> Rio de Janeiro 0.986 covered
+#         Berekley, CA -> Berkeley        0.971  covered (CA exempt)
+#         Cinncinati, OH -> Cincinnati    0.965  covered (OH exempt)
+#         Sna Francisco -> San Francisco  0.977  UNCOVERED ("Sna"/"san" is
+#                                                0.556 as a lone token)
+#   REFUSE Gare du Nord -> Garen Du       0.883  UNCOVERED ("Nord")
+#         Le Marais, Paris -> Le Mauvais Pas 0.921 UNCOVERED
+#         Union Station Denver -> Union Station 0.930 UNCOVERED
+#         Marina Bay Sands -> Marina Bay Estates 0.931 UNCOVERED
+#         Copacabana Beach -> Copacabana Bajo 0.936 UNCOVERED
+#         Brandenburg Gate -> Brandenburg  0.938 UNCOVERED
+#         Central Park West -> Central Park Estates 0.948 UNCOVERED
+#
+# Coverage alone would refuse "Sna Francisco", a correction the #215 tests
+# pin. Whole-string similarity alone cannot be set anywhere: the corrections
+# run down to 0.965 and the homonyms up to 0.948, but "Kuala Lampur" ->
+# Kuala Lumpur sits at 0.939, below two of the refusals. Requiring BOTH to
+# fail separates every measured pair: refuse only an uncovered row whose
+# whole-query similarity is under 0.96. The bar sits 0.012 above the
+# strongest measured homonym and 0.017 below the weakest correction that
+# needs the escape hatch. The cost is a real correction whose typo is in a
+# token the name does not otherwise account for and that scores under 0.96
+# overall ("Kuala Lampur"); geocode() still returns and labels that one, and
+# resolve_named_place's caller gets not_found with its try hint pointing at
+# resolve_place with city/near context. A wrong station is worse.
+#
+# Single-token queries are untouched: "Berekley" has nothing to be partly
+# matched against, and the whole failure mode is a query whose remainder
+# went unaccounted for.
+#
+# The refusal runs before the #429 places leg rather than after the winner
+# is picked, because that leg is gated on geocode having matched no
+# division — and the hamlet is a division. Dropping it does not only stop a
+# wrong answer, it uncovers the search that can give a right one: with a
+# Paris session in hand, "Gare du Nord" now resolves to the station itself
+# (measured 216 m from the platforms), where before the hamlet stood in
+# front of it. Live-pinned in test_live.py.
+_FUZZY_WHOLE_QUERY_FLOOR = 0.96
+
+
+def _fuzzy_row_is_too_weak(query: str, row: dict) -> bool:
+    """Whether `row` is a fuzzy match that never accounted for all of `query`."""
+    if row.get("matched_by") != "fuzzy":
+        return False
+    tokens = [t for t in query.replace(",", " ").split() if t]
+    if len(tokens) < 2:
+        return False
+    scored_query = query
+    base, _code, region_name = _parse_region_suffix(query, _local_divisions_table())
+    if region_name and base != query and _row_lies_in_region(row, region_name):
+        scored_query = base
+        tokens = [t for t in base.replace(",", " ").split() if t]
+    if _fuzzy_name_covers_tokens(row.get("name") or "", tokens):
+        return False
+    whole = _jaro_winkler(
+        _normalize_for_match(row.get("name") or ""), _normalize_for_match(scored_query)
+    )
+    return whole < _FUZZY_WHOLE_QUERY_FLOOR
+
+
+def _row_lies_in_region(row: dict, region_name: str) -> bool:
+    """Whether `row`'s admin chain names the region a suffix was parsed as."""
+    folded = _normalize_for_match(region_name)
+    return any(_normalize_for_match(ctx) == folded for ctx in (row.get("admin_context") or []))
+
+
+def _fuzzy_name_covers_tokens(name: str, tokens: list[str]) -> bool:
+    """Whether every token of the query is accounted for by `name`.
+
+    The #374 measure (_fuzzy_place_covers_query) applied to division names:
+    a token counts as covered when the folded name contains it outright or
+    one of the name's words is within _FUZZY_SIMILARITY_THRESHOLD of it.
+    Separate from that function because it folds with _normalize_for_match,
+    what the division tiers and _query_divisions_fuzzy use, rather than
+    overture._fold_poi_name.
+    """
+    folded_name = _normalize_for_match(name)
+    words = folded_name.split()
+    for tok in tokens:
+        folded_tok = _normalize_for_match(tok)
+        if not folded_tok or folded_tok in folded_name:
+            continue
+        if any(_jaro_winkler(word, folded_tok) >= _FUZZY_SIMILARITY_THRESHOLD for word in words):
+            continue
+        return False
+    return True
 
 
 # --- #429: the places leg of an unqualified name ----------------------------
