@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "placeroot": {
+      "command": "npx",
+      "args": ["placeroot"]
+    }
+  }
+}
