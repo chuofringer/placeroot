@@ -34,6 +34,7 @@
   <a href="https://pypi.org/project/placeroot/"><img src="https://img.shields.io/pypi/pyversions/placeroot" alt="Python versions"></a>
   <a href="https://github.com/chuofringer/placeroot/blob/v0.10.0/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://mcpservers.org/servers/chuofringer/placeroot"><img src="https://img.shields.io/badge/listed%20on-mcpservers.org-5c8a63" alt="Listed on mcpservers.org"></a>
+  <a href="https://cursor.directory/plugins/placeroot"><img src="https://img.shields.io/badge/listed%20on-Cursor%20Directory-000000" alt="Listed on Cursor Directory"></a>
 </p>
 
 **PlaceRoot grounds AI agents in open map data.** It's an MCP server that answers spatial questions — what's nearby, what's in this neighborhood, how do I get there — from [Overture Maps](https://overturemaps.org) open data. No API key, no signup, no vendor platform.
