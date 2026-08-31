@@ -191,7 +191,16 @@ def _project_onto_polyline(
 
 
 def _all_usable_pairs(graph: routing.Graph, usable_nodes: set[str]) -> list[tuple[str, str]]:
-    """Every usable undirected edge, once each, as an (a, b) with a <= b."""
+    """Every usable undirected edge, once each, as an (a, b) with a <= b.
+
+    Parallel edges collapse onto one unordered node pair here, and
+    _edge_polyline -> shape_between then resolves to the lowest-weight
+    traversal for that pair — so "nearest edge" means nearest of the
+    surviving representatives, not of every physical way. Two parallel
+    edges sharing both endpoints (a one-way twin bulging the other way)
+    can therefore snap against the wrong twin's geometry; shared endpoints
+    keep the error second-order, accepted for the scan's simplicity.
+    """
     seen_pairs: set[tuple[str, str]] = set()
     pairs: list[tuple[str, str]] = []
     for a, neighbors in graph.adjacency.items():
@@ -310,8 +319,14 @@ def _snap_trace_with_graph(
     a test-only escape hatch to force the naive full-edge scan for
     equivalence comparisons — see tests/test_map_match_stitch.py).
 
-    Raises ValueError if len(points) exceeds MAX_TRACE_POINTS, or
-    routing.UnsupportedMode for an unknown mode string.
+    Raises ValueError if len(points) exceeds MAX_TRACE_POINTS,
+    routing.UnsupportedMode for an unknown mode string, or
+    routing.RadiusTooLarge when the trace's padded bounding circle exceeds
+    the mode's extraction cap (MODE_CONFIG[mode]["max_radius_m"] — e.g. a
+    walk trace spanning more than ~2x5 km of diameter). Deliberately NOT
+    converted to ValueError here: the typed exception carries
+    radius_m/max_radius_m, and the MCP tool layer (#442) translates it into
+    the same structured "radius_too_large" answer its sibling tools return.
     """
     if len(points) > MAX_TRACE_POINTS:
         raise ValueError(f"snap_trace accepts at most {MAX_TRACE_POINTS} points, got {len(points)}")
@@ -361,8 +376,10 @@ def snap_trace(points: list[Mapping[str, float]], mode: str = "walk") -> list[Sn
     inside build_graph), so e.g. a drive trace never snaps onto a footway
     edge.
 
-    Raises ValueError if len(points) exceeds MAX_TRACE_POINTS, or
-    routing.UnsupportedMode for an unknown mode string.
+    Raises ValueError if len(points) exceeds MAX_TRACE_POINTS,
+    routing.UnsupportedMode for an unknown mode string, or
+    routing.RadiusTooLarge for a trace spanning past the mode's extraction
+    cap — see _snap_trace_with_graph for why the latter stays typed.
     """
     _graph, snapped = _snap_trace_with_graph(points, mode)
     return snapped
@@ -404,9 +421,10 @@ def match_trace(points: list[Mapping[str, float]], mode: str = "walk") -> Matche
     for the stitching algorithm, the outlier guard, road-name aggregation,
     and the confidence formula.
 
-    Raises ValueError if len(points) exceeds MAX_TRACE_POINTS, or
-    routing.UnsupportedMode for an unknown mode string (both via
-    snap_trace's own validation, run first).
+    Raises ValueError if len(points) exceeds MAX_TRACE_POINTS,
+    routing.UnsupportedMode for an unknown mode string, or
+    routing.RadiusTooLarge for a trace spanning past the mode's extraction
+    cap (all via _snap_trace_with_graph's shared validation/build path).
     """
     if not points:
         return MatchedRoute(0.0, [], [], 0.0, [])
