@@ -38,7 +38,12 @@ THEME = "divisions"
 
 # Columns admin_lookup depends on. geometry is essential — without it there
 # is no point-in-polygon test to run at all, unlike places' softer columns.
-REQUIRED_COLUMNS = ["id", "names", "subtype", "geometry", "bbox", "division_id"]
+# country (ISO 3166-1 alpha-2) and region (ISO 3166-2) are soft like
+# name/subtype/division_id (#446): a dataset without them still answers,
+# just without those two fields on each chain row.
+REQUIRED_COLUMNS = [
+    "id", "names", "subtype", "geometry", "bbox", "division_id", "country", "region",
+]
 ESSENTIAL_COLUMNS = {"geometry"}
 
 # divisions_in_polygon filters by subtype, so unlike admin_lookup (where a
@@ -82,10 +87,13 @@ def _geom_expr(upstream: str) -> str:
 def admin_lookup(lat: float, lon: float, con=None) -> dict:
     """Containing admin hierarchy for a point, smallest division first.
 
-    Returns {"chain": [{"name", "type", "id"}, ...]} ordered
-    neighborhood -> locality -> county -> region -> country (whichever
-    levels actually contain the point; an empty chain means no division in
-    the active dataset contains it, which is a valid answer, not an error).
+    Returns {"chain": [{"name", "type", "id", "country"?, "region"?}, ...]}
+    ordered neighborhood -> locality -> county -> region -> country
+    (whichever levels actually contain the point; an empty chain means no
+    division in the active dataset contains it, which is a valid answer,
+    not an error). "country" (ISO 3166-1 alpha-2) and "region" (ISO 3166-2)
+    are omitted from a row, not null-filled, when the active dataset lacks
+    the column or the row itself carries no value (#446).
 
     Raises SchemaDegraded if geometry is missing from the active divisions
     dataset (no way to test containment at all), or UpstreamUnavailable if
@@ -100,6 +108,8 @@ def admin_lookup(lat: float, lon: float, con=None) -> dict:
 
     name_expr = "NULL" if "names" in missing else "names.primary"
     subtype_expr = "NULL" if "subtype" in missing else "subtype"
+    country_expr = "NULL" if "country" in missing else "country"
+    region_expr = "NULL" if "region" in missing else "region"
     # Prefer the parent division's GERS id: division_area rows are polygon
     # variants (land/territorial) with their own row ids but a shared
     # division_id, which is the stable reference agents should hold.
@@ -130,6 +140,8 @@ def admin_lookup(lat: float, lon: float, con=None) -> dict:
             {id_expr}   AS id,
             {name_expr} AS name,
             {subtype_expr} AS type,
+            {country_expr} AS country,
+            {region_expr} AS region,
             ST_Area({geom_expr}) AS area
         FROM {src}
         WHERE {bbox_prefilter}ST_Contains({geom_expr}, ST_Point($lon, $lat))
@@ -153,16 +165,23 @@ def admin_lookup(lat: float, lon: float, con=None) -> dict:
     # geometry eagerly for every row group, defeating late materialization
     # (land_use.py measured that at 18.5s vs 1.6s cold). The containing
     # rows are one per admin level — sorting them client-side is free.
-    rows.sort(key=lambda r: r[3])
+    rows.sort(key=lambda r: r[5])
     # division_area carries multiple polygon rows per division (e.g. land and
     # maritime variants) — keep the first (smallest-area) row per division.
     chain, seen = [], set()
-    for id_, name, type_, _area in rows:
+    for id_, name, type_, country, region, _area in rows:
         key = id_ if id_ is not None else (name, type_)
         if key in seen:
             continue
         seen.add(key)
-        chain.append({"name": name, "type": type_, "id": id_})
+        entry = {"name": name, "type": type_, "id": id_}
+        # Omitted, not null-filled, when absent — same convention address_at
+        # uses for its optional columns (#446).
+        if country is not None:
+            entry["country"] = country
+        if region is not None:
+            entry["region"] = region
+        chain.append(entry)
     return {"chain": chain}
 
 

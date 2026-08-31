@@ -248,33 +248,40 @@ def build_division_rows(con: duckdb.DuckDBPyConnection) -> list[tuple]:
     address rows, with Mountain View's box copied from the live 2026-07-22.0
     extent, and Berlin for the German trailing-house-number case.
     """
+    # `region` (ISO 3166-2, #446) is carried the way the real theme does:
+    # every US row here nests inside the "Empire State" (US-NY) box, so it
+    # gets the same code; the non-US rows and the bare country-level "United
+    # Testland" row (whose own subtype IS "country", so it has no region of
+    # its own) carry None, which admin_lookup then omits rather than nulls.
     levels = [
-        ("neighborhood", "US", box_wkt(40.695, 40.705, -73.905, -73.895)),
-        ("locality", "US", box_wkt(40.6, 40.8, -74.0, -73.8)),
-        ("county", "US", box_wkt(40.0, 41.0, -75.0, -73.0)),
-        ("region", "US", box_wkt(39.0, 42.0, -76.0, -72.0)),
-        ("country", "US", box_wkt(30.0, 50.0, -90.0, -60.0)),
+        ("neighborhood", "US", "US-NY", box_wkt(40.695, 40.705, -73.905, -73.895)),
+        ("locality", "US", "US-NY", box_wkt(40.6, 40.8, -74.0, -73.8)),
+        ("county", "US", "US-NY", box_wkt(40.0, 41.0, -75.0, -73.0)),
+        ("region", "US", "US-NY", box_wkt(39.0, 42.0, -76.0, -72.0)),
+        ("country", "US", None, box_wkt(30.0, 50.0, -90.0, -60.0)),
         # Unrelated: near the high-latitude places cluster, doesn't contain CENTER.
-        ("country", "NO", box_wkt(70.0, 85.0, 0.0, 30.0)),
+        ("country", "NO", None, box_wkt(70.0, 85.0, 0.0, 30.0)),
         # #188: a country the addresses theme does not carry, around
         # build_geocode_fixture.py's UNCOVERED_LAT/UNCOVERED_LON.
-        ("country", "GB", box_wkt(50.0, 55.0, -6.0, 2.0)),
+        ("country", "GB", None, box_wkt(50.0, 55.0, -6.0, 2.0)),
     ]
     names = [
         "Downtown", "Metropolis", "Franklin County", "Empire State", "United Testland",
         "Arctica", "United Kingdom",
     ]
     rows = []
-    for i, ((subtype, country, wkt), name) in enumerate(zip(levels, names)):
+    for i, ((subtype, country, region, wkt), name) in enumerate(zip(levels, names)):
         (wkb,) = con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()
         division_id = gers_id(10_000 + i)
         bbox = _wkt_bbox(wkt)
-        rows.append((division_id, {"primary": name}, subtype, country, wkb, bbox, division_id))
+        rows.append((
+            division_id, {"primary": name}, subtype, country, region, wkb, bbox, division_id,
+        ))
     for division_id, name, country, (xmin, ymin, xmax, ymax) in GEOCODE_ANCHOR_AREAS:
         wkt = box_wkt(ymin, ymax, xmin, xmax)
         (wkb,) = con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()
         rows.append((
-            f"{division_id}-area", {"primary": name}, "locality", country, wkb,
+            f"{division_id}-area", {"primary": name}, "locality", country, None, wkb,
             {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}, division_id,
         ))
     return rows
@@ -467,12 +474,13 @@ def build_division_areas(con: duckdb.DuckDBPyConnection) -> None:
             names STRUCT("primary" VARCHAR),
             subtype VARCHAR,
             country VARCHAR,
+            region VARCHAR,
             geometry BLOB,
             bbox STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE),
             division_id VARCHAR
         )
     """)
-    con.executemany("INSERT INTO division_areas VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+    con.executemany("INSERT INTO division_areas VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
     con.execute(f"COPY division_areas TO '{DIVISION_AREAS_FIXTURE_PATH}' (FORMAT PARQUET)")
     print(f"wrote {len(rows)} rows to {DIVISION_AREAS_FIXTURE_PATH}")

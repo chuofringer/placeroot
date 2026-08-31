@@ -2575,7 +2575,10 @@ def admin_lookup(lat: float, lon: float) -> dict:
     [{"name": ..., "type": "locality", "id": ...}, ...]} smallest division
     first (e.g. neighborhood, then locality, county, region, country) — an
     empty chain means no division in the active dataset contains the
-    point, which is a valid answer for remote areas, not an error. Returns
+    point, which is a valid answer for remote areas, not an error. Chain
+    rows also carry "country" (ISO 3166-1 alpha-2, e.g. "DE") and "region"
+    (ISO 3166-2, e.g. "DE-BY") where the source row has them — omitted,
+    not null-filled, when the dataset or row lacks a value. Returns
     a structured {"error": ...} if upstream is unavailable or the divisions
     dataset is missing the geometry column this tool depends on.
     """
@@ -3506,6 +3509,11 @@ def reverse_geocode(lat: float, lon: float) -> dict:
     coverage — addresses is Overture's newest, least complete theme, so
     this is the expected degraded path. Returns a structured {"error": ...}
     instead of raising if the remote scan fails outright.
+
+    The answer also carries top-level "country" (ISO 3166-1 alpha-2) and
+    "region" (ISO 3166-2) beside admin_context, from the same nearest
+    division the chain is built from — omitted, not null-filled, when the
+    dataset or division lacks a value.
     """
     coord_error = _invalid_coord(lat, lon)
     if coord_error is not None:
