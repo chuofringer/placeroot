@@ -500,7 +500,10 @@ GRAPH_CACHE_MARGIN = 1.3  # over-fetch factor so nearby repeat queries hit the c
 #   {cache_dir}/{release}/graphs/{mode}_{speed}_{shapes}_r{radius}_t{ty}_{tx}.pkl
 # ...with an "_avoid-{classes}" suffix on a class-avoiding graph (#425).
 # Own file-count cap, independent of PLACEROOT_CACHE_MAX_MB.
-GRAPH_DISK_FORMAT = 1
+# 2: Graph grew _edge_names (#441) — a format-1 pickle would unpickle into
+# an object missing the attribute and crash name_between; the bump makes
+# old files a clean cache miss (rebuilt, then re-persisted as format 2).
+GRAPH_DISK_FORMAT = 2
 GRAPH_DISK_MAX_FILES = 16
 GRAPH_DISK_SUBDIR = "graphs"
 GRAPH_DISK_AVOID_MARKER = "avoid-"
