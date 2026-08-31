@@ -26,6 +26,22 @@ def test_happy_path_resolves_each_point_in_order():
     assert rows[1]["admin_context"] == []
 
 
+def test_iso_codes_flow_through_per_row_like_single_reverse_geocode():
+    # #446: reverse_geocode_batch just calls reverse_geocode per point, so
+    # the same country/region fields should show up (and be omitted) row by
+    # row here exactly as they do for a single call.
+    points = [
+        {"lat": CENTER_LAT, "lon": CENTER_LON},
+        {"lat": 0.0, "lon": 0.0},
+    ]
+    result = server.reverse_geocode_batch(points)
+    rows = result["results"]
+    assert rows[0]["country"] == "US"
+    assert rows[0]["region"] == "US-NY"
+    assert "country" not in rows[1]
+    assert "region" not in rows[1]
+
+
 def test_malformed_point_gets_a_per_row_error_without_failing_the_batch():
     points = [
         {"lat": CENTER_LAT, "lon": CENTER_LON},

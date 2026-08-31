@@ -1054,6 +1054,32 @@ def test_reverse_geocode_far_from_everything_has_no_admin_context():
     assert result["admin_context"] == []
 
 
+def test_reverse_geocode_carries_iso_codes_from_the_nearest_division():
+    # #446: "Downtown Brooklyn" (nearest division to CENTER) is US/US-NY in
+    # the divisions fixture.
+    result = geocode.reverse_geocode(CENTER_LAT, CENTER_LON)
+    assert result["country"] == "US"
+    assert result["region"] == "US-NY"
+
+
+def test_reverse_geocode_far_from_everything_omits_iso_codes():
+    result = geocode.reverse_geocode(0.0, 0.0)
+    assert "country" not in result
+    assert "region" not in result
+
+
+def test_reverse_geocode_omits_iso_codes_when_columns_missing(tmp_path):
+    degraded = _fixture_missing_column(
+        DIVISIONS_FIXTURE_PATH, "country, region", tmp_path, "divisions_no_iso.parquet"
+    )
+    overture.set_data_path(str(degraded), theme="divisions", type_="division")
+    result = geocode.reverse_geocode(CENTER_LAT, CENTER_LON)
+    assert "country" not in result
+    assert "region" not in result
+    assert result["admin_context"][-1] == "Brooklyn"
+    overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions", type_="division")
+
+
 def _fixture_missing_column(path, column, tmp_path, out_name):
     out = tmp_path / out_name
     con = duckdb.connect()

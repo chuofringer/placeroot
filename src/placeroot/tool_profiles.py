@@ -123,6 +123,9 @@ PROFILES: dict[str, frozenset[str]] = {
         # in analysis rather than search.
         "water_near",
         "admin_lookup",
+        # Same characterize-a-point shape as land_use_at/infrastructure_at:
+        # what timezone and local time apply here, not a search or a route.
+        "timezone_at",
         # Same compose as core: a characterize-the-neighborhood question.
         "neighborhood_verdict",
         # Characterizes an area across two releases instead of one snapshot,
@@ -156,7 +159,7 @@ ALWAYS_INCLUDED: frozenset[str] = frozenset({"data_version", "preferences"})
 ALL = "all"
 
 # Progressive disclosure (issue #210): instead of a slice of the surface,
-# a *meta* surface — a catalog tool plus a dispatcher — that keeps all 42
+# a *meta* surface — a catalog tool plus a dispatcher — that keeps all 43
 # tools reachable at the standing cost of a few schemas. For the install
 # that wants everything available but can't pay ~33k tokens for it in
 # every conversation; profiles need you to know up front which tools you
