@@ -164,6 +164,10 @@
       "description": "Ground elevation in meters at a point, from Copernicus GLO-30 (~30 m resolution)."
     },
     {
+      "name": "timezone_at",
+      "description": "IANA timezone and current local time at a point, fully offline."
+    },
+    {
       "name": "gers_lookup",
       "description": "Resolve any GERS id to its entity \u2014 place, division, or building \u2014 across Overture themes."
     },

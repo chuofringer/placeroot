@@ -24,6 +24,34 @@ def test_every_entry_carries_a_gers_id():
     assert all(d["id"] for d in result["chain"])
 
 
+def test_chain_rows_carry_iso_codes_where_the_fixture_has_them():
+    # #446: every US row in the fixture nests inside the "Empire State"
+    # (US-NY) box and carries that region; the country-level row has a
+    # country but no region of its own.
+    result = divisions.admin_lookup(CENTER_LAT, CENTER_LON)
+    by_type = {d["type"]: d for d in result["chain"]}
+    assert by_type["neighborhood"]["country"] == "US"
+    assert by_type["neighborhood"]["region"] == "US-NY"
+    assert by_type["country"]["country"] == "US"
+    assert "region" not in by_type["country"]
+
+
+def test_missing_country_and_region_columns_omit_the_keys(tmp_path):
+    out = tmp_path / "no_iso_codes.parquet"
+    con = duckdb.connect()
+    con.execute(
+        "COPY (SELECT * EXCLUDE (country, region) FROM read_parquet("
+        f"'{DIVISION_AREAS_FIXTURE_PATH}')) TO '{out}' (FORMAT PARQUET)"
+    )
+    overture.set_data_path(str(out), theme="divisions")
+    result = divisions.admin_lookup(CENTER_LAT, CENTER_LON)
+    assert result["chain"]  # still answers, just without the ISO fields
+    for entry in result["chain"]:
+        assert "country" not in entry
+        assert "region" not in entry
+    overture.set_data_path(str(DIVISION_AREAS_FIXTURE_PATH), theme="divisions")
+
+
 def test_unrelated_division_is_excluded():
     result = divisions.admin_lookup(CENTER_LAT, CENTER_LON)
     names = {d["name"] for d in result["chain"]}

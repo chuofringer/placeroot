@@ -78,6 +78,9 @@ from placeroot import map_match as mapmatch
 from placeroot import (
     preferences as preference_store,
 )
+from placeroot import (
+    timezone as timezone_lookup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2573,7 +2576,10 @@ def admin_lookup(lat: float, lon: float) -> dict:
     [{"name": ..., "type": "locality", "id": ...}, ...]} smallest division
     first (e.g. neighborhood, then locality, county, region, country) — an
     empty chain means no division in the active dataset contains the
-    point, which is a valid answer for remote areas, not an error. Returns
+    point, which is a valid answer for remote areas, not an error. Chain
+    rows also carry "country" (ISO 3166-1 alpha-2, e.g. "DE") and "region"
+    (ISO 3166-2, e.g. "DE-BY") where the source row has them — omitted,
+    not null-filled, when the dataset or row lacks a value. Returns
     a structured {"error": ...} if upstream is unavailable or the divisions
     dataset is missing the geometry column this tool depends on.
     """
@@ -3504,6 +3510,11 @@ def reverse_geocode(lat: float, lon: float) -> dict:
     coverage — addresses is Overture's newest, least complete theme, so
     this is the expected degraded path. Returns a structured {"error": ...}
     instead of raising if the remote scan fails outright.
+
+    The answer also carries top-level "country" (ISO 3166-1 alpha-2) and
+    "region" (ISO 3166-2) beside admin_context, from the same nearest
+    division the chain is built from — omitted, not null-filled, when the
+    dataset or division lacks a value.
     """
     coord_error = _invalid_coord(lat, lon)
     if coord_error is not None:
@@ -4461,6 +4472,31 @@ def map_match(points: list[dict], mode: _ModeArgWalkDefault = None) -> dict:
                 "network here, or too far from it for this mode."
             )
     return result
+
+
+@_tool("Timezone at a point")
+def timezone_at(lat: float, lon: float) -> dict:
+    """IANA timezone and current local time at a point, fully offline.
+
+    Looks up the tzdb zone containing (lat, lon) from timezone-boundary-
+    builder polygons (via tzfpy, bundled — no network, no third-party
+    timezone API) and derives the rest from stdlib zoneinfo against the
+    current instant.
+
+    Returns {"tzid": "America/Los_Angeles", "utc_offset": "-07:00",
+    "dst_active": true, "local_time": "2026-08-30T14:05:00-07:00",
+    "abbreviation": "PDT"}. Open ocean generally still resolves — to a
+    fixed-offset, no-DST "Etc/GMT±N" nautical zone rather than a named
+    tzdb zone — but a point with no resolvable zone at all is a real,
+    non-error answer: {"tzid": null, "note": "..."}. Returns a structured
+    {"error": ...} for an out-of-range coordinate.
+
+    Attribution: IANA tzdb via tzfpy / timezone-boundary-builder.
+    """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
+    return timezone_lookup.timezone_at(lat, lon)
 
 
 @_tool("Named-place route")
@@ -5581,7 +5617,7 @@ def data_version() -> dict:
 def _arg_summary(fn: Callable) -> str:
     """A tool's parameters as `required,optional?` — the catalog's arg column.
 
-    Names only, no types: the catalog's budget is the whole point (42 tools
+    Names only, no types: the catalog's budget is the whole point (44 tools
 have to fit in about 1.1k tokens), and the names here are already
     self-describing (lat, radius_m, limit, category). A caller that guesses
     a type wrong gets placeroot_call's bad_request naming what the tool
