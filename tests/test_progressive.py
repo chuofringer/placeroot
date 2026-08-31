@@ -32,14 +32,14 @@ STANDING_COST_CEILING = 1500
 # placeroot_capabilities' answer is read once per conversation that uses it,
 # so it is budgeted like a response, not like documentation. A new tool
 # that doesn't fit under this belongs in a shorter one-liner, not a raised
-# ceiling. 42 tools (suggest_areas joining the 2026-08 train's 41)
-# measure 1451 — each entry is already a one-liner, so the growth here
-# is genuinely tool count and argument count, not verbosity. (The 1412
-# figure this comment carried was already stale at 1447 before #425; the
-# +4 here is route's and from_to's new `avoid?` argument names.) The
-# headroom is deliberately small: the next few arguments fit, a new tool
-# does not without a look at what it costs.
-CATALOG_CEILING = 1475
+# ceiling. 43 tools (timezone_at joining #437) measure 1480 — each entry
+# is already a one-liner, so the growth here is genuinely tool count and
+# argument count, not verbosity. (42 tools measured 1451 under the prior
+# 1475 ceiling; timezone_at's entry — name, lat/lon args, one-liner — is
+# the +29, and its one-liner is already minimal.) The headroom is
+# deliberately small: the next few arguments fit, a new tool does not
+# without a look at what it costs.
+CATALOG_CEILING = 1505
 
 # The subset note's opening words, rendered by the renderer itself rather than
 # retyped here. A phrase typed from memory can drift from what prompts.py

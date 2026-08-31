@@ -77,6 +77,9 @@ from placeroot import geocode as geocoding
 from placeroot import (
     preferences as preference_store,
 )
+from placeroot import (
+    timezone as timezone_lookup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -4295,6 +4298,31 @@ def elevation_at(lat: float, lon: float) -> dict:
         return _upstream_error(e)
 
 
+@_tool("Timezone at a point")
+def timezone_at(lat: float, lon: float) -> dict:
+    """IANA timezone and current local time at a point, fully offline.
+
+    Looks up the tzdb zone containing (lat, lon) from timezone-boundary-
+    builder polygons (via tzfpy, bundled — no network, no third-party
+    timezone API) and derives the rest from stdlib zoneinfo against the
+    current instant.
+
+    Returns {"tzid": "America/Los_Angeles", "utc_offset": "-07:00",
+    "dst_active": true, "local_time": "2026-08-30T14:05:00-07:00",
+    "abbreviation": "PDT"}. Open ocean generally still resolves — to a
+    fixed-offset, no-DST "Etc/GMT±N" nautical zone rather than a named
+    tzdb zone — but a point with no resolvable zone at all is a real,
+    non-error answer: {"tzid": null, "note": "..."}. Returns a structured
+    {"error": ...} for an out-of-range coordinate.
+
+    Attribution: IANA tzdb via tzfpy / timezone-boundary-builder.
+    """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
+    return timezone_lookup.timezone_at(lat, lon)
+
+
 @_tool("Named-place route")
 def from_to(
     from_: str | dict,
@@ -5413,7 +5441,7 @@ def data_version() -> dict:
 def _arg_summary(fn: Callable) -> str:
     """A tool's parameters as `required,optional?` — the catalog's arg column.
 
-    Names only, no types: the catalog's budget is the whole point (42 tools
+    Names only, no types: the catalog's budget is the whole point (43 tools
 have to fit in about 1.1k tokens), and the names here are already
     self-describing (lat, radius_m, limit, category). A caller that guesses
     a type wrong gets placeroot_call's bad_request naming what the tool
