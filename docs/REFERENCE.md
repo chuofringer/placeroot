@@ -3,7 +3,7 @@
 The full tool catalog, workflow prompts, resources, and the `PLACEROOT_TOOLS`
 selection mechanism. For a quick overview, start with the [README](../README.md).
 
-## All 42 tools
+## All 43 tools
 
 Every tool returns a compact, budgeted answer. Several single-item tools have a
 `*_batch` sibling that collapses many calls into one round-trip.
@@ -25,6 +25,7 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `land_use_at` | What kind of land is this: land use and land cover classification at a point |
 | `infrastructure_at` | Infrastructure near a point, nearest first — filter by `subtype`/`infra_class` (e.g. `bridge`, `tower`) to see past the street furniture |
 | `water_near` | Water near a point, nearest first — is this waterfront, how far to the nearest river/canal/lake; filter by `subtype`/`water_class` |
+| `timezone_at` | IANA timezone and current local time at a point, fully offline (tzdb via tzfpy) — tzid, UTC offset, DST status, local time, and abbreviation; a point with no resolvable zone answers `tzid: null` with a note rather than erroring |
 | `geocode` | Free-text place name → ranked candidates with coordinates and admin context (`geocode_batch` for many at once) |
 | `geocode_batch` | Many free-text place names → one best match each, one round-trip |
 | `resolve_place` | Free-text place reference → stable ids an agent can hold onto across turns; a place name with no literal match falls back to `find_places`' alt-spelling/fuzzy tiers, same corrective note |
@@ -167,20 +168,20 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 42 | ~34,515 | — |
+| unset / `all` (default) | 43 | ~34,515 | — |
 | `search` | 13 | ~11,678 | 66% |
 | `core` | 15 | ~15,873 | 54% |
 | `routing` | 9 | ~11,061 | 68% |
-| `analysis` | 12 | ~9,280 | 73% |
+| `analysis` | 13 | ~9,280 | 73% |
 | `geometry` | 3 | ~3,203 | 91% |
-| `progressive` | 4 (all 42 reachable) | ~1,320 | 96% |
+| `progressive` | 4 (all 43 reachable) | ~1,320 | 96% |
 
 - **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `from_to`, `find_near`, `places_along_route`, `neighborhood_verdict`, `verify_claims`, `warmup_city`, `ground_location`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
 - **`search`** — the find/name/identify family: `find_places`, `find_near`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, `address_at`, `geocode_address`, `search_categories`, and `gers_lookup`.
 - **`routing`** — `route`, `from_to`, `isochrone`, `distance_matrix`, `travel_time_matrix`, `within_distance`, `optimize_route`, `elevation_at`, `meeting_point`.
-- **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `suggest_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`, `neighborhood_verdict`, `changes_in_area`, `verify_claims`.
+- **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `suggest_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`, `timezone_at`, `neighborhood_verdict`, `changes_in_area`, `verify_claims`.
 - **`geometry`** — `simplify_geometry`, `render_map`, `geometry_op`.
-- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 42 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 33.9k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
+- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 43 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 33.9k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 
 `data_version` and `preferences` are registered under every profile.
 `data_version` is ~360 tokens and the only way an agent can tell which
