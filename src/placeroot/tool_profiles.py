@@ -108,6 +108,10 @@ PROFILES: dict[str, frozenset[str]] = {
         # "Where should we meet" over the same routed-time machinery as
         # distance_matrix/route, ranked by fairness rather than distance.
         "meeting_point",
+        # Snaps a GPS trace onto the same street graph route() builds, then
+        # stitches it into a routed itinerary — a routing question about an
+        # existing trace rather than two endpoints.
+        "map_match",
     }),
     # Characterizing an area rather than locating a thing in it.
     "analysis": frozenset({

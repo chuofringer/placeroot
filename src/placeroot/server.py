@@ -74,6 +74,7 @@ from placeroot import (
 from placeroot import claims as claim_checks
 from placeroot import cursor as cursor_mod
 from placeroot import geocode as geocoding
+from placeroot import map_match as mapmatch
 from placeroot import (
     preferences as preference_store,
 )
@@ -4293,6 +4294,148 @@ def elevation_at(lat: float, lon: float) -> dict:
         return {"error": "upstream_unavailable", "detail": e.detail, "retry_advised": False}
     except errors.UpstreamUnavailable as e:
         return _upstream_error(e)
+
+
+def _map_match_geometry(latlon: list[tuple[float, float]]) -> dict:
+    """The matched polyline as a GeoJSON LineString, budget-simplified the
+    same way geometry_op's geometry-returning ops are (geometry_ops.py's
+    _budget_simplify) — reused rather than re-implemented so map_match and
+    geometry_op can't drift on what "fits the token budget" means.
+
+    A LineString needs at least two positions to mean anything; 0 or 1
+    stitched vertices (nothing matched, or a single isolated anchor) is
+    passed straight through with no simplification attempted — there is
+    nothing to simplify, and simplify_geometry itself rejects a coordinate
+    list with no points.
+    """
+    geometry = {"type": "LineString", "coordinates": [[lon, lat] for lat, lon in latlon]}
+    if len(latlon) < 2:
+        return {"geometry": geometry}
+    fitted = simplify.simplify_geometry(geometry, geometry_ops.GEOMETRY_MAX_TOKENS)
+    out = {"geometry": fitted["geometry"]}
+    if fitted["kept_points"] < fitted["original_points"]:
+        out["max_deviation_m"] = fitted["max_deviation_m"]
+        out["original_points"] = fitted["original_points"]
+        out["kept_points"] = fitted["kept_points"]
+    return out
+
+
+@_tool("Snap a GPS trace to streets")
+def map_match(points: list[dict], mode: _ModeArgWalkDefault = None) -> dict:
+    """Map-match a GPS trace: snap points onto the street graph, stitch a route.
+
+    points is an ordered list of {"lat": ..., "lon": ...} — up to 100 of
+    them (Mapbox's Map Matching tool takes the same cap; anything past it
+    returns {"error": "bad_request"} rather than truncating the trace
+    silently). A malformed point (missing/non-numeric lat or lon, or a
+    coordinate out of range) returns {"error": "bad_request"} naming the
+    offending index as "points[i]: ...".
+
+    Returns {"matched_length_m", "roads", "confidence", "geometry",
+    "unmatched_points"}: matched_length_m is the summed routed (not
+    straight-line) distance across every stitched leg; roads lists the
+    street names crossed in travel order, deduplicated only where they
+    repeat back to back; geometry is the stitched polyline as a GeoJSON
+    LineString, simplified to fit the same token budget every geometry-
+    returning tool here targets; unmatched_points lists the input
+    indices that never made it into the stitched route — points too far
+    from any street, and points the stitching's outlier guard rejected
+    (a routed detour wildly out of proportion to the straight-line gap,
+    e.g. a trace point that jumped to a different block). confidence
+    (0..1) blends how much of the trace stitched against how far the
+    matched points sat from their snapped street position.
+
+    A trace that matches nothing is a real answer, not an error:
+    matched_length_m 0, empty roads/geometry, every index in
+    unmatched_points, with a "note" explaining it. Do not treat that shape
+    as a failure — it means the trace is genuinely off the mapped street
+    network here, which is itself useful to know.
+
+    Offline graph work, same as route()/isochrone(): builds one street
+    graph from Overture's transportation theme over the trace's own padded
+    bounding circle (no network beyond the existing tile/graph path) and
+    reuses route()'s per-mode class exclusions, so e.g. a drive trace never
+    snaps onto a footway. Omit mode to use the stored preferences mode,
+    else walk. An unrecognized mode string returns
+    {"error": "unsupported_mode"}. If no usable street graph exists near
+    the trace at all, returns {"error": "no_graph_nearby"}; a scan that
+    can't reach the upstream Overture data returns
+    {"error": "upstream_unavailable", "retry_advised": true}; missing
+    essential source columns returns {"error": "schema_degraded"}.
+
+    Attribution: street geometry and names from Overture Maps
+    transportation data.
+    """
+    if not isinstance(points, list):
+        return {
+            "error": "bad_request",
+            "detail": "points must be a list of {lat, lon} points",
+        }
+    if len(points) > mapmatch.MAX_TRACE_POINTS:
+        return {
+            "error": "bad_request",
+            "detail": (
+                f"points must hold at most {mapmatch.MAX_TRACE_POINTS} points, "
+                f"got {len(points)}"
+            ),
+        }
+    parsed_points: list[dict] = []
+    for idx, p in enumerate(points):
+        if not isinstance(p, dict):
+            return {"error": "bad_request", "detail": f"points[{idx}] must be an object"}
+        try:
+            plat, plon = float(p["lat"]), float(p["lon"])
+        except (KeyError, TypeError, ValueError) as e:
+            return {
+                "error": "bad_request",
+                "detail": f"points[{idx}]: needs numeric lat and lon: {e}",
+            }
+        coord_error = _invalid_coord(plat, plon)
+        if coord_error is not None:
+            coord_error["detail"] = f"points[{idx}]: {coord_error['detail']}"
+            return coord_error
+        parsed_points.append({"lat": plat, "lon": plon})
+
+    mode = preference_store.resolve_mode(mode, preference_store.DEFAULT_MODE_ROUTE)
+    if mode not in routing.MODE_CONFIG:
+        return {
+            "error": "unsupported_mode",
+            "detail": f"unsupported mode {mode!r}; supported: {sorted(routing.MODE_CONFIG)}",
+            "supported": sorted(routing.MODE_CONFIG),
+        }
+
+    try:
+        matched = mapmatch.match_trace(parsed_points, mode=mode)
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
+    except routing.UnsupportedMode as e:
+        return {
+            "error": "unsupported_mode",
+            "detail": e.detail,
+            "supported": sorted(routing.MODE_CONFIG),
+        }
+    except errors.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except routing.SchemaDegraded as e:
+        return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
+    except routing.NoGraphNearby as e:
+        return {"error": "no_graph_nearby", "detail": e.detail}
+
+    result = {
+        "matched_length_m": matched.matched_length_m,
+        "roads": matched.road_names,
+        "confidence": matched.confidence,
+        **_map_match_geometry(matched.geometry),
+        "unmatched_points": matched.unmatched_indices,
+    }
+    if not matched.road_names and not matched.geometry:
+        result["note"] = (
+            "Nothing in this trace matched the street graph within snapping "
+            "range — every point is in unmatched_points. This is a real "
+            "answer: the trace may be off the mapped street network here, "
+            "or too far from it for this mode."
+        )
+    return result
 
 
 @_tool("Named-place route")

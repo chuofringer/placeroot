@@ -188,6 +188,10 @@
       "description": "Travel-time-fair meeting point for 2-5 people, with ranked candidate venues."
     },
     {
+      "name": "map_match",
+      "description": "Map-match a GPS trace: snap points onto the street graph, stitch a route."
+    },
+    {
       "name": "preferences",
       "description": "Read or update local travel and household defaults. Nothing leaves the machine."
     },
