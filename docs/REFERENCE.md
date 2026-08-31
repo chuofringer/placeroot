@@ -168,13 +168,13 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 43 | ~34,515 | — |
-| `search` | 13 | ~11,678 | 66% |
-| `core` | 15 | ~15,873 | 54% |
-| `routing` | 9 | ~11,061 | 68% |
-| `analysis` | 13 | ~9,280 | 73% |
-| `geometry` | 3 | ~3,203 | 91% |
-| `progressive` | 4 (all 43 reachable) | ~1,320 | 96% |
+| unset / `all` (default) | 43 | ~36,411 | — |
+| `search` | 13 | ~12,224 | 66% |
+| `core` | 15 | ~16,623 | 54% |
+| `routing` | 9 | ~11,564 | 68% |
+| `analysis` | 13 | ~10,042 | 72% |
+| `geometry` | 3 | ~3,355 | 91% |
+| `progressive` | 4 (all 43 reachable) | ~1,406 | 96% |
 
 - **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `from_to`, `find_near`, `places_along_route`, `neighborhood_verdict`, `verify_claims`, `warmup_city`, `ground_location`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
 - **`search`** — the find/name/identify family: `find_places`, `find_near`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, `address_at`, `geocode_address`, `search_categories`, and `gers_lookup`.
