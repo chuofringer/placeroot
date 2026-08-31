@@ -4596,14 +4596,23 @@ def _nearest_division(lat: float, lon: float, country: str | None = None) -> dic
     already know which one the point is in and would contradict themselves by
     naming a place across the border. Left None by reverse_geocode, which
     knows only the coordinate and so wants the nearest division full stop.
+
+    Also returns the row's own "country" (ISO 3166-1 alpha-2) and "region"
+    (ISO 3166-2), when the active dataset carries those columns, so
+    reverse_geocode can surface them without a second query (#446) — the
+    same columns this query already reads for the `country` filter above.
     """
     glob = overture.upstream_glob(theme="divisions", type_="division")
     cols = overture.probe_schema(glob)
     if cols is not None and "names" not in cols:
         return None
+    has_country = cols is None or "country" in cols
+    has_region = cols is None or "region" in cols
     country_filter = ""
-    if country and (cols is None or "country" in cols):
+    if country and has_country:
         country_filter = "AND country = $country"
+    country_expr = "country" if has_country else "NULL"
+    region_expr = "region" if has_region else "NULL"
     for radius_m in (2000, 20000, 100000):
         bbox_filter, distance_filter, params, _bbox, _radius_m = overture.area_geometry(
             lat, lon, radius_m
@@ -4612,6 +4621,7 @@ def _nearest_division(lat: float, lon: float, country: str | None = None) -> dic
             params = {**params, "country": country}
         sql = f"""
             SELECT names.primary AS name, subtype, hierarchies,
+                   {country_expr} AS country, {region_expr} AS region,
                    round({overture.DISTANCE_EXPR}, 1) AS distance_m
             FROM read_parquet('{glob}', hive_partitioning=1)
             WHERE {bbox_filter} AND {distance_filter}
@@ -4628,7 +4638,12 @@ def _nearest_division(lat: float, lon: float, country: str | None = None) -> dic
             return None
         if row:
             chain = _admin_context(row[2], self_name=row[0])
-            return {"name": row[0], "subtype": row[1], "admin_context": [*chain, row[0]]}
+            result = {"name": row[0], "subtype": row[1], "admin_context": [*chain, row[0]]}
+            if row[3] is not None:
+                result["country"] = row[3]
+            if row[4] is not None:
+                result["region"] = row[4]
+            return result
     return None
 
 
@@ -4639,13 +4654,18 @@ def reverse_geocode(lat: float, lon: float) -> dict:
     "note" — if the addresses theme is unreachable or missing, rather than
     failing the call: addresses is Overture's newest, least complete theme,
     so this is the expected degraded path, not a rare edge case.
+
+    Also carries top-level "country" (ISO 3166-1 alpha-2) and "region"
+    (ISO 3166-2), off the same nearest-division row admin_context is built
+    from, when the active dataset has those columns — omitted, not
+    null-filled, otherwise (#446).
     """
     address = _nearest_address(lat, lon)
     division = _nearest_division(lat, lon)
     admin_context = division["admin_context"] if division else []
 
     if address is not None:
-        return {
+        result = {
             "address": {
                 "street": address["street"],
                 "number": address["number"],
@@ -4657,15 +4677,24 @@ def reverse_geocode(lat: float, lon: float) -> dict:
             "admin_context": admin_context,
             "source": "address",
         }
-    return {
-        "address": None,
-        "lat": lat,
-        "lon": lon,
-        "distance_m": None,
-        "admin_context": admin_context,
-        "source": "divisions_only",
-        "note": "no nearby address found (addresses theme unavailable, missing, or sparse here)",
-    }
+    else:
+        result = {
+            "address": None,
+            "lat": lat,
+            "lon": lon,
+            "distance_m": None,
+            "admin_context": admin_context,
+            "source": "divisions_only",
+            "note": (
+                "no nearby address found (addresses theme unavailable, missing, or sparse here)"
+            ),
+        }
+    if division:
+        if "country" in division:
+            result["country"] = division["country"]
+        if "region" in division:
+            result["region"] = division["region"]
+    return result
 
 
 # --- #123: free-text area name -> a division to constrain a search to -------
