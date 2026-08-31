@@ -9,7 +9,7 @@ and clears the graph cache before every test. No network, no live Overture
 scan.
 """
 
-from placeroot import budget, geometry_ops, map_match, server
+from placeroot import budget, geometry_ops, map_match, routing, server
 
 from ._routing_fixture import build_routing_fixture as fx
 
@@ -99,3 +99,47 @@ def test_geometry_respects_the_token_budget():
     assert "error" not in result
     tokens = budget.estimate_tokens({"geometry": result["geometry"]})
     assert tokens <= geometry_ops.GEOMETRY_MAX_TOKENS
+
+
+def test_radius_too_large_is_a_structured_answer(monkeypatch):
+    """#443's review finding at the public layer: a trace spanning past the
+    mode's extraction cap must come back as the same structured
+    radius_too_large its sibling routing tools return, never a raised
+    routing.RadiusTooLarge."""
+    monkeypatch.setattr(
+        server.mapmatch,
+        "match_trace",
+        lambda points, mode: (_ for _ in ()).throw(routing.RadiusTooLarge(5300.0, 5000.0)),
+    )
+
+    result = server.map_match([{"lat": 0.0, "lon": 0.0}], mode="walk")
+
+    assert result["error"] == "radius_too_large"
+    assert result["max_radius_m"] == 5000.0
+    assert "detail" in result
+
+
+def test_single_matched_point_yields_valid_empty_linestring():
+    """One matched point can't make an RFC 7946 LineString (>=2 positions):
+    the answer normalizes to empty coordinates plus its own note, instead of
+    the invalid one-position LineString it used to emit."""
+    near, far_a, far_b = (
+        _row_trace(2, [3])[0],
+        *(
+            {"lat": lat, "lon": lon}
+            for lat, lon in (
+                fx._offset(fx.ORIGIN_LAT, fx.ORIGIN_LON, 700.0, 225),
+                fx._offset(fx.ORIGIN_LAT, fx.ORIGIN_LON, 800.0, 225),
+            )
+        ),
+    )
+
+    result = server.map_match([far_a, near, far_b], mode="walk")
+
+    assert "error" not in result
+    assert result["matched_length_m"] == 0.0
+    assert result["roads"] == []
+    assert result["geometry"] == {"type": "LineString", "coordinates": []}
+    assert result["unmatched_points"] == [0, 2]
+    assert "note" in result
+    assert "one point" in result["note"].lower()

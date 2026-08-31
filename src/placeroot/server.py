@@ -4302,15 +4302,17 @@ def _map_match_geometry(latlon: list[tuple[float, float]]) -> dict:
     _budget_simplify) — reused rather than re-implemented so map_match and
     geometry_op can't drift on what "fits the token budget" means.
 
-    A LineString needs at least two positions to mean anything; 0 or 1
-    stitched vertices (nothing matched, or a single isolated anchor) is
-    passed straight through with no simplification attempted — there is
-    nothing to simplify, and simplify_geometry itself rejects a coordinate
-    list with no points.
+    RFC 7946 requires a LineString to carry two or more positions, so 0 or
+    1 stitched vertices (nothing matched, or a single isolated anchor)
+    normalizes to EMPTY coordinates — the same shape the all-unmatched
+    answer carries — rather than emitting a one-position LineString no
+    GeoJSON consumer is required to accept. The single anchor's position
+    isn't lost to the caller: it's the snapped position of the one matched
+    point, and map_match's note explains the situation.
     """
-    geometry = {"type": "LineString", "coordinates": [[lon, lat] for lat, lon in latlon]}
     if len(latlon) < 2:
-        return {"geometry": geometry}
+        return {"geometry": {"type": "LineString", "coordinates": []}}
+    geometry = {"type": "LineString", "coordinates": [[lon, lat] for lat, lon in latlon]}
     fitted = simplify.simplify_geometry(geometry, geometry_ops.GEOMETRY_MAX_TOKENS)
     out = {"geometry": fitted["geometry"]}
     if fitted["kept_points"] < fitted["original_points"]:
@@ -4349,7 +4351,10 @@ def map_match(points: list[dict], mode: _ModeArgWalkDefault = None) -> dict:
     matched_length_m 0, empty roads/geometry, every index in
     unmatched_points, with a "note" explaining it. Do not treat that shape
     as a failure — it means the trace is genuinely off the mapped street
-    network here, which is itself useful to know.
+    network here, which is itself useful to know. A trace where only ONE
+    point matches gets the same empty-geometry shape with its own note: a
+    single position can't make a LineString (RFC 7946 requires two) or a
+    route.
 
     Offline graph work, same as route()/isochrone(): builds one street
     graph from Overture's transportation theme over the trace's own padded
@@ -4358,8 +4363,11 @@ def map_match(points: list[dict], mode: _ModeArgWalkDefault = None) -> dict:
     snaps onto a footway. Omit mode to use the stored preferences mode,
     else walk. An unrecognized mode string returns
     {"error": "unsupported_mode"}. If no usable street graph exists near
-    the trace at all, returns {"error": "no_graph_nearby"}; a scan that
-    can't reach the upstream Overture data returns
+    the trace at all, returns {"error": "no_graph_nearby"}; a trace whose
+    padded bounding circle exceeds the mode's extraction cap (e.g. a walk
+    trace spanning well past ~10 km) returns {"error": "radius_too_large",
+    "max_radius_m": ...} — try the trace in segments, or a faster mode; a
+    scan that can't reach the upstream Overture data returns
     {"error": "upstream_unavailable", "retry_advised": true}; missing
     essential source columns returns {"error": "schema_degraded"}.
 
@@ -4420,6 +4428,12 @@ def map_match(points: list[dict], mode: _ModeArgWalkDefault = None) -> dict:
         return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
     except routing.NoGraphNearby as e:
         return {"error": "no_graph_nearby", "detail": e.detail}
+    except routing.RadiusTooLarge as e:
+        return {
+            "error": "radius_too_large",
+            "detail": e.detail,
+            "max_radius_m": e.max_radius_m,
+        }
 
     result = {
         "matched_length_m": matched.matched_length_m,
@@ -4428,13 +4442,24 @@ def map_match(points: list[dict], mode: _ModeArgWalkDefault = None) -> dict:
         **_map_match_geometry(matched.geometry),
         "unmatched_points": matched.unmatched_indices,
     }
-    if not matched.road_names and not matched.geometry:
-        result["note"] = (
-            "Nothing in this trace matched the street graph within snapping "
-            "range — every point is in unmatched_points. This is a real "
-            "answer: the trace may be off the mapped street network here, "
-            "or too far from it for this mode."
-        )
+    # A single stitched vertex is as routeless as none for the caller's
+    # purposes: no roads, no line — so both get a note, and
+    # _map_match_geometry has already normalized the <2-vertex geometry to
+    # an empty (RFC 7946-valid) LineString.
+    if not matched.road_names and len(matched.geometry) < 2:
+        if len(matched.geometry) == 1:
+            result["note"] = (
+                "Only one point matched the street graph, which is not "
+                "enough to stitch a route — matched_length_m is 0 and "
+                "geometry is empty. This is a real answer, not a failure."
+            )
+        else:
+            result["note"] = (
+                "Nothing in this trace matched the street graph within "
+                "snapping range — every point is in unmatched_points. This "
+                "is a real answer: the trace may be off the mapped street "
+                "network here, or too far from it for this mode."
+            )
     return result
 
 
