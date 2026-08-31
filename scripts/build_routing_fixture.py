@@ -1,7 +1,7 @@
 """Builds the offline routing test fixture: tests/fixtures/transportation.parquet.
 
 Synthetic Overture-transportation-shaped segment data (id, geometry as WKB
-linestring, bbox, class, subclass, connectors) matching the columns
+linestring, bbox, class, subclass, connectors, names) matching the columns
 routing.py expects. A deterministic 20x20 street grid, 100m spacing:
 
 - Cardinal edges (horizontal + vertical) between adjacent grid nodes.
@@ -36,6 +36,11 @@ routing.py expects. A deterministic 20x20 street grid, 100m spacing:
   an explicit (and, versus its 27 m/s class default, much slower) posted
   speed_limits entry, regression coverage for issue #38's "speed_limits
   overrides the class default" rule.
+- names.primary on every regular grid edge (#441): "Grid Ave {j}" for every
+  horizontal edge in row j, "Grid St {i}" for every vertical edge in column
+  i — regression coverage for map_match's road-name aggregation actually
+  finding a name to aggregate. The bridge, diagonals, and motorway shortcut
+  are left unnamed (names IS NULL), same as an unnamed real-world path.
 
 Regenerate with:
 
@@ -114,17 +119,25 @@ def _offset_m(east_m: float, north_m: float) -> tuple[float, float]:
 
 def _segment_row(idx: int, p0: tuple[float, float], p1: tuple[float, float], cls: str,
                   connectors: list[dict], speed_limits: list[dict] | None = None,
-                  access_restrictions: list[dict] | None = None) -> tuple:
-    return _polyline_row(idx, [p0, p1], cls, connectors, speed_limits, access_restrictions)
+                  access_restrictions: list[dict] | None = None,
+                  name: str | None = None) -> tuple:
+    return _polyline_row(idx, [p0, p1], cls, connectors, speed_limits, access_restrictions, name)
 
 
 def _polyline_row(idx: int, points: list[tuple[float, float]], cls: str,
                    connectors: list[dict], speed_limits: list[dict] | None = None,
-                   access_restrictions: list[dict] | None = None) -> tuple:
+                   access_restrictions: list[dict] | None = None,
+                   name: str | None = None) -> tuple:
     """A segment row from an arbitrary-length (lat, lon) vertex list.
 
     Most fixture segments are straight two-point lines; the switchback below
     needs interior shape vertices, which is the whole point of it.
+
+    name (#441) becomes the segment's Overture names.primary — a bare
+    STRUCT(primary VARCHAR), since map_match's road-name aggregation
+    (routing.Graph._edge_names / name_between) only ever reads that one
+    field. None (the default) means "this segment carries no name," matching
+    most of the fixture's synthetic geometry.
     """
     wkt_points = ", ".join(f"{lon} {lat}" for lat, lon in points)
     lats = [lat for lat, _lon in points]
@@ -132,9 +145,10 @@ def _polyline_row(idx: int, points: list[tuple[float, float]], cls: str,
     bbox = {
         "xmin": min(lons), "ymin": min(lats), "xmax": max(lons), "ymax": max(lats),
     }
+    names = {"primary": name} if name else None
     return (
         f"seg-{idx:05d}", f"LINESTRING ({wkt_points})", bbox, cls, None, connectors,
-        speed_limits, access_restrictions,
+        speed_limits, access_restrictions, names,
     )
 
 
@@ -286,23 +300,32 @@ def _edge_allowed(i: int, j: int, i2: int, j2: int) -> bool:
     return True
 
 
-def build_edges() -> list[tuple[tuple[int, int], tuple[int, int], str]]:
-    """List of (node_a, node_b, class) triples."""
+def build_edges() -> list[tuple[tuple[int, int], tuple[int, int], str, str | None]]:
+    """List of (node_a, node_b, class, name) quads.
+
+    Horizontal edges get a per-row "Grid Ave {j}" name and vertical edges a
+    per-column "Grid St {i}" name (#441: map_match's road-name aggregation
+    needs at least one real, findable street name in the fixture) — the
+    bridge, diagonals, and motorway shortcut stay unnamed (None), same as
+    most real-world minor/informal paths.
+    """
     edges = []
 
     # Horizontal.
     for i in range(GRID_N - 1):
         for j in range(GRID_N):
             if _edge_allowed(i, j, i + 1, j):
-                cls = "footway" if i == RIVER_GAP_I and j == BRIDGE_J else "residential"
-                edges.append(((i, j), (i + 1, j), cls))
+                is_bridge = i == RIVER_GAP_I and j == BRIDGE_J
+                cls = "footway" if is_bridge else "residential"
+                name = None if is_bridge else f"Grid Ave {j}"
+                edges.append(((i, j), (i + 1, j), cls, name))
 
     # Vertical — the river runs north/south along the column boundary and
     # doesn't block north/south movement.
     for i in range(GRID_N):
         for j in range(GRID_N - 1):
             if _edge_allowed(i, j, i, j + 1):
-                edges.append(((i, j), (i, j + 1), "residential"))
+                edges.append(((i, j), (i, j + 1), "residential", f"Grid St {i}"))
 
     # Diagonals, skipping the river column so they don't smuggle a second
     # east/west crossing.
@@ -310,10 +333,10 @@ def build_edges() -> list[tuple[tuple[int, int], tuple[int, int], str]]:
         for j in range(0, GRID_N - 1, DIAG_STEP):
             if i == RIVER_GAP_I:
                 continue
-            edges.append(((i, j), (i + 1, j + 1), "path"))
+            edges.append(((i, j), (i + 1, j + 1), "path", None))
 
     # Motorway shortcut — excluded from the walkable graph.
-    edges.append((SHORTCUT["from"], SHORTCUT["to"], SHORTCUT["cls"]))
+    edges.append((SHORTCUT["from"], SHORTCUT["to"], SHORTCUT["cls"], None))
 
     return edges
 
@@ -321,7 +344,7 @@ def build_edges() -> list[tuple[tuple[int, int], tuple[int, int], str]]:
 def build_rows() -> list[tuple]:
     edges = build_edges()
     rows = []
-    for idx, (a, b, cls) in enumerate(edges):
+    for idx, (a, b, cls, name) in enumerate(edges):
         lat1, lon1 = node_latlon(*a)
         lat2, lon2 = node_latlon(*b)
         connectors = [
@@ -339,7 +362,8 @@ def build_rows() -> list[tuple]:
             ]
         rows.append(
             _segment_row(
-                idx, (lat1, lon1), (lat2, lon2), cls, connectors, speed_limits=speed_limits,
+                idx, (lat1, lon1), (lat2, lon2), cls, connectors,
+                speed_limits=speed_limits, name=name,
             )
         )
 
@@ -371,17 +395,18 @@ def main() -> None:
                 access_type VARCHAR,
                 "when" STRUCT(heading VARCHAR, mode VARCHAR[]),
                 between DOUBLE[]
-            )[]
+            )[],
+            names STRUCT("primary" VARCHAR)
         )
     """)
-    con.executemany("INSERT INTO staging VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    con.executemany("INSERT INTO staging VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
     FIXTURE_PATH.parent.mkdir(parents=True, exist_ok=True)
     con.execute(f"""
         COPY (
             SELECT
                 id,
                 ST_AsWKB(ST_GeomFromText(wkt)) AS geometry,
-                bbox, class, subclass, connectors, speed_limits, access_restrictions
+                bbox, class, subclass, connectors, speed_limits, access_restrictions, names
             FROM staging
         ) TO '{FIXTURE_PATH}' (FORMAT PARQUET)
     """)
