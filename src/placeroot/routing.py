@@ -500,7 +500,10 @@ GRAPH_CACHE_MARGIN = 1.3  # over-fetch factor so nearby repeat queries hit the c
 #   {cache_dir}/{release}/graphs/{mode}_{speed}_{shapes}_r{radius}_t{ty}_{tx}.pkl
 # ...with an "_avoid-{classes}" suffix on a class-avoiding graph (#425).
 # Own file-count cap, independent of PLACEROOT_CACHE_MAX_MB.
-GRAPH_DISK_FORMAT = 1
+# 2: Graph grew _edge_names (#441) — a format-1 pickle would unpickle into
+# an object missing the attribute and crash name_between; the bump makes
+# old files a clean cache miss (rebuilt, then re-persisted as format 2).
+GRAPH_DISK_FORMAT = 2
 GRAPH_DISK_MAX_FILES = 16
 GRAPH_DISK_SUBDIR = "graphs"
 GRAPH_DISK_AVOID_MARKER = "avoid-"
@@ -801,6 +804,15 @@ class Graph:
         self._edge_shapes: dict[
             tuple[str, str], tuple[float, list[tuple[float, float]], float, bool]
         ] = {}
+        # (from_node, to_node) -> the source segment's Overture names.primary,
+        # or None when the segment carried no name. Piggybacks on the exact
+        # same registration/parallel-edge rule as _edge_shapes (see add_edge)
+        # rather than a separate min-weight comparison — a name is a property
+        # of "the segment dijkstra actually traversed," same as its shape, so
+        # the two travel together. Only populated on a has_shapes graph (see
+        # add_edge); map_match's stitching (#441) is the first and only
+        # reader (name_between), always via a want_shapes=True graph.
+        self._edge_names: dict[tuple[str, str], str | None] = {}
 
     def add_node(self, node_id: str, lat: float, lon: float) -> None:
         self.adjacency.setdefault(node_id, [])
@@ -816,6 +828,7 @@ class Graph:
         directed: bool = False,
         shape: list[tuple[float, float]] | None = None,
         shape_dropped_m: float = 0.0,
+        name: str | None = None,
     ) -> None:
         if a == b:
             return
@@ -834,11 +847,11 @@ class Graph:
         # while reporting a deviation of 0.0.
         if self.has_shapes or shape or shape_dropped_m:
             vertices = shape or []
-            self._register_shape(a, b, weight, vertices, shape_dropped_m, False)
+            self._register_shape(a, b, weight, vertices, shape_dropped_m, False, name)
             if not directed:
                 # Same list object, flagged for reversal on read: the mirror
                 # entry costs a dict slot, not a second copy of the geometry.
-                self._register_shape(b, a, weight, vertices, shape_dropped_m, True)
+                self._register_shape(b, a, weight, vertices, shape_dropped_m, True, name)
 
     def _register_shape(
         self,
@@ -848,10 +861,12 @@ class Graph:
         vertices: list[tuple[float, float]],
         dropped_m: float,
         is_reversed: bool,
+        name: str | None = None,
     ) -> None:
         existing = self._edge_shapes.get((frm, to))
         if existing is None or weight < existing[0]:
             self._edge_shapes[(frm, to)] = (weight, vertices, dropped_m, is_reversed)
+            self._edge_names[(frm, to)] = name
 
     def shape_between(self, a: str, b: str) -> tuple[list[tuple[float, float]], float]:
         """(shape vertices strictly between `a` and `b` in a -> b order, meters dropped).
@@ -872,6 +887,16 @@ class Graph:
             return [], 0.0
         _, vertices, dropped_m, is_reversed = entry
         return (list(reversed(vertices)) if is_reversed else vertices), dropped_m
+
+    def name_between(self, a: str, b: str) -> str | None:
+        """Overture names.primary of the edge dijkstra would traverse from
+        `a` to `b`, or None when that segment carried no name (or this graph
+        has no name/shape data at all — see add_edge). Direction-agnostic: a
+        road's name doesn't flip with travel direction, so this is just
+        shape_between's parallel-edge resolution rule (same (a, b) key) minus
+        the reversal shape_between needs for its vertex order.
+        """
+        return self._edge_names.get((a, b))
 
     def node_count(self) -> int:
         return len(self.adjacency)
@@ -1081,6 +1106,12 @@ def build_graph(
     speed_limits_expr = "NULL" if speed_limits_missing else "speed_limits"
     access_missing = present is not None and "access_restrictions" not in present
     access_expr = "NULL" if access_missing else "access_restrictions"
+    # names (#441): only read for map_match's road-name aggregation — route()
+    # itself has never surfaced this and still doesn't; the column just rides
+    # along with the same "optional/possibly-absent" treatment as
+    # speed_limits/access_restrictions above rather than being ESSENTIAL_COLUMNS.
+    names_missing = present is not None and "names" not in present
+    names_expr = "NULL" if names_missing else "names"
     wkt_expr = geo.geom_expr(upstream, as_wkt=True)
     # Overture's transportation theme also carries rail (and other non-road)
     # segments under the same table; subtype isn't in our fixture (road-only
@@ -1102,6 +1133,7 @@ def build_graph(
             {connectors_expr} AS connectors,
             {speed_limits_expr} AS speed_limits,
             {access_expr} AS access_restrictions,
+            {names_expr} AS names,
             {wkt_expr} AS wkt
         FROM {_from_source(bbox)}
         WHERE {bbox_filter}
@@ -1138,9 +1170,10 @@ def build_graph(
     graph.truncated = truncated
     excluded_classes = _excluded_classes_for(mode, avoid)
     respects_oneway = config["respects_oneway"]
-    for _id, cls, connectors, speed_limits, access_restrictions, wkt in rows:
+    for _id, cls, connectors, speed_limits, access_restrictions, names, wkt in rows:
         if cls is not None and cls in excluded_classes:
             continue
+        primary_name = names.get("primary") if names else None
         try:
             points = _parse_linestring_wkt(wkt)
         except (ValueError, IndexError):
@@ -1204,17 +1237,17 @@ def build_graph(
             if forward_allowed and backward_allowed:
                 graph.add_edge(
                     id_a, id_b, weight, edge_length_m, directed=False,
-                    shape=shape, shape_dropped_m=dropped_m,
+                    shape=shape, shape_dropped_m=dropped_m, name=primary_name,
                 )
             elif forward_allowed:
                 graph.add_edge(
                     id_a, id_b, weight, edge_length_m, directed=True,
-                    shape=shape, shape_dropped_m=dropped_m,
+                    shape=shape, shape_dropped_m=dropped_m, name=primary_name,
                 )
             else:
                 graph.add_edge(
                     id_b, id_a, weight, edge_length_m, directed=True,
-                    shape=list(reversed(shape)), shape_dropped_m=dropped_m,
+                    shape=list(reversed(shape)), shape_dropped_m=dropped_m, name=primary_name,
                 )
 
     return graph

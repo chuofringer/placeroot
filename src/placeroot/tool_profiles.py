@@ -108,6 +108,10 @@ PROFILES: dict[str, frozenset[str]] = {
         # "Where should we meet" over the same routed-time machinery as
         # distance_matrix/route, ranked by fairness rather than distance.
         "meeting_point",
+        # Snaps a GPS trace onto the same street graph route() builds, then
+        # stitches it into a routed itinerary — a routing question about an
+        # existing trace rather than two endpoints.
+        "map_match",
     }),
     # Characterizing an area rather than locating a thing in it.
     "analysis": frozenset({
@@ -159,7 +163,7 @@ ALWAYS_INCLUDED: frozenset[str] = frozenset({"data_version", "preferences"})
 ALL = "all"
 
 # Progressive disclosure (issue #210): instead of a slice of the surface,
-# a *meta* surface — a catalog tool plus a dispatcher — that keeps all 43
+# a *meta* surface — a catalog tool plus a dispatcher — that keeps all 44
 # tools reachable at the standing cost of a few schemas. For the install
 # that wants everything available but can't pay ~33k tokens for it in
 # every conversation; profiles need you to know up front which tools you

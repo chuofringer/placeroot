@@ -439,6 +439,7 @@ _GENERIC_TOOLS: list[str] = [
     "ground_location",
     "infrastructure_at",
     "land_use_at",
+    "map_match",
     "meeting_point",
     "neighborhood_verdict",
     "place_details",

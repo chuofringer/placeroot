@@ -36,6 +36,7 @@ MODE_TOOLS = {
     "places_along_route": ("mode", MODE_ENUM, "else drive"),
     "neighborhood_verdict": ("mode", MODE_ENUM, "else walk"),
     "preferences": ("mode", MODE_ENUM, None),
+    "map_match": ("mode", MODE_ENUM, "else walk"),
 }
 
 
