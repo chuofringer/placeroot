@@ -82,6 +82,8 @@ PROFILES: dict[str, frozenset[str]] = {
         # ...and its forward twin: an address string back to a coordinate,
         # which geocode cannot answer at doorway granularity.
         "geocode_address",
+        # ...and the intersection twin: where two named streets cross.
+        "geocode_intersection",
         "search_categories",
         # Identify: any GERS id back to the entity it names.
         "gers_lookup",

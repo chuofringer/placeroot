@@ -32,14 +32,12 @@ STANDING_COST_CEILING = 1500
 # placeroot_capabilities' answer is read once per conversation that uses it,
 # so it is budgeted like a response, not like documentation. A new tool
 # that doesn't fit under this belongs in a shorter one-liner, not a raised
-# ceiling. 44 tools (timezone_at #437 and map_match #442 both joining the
-# 2026-08 train's 42) measure 1505 — each entry is already a one-liner, so
-# the growth here is genuinely tool count and argument count, not
-# verbosity. (42 tools measured 1451 under the prior 1475 ceiling;
-# timezone_at and map_match each add a one-line entry, map_match's `mode`
-# argument included.) The headroom is deliberately small: the next few
-# arguments fit, a new tool does not without a look at what it costs.
-CATALOG_CEILING = 1530
+# ceiling. 45 tools (geocode_intersection #448 joining the 44-tool surface)
+# measure 1538 — each entry is already a one-liner, so the growth here is
+# genuinely tool count and argument count, not verbosity.
+# The headroom is deliberately small: the next few arguments fit, a new
+# tool does not without a look at what it costs.
+CATALOG_CEILING = 1560
 
 # The subset note's opening words, rendered by the renderer itself rather than
 # retyped here. A phrase typed from memory can drift from what prompts.py
@@ -251,6 +249,10 @@ ROUND_TRIPS = [
         },
     ),
     ("summarize_area", {"lat": CENTER_LAT, "lon": CENTER_LON, "radius_m": 1000.0}),
+    (
+        "geocode_intersection",
+        {"street_a": "Grid Ave 2", "street_b": "Grid St 3", "city": "Grid City"},
+    ),
     ("data_version", {}),
 ]
 

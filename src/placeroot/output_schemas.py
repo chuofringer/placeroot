@@ -434,6 +434,7 @@ _GENERIC_TOOLS: list[str] = [
     "compare_areas",
     "elevation_at",
     "geocode_address",
+    "geocode_intersection",
     "geometry_op",
     "gers_lookup",
     "ground_location",

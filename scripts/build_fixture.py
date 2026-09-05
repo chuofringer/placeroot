@@ -341,6 +341,9 @@ GEOCODE_ANCHOR_AREAS = (
     # stops being an answer. Every other anchor here is a city, so without
     # this row nothing in the fixture can reach the too-broad branch.
     ("gers-div-tx", "Texas", "US", (-106.65, 25.84, -93.51, 36.50)),
+    # #448: the city extent for geocode_intersection fixture tests over the
+    # 20x20 named street grid.
+    ("gers-div-grid-city", "Grid City", "US", (-74.05, 40.70, -73.93, 40.78)),
 )
 
 

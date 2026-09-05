@@ -3624,6 +3624,43 @@ def geocode_address(
     return budget.apply_budget(result, "results")
 
 
+@_tool("Find a street intersection")
+def geocode_intersection(
+    street_a: str,
+    street_b: str,
+    city: str,
+) -> dict:
+    """Locate where two named streets cross: "5th Avenue", "Main Street", "Portland".
+
+    Resolves the city anchor, loads the street walk graph around its center
+    (the city's extent, up to 5 km from its center), and finds the junctions
+    inside it where an edge of one street meets an edge of the other.
+
+    Street names match case-insensitively and through the same USPS abbreviation
+    set as geocode_address (Avenue/Ave, Parkway/Pkwy, West/W, NW/Northwest,
+    5th/Fifth), plus a directional suffix the caller left off ("Pennsylvania
+    Avenue" finds "Pennsylvania Avenue NW").
+
+    Returns {"results": [{"lat": ..., "lon": ..., "streets": [name_a, name_b]}, ...],
+    "anchor": {"name": ..., "id": ..., "country": ..., "admin_context": [...]},
+    "note": ...}. `streets` is the map's own spelling of the two streets at that
+    crossing, in street_a/street_b order — not an echo of the inputs. When
+    multiple crossings exist, results are ordered nearest to the city center
+    first and capped at 5. If one or both streets do not resolve in the city,
+    returns empty results and a note naming the unresolved street; "truncated":
+    true means the street graph hit its size cap and may be missing some.
+    """
+    try:
+        result = geocoding.geocode_intersection(
+            street_a=street_a, street_b=street_b, city=city
+        )
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    return budget.apply_budget(result, "results")
+
+
 @_tool("Reverse geocode points in batch")
 def reverse_geocode_batch(points: list[dict]) -> dict:
     """Reverse-geocode many points in one call, to cut N round-trips down to one.
@@ -5617,7 +5654,7 @@ def data_version() -> dict:
 def _arg_summary(fn: Callable) -> str:
     """A tool's parameters as `required,optional?` — the catalog's arg column.
 
-    Names only, no types: the catalog's budget is the whole point (44 tools
+    Names only, no types: the catalog's budget is the whole point (45 tools
 have to fit in about 1.1k tokens), and the names here are already
     self-describing (lat, radius_m, limit, category). A caller that guesses
     a type wrong gets placeroot_call's bad_request naming what the tool
