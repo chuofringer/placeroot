@@ -88,6 +88,22 @@ fixing behavior is patch.
   `ambiguous_place` candidates.
 
 ### Fixed
+- `geocode`/`geocode_batch`/`resolve_place` now parse a trailing "City,
+  Country" suffix (#457) — "Cambridge, United Kingdom", "Cambridge, UK",
+  "Cambridge, GB" and "Cambridge, GBR" all resolve the UK's Cambridge and
+  exclude its US namesake, where before the joined string matched no bare
+  Overture division name and the query silently returned nothing. Also adds
+  an explicit `country=` parameter (ISO 3166-1 alpha-2, alpha-3, and common
+  aliases like "UK"/"USA" all accepted, case-insensitive) to all three
+  tools for callers that already know the country; an unrecognized
+  `country`, or one that disagrees with a country/region suffix parsed off
+  the query itself, returns a structured `bad_request` naming both. A
+  comma-suffix recognized as neither a region nor a country no longer
+  falls through to searching the unmatchable joined string — it searches
+  the base name with a note naming the unrecognized qualifier, and a
+  recognized country with zero matches inside it degrades to an
+  unconstrained search of the base name, also with a note, rather than
+  returning an empty result either way.
 - The `from`-keyword schema patch no longer hand-lists the parameters it
   republishes. `from_to`'s model dropped every parameter it forgot, twice
   (#328, #395); the shared base now dumps every declared field by name, and
