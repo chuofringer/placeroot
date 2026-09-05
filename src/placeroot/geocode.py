@@ -490,6 +490,15 @@ _NAME_PREFIX_WORDS = frozenset("""
 # must never displace it. See _pick_anchor_row.
 _ANCHOR_SPECIFIC_SHARE = 0.1
 
+# #463: the same share, applied to the *answer* ranking rather than the
+# anchor pick. A locality carrying at least this fraction of its own region's
+# (or country's) population, under the same name, is what the name means as
+# an answer too — São Paulo city is 25% of São Paulo state, and Nominatim,
+# Photon and Pelias all return the city first. Kept as its own name so the
+# two uses can diverge later without one silently moving the other; see
+# _flag_namesake_localities.
+_NAMESAKE_LOCALITY_SHARE = _ANCHOR_SPECIFIC_SHARE
+
 # Words that say what a place *is*, never where it is. A one-word anchor
 # candidate drawn from this set is refused outright.
 #
@@ -705,6 +714,74 @@ def _home_bias_flag(row: dict, *, active: bool = True) -> int:
     return 0 if home_region.in_home_region(row.get("lat"), row.get("lon")) else 1
 
 
+# #463: private row tag set by _flag_namesake_localities, read by _rank_key:
+# the population of the region/country the tagged locality is the namesake
+# of, which the locality ranks *as if* it carried. Rides along on the row
+# dict like `_variant`/`_fuzzy`; never serialized — geocode() builds each
+# returned entry field by field.
+_NAMESAKE_LOCALITY_KEY = "_namesake_locality"
+
+
+def _flag_namesake_localities(rows: list[dict], query: str) -> None:
+    """#463 pre-pass over one candidate list: tag each locality that is the
+    namesake city of a region/country also present in `rows`.
+
+    A locality qualifies when some region or country row in `rows` (a) has
+    the same folded name, (b) matched `query` at the same strong (exact or
+    prefix) tier — neither side fuzzy — (c) contains the locality (a region
+    row's `region` is its own ISO code, which the locality's `region` must
+    equal; for a country row the `country` codes must match), (d) has a
+    nonzero population, and (e) that population is at most
+    1/_NAMESAKE_LOCALITY_SHARE times the locality's. The share guard is the
+    same one _pick_anchor_row uses: a 0.04% hamlet named after its region
+    is a coincidence, a 25-43% city is the place the name means.
+
+    The tag's value is the containing row's population (the largest, if the
+    locality is the namesake of both its region and its country); _rank_key
+    ranks the locality as if that were its own, and the #47 subtype term
+    then orders it immediately ahead of the region — and nowhere else.
+
+    Idempotent — clears any earlier tag first — and a no-op on a list with no
+    such pair, so every ranking without a namesake pair is byte-identical to
+    before #463. Mutates `rows` in place; the tag is read by _rank_key.
+    """
+    for row in rows:
+        row.pop(_NAMESAKE_LOCALITY_KEY, None)
+    broads = []
+    for row in rows:
+        if row.get("subtype") not in ("region", "country") or row.get("_fuzzy"):
+            continue
+        if (row.get("population") or 0) <= 0:
+            continue
+        tier = _effective_tier(row, query)
+        if tier < _STRONG_TIER:
+            continue
+        broads.append((row, tier, _normalize_for_match(row["name"])))
+    if not broads:
+        return
+    for row in rows:
+        if row.get("subtype") != "locality" or row.get("_fuzzy"):
+            continue
+        population = row.get("population") or 0
+        if population <= 0:
+            continue
+        tier = _effective_tier(row, query)
+        if tier < _STRONG_TIER:
+            continue
+        name = _normalize_for_match(row["name"])
+        for broad, broad_tier, broad_name in broads:
+            if broad_tier != tier or broad_name != name:
+                continue
+            if broad["subtype"] == "region":
+                inside = broad.get("region") is not None and row.get("region") == broad["region"]
+            else:
+                inside = broad.get("country") is not None and row.get("country") == broad["country"]
+            if inside and population >= _NAMESAKE_LOCALITY_SHARE * broad["population"]:
+                row[_NAMESAKE_LOCALITY_KEY] = max(
+                    row.get(_NAMESAKE_LOCALITY_KEY) or 0, broad["population"]
+                )
+
+
 def _rank_key(row: dict, query: str, region_population: dict[str, int], *, home_bias: bool = True):
     """Sort key: (#215) literal-over-fuzzy, then (#221) strong-vs-substring
     tier group, then whether a *nonzero* population is known, then the match
@@ -772,9 +849,37 @@ def _rank_key(row: dict, query: str, region_population: dict[str, int], *, home_
     only wins when every other signal is tied, which is the case #53 is
     actually documented to care about (two otherwise-identical candidates,
     one found straight, one found through a spelling variant).
+
+    Namesake localities (#463). Two exact-tier, populated rows still order
+    by raw population, and that is wrong for exactly one shape: a city and
+    the region it sits in, sharing a name. "São Paulo" returned the state
+    (45.5M, centroid 259 km from the city) above the city (11.5M) for three
+    weekly corpus runs, where every other geocoder returns the city, because
+    a region's population always includes its namesake city's and so always
+    exceeds it. `_flag_namesake_localities` tags such a locality before the
+    sort — same-name, same strong tier, inside that region, and carrying at
+    least _NAMESAKE_LOCALITY_SHARE of its population, the guard
+    _pick_anchor_row already uses so a namesake hamlet can never displace a
+    genuine region — with the region's population, and the tagged locality
+    is then ranked *as if it carried that population*. Every term above the
+    population one is untouched, so the two rows tie all the way down to
+    the #47 subtype term, where locality (4) orders ahead of region (1): the
+    city lands immediately ahead of its region and nowhere else. That is
+    deliberately not a flag term of its own higher in the tuple: demoting
+    the region there sinks it below every same-name hamlet (a 3,688-person
+    "São Paulo" macrohood would become result #2), and promoting the city
+    there lifts it over everything, including a same-name country ("Mexico"
+    would return Ciudad de México over México, because Overture carries the
+    city both as a locality and as the region MX-CMX). With no tagged row the
+    ordering is byte-identical: "Kansas" still returns the state, "東京"
+    still returns 東京都. rank_score, as above, does not follow it.
     """
     tier = _effective_tier(row, query)
     population = row.get("population")
+    namesake_of = row.get(_NAMESAKE_LOCALITY_KEY)
+    if namesake_of:
+        # #463: rank as the region this locality is the namesake of.
+        population = max(population or 0, namesake_of)
     weight = _SUBTYPE_WEIGHT.get(row.get("subtype"), 0)
     depth = len(row.get("admin_context") or [])
     region_pop = region_population.get(row.get("region")) or 0
@@ -3601,6 +3706,7 @@ def geocode_detailed(
         _bundled_recall_pending = False
 
     region_population = _region_population_lookup(local_table)
+    _flag_namesake_localities(divisions, search_query)
     divisions.sort(key=lambda r: _rank_key(r, search_query, region_population))
 
     # #406: cheap on an already-sorted list — the disclosure note only ever
@@ -3767,6 +3873,7 @@ def geocode_detailed(
         # 11.0s of a fresh install's first landmark query, spent proving a
         # negative that the query's own shape already implies.
         recalled = _query_divisions(search_query, region_code, None)
+        _flag_namesake_localities(recalled, search_query)
         recalled.sort(key=lambda r: _rank_key(r, search_query, region_population))
         candidates = recalled
         # #406: the recall pass replaces `candidates` wholesale, so redo the
