@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from placeroot import overture
+from placeroot import db, overture
 
 from ._geo import haversine_m
 
@@ -128,5 +128,11 @@ def test_distance_expr_matches_independent_haversine():
         )
     """
     params = {"lat": lat, "lon": lon, "other_lat": other_lat, "other_lon": other_lon}
-    (got,) = con.execute(sql, params).fetchone()
+    # shared_conn()'s contract: hold conn_lock around every query on it. A
+    # daemon autowarm thread left running by an earlier test file queries
+    # the same connection, and two threads on one DuckDB connection can
+    # hand each other's result sets back — fetchone() returned None here
+    # once in CI (#448's PR, test (3.13) matrix job).
+    with db.conn_lock:
+        (got,) = con.execute(sql, params).fetchone()
     assert got == pytest.approx(expected, abs=1.0)
