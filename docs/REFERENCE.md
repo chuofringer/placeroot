@@ -3,7 +3,7 @@
 The full tool catalog, workflow prompts, resources, and the `PLACEROOT_TOOLS`
 selection mechanism. For a quick overview, start with the [README](../README.md).
 
-## All 45 tools
+## All 46 tools
 
 Every tool returns a compact, budgeted answer. Several single-item tools have a
 `*_batch` sibling that collapses many calls into one round-trip.
@@ -35,6 +35,7 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `address_at` | Point → the nearest street addresses (number, street, unit, postcode), with an explicit note when the country is outside Overture's 39-country address coverage |
 | `geocode_address` | Street address → coordinates: "1600 Amphitheatre Parkway, Mountain View" — city-bounded, deduplicated to distinct number+street, nearest first |
 | `geocode_intersection` | Locate where two named streets cross: "5th Avenue", "Main Street", "Portland" — city-bounded, walk-graph-extracted, nearest-to-center crossings capped at 5 |
+| `resolve_map_url` | A pasted Google/Apple/OpenStreetMap/`geo:` map link → its coordinate, zoom and place name, plus a reverse-geocoded `place` row — parsed offline, no API key; only a Google short link (`maps.app.goo.gl`) is followed over the network; a link that only names a place resolves by name |
 | `gers_lookup` | Any GERS id → the entity it names (place, division, or building), what it's inside, and the building at its point |
 | `search_categories` | Free text (including phrase intents like "fix my cracked phone screen") → ranked Overture category slugs with confidence, to filter `find_places` by |
 | `isochrone` | The area reachable within N minutes on foot, bike, or car |
@@ -82,7 +83,7 @@ PlaceRoot also speaks the MCP 2026-07-28 revision's listing cache hints:
 `tools/list` (and the prompt and resource listings) come back with
 `ttlMs: 86400000` and `cacheScope: "public"`. The listings are frozen at build
 time — nothing at runtime can change them — so a client is free to reuse them
-for a day instead of re-reading a ~37.9k-token schema surface every session.
+for a day instead of re-reading a ~38.7k-token schema surface every session.
 Clients that speak an older revision are unaffected: those fields did not exist
 before 2026-07-28, and the response they get is byte-identical to what it was.
 
@@ -147,8 +148,8 @@ without them registered.
 
 ## Loading fewer tools (`PLACEROOT_TOOLS`)
 
-All 45 tool schemas cost roughly **37.9k tokens** of every conversation's
-context, paid before the agent asks anything — about the cost of 78 median
+All 46 tool schemas cost roughly **38.7k tokens** of every conversation's
+context, paid before the agent asks anything — about the cost of 80 median
 answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS`
 selects which tools get registered. Unselected tools are never registered and
 never appear in `tools/list`.
@@ -170,20 +171,20 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 45 | ~37,915 | — |
-| `search` | 14 | ~12,685 | 67% |
-| `core` | 15 | ~16,691 | 56% |
-| `routing` | 10 | ~12,549 | 67% |
-| `analysis` | 13 | ~10,100 | 73% |
+| unset / `all` (default) | 46 | ~38,674 | — |
+| `search` | 15 | ~13,444 | 65% |
+| `core` | 16 | ~17,450 | 55% |
+| `routing` | 10 | ~12,549 | 68% |
+| `analysis` | 13 | ~10,100 | 74% |
 | `geometry` | 3 | ~3,355 | 91% |
-| `progressive` | 4 (all 45 reachable) | ~1,406 | 96% |
+| `progressive` | 4 (all 46 reachable) | ~1,406 | 96% |
 
-- **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `from_to`, `find_near`, `places_along_route`, `neighborhood_verdict`, `verify_claims`, `warmup_city`, `ground_location`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
-- **`search`** — the find/name/identify family: `find_places`, `find_near`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, `address_at`, `geocode_address`, `geocode_intersection`, `search_categories`, and `gers_lookup`.
+- **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `from_to`, `find_near`, `places_along_route`, `neighborhood_verdict`, `verify_claims`, `warmup_city`, `ground_location`, `resolve_map_url`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
+- **`search`** — the find/name/identify family: `find_places`, `find_near`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, `address_at`, `geocode_address`, `geocode_intersection`, `resolve_map_url`, `search_categories`, and `gers_lookup`.
 - **`routing`** — `route`, `from_to`, `isochrone`, `distance_matrix`, `travel_time_matrix`, `within_distance`, `optimize_route`, `elevation_at`, `meeting_point`, `map_match`.
 - **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `suggest_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`, `timezone_at`, `neighborhood_verdict`, `changes_in_area`, `verify_claims`.
 - **`geometry`** — `simplify_geometry`, `render_map`, `geometry_op`.
-- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 45 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 37.9k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
+- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 46 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 38.7k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 
 `data_version` and `preferences` are registered under every profile.
 `data_version` is ~360 tokens and the only way an agent can tell which
@@ -198,7 +199,7 @@ Profiles may overlap, and a list may mix them with bare tool names —
 nor a tool **fails at startup** with the list of valid names, rather than
 quietly falling back to loading everything. The server logs one line at
 startup naming what it registered
-(`registered 15 of 45 tools (PLACEROOT_TOOLS=core)`), so a selection that
+(`registered 16 of 46 tools (PLACEROOT_TOOLS=core)`), so a selection that
 didn't apply — an empty value, a variable that never reached the process — is
 visible rather than silently the full 35.
 

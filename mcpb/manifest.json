@@ -144,6 +144,10 @@
       "description": "Locate where two named streets cross: \"5th Avenue\", \"Main Street\", \"Portland\"."
     },
     {
+      "name": "resolve_map_url",
+      "description": "Pasted Google/Apple/OpenStreetMap/geo: map link -> its coordinate and place."
+    },
+    {
       "name": "simplify_geometry",
       "description": "Simplify a GeoJSON geometry to fit a token budget, reporting what was lost."
     },
