@@ -103,6 +103,9 @@ PROFILES: dict[str, frozenset[str]] = {
         "optimize_route",
         # Named-place compose over route().
         "from_to",
+        # One-call walk/cycle/drive comparison over route(): the ends
+        # resolve once, each mode routes between the same coordinates.
+        "compare_modes",
         # Ground elevation at a point (#358) — routing comfort ("is this
         # walk hilly", "how high is the pass"), not a street-graph query,
         # but the same "getting between points" family this profile is.

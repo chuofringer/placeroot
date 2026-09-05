@@ -216,6 +216,10 @@
       "description": "Shortest-path walk/cycle/drive between two named places."
     },
     {
+      "name": "compare_modes",
+      "description": "Walk vs cycle vs drive between two places in one call: compact per-mode rows, fastest and shortest."
+    },
+    {
       "name": "find_near",
       "description": "Places of a category near a named place or city."
     },

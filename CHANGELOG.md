@@ -9,6 +9,18 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `compare_modes(from, to, modes=None, include_elevation=False, confirm=False)`
+  MCP tool (#459): "should I walk, bike or drive from A to B?" in one call
+  instead of three `route()` calls. The ends (same LocationRef forms as
+  `from_to`) resolve exactly once, every requested mode routes between the
+  same coordinates, and each mode gets one compact row (`distance_m`,
+  `duration_s`, `duration_min`, optional `total_climb_m`/`total_descent_m`)
+  — no path, no export. `fastest`/`shortest` name the winners (null when
+  nothing routed) and `summary` is a deterministic sentence that says drive
+  time has no live traffic. A mode that cannot be routed (`too_far`,
+  `needs_confirm` with its ETA, `no_route`, ...) fails inline in its own row
+  and never aborts the call; only end resolution fails the whole call, with
+  `field: "from" | "to"` as `from_to` reports it. Joins the `routing` profile.
 - `geocode_intersection(street_a, street_b, city)` MCP tool (#448): locate where
   two named streets cross within a resolved city anchor. Reuses `geocode_address`'s
   anchor-resolution and USPS abbreviation normalization (Parkway/Pkwy, West/W,
