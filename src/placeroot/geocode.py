@@ -6340,23 +6340,49 @@ def geocode_address(
 # --- #448: geocode_intersection --------------------------------------------
 
 INTERSECTION_MAX_LIMIT = 5
+# Divided roads and signalled junctions are several Overture connectors per
+# physical corner (15-40 m apart); matched nodes closer than this to one
+# already kept are the same crossing, not another one.
 INTERSECTION_CLUSTER_M = 50.0
+# Floor on the walk-graph extraction radius: a village whose boundary is a
+# few hundred metres across still gets a graph big enough to hold its
+# streets, and the cache tile is never smaller than a walk isochrone's.
+INTERSECTION_MIN_RADIUS_M = 1000.0
+
+# The trailing tokens an Overture street name may carry beyond what the
+# caller typed and still be *the same street*: the cardinal/quadrant suffix
+# DC, Atlanta, Calgary and Portland put on every name ("Pennsylvania Avenue
+# NW" for a query of "Pennsylvania Avenue"). Nothing else — "Broadway
+# Terrace" is a different street from "Broadway", "Park Ave Ext" from "Park
+# Ave", "Main St Bridge" from "Main St" — and a lone "Main" must not sweep
+# up Main St, Main Ave and Main Street North the way geocode_address's
+# ILIKE prefix deliberately does over address rows: there a wide match is
+# a longer list to pick from, here it is a wrong coordinate.
+_STREET_DIRECTIONAL_SUFFIXES: frozenset[str] = frozenset({
+    "n", "s", "e", "w", "ne", "nw", "se", "sw",
+    "north", "south", "east", "west",
+    "northeast", "northwest", "southeast", "southwest",
+})
 
 
 def _matches_street(edge_name: str | None, variants: set[str]) -> bool:
-    """Match an edge's street name against normalized variants.
+    """Whether an edge's street name is one of the caller's street's spellings.
 
-    Supports exact equality and word-boundary prefix matching (e.g.
-    'Market St NW' or 'Market Street North' matching variant 'Market St').
+    `variants` is _street_variants' lowercase output for the query (USPS
+    suffixes, cardinals, ordinals). Equality, or equality followed only by
+    directional tokens (_STREET_DIRECTIONAL_SUFFIXES) — never an arbitrary
+    longer name.
     """
     if not edge_name:
         return False
-    enl = edge_name.strip().lower()
+    enl = " ".join(edge_name.lower().split())
     if enl in variants:
         return True
     for v in variants:
-        if re.match(rf"^{re.escape(v)}(?:\b|$)", enl):
-            return True
+        if len(enl) > len(v) and enl.startswith(v) and enl[len(v)] == " ":
+            rest = enl[len(v) + 1:].split()
+            if all(tok in _STREET_DIRECTIONAL_SUFFIXES for tok in rest):
+                return True
     return False
 
 
@@ -6372,21 +6398,32 @@ def geocode_intersection(
     Four steps:
     1. Parse and validate street_a, street_b, and city. Reject self-intersections
        where both street names normalize to the same street.
-    2. Resolve the city anchor extent (same anchor-resolution approach as
+    2. Resolve the city anchor extent (_resolve_city_anchor, shared with
        geocode_address). No extent or too broad returns an empty list plus a note.
-    3. Build or retrieve the walk graph around the anchor center bounded by
-       the city bbox (clamped to routing.WALK_MAX_RADIUS_M).
-    4. Find graph nodes that have at least one incident edge matching street_a
-       and at least one incident edge matching street_b, using normalized USPS
-       variants and word-boundary prefix matching (e.g. directional suffixes).
-       Cluster near-duplicate divided-road junctions within ~50 m, keeping the
-       node nearest to the city center.
+    3. Build or retrieve the walk graph around the anchor center, sized to the
+       city bbox and clamped to routing.WALK_MAX_RADIUS_M. The search covers
+       the part of the bbox within that radius; when the city is larger the
+       note says so, so the caller can pass a neighborhood as `city` instead.
+    4. Find junction nodes (three or more neighbors — a degree-2 node is one
+       road changing name, not two roads meeting) inside that extent with an
+       incident edge matching street_a and a different incident edge matching
+       street_b, through the normalized USPS variants plus a directional
+       suffix the caller left off ("Pennsylvania Avenue" -> "Pennsylvania
+       Avenue NW"). Cluster the connectors of a divided-road junction within
+       INTERSECTION_CLUSTER_M, keeping the one nearest the city center.
 
-    Returns {"results": [{"lat": ..., "lon": ..., "streets": [street_a, street_b],
-    "anchor": {"name": ..., "country": ...}}, ...], "note": ...}.
-    When multiple crossings exist, results are ordered nearest to the city center
-    first and capped at 5. If one or both streets do not resolve in the city,
-    returns empty results and a note naming the unresolved street.
+    Returns {"results": [{"lat", "lon", "streets": [name_a, name_b]}, ...],
+    "anchor": {"name", "id", "country", "admin_context"}, "note": ...}.
+    `streets` carries the map's own spelling of the two streets (Overture
+    names.primary of the matched edges, in street_a/street_b order), which is
+    how a caller learns the "NW" or "Avenue" they left off. `anchor` is the
+    place the search ran in, once, the same shape geocode_address returns.
+    When multiple crossings exist, results are ordered nearest to the city
+    center first and capped at INTERSECTION_MAX_LIMIT. If one or both streets
+    do not resolve in the city, returns empty results and a note naming the
+    unresolved street. When the extracted graph hit routing.MAX_GRAPH_SEGMENTS
+    the answer carries "truncated": true and says so, since a street missing
+    from a partial graph is not a street missing from the city.
     """
     street_a = (street_a or "").strip()
     street_b = (street_b or "").strip()
@@ -6422,7 +6459,11 @@ def geocode_intersection(
     variants_a = {v.lower() for v in _street_variants(street_a)}
     variants_b = {v.lower() for v in _street_variants(street_b)}
 
-    if variants_a & variants_b or _matches_street(street_a, variants_b) or _matches_street(street_b, variants_a):
+    if (
+        variants_a & variants_b
+        or _matches_street(street_a, variants_b)
+        or _matches_street(street_b, variants_a)
+    ):
         return {
             "results": [],
             "note": (
@@ -6445,17 +6486,16 @@ def geocode_intersection(
 
     center_lat = anchor["lat"]
     center_lon = anchor["lon"]
+    min_lon, min_lat, max_lon, max_lat = bbox
 
-    corner_dists = [
-        geo.haversine_m(center_lat, center_lon, bbox[1], bbox[0]),
-        geo.haversine_m(center_lat, center_lon, bbox[1], bbox[2]),
-        geo.haversine_m(center_lat, center_lon, bbox[3], bbox[0]),
-        geo.haversine_m(center_lat, center_lon, bbox[3], bbox[2]),
-    ]
-    max_corner_dist = max(corner_dists)
-    radius_m = min(max_corner_dist, routing.WALK_MAX_RADIUS_M)
-    radius_m = max(radius_m, 1000.0)
-    radius_m = min(radius_m, routing.WALK_MAX_RADIUS_M)
+    max_corner_dist = max(
+        geo.haversine_m(center_lat, center_lon, lat, lon)
+        for lat in (min_lat, max_lat)
+        for lon in (min_lon, max_lon)
+    )
+    radius_m = max(
+        min(max_corner_dist, routing.WALK_MAX_RADIUS_M), INTERSECTION_MIN_RADIUS_M
+    )
 
     graph = routing._get_or_build_graph(
         center_lat,
@@ -6469,11 +6509,16 @@ def geocode_intersection(
     found_a = False
     found_b = False
     crossings: list[dict] = []
-    seen_coords: set[tuple[float, float]] = set()
+    # A graph has hundreds of thousands of edge visits and a few thousand
+    # distinct street names: match each name once, then it is a dict lookup.
+    name_hits: dict[str, tuple[bool, bool]] = {}
 
     for node_id, (nlat, nlon) in graph.coords.items():
-        coord_key = (round(nlat, 7), round(nlon, 7))
-        if coord_key in seen_coords:
+        # The served graph can be larger than the city — a cached 5 km walk
+        # graph centered elsewhere, or the GRAPH_CACHE_MARGIN-padded build —
+        # and a crossing in the next town over is not an answer about this
+        # one. Bound by the anchor's own extent, as geocode_address's scan is.
+        if not (min_lat <= nlat <= max_lat and min_lon <= nlon <= max_lon):
             continue
         nbrs = graph._undirected_neighbors.get(node_id, set())
         edges_a: list[tuple[str, str]] = []
@@ -6482,13 +6527,26 @@ def geocode_intersection(
             edge_name = graph.name_between(node_id, nbr) or graph.name_between(nbr, node_id)
             if not edge_name:
                 continue
-            if _matches_street(edge_name, variants_a):
+            hit = name_hits.get(edge_name)
+            if hit is None:
+                hit = (
+                    _matches_street(edge_name, variants_a),
+                    _matches_street(edge_name, variants_b),
+                )
+                name_hits[edge_name] = hit
+            if hit[0]:
                 found_a = True
                 edges_a.append((nbr, edge_name))
-            if _matches_street(edge_name, variants_b):
+            if hit[1]:
                 found_b = True
                 edges_b.append((nbr, edge_name))
 
+        # Two streets meeting is a junction: at least three ways leave it.
+        # A degree-2 node with one matching edge on each side is a single
+        # road changing its name (Main St becoming Broadway at the city
+        # line), which is not where they cross.
+        if len(nbrs) < 3 or not edges_a or not edges_b:
+            continue
         matched_pair: tuple[str, str] | None = None
         for nbr_a, name_a in edges_a:
             for nbr_b, name_b in edges_b:
@@ -6497,20 +6555,17 @@ def geocode_intersection(
                     break
             if matched_pair:
                 break
-
-        if matched_pair:
-            seen_coords.add(coord_key)
-            dist_m = geo.haversine_m(center_lat, center_lon, nlat, nlon)
-            crossings.append({
-                "lat": nlat,
-                "lon": nlon,
-                "streets": [matched_pair[0], matched_pair[1]],
-                "anchor": {
-                    "name": anchor["name"],
-                    "country": anchor.get("country"),
-                },
-                "_dist": dist_m,
-            })
+        if matched_pair is None:
+            continue
+        dist_m = geo.haversine_m(center_lat, center_lon, nlat, nlon)
+        if dist_m > radius_m:
+            continue
+        crossings.append({
+            "lat": nlat,
+            "lon": nlon,
+            "streets": [matched_pair[0], matched_pair[1]],
+            "_dist": dist_m,
+        })
 
     crossings.sort(key=lambda c: c["_dist"])
     clustered: list[dict] = []
@@ -6528,22 +6583,46 @@ def geocode_intersection(
         for c in clustered
     ]
 
+    payload: dict = {
+        "results": results,
+        # Once, at the top, same shape as geocode_address: the anchor is the
+        # one thing that decides *which* Portland this answers about, and
+        # repeating it on every row adds bytes, not information.
+        "anchor": {
+            "name": anchor["name"],
+            "id": anchor["id"],
+            "country": anchor.get("country"),
+            "admin_context": anchor.get("admin_context") or [],
+        },
+    }
     if not results:
+        # A street absent from a graph that stopped at its segment cap is a
+        # fact about the extraction, not the city; say "the extracted part"
+        # rather than asserting the negative about the map.
+        where = (
+            f"the extracted part of {anchor['name']}" if graph.truncated else anchor["name"]
+        )
         if not found_a and not found_b:
-            notes.append(f"neither \"{street_a}\" nor \"{street_b}\" resolved in {anchor['name']}")
+            notes.append(f"neither \"{street_a}\" nor \"{street_b}\" resolved in {where}")
         elif not found_a:
-            notes.append(f"\"{street_a}\" did not resolve in {anchor['name']}")
+            notes.append(f"\"{street_a}\" did not resolve in {where}")
         elif not found_b:
-            notes.append(f"\"{street_b}\" did not resolve in {anchor['name']}")
+            notes.append(f"\"{street_b}\" did not resolve in {where}")
         else:
-            notes.append(f"\"{street_a}\" and \"{street_b}\" do not intersect in {anchor['name']}")
+            notes.append(f"\"{street_a}\" and \"{street_b}\" do not intersect in {where}")
         if max_corner_dist > routing.WALK_MAX_RADIUS_M:
             notes.append(
-                f"(search was bounded to {routing.WALK_MAX_RADIUS_M / 1000.0:.1f} km from the center of {anchor['name']})"
+                f"(the search covered only the {routing.WALK_MAX_RADIUS_M / 1000.0:.1f} km "
+                f"around the center of {anchor['name']}; pass a neighborhood or district "
+                f"as `city` to search elsewhere in it)"
             )
-
-    payload: dict = {"results": results}
+    if graph.truncated:
+        payload["truncated"] = True
+        notes.append(
+            f"the street graph around {anchor['name']} hit its "
+            f"{routing.MAX_GRAPH_SEGMENTS:,}-segment cap, so this is a partial view of "
+            f"the network and a street or crossing may be missing from it"
+        )
     if notes:
         payload["note"] = " ".join(notes)
     return payload
-

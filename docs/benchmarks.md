@@ -77,11 +77,11 @@ Generated 2026-09-05 by `uv run python benchmarks/token_efficiency.py --write`.
 - Token counting method: **chars/4 heuristic (no tokenizer installed; same estimator as placeroot.budget.estimate_tokens)**
 - Overture release pinned for the fixture run: `2026-08-19.0`
 - Tools registered: **45**
-- Total schema surface: **36376 tokens** (145575 chars, 145975 bytes)
+- Total schema surface: **36487 tokens** (146018 chars, 146420 bytes)
 - Of which inputSchema: **5936 tokens**, outputSchema: **4089 tokens** (roadmap §4.3, #403) — the rest is names/descriptions/annotations
 - Schema cost per tool: min 297, median 698, max 3177 tokens
 - Median scenario response: **436 tokens** (range 87-538)
-- Break-even: the schema surface costs about as much as **83 median answers**
+- Break-even: the schema surface costs about as much as **84 median answers**
 
 ### Schema surface (paid once per conversation)
 
@@ -115,6 +115,7 @@ Generated 2026-09-05 by `uv run python benchmarks/token_efficiency.py --write`.
 | `address_at` | 427 | 54 | 52 | **597** | 2388 |
 | `gers_lookup` | 385 | 74 | 52 | **575** | 2303 |
 | `preferences` | 206 | 216 | 52 | **532** | 2131 |
+| `geocode_intersection` | 304 | 62 | 52 | **487** | 1948 |
 | `neighborhood_verdict` | 200 | 152 | 52 | **462** | 1849 |
 | `geocode_batch` | 211 | 58 | 98 | **430** | 1722 |
 | `land_use_at` | 274 | 41 | 52 | **429** | 1717 |
@@ -122,7 +123,6 @@ Generated 2026-09-05 by `uv run python benchmarks/token_efficiency.py --write`.
 | `resolve_place_batch` | 248 | 42 | 52 | **406** | 1626 |
 | `elevation_at` | 242 | 41 | 52 | **394** | 1579 |
 | `warmup_city` | 175 | 109 | 52 | **391** | 1565 |
-| `geocode_intersection` | 197 | 62 | 52 | **376** | 1505 |
 | `timezone_at` | 211 | 41 | 52 | **366** | 1465 |
 | `summarize_area` | 148 | 105 | 52 | **365** | 1460 |
 | `data_version` | 166 | 16 | 119 | **355** | 1421 |
@@ -132,7 +132,7 @@ Generated 2026-09-05 by `uv run python benchmarks/token_efficiency.py --write`.
 | `reverse_geocode_batch` | 163 | 48 | 52 | **327** | 1308 |
 | `summarize_buildings` | 154 | 58 | 52 | **320** | 1283 |
 | `simplify_geometry` | 129 | 58 | 52 | **297** | 1188 |
-| **all 45 tools** | 23192 | 5936 | 4089 | **36376** | 145575 |
+| **all 45 tools** | 23299 | 5936 | 4089 | **36487** | 146018 |
 
 ### Response cost (paid per tool call, measured on committed fixtures)
 

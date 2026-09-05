@@ -25,8 +25,12 @@ def test_happy_path_finds_exact_fixture_intersection():
     assert math.isclose(hit["lon"], expected_lon, abs_tol=1e-6)
 
     assert hit["streets"] == ["Grid Ave 2", "Grid St 3"]
-    assert hit["anchor"]["name"] == "Grid City"
-    assert hit["anchor"]["country"] == "US"
+    # One top-level anchor, the geocode_address shape, never repeated per row.
+    assert "anchor" not in hit
+    assert result["anchor"]["name"] == "Grid City"
+    assert result["anchor"]["id"] == "gers-div-grid-city"
+    assert result["anchor"]["country"] == "US"
+    assert "truncated" not in result
 
 
 def test_case_insensitive_matching():
@@ -263,16 +267,20 @@ def test_divided_road_junction_clustering(monkeypatch):
     for nid, lat, lon in nodes:
         g.add_node(nid, lat, lon)
         g.add_node(f"w_{nid}", lat, lon - 0.001)
+        g.add_node(f"e_{nid}", lat, lon + 0.001)
         g.add_node(f"n_{nid}", lat + 0.001, lon)
         g.add_edge(nid, f"w_{nid}", 50.0, 50.0, directed=False, name="Divided Ave")
+        g.add_edge(nid, f"e_{nid}", 50.0, 50.0, directed=False, name="Divided Ave")
         g.add_edge(nid, f"n_{nid}", 50.0, 50.0, directed=False, name="Cross St")
 
     # A separate 2nd intersection 1.5 km away
     far_lat, far_lon = center_lat + 0.015, center_lon
     g.add_node("far_cross", far_lat, far_lon)
     g.add_node("far_w", far_lat, far_lon - 0.001)
+    g.add_node("far_e", far_lat, far_lon + 0.001)
     g.add_node("far_n", far_lat + 0.001, far_lon)
     g.add_edge("far_cross", "far_w", 50.0, 50.0, directed=False, name="Divided Ave")
+    g.add_edge("far_cross", "far_e", 50.0, 50.0, directed=False, name="Divided Ave")
     g.add_edge("far_cross", "far_n", 50.0, 50.0, directed=False, name="Cross St")
 
     monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: g)
@@ -314,3 +322,200 @@ def test_want_shapes_false_in_graph_extraction(monkeypatch):
     assert captured_args.get("want_shapes") is False
     assert captured_args.get("radius_m") <= routing.WALK_MAX_RADIUS_M
 
+
+
+# --- Second review round ----------------------------------------------------
+
+CENTER_LAT, CENTER_LON = 40.74, -73.99
+# Matches scripts/build_fixture.py's GEOCODE_ANCHOR_AREAS row for Grid City.
+GRID_CITY_BBOX = (-74.05, 40.70, -73.93, 40.78)
+
+
+def _fake_grid_city_anchor(monkeypatch, bbox=GRID_CITY_BBOX):
+    """Resolve "Grid City" without DuckDB, so a test that also swaps the graph
+    exercises the node loop alone."""
+    anchor = {
+        "name": "Grid City", "id": "gers-div-grid-city", "country": "US",
+        "lat": CENTER_LAT, "lon": CENTER_LON,
+        "admin_context": ["United States", "New York"],
+    }
+
+    def resolve(city, *, action_label="scan"):
+        return geocode._ResolvedAnchor(
+            anchor=anchor, bbox=bbox, notes=[], top=anchor, rejected=[], too_broad=None
+        )
+
+    monkeypatch.setattr(geocode, "_resolve_city_anchor", resolve)
+
+
+def _junction(g, nid, lat, lon, name_ew, name_n, name_e=None):
+    """A T-junction at (lat, lon): `name_ew` runs west and east through it,
+    `name_n` leaves north. `name_e` renames the eastern leg."""
+    g.add_node(nid, lat, lon)
+    g.add_node(f"{nid}_w", lat, lon - 0.001)
+    g.add_node(f"{nid}_e", lat, lon + 0.001)
+    g.add_node(f"{nid}_n", lat + 0.001, lon)
+    g.add_edge(nid, f"{nid}_w", 100.0, 100.0, directed=False, name=name_ew)
+    g.add_edge(nid, f"{nid}_e", 100.0, 100.0, directed=False, name=name_e or name_ew)
+    g.add_edge(nid, f"{nid}_n", 100.0, 100.0, directed=False, name=name_n)
+
+
+def test_anchor_is_top_level_and_not_repeated_per_row(monkeypatch):
+    _fake_grid_city_anchor(monkeypatch)
+    g = routing.Graph()
+    _junction(g, "x", CENTER_LAT + 0.001, CENTER_LON, "Main St", "Cross Ave")
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: g)
+
+    res = geocode.geocode_intersection("Main St", "Cross Ave", "Grid City")
+    assert res["anchor"] == {
+        "name": "Grid City", "id": "gers-div-grid-city", "country": "US",
+        "admin_context": ["United States", "New York"],
+    }
+    assert res["results"] == [
+        {"lat": CENTER_LAT + 0.001, "lon": CENTER_LON, "streets": ["Main St", "Cross Ave"]}
+    ]
+
+
+def test_rename_point_on_one_road_is_not_a_crossing(monkeypatch):
+    """Main St becoming Broadway at a degree-2 node is one road, not two meeting."""
+    _fake_grid_city_anchor(monkeypatch)
+    g = routing.Graph()
+    lat = CENTER_LAT + 0.001
+    g.add_node("rename", lat, CENTER_LON)
+    g.add_node("rename_w", lat, CENTER_LON - 0.001)
+    g.add_node("rename_e", lat, CENTER_LON + 0.001)
+    g.add_edge("rename", "rename_w", 100.0, 100.0, directed=False, name="Main St")
+    g.add_edge("rename", "rename_e", 100.0, 100.0, directed=False, name="Broadway")
+    # ...and the real junction further out, which must still be found.
+    _junction(g, "real", CENTER_LAT + 0.005, CENTER_LON, "Main St", "Broadway")
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: g)
+
+    res = geocode.geocode_intersection("Main St", "Broadway", "Grid City")
+    assert [r["lat"] for r in res["results"]] == [CENTER_LAT + 0.005]
+
+    # With only the rename point in the graph: both streets exist, no crossing.
+    g2 = routing.Graph()
+    g2.add_node("rename", lat, CENTER_LON)
+    g2.add_node("rename_w", lat, CENTER_LON - 0.001)
+    g2.add_node("rename_e", lat, CENTER_LON + 0.001)
+    g2.add_edge("rename", "rename_w", 100.0, 100.0, directed=False, name="Main St")
+    g2.add_edge("rename", "rename_e", 100.0, 100.0, directed=False, name="Broadway")
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: g2)
+    res2 = geocode.geocode_intersection("Main St", "Broadway", "Grid City")
+    assert res2["results"] == []
+    assert "do not intersect" in res2["note"]
+
+
+def test_longer_street_name_is_a_different_street(monkeypatch):
+    """Only a directional suffix may extend a query; "Broadway Terrace" is not
+    "Broadway", and a lone "Main" is not "Main Ave"."""
+    assert geocode._matches_street("Broadway Terrace", {"broadway"}) is False
+    assert geocode._matches_street("Park Ave Ext", {"park ave", "park avenue"}) is False
+    assert geocode._matches_street("Main St Bridge", {"main st", "main street"}) is False
+    assert geocode._matches_street("Main Ave", {"main"}) is False
+    assert geocode._matches_street("Main Street North", {"main street"}) is True
+    assert geocode._matches_street("Pennsylvania Avenue NW", {"pennsylvania avenue"}) is True
+    assert geocode._matches_street("Pennsylvania Avenue", {"pennsylvania avenue nw"}) is False
+
+    _fake_grid_city_anchor(monkeypatch)
+    g = routing.Graph()
+    _junction(g, "x", CENTER_LAT + 0.001, CENTER_LON, "Broadway", "Broadway Terrace")
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: g)
+    res = geocode.geocode_intersection("Broadway", "Broadway Terrace", "Grid City")
+    assert "same street" not in res.get("note", "")
+    assert res["results"][0]["streets"] == ["Broadway", "Broadway Terrace"]
+
+
+def test_crossings_outside_the_city_extent_are_not_reported(monkeypatch):
+    """A cached graph wider than the city must not hand back the next town's
+    crossing under this city's anchor."""
+    # A city extent ~1.1 km across, well inside the 5 km graph.
+    _fake_grid_city_anchor(monkeypatch, bbox=(-73.995, 40.735, -73.985, 40.745))
+    g = routing.Graph()
+    _junction(g, "inside", CENTER_LAT + 0.001, CENTER_LON, "Main St", "1st St")
+    _junction(g, "outside", CENTER_LAT + 0.02, CENTER_LON, "Main St", "1st St")
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: g)
+
+    res = geocode.geocode_intersection("Main St", "1st St", "Grid City")
+    assert [r["lat"] for r in res["results"]] == [CENTER_LAT + 0.001]
+
+    g2 = routing.Graph()
+    _junction(g2, "outside", CENTER_LAT + 0.02, CENTER_LON, "Main St", "1st St")
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: g2)
+    res2 = geocode.geocode_intersection("Main St", "1st St", "Grid City")
+    assert res2["results"] == []
+    assert "neither" in res2["note"]
+
+
+def test_truncated_graph_is_surfaced_not_asserted_as_absence(monkeypatch):
+    _fake_grid_city_anchor(monkeypatch)
+    g = routing.Graph()
+    g.truncated = True
+    _junction(g, "x", CENTER_LAT + 0.001, CENTER_LON, "Main St", "Elm St")
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: g)
+
+    res = geocode.geocode_intersection("Main St", "Oak St", "Grid City")
+    assert res["results"] == []
+    assert res["truncated"] is True
+    assert '"Oak St" did not resolve in the extracted part of Grid City' in res["note"]
+    assert "segment cap" in res["note"]
+
+    hit = geocode.geocode_intersection("Main St", "Elm St", "Grid City")
+    assert len(hit["results"]) == 1
+    assert hit["truncated"] is True
+    assert "segment cap" in hit["note"]
+
+
+def test_large_city_note_says_the_search_was_bounded(monkeypatch):
+    """A bbox wider than the walk cap: an empty answer says how far was searched."""
+    _fake_grid_city_anchor(monkeypatch, bbox=(-74.3, 40.5, -73.7, 41.0))
+    g = routing.Graph()
+    _junction(g, "x", CENTER_LAT + 0.001, CENTER_LON, "Main St", "Elm St")
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: g)
+
+    res = geocode.geocode_intersection("Main St", "Oak St", "Grid City")
+    assert res["results"] == []
+    assert "5.0 km" in res["note"]
+    assert "neighborhood" in res["note"]
+
+
+def test_edge_names_follow_the_lightest_parallel_edge():
+    """name_between names the edge dijkstra traverses: on parallel edges the
+    lightest wins, first-registered on a tie, and an unnamed lighter edge
+    clears a heavier named one's slot -- on shapeless and shape graphs alike."""
+    for has_shapes in (False, True):
+        g = routing.Graph()
+        g.has_shapes = has_shapes
+        g.add_node("a", 0.0, 0.0)
+        g.add_node("b", 0.0, 0.001)
+        g.add_edge("a", "b", 50.0, 50.0, directed=False, name=None)
+        g.add_edge("a", "b", 100.0, 100.0, directed=False, name="Main St")
+        assert g.name_between("a", "b") is None
+        assert g.name_between("b", "a") is None
+
+        g = routing.Graph()
+        g.has_shapes = has_shapes
+        g.add_node("a", 0.0, 0.0)
+        g.add_node("b", 0.0, 0.001)
+        g.add_edge("a", "b", 100.0, 100.0, directed=False, name="Main St")
+        g.add_edge("a", "b", 50.0, 50.0, directed=False, name="Service Rd")
+        assert g.name_between("a", "b") == "Service Rd"
+        g.add_edge("a", "b", 50.0, 50.0, directed=False, name="Tie Loser")
+        assert g.name_between("a", "b") == "Service Rd"
+        g.add_edge("a", "b", 25.0, 25.0, directed=False, name=None)
+        assert g.name_between("a", "b") is None
+
+        # One-way edges compete per direction only.
+        g = routing.Graph()
+        g.has_shapes = has_shapes
+        g.add_node("a", 0.0, 0.0)
+        g.add_node("b", 0.0, 0.001)
+        g.add_edge("a", "b", 100.0, 100.0, directed=True, name="Northbound")
+        g.add_edge("b", "a", 50.0, 50.0, directed=True, name="Southbound")
+        assert g.name_between("a", "b") == "Northbound"
+        assert g.name_between("b", "a") == "Southbound"
+
+
+def test_disk_format_bumped_for_edge_names_on_shapeless_graphs():
+    """Format-2 shapeless pickles carry no edge names; they must miss, not load."""
+    assert routing.GRAPH_DISK_FORMAT >= 3

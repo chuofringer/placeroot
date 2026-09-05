@@ -14,8 +14,12 @@ fixing behavior is patch.
   anchor-resolution and USPS abbreviation normalization (Parkway/Pkwy, West/W,
   NW/Northwest, 5th/Fifth), extracts the walk graph around the anchor center, and
   returns intersection coordinates ordered nearest to the city center first (capped
-  at 5). An unresolvable street returns empty results with an explanatory note rather
-  than an error.
+  at 5) under one top-level `anchor` (the `geocode_address` shape). An unresolvable
+  street returns empty results with an explanatory note rather than an error, and a
+  graph that hit its segment cap says so with `truncated: true`.
+- `Graph.name_between` now answers on every street graph, shapeless walk graphs
+  included (#448), and the on-disk walk-graph format is bumped to 3 so graphs
+  persisted by earlier releases (no edge names) are rebuilt rather than served.
 - `avoid` on `route` and `from_to` (#425): `avoid=["motorway"]` (and/or
   `"trunk"`) keeps a drive off those road classes and their on/off ramps —
   the "no highways" ask Google Directions, Mapbox and Valhalla all answer

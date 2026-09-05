@@ -503,7 +503,12 @@ GRAPH_CACHE_MARGIN = 1.3  # over-fetch factor so nearby repeat queries hit the c
 # 2: Graph grew _edge_names (#441) — a format-1 pickle would unpickle into
 # an object missing the attribute and crash name_between; the bump makes
 # old files a clean cache miss (rebuilt, then re-persisted as format 2).
-GRAPH_DISK_FORMAT = 2
+# 3: _edge_names is populated on every graph, shapeless walk graphs
+# included (#448). A format-2 shapeless pickle carries an empty
+# _edge_names — it would load fine and then answer None to every
+# name_between, so geocode_intersection would report every street in that
+# city as unresolved until the release changed. Same remedy: a clean miss.
+GRAPH_DISK_FORMAT = 3
 GRAPH_DISK_MAX_FILES = 16
 GRAPH_DISK_SUBDIR = "graphs"
 GRAPH_DISK_AVOID_MARKER = "avoid-"
@@ -805,10 +810,15 @@ class Graph:
             tuple[str, str], tuple[float, list[tuple[float, float]], float, bool]
         ] = {}
         # (from_node, to_node) -> the source segment's Overture names.primary,
-        # or None when the segment carried no name. Decoupled from _edge_shapes
-        # (#448) so street-name queries (geocode_intersection, map_match) can read
-        # names without paying the memory/geometry cost of want_shapes=True.
-        self._edge_names: dict[tuple[str, str], str | None] = {}
+        # for every *named* edge; an unnamed segment simply has no entry.
+        # Keyed and resolved exactly like _edge_shapes — by direction of
+        # travel, lightest parallel edge wins (see _register_name) — because
+        # a name is a property of "the segment dijkstra actually traversed",
+        # same as its shape. Populated on every graph, not just a has_shapes
+        # one (#448): geocode_intersection reads names off the cheap
+        # shapeless walk graph, and a dict of short strings costs nothing
+        # like the vertex lists want_shapes=True retains.
+        self._edge_names: dict[tuple[str, str], str] = {}
 
     def add_node(self, node_id: str, lat: float, lon: float) -> None:
         self.adjacency.setdefault(node_id, [])
@@ -828,15 +838,17 @@ class Graph:
     ) -> None:
         if a == b:
             return
+        # Names go first, before this edge joins adjacency: _register_name's
+        # parallel-edge comparison is against the edges already traversable
+        # in that direction, and this one must not be its own competitor.
+        self._register_name(a, b, weight, name)
+        if not directed:
+            self._register_name(b, a, weight, name)
         self.adjacency[a].append((b, weight, length_m))
         self._undirected_neighbors[a].add(b)
         self._undirected_neighbors[b].add(a)
         if not directed:
             self.adjacency[b].append((a, weight, length_m))
-        if name is not None:
-            self._edge_names[(a, b)] = name
-            if not directed:
-                self._edge_names[(b, a)] = name
         # On a shape-carrying graph EVERY edge registers, straight chords
         # included (empty vertices, 0.0 dropped): _register_shape's min-weight
         # rule for parallel edges only resolves the way dijkstra does if it
@@ -847,11 +859,36 @@ class Graph:
         # while reporting a deviation of 0.0.
         if self.has_shapes or shape or shape_dropped_m:
             vertices = shape or []
-            self._register_shape(a, b, weight, vertices, shape_dropped_m, False, name)
+            self._register_shape(a, b, weight, vertices, shape_dropped_m, False)
             if not directed:
                 # Same list object, flagged for reversal on read: the mirror
                 # entry costs a dict slot, not a second copy of the geometry.
-                self._register_shape(b, a, weight, vertices, shape_dropped_m, True, name)
+                self._register_shape(b, a, weight, vertices, shape_dropped_m, True)
+
+    def _register_name(self, frm: str, to: str, weight: float, name: str | None) -> None:
+        """Record `name` as the name of the frm -> to edge dijkstra would take.
+
+        The same parallel-edge rule as _register_shape: among the edges
+        traversable frm -> to, the lightest one owns the slot, and the first
+        registered keeps it on a tie. Must run before the edge joins
+        adjacency (see add_edge) so the comparison sees only its
+        predecessors. An unnamed edge that wins clears the slot rather than
+        leaving a heavier named road's name behind — name_between answering
+        "Main St" for a traversal dijkstra made over an unnamed path would
+        put a road name on a segment the route never used (#441's map_match
+        stitching is exactly that reader).
+        """
+        if to in self._undirected_neighbors[frm]:
+            # A parallel edge exists in *some* direction; only the ones
+            # traversable frm -> to compete, and adjacency lists are
+            # degree-sized, so scanning one is cheaper than a second dict.
+            prior = [w for t, w, _ in self.adjacency[frm] if t == to]
+            if prior and weight >= min(prior):
+                return
+        if name is None:
+            self._edge_names.pop((frm, to), None)
+        else:
+            self._edge_names[(frm, to)] = name
 
     def _register_shape(
         self,
@@ -861,12 +898,10 @@ class Graph:
         vertices: list[tuple[float, float]],
         dropped_m: float,
         is_reversed: bool,
-        name: str | None = None,
     ) -> None:
         existing = self._edge_shapes.get((frm, to))
         if existing is None or weight < existing[0]:
             self._edge_shapes[(frm, to)] = (weight, vertices, dropped_m, is_reversed)
-            self._edge_names[(frm, to)] = name
 
     def shape_between(self, a: str, b: str) -> tuple[list[tuple[float, float]], float]:
         """(shape vertices strictly between `a` and `b` in a -> b order, meters dropped).
@@ -890,11 +925,12 @@ class Graph:
 
     def name_between(self, a: str, b: str) -> str | None:
         """Overture names.primary of the edge dijkstra would traverse from
-        `a` to `b`, or None when that segment carried no name (or this graph
-        has no name/shape data at all — see add_edge). Direction-agnostic: a
-        road's name doesn't flip with travel direction, so this is just
-        shape_between's parallel-edge resolution rule (same (a, b) key) minus
-        the reversal shape_between needs for its vertex order.
+        `a` to `b`, or None when that segment carried no name (or no edge
+        runs a -> b). Direction-agnostic: a road's name doesn't flip with
+        travel direction, so this is just shape_between's parallel-edge
+        resolution rule (same (a, b) key, see _register_name) minus the
+        reversal shape_between needs for its vertex order. Answered on
+        every graph, shapeless ones included (#448).
         """
         return self._edge_names.get((a, b))
 
