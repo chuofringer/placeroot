@@ -9,6 +9,18 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `transit_stops_near(lat, lon, radius_m=800, limit=10, kind=None)` MCP tool
+  (#453): nearest bus/rail/subway/tram/ferry stops, a filtered view over the
+  same Overture base/infrastructure `subtype='transit'` rows infrastructure_at
+  reads. Restricted to real, boardable stop classes (bus_stop, bus_station,
+  railway_station, railway_halt, subway_station, tram_stop, ferry_terminal,
+  aerialway_station) rather than the unfiltered layer, which is dominated by
+  bicycle_parking and by platform/stop_position (OSM's per-geometry re-tagging
+  of the same physical stop). Falls back to platform/stop_position rows, with
+  a note, when zero stop-class rows are within radius; `kind` restricts to one
+  class and rejects anything else with a bad_request naming the accepted
+  values. No schedules, no live arrivals — Overture's base coverage is a
+  static, OSM-derived conflation and carries neither.
 - `geocode_intersection(street_a, street_b, city)` MCP tool (#448): locate where
   two named streets cross within a resolved city anchor. Reuses `geocode_address`'s
   anchor-resolution and USPS abbreviation normalization (Parkway/Pkwy, West/W,
