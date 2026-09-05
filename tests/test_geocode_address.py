@@ -856,3 +856,191 @@ def test_the_neighbor_query_reads_the_same_bbox_the_exact_scan_used():
 ])
 def test_leading_int_parse(number, expected):
     assert geocode._parse_leading_int(number) == expected
+
+
+# --- #465: "A & B, City" is an intersection, not a street -------------------
+
+
+def _spy_intersection(monkeypatch):
+    """Swap geocode_intersection for a recorder, so the routing is tested
+    without a street graph. Returns the list of (street_a, street_b, city)."""
+    calls: list[tuple[str, str, str]] = []
+
+    def fake(street_a, street_b, city):
+        calls.append((street_a, street_b, city))
+        return {
+            "results": [{"lat": 40.753, "lon": -73.981, "streets": [street_a, street_b]}],
+            "anchor": {"name": "New York", "id": "x", "country": "US", "admin_context": []},
+        }
+
+    monkeypatch.setattr(geocode, "geocode_intersection", fake)
+    return calls
+
+
+@pytest.mark.parametrize("query", [
+    "5th Ave & 42nd St, New York, NY",
+    "5th Ave&42nd St, New York, NY",
+    "5th Ave and 42nd St, New York, NY",
+    "5th Ave AND 42nd St, New York, NY",
+    "5th Ave at 42nd St, New York, NY",
+    "5th Ave / 42nd St, New York, NY",
+    "5th Ave @ 42nd St, New York, NY",
+])
+def test_intersection_syntax_is_routed_to_geocode_intersection(monkeypatch, query):
+    """Corpus a07: the street half is a crossing, which no address scan can
+    find. It goes to the tool built for it, with the parsed city."""
+    calls = _spy_intersection(monkeypatch)
+
+    result = geocode.geocode_address(query)
+
+    assert calls == [("5th Ave", "42nd St", "New York, NY")]
+    assert result["delegated_to"] == "geocode_intersection"
+    assert result["results"][0]["streets"] == ["5th Ave", "42nd St"]
+    assert (result["results"][0]["lat"], result["results"][0]["lon"]) == (40.753, -73.981)
+
+
+def test_a_house_numbered_query_never_delegates(monkeypatch):
+    """A number means a doorway was asked for; "&" in what follows is not a
+    crossing to look up. Parsed and explicit numbers alike."""
+    calls = _spy_intersection(monkeypatch)
+
+    result = geocode.geocode_address("1600 Amphitheatre Parkway & Main St, Mountain View")
+    assert calls == []
+    assert "delegated_to" not in result
+
+    result = geocode.geocode_address("5th Ave & 42nd St, New York, NY", number="350")
+    assert calls == []
+    assert "delegated_to" not in result
+
+
+@pytest.mark.parametrize("query", [
+    "Rock and Roll Blvd, Cleveland",
+    "Rock and Roll Hall of Fame Blvd, Cleveland",
+    "Market Street, San Francisco",
+    # Three pieces or a bare number on one side is not a crossing this
+    # parser vouches for.
+    "A St & B St & C St, San Francisco",
+    "5 & 42, New York, NY",
+])
+def test_a_street_name_containing_and_is_still_one_street(monkeypatch, query):
+    """"and" only splits when both halves look like streets: "Rock" does not,
+    so the whole name scans as one street, as it always has."""
+    calls = _spy_intersection(monkeypatch)
+
+    result = geocode.geocode_address(query)
+
+    assert calls == []
+    assert "delegated_to" not in result
+
+
+def test_structured_params_route_to_the_intersection_too(monkeypatch):
+    calls = _spy_intersection(monkeypatch)
+
+    result = geocode.geocode_address(street="5th Ave & 42nd St", city="New York, NY")
+    assert calls == [("5th Ave", "42nd St", "New York, NY")]
+    assert result["delegated_to"] == "geocode_intersection"
+
+    # An explicit city wins over the parsed one, as it does for a street scan.
+    calls.clear()
+    geocode.geocode_address("5th Ave & 42nd St, Brooklyn", city="Manhattan, New York")
+    assert calls == [("5th Ave", "42nd St", "Manhattan, New York")]
+
+
+def test_an_intersection_with_no_city_is_the_usual_no_anchor_empty(monkeypatch):
+    calls = _spy_intersection(monkeypatch)
+    result = geocode.geocode_address("5th Ave & 42nd St")
+    assert calls == []
+    assert result["results"] == []
+    assert result["note"] == geocode._ADDRESS_NO_ANCHOR_NOTE
+
+
+def test_the_server_tool_passes_the_delegation_through(monkeypatch):
+    _spy_intersection(monkeypatch)
+    result = server.geocode_address("5th Ave & 42nd St, New York, NY")
+    assert result["delegated_to"] == "geocode_intersection"
+    assert result["results"][0]["streets"] == ["5th Ave", "42nd St"]
+
+
+@pytest.mark.parametrize("street, expected", [
+    ("5th Ave & 42nd St", ("5th Ave", "42nd St")),
+    ("Fifth Avenue and Broadway", ("Fifth Avenue", "Broadway")),
+    ("Main St at Church Rd", ("Main St", "Church Rd")),
+    ("Broadway / Wall Street", ("Broadway", "Wall Street")),
+    # Symbol separators need only a letter on each side and no bare number.
+    ("Broadway & Wall", ("Broadway", "Wall")),
+    # Word separators need a street-type word or ordinal on each side.
+    ("Main and Broadway", None),
+    ("Rock and Roll Hall of Fame Blvd", None),
+    ("Land at Sea Rd", None),
+    ("Market Street", None),
+    ("A & B & C", None),
+    ("5 & 42", None),
+    ("& 42nd St", None),
+])
+def test_split_intersection_table(street, expected):
+    assert geocode._split_intersection(street) == expected
+
+
+# --- #465: a namesake runner-up is labelled by type -------------------------
+
+
+def _namesake_anchor(monkeypatch):
+    """geocode ranks the *region* New York above the *locality* New York;
+    the region is too broad and the fallback picks the locality. Same name,
+    same country: only the type tells them apart."""
+    region = {
+        "id": "gers-div-ny-state", "name": "New York", "type": "region",
+        "country": "US", "admin_context": ["United States"],
+        "lat": 42.9, "lon": -75.5,
+    }
+    locality = {
+        "id": "gers-div-nyc", "name": "New York", "type": "locality",
+        "country": "US", "admin_context": ["United States", "New York"],
+        "lat": 40.7127, "lon": -74.006,
+    }
+    bboxes = {
+        "gers-div-ny-state": (-79.76, 40.50, -71.86, 45.01),
+        "gers-div-nyc": (-74.26, 40.48, -73.70, 40.92),
+    }
+    monkeypatch.setattr(
+        geocode, "geocode_detailed", lambda *a, **k: {"results": [region, locality]}
+    )
+    monkeypatch.setattr(geocode, "_warm_division_area_bboxes", lambda ids: None)
+    monkeypatch.setattr(geocode, "_anchor_bbox", lambda anchor_id, table: bboxes.get(anchor_id))
+
+
+def test_a_namesake_runner_up_is_told_apart_by_type(monkeypatch):
+    """The note used to read "New York (United States, US) ... inside New
+    York (United States, US)", which is how #465 was filed: it looked like
+    the scan re-picked the state."""
+    _namesake_anchor(monkeypatch)
+
+    resolved = geocode._resolve_city_anchor("New York, NY", action_label="scan")
+
+    assert resolved.anchor["id"] == "gers-div-nyc"
+    note = resolved.notes[0]
+    assert "resolved to New York (region; United States, US)" in note
+    assert "ran inside New York (locality; New York, United States, US)" in note
+    assert "far larger than a city" in note
+    assert "the next candidate of that name in the same country" in note
+
+
+def test_a_namesake_pair_of_the_same_type_is_told_apart_by_its_state():
+    """Springfield MA -> Springfield IL are both localities, so the type
+    alone would still print the same label twice; the admin chain, most
+    specific first, is what tells them apart."""
+    result = geocode.geocode_address("Main St, Springfield")
+
+    assert result["anchor"]["id"] == "gers-div-springfield-il"
+    assert "resolved to Springfield (locality; Massachusetts, United States, US)" in result["note"]
+    assert "ran inside Springfield (locality; Illinois, United States, US)" in result["note"]
+    assert "the next candidate of that name in the same country" in result["note"]
+
+
+def test_the_plain_country_suffix_is_unchanged_and_the_typed_one_is_explicit():
+    row = {"type": "locality", "country": "US", "admin_context": ["United States", "Illinois"]}
+    assert geocode._country_suffix(row) == " (United States, US)"
+    typed = geocode._country_suffix(row, with_type=True)
+    assert typed == " (locality; Illinois, United States, US)"
+    assert geocode._country_suffix({"name": "x"}, with_type=True) == ""
+    assert geocode._country_suffix({"country": "GB"}, with_type=True) == " (GB)"

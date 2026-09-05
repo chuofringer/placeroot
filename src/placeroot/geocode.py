@@ -6053,11 +6053,31 @@ def _intersection_unresolved_anchor_note(
     return note
 
 
-def _country_suffix(row: dict) -> str:
-    """" (United Kingdom, GB)" — whatever of the two a row actually carries."""
-    label = (row.get("admin_context") or [None])[0]
+def _country_suffix(row: dict, *, with_type: bool = False) -> str:
+    """" (United Kingdom, GB)" — whatever of the two a row actually carries.
+
+    `with_type` (#465) is for the one place two rows of the *same name and
+    country* are named side by side — the runner-up note below — and spells
+    out what tells them apart: the division type and the whole admin chain,
+    most specific first: " (region; United States, US)" against
+    " (locality; New York, United States, US)", or Springfield
+    " (locality; Massachusetts, United States, US)" against
+    " (locality; Illinois, United States, US)". "New York, NY" resolves to
+    the *region* New York, too broad, and falls back to the *locality* New
+    York; with the plain suffix both halves of that note read "New York
+    (United States, US)" and the sentence looks like it re-picked the state
+    (which is how #465 was filed).
+    """
+    chain = [p for p in (row.get("admin_context") or []) if p]
     code = row.get("country")
-    parts = [p for p in (label, code) if p]
+    if with_type:
+        # "; " between type and place so the type is not read as one more
+        # element of the admin chain.
+        parts = [*reversed(chain), *([code] if code else [])]
+        head = f"{row['type']}; " if row.get("type") else ""
+        body = head + ", ".join(parts)
+        return f" ({body})" if body else ""
+    parts = [p for p in (chain[:1] + [code]) if p]
     return f" ({', '.join(parts)})" if parts else ""
 
 
@@ -6134,11 +6154,16 @@ def _resolve_city_anchor(
             if candidate_bbox is None or _anchor_too_broad(candidate_bbox):
                 continue
             anchor, bbox = row, candidate_bbox
+            # #465: a namesake pair ("New York" the region -> "New York"
+            # the locality) is only tellable apart by type; otherwise the
+            # note names the same label twice.
+            same_name = top["name"] == anchor["name"]
             notes.append(
-                f"\"{city}\" resolved to {top['name']}{_country_suffix(top)}, "
+                f"\"{city}\" resolved to {top['name']}"
+                f"{_country_suffix(top, with_type=same_name)}, "
                 f"{top_reason}, so the {action_label} ran inside "
-                f"{anchor['name']}{_country_suffix(anchor)} -- the next candidate of "
-                f"that name in the same country."
+                f"{anchor['name']}{_country_suffix(anchor, with_type=same_name)} -- "
+                f"the next candidate of that name in the same country."
             )
             break
 
@@ -6152,6 +6177,72 @@ def _resolve_city_anchor(
     )
 
 
+# --- #465: "A & B, City" is an intersection, not a street ------------------
+
+# The separators that write a street crossing in one field. The symbols are
+# unambiguous; "and"/"at" are ordinary English that also appears *inside*
+# street names ("Rock and Roll Hall of Fame Blvd"), so they only split when
+# both halves independently look like streets (_looks_like_street, strict).
+_INTERSECTION_SYMBOL_SPLIT_RE = re.compile(r"\s*&\s*|\s+@\s+|\s+/\s+")
+_INTERSECTION_WORD_SPLIT_RE = re.compile(r"\s+(?:and|at)\s+", re.IGNORECASE)
+
+# What makes a half of "A and B" a street rather than half of one name: a
+# street-type word (the USPS table geocode_address already matches through,
+# plus the common types it has no abbreviation pair for and the numbered-
+# route types) or an ordinal ("5th", "42nd", "Fifth").
+_STREET_TYPE_WORDS: frozenset[str] = (
+    frozenset(_STREET_SUFFIX_VARIANTS)
+    | _LEADING_STREET_TYPES
+    | frozenset({
+        "way", "terrace", "ter", "circle", "cir", "square", "sq", "trail", "trl",
+        "alley", "aly", "expressway", "expy", "freeway", "fwy", "turnpike",
+        "tpke", "plaza", "plz", "broadway", "crescent", "cres", "loop", "path",
+        "row", "walk", "esplanade", "promenade", "quay", "embankment",
+    })
+)
+
+
+def _looks_like_street(half: str, *, strict: bool) -> bool:
+    """Is this half of a split query a street name and not a fragment?
+
+    Loose (symbol separators): non-empty, has a letter, is not a bare number.
+    Strict (word separators): additionally carries a street-type word or an
+    ordinal token, so "Rock" (of "Rock and Roll ...") fails and the query
+    falls through to today's single-street scan.
+    """
+    tokens = half.split()
+    if not tokens or not any(ch.isalpha() for ch in half):
+        return False
+    if not strict:
+        return True
+    for tok in tokens:
+        key = tok.strip(".").lower()
+        if key in _STREET_TYPE_WORDS or _ORDINAL_RE.match(key) or key in _WORD_ORDINALS:
+            return True
+    return False
+
+
+def _split_intersection(street: str) -> tuple[str, str] | None:
+    """"5th Ave & 42nd St" -> ("5th Ave", "42nd St"); a plain street -> None.
+
+    Exactly two halves, each street-looking (see _looks_like_street); any
+    other shape — three pieces, an empty side, a half that is only a number
+    — is not an intersection this parser will vouch for, and the caller
+    scans the text as one street as it always has.
+    """
+    for pattern, strict in (
+        (_INTERSECTION_SYMBOL_SPLIT_RE, False),
+        (_INTERSECTION_WORD_SPLIT_RE, True),
+    ):
+        parts = [p.strip() for p in pattern.split(street)]
+        if len(parts) != 2:
+            continue
+        if all(_looks_like_street(p, strict=strict) for p in parts):
+            return parts[0], parts[1]
+        return None
+    return None
+
+
 def geocode_address(
     query: str = "",
     limit: int = ADDRESS_DEFAULT_LIMIT,
@@ -6160,6 +6251,15 @@ def geocode_address(
     city: str | None = None,
 ) -> dict:
     """"Market Street, San Francisco" -> the address points on that street.
+
+    #465: a street half written as a crossing — "5th Ave & 42nd St", "5th
+    Ave and 42nd St", "5th Ave at 42nd St", "5th Ave / 42nd St" — with no
+    house number is not a street name to scan for (nothing is addressed
+    "5th Ave & 42nd St"); it is routed to geocode_intersection with the same
+    city, and the answer is that tool's, marked "delegated_to":
+    "geocode_intersection". "and"/"at" only split when both halves look
+    like streets (a street-type word or an ordinal each), so "Rock and Roll
+    Hall of Fame Blvd, Cleveland" still scans as one street.
 
     The forward counterpart to address_at: a street-level *search*, where
     geocode answers at city/neighborhood granularity and never at a doorway.
@@ -6235,6 +6335,17 @@ def geocode_address(
         return {"results": [], "note": _ADDRESS_NO_STREET_NOTE}
     if not city:
         return {"results": [], "note": _ADDRESS_NO_ANCHOR_NOTE}
+
+    # #465: no house number and a street half shaped like "A & B" is a
+    # crossing, which the address scan can never find (no address point is
+    # on a street named "5th Ave & 42nd St"). Hand it to the tool built for
+    # it, with the same city, and say so in the payload.
+    if number is None:
+        crossing = _split_intersection(street)
+        if crossing is not None:
+            result = geocode_intersection(crossing[0], crossing[1], city)
+            result["delegated_to"] = "geocode_intersection"
+            return result
 
     resolved = _resolve_city_anchor(city, action_label="scan")
     if resolved.bbox is None:
@@ -6365,6 +6476,15 @@ _STREET_DIRECTIONAL_SUFFIXES: frozenset[str] = frozenset({
 })
 
 
+def _query_has_directional(variants: set[str]) -> bool:
+    """Did the caller's street carry a directional token ("East 42nd St",
+    "Main St N")? _street_variants only respells the tokens the query has,
+    so a directional in any variant means one in the query."""
+    return any(
+        tok in _STREET_DIRECTIONAL_SUFFIXES for v in variants for tok in v.split()
+    )
+
+
 def _matches_street(edge_name: str | None, variants: set[str]) -> bool:
     """Whether an edge's street name is one of the caller's street's spellings.
 
@@ -6372,6 +6492,14 @@ def _matches_street(edge_name: str | None, variants: set[str]) -> bool:
     suffixes, cardinals, ordinals). Equality, or equality followed only by
     directional tokens (_STREET_DIRECTIONAL_SUFFIXES) — never an arbitrary
     longer name.
+
+    #465: when the query carries no directional at all, a single *leading*
+    directional on the map's name is dropped too, so "42nd St" reaches
+    Manhattan's "East 42nd Street" and "West 42nd Street" (5th Avenue is
+    the E/W divide; no segment is named plain "42nd Street" there). A query
+    that does name a side keeps exact matching — "East 42nd St" never
+    matches "West 42nd Street" — and only whole tokens strip, so "Main St"
+    still does not match "Main Street North Extension".
     """
     if not edge_name:
         return False
@@ -6383,6 +6511,13 @@ def _matches_street(edge_name: str | None, variants: set[str]) -> bool:
             rest = enl[len(v) + 1:].split()
             if all(tok in _STREET_DIRECTIONAL_SUFFIXES for tok in rest):
                 return True
+    tokens = enl.split()
+    if (
+        len(tokens) > 1
+        and tokens[0] in _STREET_DIRECTIONAL_SUFFIXES
+        and not _query_has_directional(variants)
+    ):
+        return " ".join(tokens[1:]) in variants
     return False
 
 
@@ -6558,7 +6693,12 @@ def geocode_intersection(
         if matched_pair is None:
             continue
         dist_m = geo.haversine_m(center_lat, center_lon, nlat, nlon)
-        if dist_m > radius_m:
+        # #465: a junction sitting on the rim of the extracted graph is still
+        # a junction in this city -- 5th Avenue & 42nd Street lies 5,003 m
+        # from New York's anchor point against a 5,000 m walk radius and was
+        # dropped by 3 m. Allow one cluster width of slack past the radius;
+        # the graph itself already bounds how far out a node can be.
+        if dist_m > radius_m + INTERSECTION_CLUSTER_M:
             continue
         crossings.append({
             "lat": nlat,
