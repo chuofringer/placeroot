@@ -9,6 +9,13 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `geocode_intersection(street_a, street_b, city)` MCP tool (#448): locate where
+  two named streets cross within a resolved city anchor. Reuses `geocode_address`'s
+  anchor-resolution and USPS abbreviation normalization (Parkway/Pkwy, West/W,
+  NW/Northwest, 5th/Fifth), extracts the walk graph around the anchor center, and
+  returns intersection coordinates ordered nearest to the city center first (capped
+  at 5). An unresolvable street returns empty results with an explanatory note rather
+  than an error.
 - `avoid` on `route` and `from_to` (#425): `avoid=["motorway"]` (and/or
   `"trunk"`) keeps a drive off those road classes and their on/off ramps —
   the "no highways" ask Google Directions, Mapbox and Valhalla all answer

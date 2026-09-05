@@ -140,6 +140,10 @@
       "description": "Street address -> coordinates: \"1600 Amphitheatre Parkway, Mountain View\"."
     },
     {
+      "name": "geocode_intersection",
+      "description": "Locate where two named streets cross: \"5th Avenue\", \"Main Street\", \"Portland\"."
+    },
+    {
       "name": "simplify_geometry",
       "description": "Simplify a GeoJSON geometry to fit a token budget, reporting what was lost."
     },

@@ -432,6 +432,13 @@ def build_divisions() -> list[tuple]:
         "gers-div-tx", "Texas", "region", "US", "US-TX", 31.0, -100.0,
         _chain("United States", "Texas"), population=30_503_301,
     )
+    # #448: the city anchor for geocode_intersection fixture tests over the
+    # 20x20 named street grid (scripts/build_routing_fixture.py's ORIGIN_LAT/LON).
+    add(
+        "gers-div-grid-city", "Grid City", "locality", "US", "US-NY",
+        40.74, -73.99, _chain("United States", "New York", "Grid City"),
+        population=100_000,
+    )
     return rows
 
 

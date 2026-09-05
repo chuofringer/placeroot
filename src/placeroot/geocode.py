@@ -437,6 +437,7 @@ from placeroot import (
     overture,
     progress,
     release,
+    routing,
     trace,
 )
 from placeroot.errors import AmbiguousArea, AmbiguousPlace, AnchoredNotFound
@@ -6275,3 +6276,194 @@ def geocode_address(
     if degraded:
         payload["degraded_fields"] = degraded
     return payload
+
+
+# --- #448: geocode_intersection --------------------------------------------
+
+INTERSECTION_MAX_LIMIT = 5
+
+
+def geocode_intersection(
+    street_a: str = "",
+    street_b: str = "",
+    city: str = "",
+) -> dict:
+    """"5th Avenue", "Main Street", "Portland" -> coordinate where they cross.
+
+    Locates where two named streets intersect within a resolved city anchor.
+
+    Four steps:
+    1. Parse and validate street_a, street_b, and city.
+    2. Resolve the city anchor extent (same anchor-resolution approach as
+       geocode_address). No extent or too broad returns an empty list plus a note.
+    3. Build or retrieve the walk graph around the anchor center (bounded by
+       routing.WALK_MAX_RADIUS_M) with edge names populated (want_shapes=True).
+    4. Find graph nodes that have at least one incident edge matching street_a
+       and at least one incident edge matching street_b, using the same
+       _street_variants normalizer as geocode_address.
+
+    Returns {"results": [{"lat": ..., "lon": ..., "streets": [street_a, street_b],
+    "anchor": {"name": ..., "country": ...}}, ...], "note": ...}.
+    When multiple crossings exist, results are ordered nearest to the city center
+    first and capped at 5. If one or both streets do not resolve in the city,
+    returns empty results and a note naming the unresolved street.
+    """
+    street_a = (street_a or "").strip()
+    street_b = (street_b or "").strip()
+    city = (city or "").strip()
+
+    if not city:
+        return {"results": [], "note": _ADDRESS_NO_ANCHOR_NOTE}
+    if not street_a and not street_b:
+        return {
+            "results": [],
+            "note": (
+                "no streets to search for. Pass two street names and a city to "
+                "find their intersection."
+            ),
+        }
+    if not street_a:
+        return {
+            "results": [],
+            "note": (
+                f"no first street provided to cross with \"{street_b}\". Pass two street "
+                "names and a city to find their intersection."
+            ),
+        }
+    if not street_b:
+        return {
+            "results": [],
+            "note": (
+                f"no second street provided to cross with \"{street_a}\". Pass two street "
+                "names and a city to find their intersection."
+            ),
+        }
+
+    local_table = _local_divisions_table()
+    candidates = [
+        r for r in geocode_detailed(city, limit=3, include_country=True)["results"]
+        if r.get("id")
+    ]
+    top = candidates[0] if candidates else None
+    if top is not None:
+        _warm_division_area_bboxes(
+            [top["id"]] + [r["id"] for r in candidates[1:] if _same_country(r, top)]
+        )
+    anchor = top
+    bbox = _anchor_bbox(anchor["id"], local_table) if anchor else None
+    notes: list[str] = []
+    rejected: list[dict] = []
+    too_broad: tuple[float, float, float, float] | None = None
+    top_reason = "which Overture carries no boundary extent for"
+    if bbox is not None and _anchor_too_broad(bbox):
+        too_broad, bbox = bbox, None
+        top_reason = f"whose boundary ({_bbox_span_label(too_broad)}) is far larger than a city"
+    if bbox is None and top is not None:
+        for row in candidates[1:]:
+            if not _same_country(row, top):
+                rejected.append(row)
+                continue
+            candidate_bbox = _anchor_bbox(row["id"], local_table)
+            if candidate_bbox is None or _anchor_too_broad(candidate_bbox):
+                continue
+            anchor, bbox = row, candidate_bbox
+            notes.append(
+                f"\"{city}\" resolved to {top['name']}{_country_suffix(top)}, "
+                f"{top_reason}, so the search ran inside "
+                f"{anchor['name']}{_country_suffix(anchor)} -- the next candidate of "
+                f"that name in the same country."
+            )
+            break
+    if bbox is None:
+        return {
+            "results": [],
+            "note": _address_unresolved_anchor_note(city, top, rejected, too_broad),
+        }
+
+    center_lat = anchor["lat"]
+    center_lon = anchor["lon"]
+    graph = routing._get_or_build_graph(
+        center_lat,
+        center_lon,
+        routing.WALK_MAX_RADIUS_M,
+        mode="walk",
+        speed_m_s=None,
+        want_shapes=True,
+    )
+
+    variants_a = {v.lower() for v in _street_variants(street_a)}
+    variants_b = {v.lower() for v in _street_variants(street_b)}
+    found_a = False
+    found_b = False
+
+    for edge_name in graph._edge_names.values():
+        if edge_name:
+            enl = edge_name.lower()
+            if enl in variants_a:
+                found_a = True
+            if enl in variants_b:
+                found_b = True
+
+    crossings: list[dict] = []
+    seen_coords: set[tuple[float, float]] = set()
+
+    for node_id, (nlat, nlon) in graph.coords.items():
+        coord_key = (round(nlat, 7), round(nlon, 7))
+        if coord_key in seen_coords:
+            continue
+        nbrs = graph._undirected_neighbors.get(node_id, set())
+        edges_a: list[tuple[str, str]] = []
+        edges_b: list[tuple[str, str]] = []
+        for nbr in nbrs:
+            edge_name = graph.name_between(node_id, nbr) or graph.name_between(nbr, node_id)
+            if edge_name:
+                enl = edge_name.lower()
+                if enl in variants_a:
+                    edges_a.append((nbr, edge_name))
+                if enl in variants_b:
+                    edges_b.append((nbr, edge_name))
+
+        matched_pair: tuple[str, str] | None = None
+        for nbr_a, name_a in edges_a:
+            for nbr_b, name_b in edges_b:
+                if nbr_a != nbr_b:
+                    matched_pair = (name_a, name_b)
+                    break
+            if matched_pair:
+                break
+
+        if matched_pair:
+            seen_coords.add(coord_key)
+            dist_m = geo.haversine_m(center_lat, center_lon, nlat, nlon)
+            crossings.append({
+                "lat": nlat,
+                "lon": nlon,
+                "streets": [matched_pair[0], matched_pair[1]],
+                "anchor": {
+                    "name": anchor["name"],
+                    "country": anchor.get("country"),
+                },
+                "_dist": dist_m,
+            })
+
+    crossings.sort(key=lambda c: c["_dist"])
+    results = [
+        {k: v for k, v in c.items() if k != "_dist"}
+        for c in crossings[:INTERSECTION_MAX_LIMIT]
+    ]
+
+    if not results:
+        if not found_a and not found_b:
+            notes.append(f"neither \"{street_a}\" nor \"{street_b}\" resolved in {anchor['name']}")
+        elif not found_a:
+            notes.append(f"\"{street_a}\" did not resolve in {anchor['name']}")
+        elif not found_b:
+            notes.append(f"\"{street_b}\" did not resolve in {anchor['name']}")
+        else:
+            notes.append(f"\"{street_a}\" and \"{street_b}\" do not intersect in {anchor['name']}")
+
+    payload: dict = {"results": results}
+    if notes:
+        payload["note"] = " ".join(notes)
+    return payload
+
