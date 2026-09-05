@@ -805,13 +805,9 @@ class Graph:
             tuple[str, str], tuple[float, list[tuple[float, float]], float, bool]
         ] = {}
         # (from_node, to_node) -> the source segment's Overture names.primary,
-        # or None when the segment carried no name. Piggybacks on the exact
-        # same registration/parallel-edge rule as _edge_shapes (see add_edge)
-        # rather than a separate min-weight comparison — a name is a property
-        # of "the segment dijkstra actually traversed," same as its shape, so
-        # the two travel together. Only populated on a has_shapes graph (see
-        # add_edge); map_match's stitching (#441) is the first and only
-        # reader (name_between), always via a want_shapes=True graph.
+        # or None when the segment carried no name. Decoupled from _edge_shapes
+        # (#448) so street-name queries (geocode_intersection, map_match) can read
+        # names without paying the memory/geometry cost of want_shapes=True.
         self._edge_names: dict[tuple[str, str], str | None] = {}
 
     def add_node(self, node_id: str, lat: float, lon: float) -> None:
@@ -837,6 +833,10 @@ class Graph:
         self._undirected_neighbors[b].add(a)
         if not directed:
             self.adjacency[b].append((a, weight, length_m))
+        if name is not None:
+            self._edge_names[(a, b)] = name
+            if not directed:
+                self._edge_names[(b, a)] = name
         # On a shape-carrying graph EVERY edge registers, straight chords
         # included (empty vertices, 0.0 dropped): _register_shape's min-weight
         # rule for parallel edges only resolves the way dijkstra does if it

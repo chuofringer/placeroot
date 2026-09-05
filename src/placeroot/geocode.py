@@ -423,6 +423,7 @@ import threading
 import time
 import unicodedata
 from collections import OrderedDict
+from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
@@ -5963,6 +5964,11 @@ _ADDRESS_NO_ANCHOR_NOTE = (
     "\"Market Street, San Francisco\" -- or pass the `city` parameter."
 )
 
+_INTERSECTION_NO_ANCHOR_NOTE = (
+    "no city to search in. Pass `city` to locate the intersection within a "
+    "specific city or town (e.g. \"5th Avenue\", \"Main Street\", \"Portland\")."
+)
+
 _ADDRESS_NO_STREET_NOTE = (
     "no street to search for. Pass a street name, either as the part before the "
     "comma (\"1600 Amphitheatre Parkway, Mountain View\") or as the `street` "
@@ -6013,6 +6019,40 @@ def _address_unresolved_anchor_note(
     return note
 
 
+def _intersection_unresolved_anchor_note(
+    city: str,
+    anchor: dict | None,
+    rejected: list[dict] | None = None,
+    too_broad: tuple[float, float, float, float] | None = None,
+) -> str:
+    if anchor is None:
+        return (
+            f"\"{city}\" did not resolve to any place, so there was no city to "
+            f"search intersections within. Check the spelling, or try "
+            f"geocode(\"{city}\") to see what the name does match."
+        )
+    if too_broad is not None:
+        note = (
+            f"\"{city}\" resolved to {anchor['name']}{_country_suffix(anchor)}, whose "
+            f"boundary spans {_bbox_span_label(too_broad)} -- far larger than a city. "
+            f"Name the city or town you mean, and pass the region after it if the "
+            f"name is ambiguous (\"Springfield, IL\")."
+        )
+    else:
+        note = (
+            f"\"{city}\" resolved to {anchor['name']}{_country_suffix(anchor)}, but Overture "
+            f"carries no boundary extent for it -- only a point. Try a larger "
+            f"containing place (the city rather than the neighborhood)."
+        )
+    if rejected:
+        names = ", ".join(f"{r['name']}{_country_suffix(r)}" for r in rejected)
+        note += (
+            f" Same-named candidates in a different country do exist ({names}), but "
+            f"searching inside one would answer about the wrong place entirely."
+        )
+    return note
+
+
 def _country_suffix(row: dict) -> str:
     """" (United Kingdom, GB)" — whatever of the two a row actually carries."""
     label = (row.get("admin_context") or [None])[0]
@@ -6043,6 +6083,73 @@ def _same_country(a: dict, b: dict) -> bool:
     if ctx_a and ctx_b:
         return ctx_a[0] == ctx_b[0]
     return False
+
+
+@dataclass
+class _ResolvedAnchor:
+    anchor: dict | None
+    bbox: tuple[float, float, float, float] | None
+    notes: list[str]
+    top: dict | None
+    rejected: list[dict]
+    too_broad: tuple[float, float, float, float] | None
+
+
+def _resolve_city_anchor(
+    city: str,
+    *,
+    action_label: str = "scan",
+) -> _ResolvedAnchor:
+    """Resolve the city anchor extent for geocode_address / geocode_intersection.
+
+    Returns the resolved anchor and bounding box (or None if unresolved),
+    along with any runner-up fallback notes or metadata for generating
+    unresolved-anchor notes.
+    """
+    local_table = _local_divisions_table()
+    candidates = [
+        r for r in geocode_detailed(city, limit=3, include_country=True)["results"]
+        if r.get("id")
+    ]
+    top = candidates[0] if candidates else None
+    if top is not None:
+        _warm_division_area_bboxes(
+            [top["id"]] + [r["id"] for r in candidates[1:] if _same_country(r, top)]
+        )
+    anchor = top
+    bbox = _anchor_bbox(anchor["id"], local_table) if anchor else None
+    notes: list[str] = []
+    rejected: list[dict] = []
+    too_broad: tuple[float, float, float, float] | None = None
+    top_reason = "which Overture carries no boundary extent for"
+    if bbox is not None and _anchor_too_broad(bbox):
+        too_broad, bbox = bbox, None
+        top_reason = f"whose boundary ({_bbox_span_label(too_broad)}) is far larger than a city"
+    if bbox is None and top is not None:
+        for row in candidates[1:]:
+            if not _same_country(row, top):
+                rejected.append(row)
+                continue
+            candidate_bbox = _anchor_bbox(row["id"], local_table)
+            if candidate_bbox is None or _anchor_too_broad(candidate_bbox):
+                continue
+            anchor, bbox = row, candidate_bbox
+            notes.append(
+                f"\"{city}\" resolved to {top['name']}{_country_suffix(top)}, "
+                f"{top_reason}, so the {action_label} ran inside "
+                f"{anchor['name']}{_country_suffix(anchor)} -- the next candidate of "
+                f"that name in the same country."
+            )
+            break
+
+    return _ResolvedAnchor(
+        anchor=anchor if bbox is not None else None,
+        bbox=bbox,
+        notes=notes,
+        top=top,
+        rejected=rejected,
+        too_broad=too_broad,
+    )
 
 
 def geocode_address(
@@ -6129,65 +6236,17 @@ def geocode_address(
     if not city:
         return {"results": [], "note": _ADDRESS_NO_ANCHOR_NOTE}
 
-    local_table = _local_divisions_table()
-    candidates = [r for r in geocode_detailed(city, limit=3, include_country=True)["results"]
-                  if r["id"]]
-    top = candidates[0] if candidates else None
-    # One scan for every extent this call could possibly need, before the
-    # first one is asked for: the loop below walks the same-country
-    # runners-up, and each uncached miss would otherwise be its own ~10s
-    # division_area scan (#268 measured 116.3s for a column of Londons).
-    if top is not None:
-        _warm_division_area_bboxes(
-            [top["id"]] + [r["id"] for r in candidates[1:] if _same_country(r, top)]
-        )
-    anchor = top
-    bbox = _anchor_bbox(anchor["id"], local_table) if anchor else None
-    notes: list[str] = []
-    rejected: list[dict] = []
-    # Why the top candidate's extent was unusable, for the notes below: it
-    # either had none, or had one too big to scan. The runner-up note
-    # has to say which, or it tells the caller their state-sized "Texas" has
-    # no boundary in Overture, which is false.
-    too_broad: tuple[float, float, float, float] | None = None
-    top_reason = "which Overture carries no boundary extent for"
-    if bbox is not None and _anchor_too_broad(bbox):
-        too_broad, bbox = bbox, None
-        top_reason = f"whose boundary ({_bbox_span_label(too_broad)}) is far larger than a city"
-    if bbox is None and top is not None:
-        # A neighborhood or a place row can lose to its own containing city
-        # here: geocode ranks by name match, not by "which of these has a
-        # boundary". Try the runners-up before declaring no extent -- but
-        # only the ones in the *same country* as the top candidate (#229):
-        # every division name worth searching for is shared across
-        # borders, and a fallback that crosses one turns "no extent for the
-        # London you meant" into confidently wrong doorways in Ontario.
-        #
-        # The country test runs *first*. It is a dict comparison, while
-        # the extent lookup behind it is the 10.7s uncached division_area
-        # scan -- and a cross-border candidate can never become the anchor
-        # whatever that scan returns, so paying for it before rejecting the
-        # row was ~10s spent to reach a foregone conclusion.
-        for row in candidates[1:]:
-            if not _same_country(row, top):
-                rejected.append(row)
-                continue
-            candidate_bbox = _anchor_bbox(row["id"], local_table)
-            if candidate_bbox is None or _anchor_too_broad(candidate_bbox):
-                continue
-            anchor, bbox = row, candidate_bbox
-            notes.append(
-                f"\"{city}\" resolved to {top['name']}{_country_suffix(top)}, "
-                f"{top_reason}, so the scan ran inside "
-                f"{anchor['name']}{_country_suffix(anchor)} -- the next candidate of "
-                f"that name in the same country."
-            )
-            break
-    if bbox is None:
+    resolved = _resolve_city_anchor(city, action_label="scan")
+    if resolved.bbox is None:
         return {
             "results": [],
-            "note": _address_unresolved_anchor_note(city, top, rejected, too_broad),
+            "note": _address_unresolved_anchor_note(
+                city, resolved.top, resolved.rejected, resolved.too_broad
+            ),
         }
+    anchor = resolved.anchor
+    bbox = resolved.bbox
+    notes: list[str] = list(resolved.notes)
 
     origin = (anchor["lat"], anchor["lon"])
     patterns = _street_variants(street)
@@ -6281,6 +6340,24 @@ def geocode_address(
 # --- #448: geocode_intersection --------------------------------------------
 
 INTERSECTION_MAX_LIMIT = 5
+INTERSECTION_CLUSTER_M = 50.0
+
+
+def _matches_street(edge_name: str | None, variants: set[str]) -> bool:
+    """Match an edge's street name against normalized variants.
+
+    Supports exact equality and word-boundary prefix matching (e.g.
+    'Market St NW' or 'Market Street North' matching variant 'Market St').
+    """
+    if not edge_name:
+        return False
+    enl = edge_name.strip().lower()
+    if enl in variants:
+        return True
+    for v in variants:
+        if re.match(rf"^{re.escape(v)}(?:\b|$)", enl):
+            return True
+    return False
 
 
 def geocode_intersection(
@@ -6293,14 +6370,17 @@ def geocode_intersection(
     Locates where two named streets intersect within a resolved city anchor.
 
     Four steps:
-    1. Parse and validate street_a, street_b, and city.
+    1. Parse and validate street_a, street_b, and city. Reject self-intersections
+       where both street names normalize to the same street.
     2. Resolve the city anchor extent (same anchor-resolution approach as
        geocode_address). No extent or too broad returns an empty list plus a note.
-    3. Build or retrieve the walk graph around the anchor center (bounded by
-       routing.WALK_MAX_RADIUS_M) with edge names populated (want_shapes=True).
+    3. Build or retrieve the walk graph around the anchor center bounded by
+       the city bbox (clamped to routing.WALK_MAX_RADIUS_M).
     4. Find graph nodes that have at least one incident edge matching street_a
-       and at least one incident edge matching street_b, using the same
-       _street_variants normalizer as geocode_address.
+       and at least one incident edge matching street_b, using normalized USPS
+       variants and word-boundary prefix matching (e.g. directional suffixes).
+       Cluster near-duplicate divided-road junctions within ~50 m, keeping the
+       node nearest to the city center.
 
     Returns {"results": [{"lat": ..., "lon": ..., "streets": [street_a, street_b],
     "anchor": {"name": ..., "country": ...}}, ...], "note": ...}.
@@ -6313,7 +6393,7 @@ def geocode_intersection(
     city = (city or "").strip()
 
     if not city:
-        return {"results": [], "note": _ADDRESS_NO_ANCHOR_NOTE}
+        return {"results": [], "note": _INTERSECTION_NO_ANCHOR_NOTE}
     if not street_a and not street_b:
         return {
             "results": [],
@@ -6339,71 +6419,55 @@ def geocode_intersection(
             ),
         }
 
-    local_table = _local_divisions_table()
-    candidates = [
-        r for r in geocode_detailed(city, limit=3, include_country=True)["results"]
-        if r.get("id")
-    ]
-    top = candidates[0] if candidates else None
-    if top is not None:
-        _warm_division_area_bboxes(
-            [top["id"]] + [r["id"] for r in candidates[1:] if _same_country(r, top)]
-        )
-    anchor = top
-    bbox = _anchor_bbox(anchor["id"], local_table) if anchor else None
-    notes: list[str] = []
-    rejected: list[dict] = []
-    too_broad: tuple[float, float, float, float] | None = None
-    top_reason = "which Overture carries no boundary extent for"
-    if bbox is not None and _anchor_too_broad(bbox):
-        too_broad, bbox = bbox, None
-        top_reason = f"whose boundary ({_bbox_span_label(too_broad)}) is far larger than a city"
-    if bbox is None and top is not None:
-        for row in candidates[1:]:
-            if not _same_country(row, top):
-                rejected.append(row)
-                continue
-            candidate_bbox = _anchor_bbox(row["id"], local_table)
-            if candidate_bbox is None or _anchor_too_broad(candidate_bbox):
-                continue
-            anchor, bbox = row, candidate_bbox
-            notes.append(
-                f"\"{city}\" resolved to {top['name']}{_country_suffix(top)}, "
-                f"{top_reason}, so the search ran inside "
-                f"{anchor['name']}{_country_suffix(anchor)} -- the next candidate of "
-                f"that name in the same country."
-            )
-            break
-    if bbox is None:
+    variants_a = {v.lower() for v in _street_variants(street_a)}
+    variants_b = {v.lower() for v in _street_variants(street_b)}
+
+    if variants_a & variants_b or _matches_street(street_a, variants_b) or _matches_street(street_b, variants_a):
         return {
             "results": [],
-            "note": _address_unresolved_anchor_note(city, top, rejected, too_broad),
+            "note": (
+                f"\"{street_a}\" and \"{street_b}\" refer to the same street. "
+                "Pass two different street names to find their intersection."
+            ),
         }
+
+    resolved = _resolve_city_anchor(city, action_label="search")
+    if resolved.bbox is None:
+        return {
+            "results": [],
+            "note": _intersection_unresolved_anchor_note(
+                city, resolved.top, resolved.rejected, resolved.too_broad
+            ),
+        }
+    anchor = resolved.anchor
+    bbox = resolved.bbox
+    notes: list[str] = list(resolved.notes)
 
     center_lat = anchor["lat"]
     center_lon = anchor["lon"]
+
+    corner_dists = [
+        geo.haversine_m(center_lat, center_lon, bbox[1], bbox[0]),
+        geo.haversine_m(center_lat, center_lon, bbox[1], bbox[2]),
+        geo.haversine_m(center_lat, center_lon, bbox[3], bbox[0]),
+        geo.haversine_m(center_lat, center_lon, bbox[3], bbox[2]),
+    ]
+    max_corner_dist = max(corner_dists)
+    radius_m = min(max_corner_dist, routing.WALK_MAX_RADIUS_M)
+    radius_m = max(radius_m, 1000.0)
+    radius_m = min(radius_m, routing.WALK_MAX_RADIUS_M)
+
     graph = routing._get_or_build_graph(
         center_lat,
         center_lon,
-        routing.WALK_MAX_RADIUS_M,
+        radius_m,
         mode="walk",
         speed_m_s=None,
-        want_shapes=True,
+        want_shapes=False,
     )
 
-    variants_a = {v.lower() for v in _street_variants(street_a)}
-    variants_b = {v.lower() for v in _street_variants(street_b)}
     found_a = False
     found_b = False
-
-    for edge_name in graph._edge_names.values():
-        if edge_name:
-            enl = edge_name.lower()
-            if enl in variants_a:
-                found_a = True
-            if enl in variants_b:
-                found_b = True
-
     crossings: list[dict] = []
     seen_coords: set[tuple[float, float]] = set()
 
@@ -6416,12 +6480,14 @@ def geocode_intersection(
         edges_b: list[tuple[str, str]] = []
         for nbr in nbrs:
             edge_name = graph.name_between(node_id, nbr) or graph.name_between(nbr, node_id)
-            if edge_name:
-                enl = edge_name.lower()
-                if enl in variants_a:
-                    edges_a.append((nbr, edge_name))
-                if enl in variants_b:
-                    edges_b.append((nbr, edge_name))
+            if not edge_name:
+                continue
+            if _matches_street(edge_name, variants_a):
+                found_a = True
+                edges_a.append((nbr, edge_name))
+            if _matches_street(edge_name, variants_b):
+                found_b = True
+                edges_b.append((nbr, edge_name))
 
         matched_pair: tuple[str, str] | None = None
         for nbr_a, name_a in edges_a:
@@ -6447,9 +6513,19 @@ def geocode_intersection(
             })
 
     crossings.sort(key=lambda c: c["_dist"])
+    clustered: list[dict] = []
+    for c in crossings:
+        if not any(
+            geo.haversine_m(c["lat"], c["lon"], acc["lat"], acc["lon"]) < INTERSECTION_CLUSTER_M
+            for acc in clustered
+        ):
+            clustered.append(c)
+            if len(clustered) >= INTERSECTION_MAX_LIMIT:
+                break
+
     results = [
         {k: v for k, v in c.items() if k != "_dist"}
-        for c in crossings[:INTERSECTION_MAX_LIMIT]
+        for c in clustered
     ]
 
     if not results:
@@ -6461,6 +6537,10 @@ def geocode_intersection(
             notes.append(f"\"{street_b}\" did not resolve in {anchor['name']}")
         else:
             notes.append(f"\"{street_a}\" and \"{street_b}\" do not intersect in {anchor['name']}")
+        if max_corner_dist > routing.WALK_MAX_RADIUS_M:
+            notes.append(
+                f"(search was bounded to {routing.WALK_MAX_RADIUS_M / 1000.0:.1f} km from the center of {anchor['name']})"
+            )
 
     payload: dict = {"results": results}
     if notes:
