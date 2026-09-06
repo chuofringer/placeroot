@@ -3762,6 +3762,14 @@ def geocode_address(
     "Hauptstraße 5"). Pass `number`/`street`/`city` instead if you already
     have the parts. Unit/apartment numbers are not parsed.
 
+    A street part written as a crossing with no house number — "5th Ave &
+    42nd St, New York, NY", also "A and B", "A at B", "A / B", "A @ B" — is
+    routed to geocode_intersection with the same city and returns that tool's
+    answer ({"results": [{lat, lon, streets}], "anchor", "note"}) plus
+    "delegated_to": "geocode_intersection". "and"/"at" only split when both
+    halves look like streets (a street-type word or an ordinal each), so
+    "Rock and Roll Hall of Fame Blvd, Cleveland" is still one street.
+
     The city is resolved first and its boundary bounds the search, so a city
     that resolves to no boundary — or to something far larger than a city,
     like a state — returns an empty list plus a note rather than a scan. If a
