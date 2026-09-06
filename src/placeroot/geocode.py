@@ -3942,12 +3942,15 @@ _RESOLVE_PLACE_RADIUS_M = 20_000
 
 _MATCH_TIER_LABELS = {3: "exact", 2: "prefix", 1: "substring"}
 
-# resolve_place's `match` labels, best first. "fuzzy" (#215) is not a tier
-# the literal search can produce — it means the name doesn't contain the
-# query at all and was reached by edit distance instead — so it ranks
-# below every literal label, matching how _rank_key already orders the
-# rows themselves.
-_MATCH_LABEL_RANK = {"exact": 3, "prefix": 2, "substring": 1, "fuzzy": 0}
+# resolve_place's `match` labels, best first. "contains" (#475) is a place
+# label only — the candidate's whole name contains the whole query, or the
+# reverse — and sits above "substring", which for places also covers a
+# single shared significant word (see _place_match_label). "fuzzy" (#215)
+# is not a tier the literal search can produce — it means the name doesn't
+# contain the query at all and was reached by edit distance instead — so
+# it ranks below every literal label, matching how _rank_key already
+# orders the rows themselves.
+_MATCH_LABEL_RANK = {"exact": 4, "prefix": 3, "contains": 2, "substring": 1, "fuzzy": 0}
 
 # Small enough to filter, generic enough that requiring them in a name
 # match would be actively wrong ("the Whole Foods on Lamar" — "the"/"on"
@@ -4045,6 +4048,24 @@ def _place_match_label(name: str, query: str) -> str | None:
     Austin" vs. a place literally named "Mañana Coffee") — so containment
     is checked in both directions, and failing that, a shared significant
     word still counts as a (weaker) match.
+
+    Whole-name containment and a shared word are not the same strength of
+    claim, and labeling them both "substring" (#475) let the tie-breaks
+    decide between them: "Marina Bay Sands Singapore" answered "Freia
+    Aesthetics | Marina Square" — an aesthetics clinic that shares the one
+    word "marina" — over "Skypark#Marina Bay Sands Hotel,Singapore.", whose
+    name contains the caller's entire query. Both read as "substring"; the
+    city pin (Singapore's centroid, 1 km from the clinic and ~1.1 km from
+    the hotel, the same km once rounded) settled nothing; prominence
+    picked the clinic. So containment in either direction is its own label,
+    "contains", ranked between "prefix" and "substring": a name that holds
+    every word the caller typed, or a query that holds the candidate's
+    whole name ("the Blue Bottle Roastery Austin" vs. "Blue Bottle
+    Roastery" — the #22 shape, with the name mid-query rather than leading
+    it), beats any one-word coincidence, and the distance/prominence
+    tie-breaks then only ever choose among names that actually contain
+    each other. A shared significant word stays "substring": still related
+    enough to keep, still the weakest literal claim.
     """
     n, q = _normalize_for_match(name), _normalize_for_match(query)
     if n == q:
@@ -4052,7 +4073,7 @@ def _place_match_label(name: str, query: str) -> str | None:
     if n.startswith(q) or q.startswith(n):
         return "prefix"
     if n in q or q in n:
-        return "substring"
+        return "contains"
     n_tokens = set(_significant_tokens(n))
     q_tokens = set(_significant_tokens(q))
     if n_tokens & q_tokens:
@@ -4229,16 +4250,20 @@ def resolve_place(
     just down-ranked — see _place_match_label.
 
     Each candidate: {"id" (GERS), "kind": "division" | "place", "name",
-    "lat", "lon", "match": "exact" | "prefix" | "substring" | "fuzzy", plus
-    "admin_context" (division) or "category" (place)}. "fuzzy" (#215 for
-    divisions, #373 for places) means the name doesn't contain the query at
-    all and was reached by close spelling instead — the caller asked for
-    one string and is being handed the answer to another, so it ranks below
-    every literal label. A place candidate reached through #373's fallback
-    tiers (an alt-spelling or fuzzy match on the underlying find_places
-    call) additionally carries "matched_by": "alt_name" | "fuzzy", absent
-    on an ordinary literal match. Ranked by match tier first — kind-agnostic,
-    an exact place beats a prefix-matched division — then by prominence
+    "lat", "lon", "match": "exact" | "prefix" | "contains" | "substring" |
+    "fuzzy", plus "admin_context" (division) or "category" (place)}.
+    "contains" (#475, places only) means the name contains the whole query
+    or the query contains the whole name; "substring" for a place can mean
+    as little as one shared significant word, and for a division the usual
+    literal substring. "fuzzy" (#215 for divisions, #373 for places) means
+    the name doesn't contain the query at all and was reached by close
+    spelling instead — the caller asked for one string and is being handed
+    the answer to another, so it ranks below every literal label. A place
+    candidate reached through #373's fallback tiers (an alt-spelling or
+    fuzzy match on the underlying find_places call) additionally carries
+    "matched_by": "alt_name" | "fuzzy", absent on an ordinary literal match.
+    Ranked by match tier first — kind-agnostic, an exact place beats a
+    prefix-matched division — then by prominence
     (division rank_score / place confidence, both roughly 0-1 scales), then
     id for determinism. Never more than `limit` results.
 
