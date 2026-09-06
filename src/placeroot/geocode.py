@@ -2136,6 +2136,13 @@ def _extract_city_hint(query: str) -> tuple[str, str | None, tuple[float, float]
     Returns (place_query, city_name, coords). coords come only from the
     bundled alias list — they bound the search, they are not an answer.
     """
+    # #481: a whole-query alias wins over the trailing-city split. "Notre-Dame
+    # de Paris" ends in a well-known city, and splitting first left the head
+    # "Notre-Dame de" (no alias) with a bare city hint — the curated pin for
+    # the landmark, keyed under the full phrase, was never consulted.
+    alias = _lookup_poi_alias(query)
+    if alias:
+        return query, alias["city"], (alias["lat"], alias["lon"])
     tokens = query.strip().split()
     for n in (2, 1):
         if len(tokens) <= n:
@@ -2153,9 +2160,6 @@ def _extract_city_hint(query: str) -> tuple[str, str | None, tuple[float, float]
         if alias:
             return head, alias["city"] or city, (alias["lat"], alias["lon"])
         return head, city, None
-    alias = _lookup_poi_alias(query)
-    if alias:
-        return query, alias["city"], (alias["lat"], alias["lon"])
     return query, None, None
 
 
@@ -4773,6 +4777,21 @@ def _skip_unanchored_places_scan() -> bool:
 # metro area" as the top division match, not a general-purpose area search.
 _RESOLVE_PLACE_RADIUS_M = 20_000
 
+# #481: how far from a bundled-alias pin a candidate still counts as *the*
+# landmark the alias names. The alias table is a curated coordinate — the
+# strongest evidence this module ever holds about where a query means — and
+# a candidate sitting on it must outrank one that merely earned a better
+# string tier 4 km away ("notre dame paris" answered Notre Dame de
+# Clignancourt, a parish church in the 18th, on a prefix match while the
+# cathedral 30 m from the pin only *contained* the words). 400 m is a
+# landmark's footprint plus the shops named after it, not a neighbourhood.
+_ALIAS_PIN_RADIUS_M = 400
+# Rows fetched by the one unfiltered nearest-first scan at an alias pin —
+# the landmark itself sits metres from its pin, so the nearest couple of
+# dozen rows always include it even on a square packed with cafés and
+# souvenir shops. find_places clamps to overture.MAX_ROWS (25) regardless.
+_ALIAS_PIN_SCAN_LIMIT = 25
+
 _MATCH_TIER_LABELS = {3: "exact", 2: "prefix", 1: "substring"}
 
 # resolve_place's `match` labels, best first. "contains" (#475) is a place
@@ -5255,6 +5274,16 @@ def resolve_place(
     (division rank_score / place confidence, both roughly 0-1 scales), then
     id for determinism. Never more than `limit` results.
 
+    One exception to tier-first (#481): when the query hit the bundled
+    landmark alias table, candidates within _ALIAS_PIN_RADIUS_M of that
+    curated pin rank ahead of every other candidate, whatever their tier.
+    The alias coordinate is the strongest evidence this module has about
+    where the caller means — "notre dame paris" pinned on the cathedral
+    must answer the cathedral, not a same-named parish church 4 km away
+    that happened to earn a prefix label. Tier, distance and prominence
+    still order the pinned rows among themselves; a pin with nothing
+    inside its radius changes nothing.
+
     No match is a valid answer, not an error: an unresolvable query returns
     an empty list. Raises overture.UpstreamUnavailable if a remote scan
     fails after retries, or overture.SchemaDegraded if the places dataset
@@ -5325,10 +5354,16 @@ def resolve_place(
     # Brooklyn is cached under a bare query and replayed after Paris.
     place_query = query
     city_bounded = False
+    # #481: the pin _extract_city_hint hands back comes only from the bundled
+    # alias table (a plain city split or a caller's near hint yields None
+    # here) — kept separately from near_lat/near_lon because the ranking
+    # below treats it differently from any other reference.
+    alias_pin: tuple[float, float] | None = None
     if city is None and near_lat is None and near_lon is None:
         place_query, inferred_city, inferred_coords = _extract_city_hint(query)
         if inferred_coords is not None:
             near_lat, near_lon = inferred_coords
+            alias_pin = inferred_coords
             city = inferred_city or city
             city_bounded = True
         elif inferred_city:
@@ -5575,6 +5610,27 @@ def resolve_place(
                         held["_type_scan"] = True
                         break
 
+    # #481: the alias pin is a curated coordinate for a specific landmark,
+    # so look at what actually stands there. The name-filtered scans above
+    # can miss it entirely — "Cathédrale Notre-Dame de Paris" is not a LIKE
+    # match for "notre dame" or "notre dame cathedral", and when geocode()
+    # already came back with enough same-named shops those scans are
+    # skipped anyway — leaving nothing inside the pin radius for the
+    # pinned-first sort to promote. One nearest-first scan bounded to the
+    # pin radius (warm tiles, no name filter); every row still has to earn
+    # a label against the query or an alias spelling below, so the shops
+    # and bus stops sharing the square are dropped as unrelated, exactly as
+    # a per-token hit would be.
+    if alias_pin is not None:
+        pinned_ids = {r["id"] for r in place_rows}
+        for row in overture.find_places(
+            alias_pin[0], alias_pin[1], radius_m=_ALIAS_PIN_RADIUS_M,
+            limit=_ALIAS_PIN_SCAN_LIMIT,
+        ):
+            if row["id"] and row["id"] not in pinned_ids:
+                pinned_ids.add(row["id"])
+                place_rows.append(row)
+
     candidates = []
     seen_ids: set[str] = set()
     for r in division_hits:
@@ -5741,6 +5797,26 @@ def resolve_place(
             <= _TYPE_SCAN_SUPPORT_RADIUS_M
         ) if c.get("_type_scan") else 0
 
+    # #481: when the pin came from the bundled alias table, that pin is a
+    # curated landmark coordinate — the strongest evidence the server has
+    # about where the query means — and a string-tier heuristic must not
+    # outvote it. "notre dame paris" pinned 30 m from the cathedral and still
+    # answered Notre Dame de Clignancourt 4.4 km north, because the parish
+    # church's name *starts with* the query (prefix) while the cathedral's
+    # only contains it (substring), and tier sorts before distance. Every
+    # candidate within _ALIAS_PIN_RADIUS_M of the pin is tagged and sorts
+    # ahead of all others; tier → distance → prominence still decide among
+    # the pinned rows (the cathedral over the museum named after it). When
+    # nothing sits inside the radius — the alias points at something the
+    # scans missed — no row is tagged and the ordering is unchanged.
+    if alias_pin is not None:
+        for c in candidates:
+            if (
+                geo.haversine_m(alias_pin[0], alias_pin[1], c["lat"], c["lon"])
+                <= _ALIAS_PIN_RADIUS_M
+            ):
+                c["_alias_pinned"] = True
+
     def _rank_candidate(c):
         near_km = 0.0
         if reference is not None:
@@ -5748,7 +5824,12 @@ def resolve_place(
                 geo.haversine_m(reference[0], reference[1], c["lat"], c["lon"]) / 1000.0
             )
         return (
-            -_MATCH_LABEL_RANK[c["match"]], -c["_support"], near_km, -c["_prominence"], c["id"],
+            0 if c.get("_alias_pinned") else 1,
+            -_MATCH_LABEL_RANK[c["match"]],
+            -c["_support"],
+            near_km,
+            -c["_prominence"],
+            c["id"],
         )
 
     candidates.sort(key=_rank_candidate)
@@ -5756,6 +5837,7 @@ def resolve_place(
         del c["_prominence"]
         del c["_support"]
         c.pop("_type_scan", None)
+        c.pop("_alias_pinned", None)
     out = candidates[:limit]
     _resolve_cache_put(query, cache_city, cache_lat, cache_lon, out, lang, country)
     if out:
