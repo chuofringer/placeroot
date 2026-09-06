@@ -655,7 +655,7 @@ q("x01", "resolve_place", "coffe shops near pike place market seatle",
 q("x02", "resolve_place", "wheres the golden gate bridge",
   _resolve("golden gate bridge san francisco", None, (37.82, -122.48, 25)))
 q("x03", "resolve_place", "notre dame paris (dropped-word landmark)",
-  _resolve("notre dame paris", None, (48.853, 2.35, 25)))
+  _resolve("notre dame paris", None, (48.853, 2.35, 1)))
 q("x04", "resolve_place", "harvard square cambridge (third city of the name)",
   _resolve("harvard square cambridge", "Harvard Square", (42.373, -71.119, 25)))
 q("x05", "resolve_place", "san jose airport (name-prefix city)",
