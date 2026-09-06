@@ -139,9 +139,9 @@ def _count_places_fallback(monkeypatch):
     calls = []
     real = geocode._query_places_fallback
 
-    def counted(query, anchor=None, also=None):
+    def counted(query, anchor=None, also=None, schedule_tiles=True):
         calls.append((query, anchor))
-        return real(query, anchor=anchor, also=also)
+        return real(query, anchor=anchor, also=also, schedule_tiles=schedule_tiles)
 
     monkeypatch.setattr(geocode, "_query_places_fallback", counted)
     return calls
@@ -228,6 +228,69 @@ def test_short_residual_gate_matches_the_note_it_would_have_shown():
     # never-search-nothing fallback -- unchanged by #216.
     assert geocode._significant_tokens("the") == ["the"]
     assert geocode._significant_tokens("the Blue Bottle") == ["Blue", "Bottle"]
+
+
+# --- #472: nor on a residual that is nothing but generic type words --------
+# Live repro (2026-08-19.0 release): "Shibuya Station" anchored on the
+# Shibuya division and searched place names for the residual "Station" --
+# 5.5s of a 5.7s geocode() call, answering with "Nakameguro Station" and
+# "Tokyo Station Beer Stand". #216 one level up: a feature noun on its own is
+# as un-searchable as a stopword, so the same skip applies.
+
+
+def test_generic_only_residual_runs_no_places_scan_at_all(monkeypatch):
+    # Trailing "Brooklyn" is the anchor, exactly as #83 intends; what is left
+    # over ("Station") names no place, so the scan must not run.
+    calls = _count_places_fallback(monkeypatch)
+
+    result = geocode.geocode_detailed("Station Brooklyn", limit=5)
+
+    assert calls == [], "a generic-only residual must not touch the places theme"
+    assert result["results"] == []
+    assert "nothing distinctive is left" in result["note"]
+
+
+def test_generic_only_residual_after_a_leading_anchor_runs_no_scan(geocode_cache, monkeypatch):
+    # The live shape: the location word comes first and the type word last
+    # ("Shibuya Station"), so the anchor is a *leading* split, which only the
+    # local divisions table tries (#268). Same residual, same refusal.
+    calls = _count_places_fallback(monkeypatch)
+
+    result = geocode.geocode_detailed("Brooklyn Station", limit=5)
+
+    assert calls == [], "a generic-only residual must not touch the places theme"
+    assert result["results"] == []
+    assert "nothing distinctive is left" in result["note"]
+
+
+def test_distinctive_residual_with_a_type_word_still_scans_places(monkeypatch):
+    # The gate is about *every* word being generic, not any: "Blue Bottle
+    # Station" is a perfectly good name to search for.
+    calls = _count_places_fallback(monkeypatch)
+
+    geocode.geocode_detailed("Blue Bottle Station Brooklyn", limit=5)
+
+    assert [q for q, _ in calls] == ["Blue Bottle Station"]
+    assert calls[0][1] is not None, "and still bounded by the Brooklyn anchor"
+
+
+def test_generic_residual_gate_is_the_stopword_gate_widened():
+    # #472's rule: every word is a _STOPWORD or a _GENERIC_PLACE_WORDS member.
+    assert geocode._nothing_but_generic("Station")
+    assert geocode._nothing_but_generic("Park")
+    assert geocode._nothing_but_generic("the Museum")
+    assert geocode._nothing_but_generic("Airport.")
+    assert geocode._nothing_but_generic("the")
+    assert geocode._nothing_but_generic("   ")
+    assert not geocode._nothing_but_generic("Valley Fair")
+    assert not geocode._nothing_but_generic("H&M")
+    assert not geocode._nothing_but_generic("渋谷")
+    assert not geocode._nothing_but_generic("Shibuya Station")
+    # _nothing_but_stopwords keeps its #216 meaning exactly: a type word on
+    # its own is not a stopword.
+    assert geocode._nothing_but_stopwords("the")
+    assert not geocode._nothing_but_stopwords("H&M")
+    assert not geocode._nothing_but_stopwords("Station")
 
 
 def test_misspelled_prefix_reaches_the_fallback_without_the_fuzzy_tier(monkeypatch):
@@ -1267,10 +1330,121 @@ def test_city_state_abbreviation_disambiguates_from_general_region(geocode_cache
     assert results[0]["admin_context"] == ["United States", "Ohio"]
 
 
-def test_unparseable_suffix_degrades_to_todays_behavior():
-    # "ZZ" isn't a real state/region — the whole literal string is searched,
-    # matching nothing (division names are bare, never "City, ST").
-    assert geocode.geocode("Springfield, ZZ", limit=5) == []
+def test_unparseable_suffix_searches_the_base_name_with_a_note():
+    # #457: "ZZ" isn't a real state/region/country — rather than searching
+    # the literal joined string (which can never match a bare Overture
+    # name) and returning [], the base name is searched and a note names
+    # the qualifier that went unrecognized.
+    result = geocode.geocode_detailed("Springfield, ZZ", limit=5)
+    assert result["results"]
+    assert all(r["name"] == "Springfield" for r in result["results"])
+    assert "note" in result
+    assert "ZZ" in result["note"]
+    assert "Springfield" in result["note"]
+
+
+# --- #457: "City, Country" parsing -----------------------------------------
+
+
+def test_country_name_suffix_is_not_searched_as_a_literal():
+    # Fails without #457: the joined string "Cambridge, United Kingdom" is
+    # never a bare Overture division name, so this came back [] before.
+    results = geocode.geocode("Cambridge, United Kingdom", limit=5)
+    assert results
+
+
+@pytest.mark.parametrize("suffix", ["United Kingdom", "UK", "GB", "GBR"])
+def test_city_comma_country_resolves_correct_country(suffix):
+    results = geocode.geocode(f"Cambridge, {suffix}", limit=5)
+    cambridges = [r for r in results if r["name"] == "Cambridge"]
+    assert cambridges
+    assert cambridges[0]["admin_context"] == ["United Kingdom", "England"]
+    assert cambridges[0].get("matched_by") != "fuzzy"
+    # The US Cambridge must be excluded entirely, not merely ranked below.
+    assert not any(
+        r["name"] == "Cambridge" and r["admin_context"][0] == "United States"
+        for r in results
+    )
+
+
+def test_explicit_country_param_matches_suffix_parsing():
+    results = geocode.geocode("Cambridge", limit=5, country="gb")
+    assert results
+    assert results[0]["name"] == "Cambridge"
+    assert results[0]["admin_context"] == ["United Kingdom", "England"]
+    assert results[0].get("matched_by") != "fuzzy"
+
+
+def test_city_comma_country_full_name_resolves_via_embedded_table():
+    results = geocode.geocode("London, Canada", limit=5)
+    assert results
+    assert results[0]["name"] == "London"
+    assert results[0]["admin_context"] == ["Canada", "Ontario"]
+
+
+def test_unrecognized_comma_qualifier_never_returns_empty():
+    result = geocode.geocode_detailed("Cambridge, Narnia", limit=5)
+    assert result["results"]
+    assert {r["admin_context"][0] for r in result["results"]} == {
+        "United Kingdom", "United States",
+    }
+    assert "note" in result
+    assert "Narnia" in result["note"]
+    assert "Cambridge" in result["note"]
+
+
+def test_recognized_country_with_no_match_degrades_to_base_name_with_note():
+    # No GB Springfield in the fixture: the country is real, but nothing
+    # matches inside it — degrade to the base name, unconstrained, with a
+    # note, rather than an empty answer.
+    result = geocode.geocode_detailed("Springfield, GB", limit=5)
+    assert result["results"]
+    assert all(r["name"] == "Springfield" for r in result["results"])
+    assert "note" in result
+    assert "GB" in result["note"]
+
+
+def test_bad_country_param_raises():
+    with pytest.raises(ValueError):
+        geocode.geocode("Cambridge", limit=5, country="ZZZ")
+
+
+def test_country_param_conflicting_with_parsed_suffix_raises():
+    with pytest.raises(ValueError) as exc_info:
+        geocode.geocode("Cambridge, UK", limit=5, country="US")
+    detail = str(exc_info.value)
+    assert "US" in detail
+    assert "GB" in detail or "United Kingdom" in detail
+
+
+def test_geocode_batch_honors_country_param():
+    rows = geocode.geocode_batch(["Cambridge", "London"], country="CA")
+    by_query = {r["query"]: r for r in rows}
+    assert by_query["London"]["name"] == "London"
+    assert by_query["London"]["lat"] == pytest.approx(42.98, abs=0.5)
+    # No Canadian Cambridge in the fixture.
+    assert by_query["Cambridge"].get("error") == "not_found"
+
+
+def test_resolve_place_honors_country_param():
+    from placeroot import geocode as geocode_mod
+
+    hits = geocode_mod.resolve_place("Cambridge", limit=5, country="GB")
+    assert hits
+    top = hits[0]
+    assert top["name"] == "Cambridge"
+    assert top["admin_context"] == ["United Kingdom", "England"]
+
+
+def test_server_geocode_bad_country_returns_bad_request():
+    result = server.geocode("Cambridge", country="ZZZ")
+    assert result["error"] == "bad_request"
+
+
+def test_server_geocode_conflicting_country_returns_bad_request():
+    result = server.geocode("Cambridge, UK", country="US")
+    assert result["error"] == "bad_request"
+    assert "US" in result["detail"]
 
 
 # --- #47: prominence disambiguation ---------------------------------------
@@ -1458,7 +1632,7 @@ def test_anchored_query_still_searches_places_when_upstream_is_remote(monkeypatc
     # stand-in for S3 and isn't readable from a test.
     monkeypatch.setattr(
         geocode, "_query_places_fallback",
-        lambda q, anchor=None, also=None: called.append(anchor) or [],
+        lambda q, anchor=None, also=None, schedule_tiles=True: called.append(anchor) or [],
     )
     # "Brooklyn" matches a division, so an anchor is derivable.
     geocode.geocode_detailed("Blue Bottle Roastery Brooklyn", limit=5)
@@ -2035,7 +2209,7 @@ def test_every_token_present_finds_a_name_the_user_shortened(monkeypatch):
     empty while the same query with "Independent" restored found it."""
     seen = {}
 
-    def fake(query, anchor=None, also=None):
+    def fake(query, anchor=None, also=None, schedule_tiles=True):
         seen["query"], seen["also"] = query, also
         return []
 
@@ -2113,3 +2287,89 @@ def test_an_ambiguous_city_offers_its_namesakes_as_alternates(monkeypatch):
     assert (52.21, 0.12) in coords
     assert (43.36, -80.31) in coords
     assert (42.37, -71.11) in coords, "the third namesake must be reachable"
+
+
+# --- #476: a near constraint bounds the division pass and the anchor -------
+
+
+def test_near_constraint_bounds_the_fuzzy_tier(geocode_cache):
+    """"Marina Bay Sands", pinned to Singapore, was corrected by spelling to
+    five "Marina Bay" neighbourhoods in the US. Under a pin the typo tier
+    only sees the pin's box: Berkeley is a correction for "Berekley" from
+    Berkeley, not from Singapore."""
+    berkeley = (37.87, -122.27, geocode._CITY_HINT_RADIUS_M)
+    singapore = (1.29, 103.85, geocode._CITY_HINT_RADIUS_M)
+    assert [r["name"] for r in geocode.geocode("Berekley", limit=5, near=berkeley)] == ["Berkeley"]
+    assert geocode.geocode("Berekley", limit=5, near=singapore) == []
+
+
+def test_near_constraint_bounds_the_literal_pass(geocode_cache):
+    """Two fixture Springfields (MA and IL); a constraint around one returns
+    only that one, the same way a "City, ST" region filter would."""
+    near_ma = (42.1, -72.59, geocode._CITY_HINT_RADIUS_M)
+    rows = geocode.geocode("Springfield", limit=5, near=near_ma)
+    assert all(abs(r["lat"] - 42.1) < 1 and abs(r["lon"] + 72.59) < 1 for r in rows), rows
+    assert len(rows) == 1
+
+
+def test_no_near_constraint_leaves_geocode_unchanged(geocode_cache):
+    assert (
+        geocode.geocode("Springfield", limit=5)
+        == geocode.geocode("Springfield", limit=5, near=None)
+    )
+    assert len(geocode.geocode("Springfield", limit=5)) == 2
+
+
+def test_near_filter_sql_wraps_at_the_antimeridian():
+    params: dict = {}
+    clause = geocode._near_filter_sql((-16.5, 179.9, 50_000), "lat", "lon", params)
+    assert "OR" in clause
+    assert params["near_xmin"] > 179.0 and params["near_xmax"] < -179.0
+    params = {}
+    clause = geocode._near_filter_sql((1.29, 103.85, 50_000), "lat", "lon", params)
+    assert "BETWEEN $near_xmin AND $near_xmax" in clause
+    assert params["near_xmin"] < 103.85 < params["near_xmax"]
+    assert geocode._near_filter_sql(None, "lat", "lon", {}) == ""
+
+
+def _record_cache_resolutions(monkeypatch):
+    seen = []
+
+    def recording(con, release, theme, bbox, upstream_glob, *a, **k):
+        seen.append((theme, bbox, k.get("schedule_missing", True)))
+        return None
+
+    monkeypatch.setattr(geocode.cache, "local_paths_for_query", recording)
+    return seen
+
+
+def test_speculative_anchor_does_not_schedule_tiles_when_it_loses(geocode_cache, monkeypatch):
+    """A split-derived anchor is a guess. Its box's tiles are not queued for
+    download until the guess pays off; a losing guess leaves nothing behind
+    (#476: 807 MB of Florida and California behind two European resolves)."""
+    seen = _record_cache_resolutions(monkeypatch)
+    rows = geocode.geocode("Nonexistentcafe Springfield", limit=5)
+    assert rows == []
+    places = [(theme, sched) for theme, _bbox, sched in seen if theme == "places"]
+    assert places, "the anchored places fallback resolved the cache"
+    assert all(sched is False for _theme, sched in places), seen
+
+
+def test_speculative_anchor_schedules_tiles_once_it_answers(geocode_cache, monkeypatch):
+    """...and the anchor that actually found the place gets its tiles queued
+    afterwards, so the repeat query answers from cache like before."""
+    seen = _record_cache_resolutions(monkeypatch)
+    rows = geocode.geocode("Blue Bottle Roastery Metropolis", limit=5)
+    assert any(r["name"] == "Blue Bottle Roastery" for r in rows)
+    scheduled = [bbox for theme, bbox, sched in seen if theme == "places" and sched]
+    assert scheduled, seen
+    xmin, ymin, xmax, ymax = scheduled[-1]
+    assert xmin <= CENTER_LON <= xmax and ymin <= CENTER_LAT <= ymax
+
+
+def test_pinned_anchor_schedules_its_tiles_up_front(geocode_cache, monkeypatch):
+    """A caller's pin is not a guess: its tiles are scheduled on the first
+    scan, exactly as before #476."""
+    seen = _record_cache_resolutions(monkeypatch)
+    geocode.geocode("Blue Bottle Roastery", limit=5, near=(CENTER_LAT, CENTER_LON, 50_000))
+    assert [sched for theme, _b, sched in seen if theme == "places"] == [True]
