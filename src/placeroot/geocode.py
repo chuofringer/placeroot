@@ -432,6 +432,7 @@ import duckdb
 from placeroot import (
     addresses,
     cache,
+    categories,
     geo,
     home_region,
     manifest,
@@ -506,13 +507,20 @@ _ANCHOR_SPECIFIC_SHARE = 0.1
 # any of these words *is* allowed to anchor when the user supplies nothing
 # else to go on — the rule is about not preferring a feature noun over a
 # genuine place name, not about banning the string.
+#
+# #469: the same set is what _place_match_label refuses to accept as the
+# *only* word a place candidate shares with the query. The two uses are one
+# judgment: a word that says what a place is cannot say which place it is —
+# not as an anchor, and not as evidence that "Snow Peak Land Station" has
+# anything to do with "Shibuya Station". "hall" and "shrine" were added for
+# that use and are refused as anchors under the same reasoning.
 _GENERIC_PLACE_WORDS = frozenset("""
     academy airport aquarium arena avenue basilica bay beach boulevard bridge dam falls
     building campus castle cathedral centre center chapel church cinema clinic
-    club college crossing dock field fountain garden gardens gate gym harbor
+    club college crossing dock field fountain garden gardens gate gym hall harbor
     harbour hospital hotel institute island junction library mall market
     memorial monument mosque museum observatory palace park pharmacy pier
-    plaza port preschool quay resort restaurant road school square stadium
+    plaza port preschool quay resort restaurant road school shrine square stadium
     station store street studio synagogue temple terminal theater theatre
     tower university wharf zoo
 """.split())
@@ -3955,6 +3963,60 @@ _MATCH_LABEL_RANK = {"exact": 3, "prefix": 2, "substring": 1, "fuzzy": 0}
 # per-token find_places searches and before word-overlap scoring.
 _STOPWORDS = {"the", "a", "an", "on", "in", "at", "near", "of", "and", "by"}
 
+# #469: the generic type word a place query ends in -> the Overture category
+# slugs a row of that kind carries. "Shibuya Station" is a *kind* of thing
+# plus a name, and Overture files the thing under a category, not under the
+# English word: the station is "Gare de Shibuya" / "京王井の頭線 渋谷駅",
+# category train_station, and no row anywhere is named "Shibuya Station".
+# A name-only search can never reach it; a category-filtered search on the
+# distinctive word alone ("Shibuya", within train_station) finds it in one
+# bounded scan. See _type_word_slugs and the #469 block in resolve_place.
+#
+# Curated from what categories.search_categories returns for each word
+# rather than looked up live: that search is lexical, and for "station" it
+# ranks gas_station and radio_station level with metro_station. Every slug
+# here is a row in data/overture_categories.csv (tested), and rows come back
+# through find_places' substring category filter, so a scan for "park" also
+# returns "parking" — _type_scan_rows drops those with an exact/hierarchy
+# check against the same CSV. Words whose category is too loose to be
+# useful ("market", "square", "center", "hall", "terminal") are deliberately
+# absent: they still count as generic for the gate, they just get no scan.
+_TYPE_WORD_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "station": ("train_station", "metro_station", "light_rail_and_subway_stations"),
+    "park": ("park",),
+    "airport": ("airport",),
+    "museum": ("museum",),
+    "bridge": ("bridge",),
+    "tower": ("tower",),
+    "temple": ("temple",),
+    "shrine": ("shinto_shrines",),
+    "church": ("church_cathedral",),
+    "cathedral": ("church_cathedral",),
+    "stadium": ("stadium_arena",),
+    "arena": ("stadium_arena",),
+    "university": ("college_university",),
+    "college": ("college_university",),
+    "school": ("school",),
+    "hospital": ("hospital",),
+    "zoo": ("zoo",),
+    "beach": ("beach",),
+    "plaza": ("plaza",),
+    "hotel": ("hotel",),
+    "library": ("library",),
+    "theater": ("theaters_and_performance_venues",),
+    "theatre": ("theaters_and_performance_venues",),
+    "palace": ("palace",),
+    "castle": ("castle",),
+    "mall": ("shopping_center",),
+}
+
+# #469: two rows of the same category this close together are the same
+# feature — a station's exits, lines and operators are each their own
+# places row, a park's lawn and its athletic track likewise. A row that
+# stands alone is the one mis-pinned across town (a "Shibuya Station Tokyo.
+# Japan" 7 km east of every other Shibuya station row, at confidence 0.71).
+_TYPE_SCAN_SUPPORT_RADIUS_M = 1_000
+
 
 def _match_label(row: dict, query: str) -> str:
     """A geocode() result row -> how it matched `query`.
@@ -4032,7 +4094,9 @@ def _significant_tokens(query: str) -> list[str]:
     return (significant or tokens or [query])[:_MAX_RESOLVE_TOKENS]
 
 
-def _place_match_label(name: str, query: str) -> str | None:
+def _place_match_label(
+    name: str, query: str, context_words: frozenset[str] = frozenset()
+) -> str | None:
     """Match label for a place candidate found via per-token search (#22),
     or None if it isn't actually related to `query` — the per-token
     find_places calls below are deliberately loose (OR of significant
@@ -4045,6 +4109,26 @@ def _place_match_label(name: str, query: str) -> str | None:
     Austin" vs. a place literally named "Mañana Coffee") — so containment
     is checked in both directions, and failing that, a shared significant
     word still counts as a (weaker) match.
+
+    #469: the shared word has to be a *distinctive* one. "Shibuya Station"
+    and "Snow Peak Land Station" share "station"; "Yoyogi Park" and "Park
+    Hotel Tokyo" share "park". Those words say what kind of thing the
+    caller means, and every downtown has hundreds of names carrying them —
+    letting one through as relatedness is what resolved the station to a
+    sporting-goods store 7 km away and routed a 1.5 km walk as 8.6 km.
+    So the generic feature words (_GENERIC_PLACE_WORDS) are set aside from
+    the query's side of the overlap first, and the candidate must share
+    one of the words that remain. Only when the query is *nothing but*
+    generic words ("Station") is there no distinctive word to insist on,
+    and the plain overlap rule stands. The containment rules above are
+    untouched: a name that contains the whole query, type word and all,
+    is still a match.
+
+    context_words are the query's location words — the trailing city
+    resolve_place split off to anchor the search ("tokyo" in "Shibuya
+    Station Tokyo"). They say where, not which, and are set aside from the
+    overlap the same way: "Tokyo Station Beer Stand" shares "tokyo" with
+    that query and is no more the answer for it than Snow Peak was.
     """
     n, q = _normalize_for_match(name), _normalize_for_match(query)
     if n == q:
@@ -4055,13 +4139,61 @@ def _place_match_label(name: str, query: str) -> str | None:
         return "substring"
     n_tokens = set(_significant_tokens(n))
     q_tokens = set(_significant_tokens(q))
-    if n_tokens & q_tokens:
+    q_distinctive = {
+        t for t in q_tokens
+        if t.strip(".,") not in _GENERIC_PLACE_WORDS and t not in context_words
+    }
+    if n_tokens & (q_distinctive or q_tokens):
         return "substring"
     return None
 
 
-def _best_place_label(name: str, query: str, alternates: list[str]) -> str | None:
+def _type_word_slugs(search_query: str) -> tuple[str, ...]:
+    """#469: the category slugs for the generic type word `search_query`
+    ends in, or () when it ends in something else (or in a type word with
+    no usable category — see _TYPE_WORD_CATEGORIES)."""
+    tokens = _significant_tokens(search_query)
+    if not tokens:
+        return ()
+    return _TYPE_WORD_CATEGORIES.get(tokens[-1].lower().strip(".,"), ())
+
+
+def _type_scan_rows(
+    lat: float, lon: float, slugs: tuple[str, ...], token: str
+) -> list[dict]:
+    """#469: one bounded find_places scan for rows OF the query's kind whose
+    name carries its distinctive word — "Shibuya" within train_station.
+
+    Same radius and limit as the per-token scans. find_places' category
+    filter is a substring match (so "park" returns parking lots too); rows
+    are kept only when their own category is one of `slugs` or sits under
+    one in the taxonomy, the exact/hierarchy reading the compose tools use.
+    A row with no category at all is kept — a degraded taxonomy column is
+    not evidence against it. Each kept row is tagged "_type_scan" for the
+    grading in resolve_place.
+    """
+    rows = overture.find_places(
+        lat, lon, radius_m=_RESOLVE_PLACE_RADIUS_M,
+        categories=list(slugs), name=token, limit=_RESOLVE_OVERFETCH,
+    )
+    kept = []
+    for row in rows:
+        cat = row.get("category")
+        if cat:
+            chain = categories.hierarchy_for(cat) or [cat]
+            if not any(slug in chain for slug in slugs):
+                continue
+        row["_type_scan"] = True
+        kept.append(row)
+    return kept
+
+
+def _best_place_label(
+    name: str, query: str, alternates: list[str],
+    context_words: frozenset[str] = frozenset(),
+) -> str | None:
     """The strongest label `name` earns against `query` or any of `alternates`.
+    context_words pass through to _place_match_label (#469).
 
     #429: the alternates are other spellings of the same thing the caller
     asked for — the bundled landmark aliases, and the city-stripped
@@ -4074,9 +4206,9 @@ def _best_place_label(name: str, query: str, alternates: list[str]) -> str | Non
     starts with the word. Graded against the alias spelling "musee du
     louvre" it is an exact match, which is what it actually is.
     """
-    best = _place_match_label(name, query)
+    best = _place_match_label(name, query, context_words)
     for alt in alternates:
-        label = _place_match_label(name, alt)
+        label = _place_match_label(name, alt, context_words)
         if label is not None and (
             best is None or _MATCH_LABEL_RANK[label] > _MATCH_LABEL_RANK[best]
         ):
@@ -4248,6 +4380,24 @@ def resolve_place(
     is missing bbox — the caller (server.py) turns either into a structured
     error like every other tool.
 
+    #469: a query that ends in a generic type word — "Shibuya Station",
+    "Yoyogi Park", "Heathrow Airport" — names a *kind* of feature plus the
+    word that picks it out, and Overture files the kind under a category
+    rather than in the name: the station is "Gare de Shibuya", category
+    train_station, and nothing is literally named "Shibuya Station". So
+    alongside the name scans, one bounded find_places scan filtered to that
+    kind's categories and to the distinctive word runs from the same
+    reference (_TYPE_WORD_CATEGORIES, _type_scan_rows). A row it returns
+    whose name covers every distinctive word has answered both halves of
+    the query — the category is the type word — and is graded "exact";
+    among such rows the one with other rows of its kind within
+    _TYPE_SCAN_SUPPORT_RADIUS_M ranks first, because a station is many rows
+    (its exits, lines, operators) while a mis-pinned duplicate stands alone.
+    The relatedness gate (_place_match_label) meanwhile no longer accepts
+    the type word itself as the shared word, so when nothing of the kind is
+    found the answer is [] — which server.py turns into `need: location` —
+    rather than the nearest business with "Station" in its name.
+
     lang (#410) requests Overture's language-tagged names.common variant,
     the same as geocode() — but only for "kind": "division" candidates
     (threaded through the internal geocode() call this function already
@@ -4355,6 +4505,25 @@ def resolve_place(
 
     place_rows: list[dict] = []
     gate_tokens: list[str] = []  # #374: set alongside the token loop below
+    query_alternates = _alias_names_for(query) + (
+        [search_query] if search_query != query else []
+    )
+    # #469: the city words split off the query — location context for the
+    # gate to set aside, not a word a candidate can be related through.
+    context_words = frozenset(
+        t.lower() for t in _significant_tokens(query)
+    ) - frozenset(t.lower() for t in _significant_tokens(search_query))
+    # #469: what each of geocode()'s place-kind rows earns from the gate,
+    # decided once here — both for the coverage count just below (a row the
+    # gate will drop as unrelated is not coverage: before this, ten
+    # "...Station" businesses counted as having answered "Shibuya Station"
+    # and stood the one scan down that could have) and for the merge
+    # further on.
+    geocode_place_labels: dict[str, str | None] = {
+        r["id"]: _best_place_label(r["name"], query, query_alternates, context_words)
+        for r in geocode_hits
+        if r["type"] == "place" and r["id"] and r["name"]
+    }
     # geocode()'s own anchored fallback often already searched the places
     # theme near this same reference with the whole query and its tokens —
     # when it came back with enough place-kind rows, re-scanning per token
@@ -4370,10 +4539,11 @@ def resolve_place(
         1 for r in geocode_hits
         if r["type"] == "place"
         and reference is not None
+        and geocode_place_labels.get(r["id"]) is not None
         and geo.haversine_m(reference[0], reference[1], r["lat"], r["lon"])
         <= _RESOLVE_PLACE_RADIUS_M
     )
-    if reference is not None and geocode_places < limit:
+    if reference is not None:
         ref_lat, ref_lon = reference
         seen_place_ids: set[str] = set()
         # Not every word deserves its own scan (#272). A feature noun
@@ -4417,19 +4587,41 @@ def resolve_place(
         # *alternative* spelling of the query, not extra context the name
         # has to contain too). See _fuzzy_place_covers_query.
         gate_tokens = [t for t in tokens if " " not in t and t not in alias_tokens]
-        for token in tokens:
-            for row in overture.find_places(
-                ref_lat, ref_lon, radius_m=_RESOLVE_PLACE_RADIUS_M,
-                name=token, limit=_RESOLVE_OVERFETCH,
-            ):
+        if geocode_places < limit:
+            for token in tokens:
+                for row in overture.find_places(
+                    ref_lat, ref_lon, radius_m=_RESOLVE_PLACE_RADIUS_M,
+                    name=token, limit=_RESOLVE_OVERFETCH,
+                ):
+                    if row["id"] and row["id"] not in seen_place_ids:
+                        seen_place_ids.add(row["id"])
+                        if row.get("matched_by"):
+                            # Which token the #373 fallback actually matched
+                            # this row against — the #374 gate below trusts
+                            # the fuzzy label only when that was the whole
+                            # query.
+                            row["_matched_token"] = token
+                        place_rows.append(row)
+        # #469: the query's kind, searched by category on its distinctive
+        # word. Runs regardless of coverage — the name scans above cannot
+        # reach a row filed under the category rather than the English
+        # word, however many rows they return. Skipped when no distinctive
+        # word survived the pruning ("Station" alone, or "Tokyo Station"
+        # once the city word is set aside): a category scan with nothing
+        # to match names against is every station in the metro.
+        type_slugs = _type_word_slugs(search_query)
+        if type_slugs and gate_tokens:
+            for row in _type_scan_rows(ref_lat, ref_lon, type_slugs, gate_tokens[0]):
                 if row["id"] and row["id"] not in seen_place_ids:
                     seen_place_ids.add(row["id"])
-                    if row.get("matched_by"):
-                        # Which token the #373 fallback actually matched
-                        # this row against — the #374 gate below trusts the
-                        # fuzzy label only when that was the whole query.
-                        row["_matched_token"] = token
                     place_rows.append(row)
+                    continue
+                # Already in hand from a name scan — carry the tag over so
+                # the grading below sees the row for the kind it is.
+                for held in place_rows:
+                    if held["id"] == row["id"]:
+                        held["_type_scan"] = True
+                        break
 
     candidates = []
     seen_ids: set[str] = set()
@@ -4478,11 +4670,14 @@ def resolve_place(
             else:
                 continue
         else:
-            label = _best_place_label(
-                r["name"],
-                query,
-                _alias_names_for(query) + ([search_query] if search_query != query else []),
-            )
+            label = _best_place_label(r["name"], query, query_alternates, context_words)
+        # #469: a row of the query's own kind whose name covers every
+        # distinctive word has matched the whole query — the category
+        # stands in for the type word ("Gare de Shibuya" + train_station is
+        # "Shibuya Station"). Graded exact so it outranks every name-only
+        # reading, however that reading was labelled.
+        if r.get("_type_scan") and _fuzzy_place_covers_query(r["name"], gate_tokens):
+            label = "exact"
         if label is None:
             continue
         seen_ids.add(r["id"])
@@ -4492,6 +4687,7 @@ def resolve_place(
             "category": r["category"],
             "match": label,
             "_prominence": r.get("confidence") or 0.0,
+            "_type_scan": bool(r.get("_type_scan")),
         }
         if r.get("matched_by"):
             candidate["matched_by"] = r["matched_by"]
@@ -4506,11 +4702,7 @@ def resolve_place(
     for r in geocode_hits:
         if r["type"] != "place" or not r["id"] or r["id"] in seen_ids or not r["name"]:
             continue
-        label = _best_place_label(
-            r["name"],
-            query,
-            _alias_names_for(query) + ([search_query] if search_query != query else []),
-        )
+        label = geocode_place_labels.get(r["id"])
         if label is None:
             continue
         seen_ids.add(r["id"])
@@ -4530,17 +4722,37 @@ def resolve_place(
     # no distance term. Same judgment _rank_place applies in geocode's own
     # fallback, applied to the merged list. Km-rounded so GPS-grade jitter
     # never reorders genuinely co-located candidates.
+    #
+    # #469: among the rows the type scan returned, agreement before distance.
+    # The reference is the *city's* pin, and at metro scale the row nearest
+    # it is whichever duplicate happens to be mis-pinned toward downtown; a
+    # row with other rows of its kind within _TYPE_SCAN_SUPPORT_RADIUS_M is
+    # the real complex. Name-scan rows carry no support and are unaffected
+    # relative to one another.
+    typed = [c for c in candidates if c.get("_type_scan")]
+    for c in candidates:
+        c["_support"] = sum(
+            1 for other in typed
+            if other is not c
+            and geo.haversine_m(c["lat"], c["lon"], other["lat"], other["lon"])
+            <= _TYPE_SCAN_SUPPORT_RADIUS_M
+        ) if c.get("_type_scan") else 0
+
     def _rank_candidate(c):
         near_km = 0.0
         if reference is not None:
             near_km = round(
                 geo.haversine_m(reference[0], reference[1], c["lat"], c["lon"]) / 1000.0
             )
-        return (-_MATCH_LABEL_RANK[c["match"]], near_km, -c["_prominence"], c["id"])
+        return (
+            -_MATCH_LABEL_RANK[c["match"]], -c["_support"], near_km, -c["_prominence"], c["id"],
+        )
 
     candidates.sort(key=_rank_candidate)
     for c in candidates:
         del c["_prominence"]
+        del c["_support"]
+        c.pop("_type_scan", None)
     out = candidates[:limit]
     _resolve_cache_put(query, cache_city, cache_lat, cache_lon, out, lang)
     if out:
@@ -4989,9 +5201,20 @@ def _fuzzy_name_covers_tokens(name: str, tokens: list[str]) -> bool:
 
 
 def _has_extra_place_context(query: str) -> bool:
-    """Whether resolve_place knows a location for `query` that geocode did not."""
-    _place_query, _city, coords = _extract_city_hint(query)
-    if coords is not None:
+    """Whether resolve_place knows a location for `query` that geocode did not.
+
+    #469: a trailing well-known city counts. "Shibuya Station Tokyo" gives
+    geocode one opaque string, and its places half returned a row named
+    "Shibuya Station Tokyo. Japan" pinned 7 km east of the station — the
+    top hit, so from_to routed 8.6 km for a 1.5 km walk. resolve_place
+    splits the city off, anchors on its pin, searches the residual by
+    category as well as by name, and grades against the residual. That is
+    a bounded search (one local city lookup plus a few 20 km scans, ~2 s
+    measured), never the unbounded miss the cost rule above guards
+    against — that case has no recognizable city to split off.
+    """
+    _place_query, city, coords = _extract_city_hint(query)
+    if coords is not None or city:
         return True
     with _last_good_lock:
         last_city = _last_good_city
