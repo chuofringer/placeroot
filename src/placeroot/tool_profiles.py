@@ -64,6 +64,9 @@ PROFILES: dict[str, frozenset[str]] = {
         # Single-hop point compose: where/surroundings/reach/notable in
         # one call, the install-to-wow "orient me here" question (#362).
         "ground_location",
+        # A pasted map link is an install-to-wow input: "meet here: <link>"
+        # answered without an API key (#461).
+        "resolve_map_url",
     }),
     # Find/name/identify, including the batch siblings and the category
     # lookup that makes find_places' category filter usable.
@@ -84,6 +87,8 @@ PROFILES: dict[str, frozenset[str]] = {
         "geocode_address",
         # ...and the intersection twin: where two named streets cross.
         "geocode_intersection",
+        # A pasted Google/Apple/OSM link back to a coordinate and place.
+        "resolve_map_url",
         "search_categories",
         # Identify: any GERS id back to the entity it names.
         "gers_lookup",
@@ -103,6 +108,9 @@ PROFILES: dict[str, frozenset[str]] = {
         "optimize_route",
         # Named-place compose over route().
         "from_to",
+        # One-call walk/cycle/drive comparison over route(): the ends
+        # resolve once, each mode routes between the same coordinates.
+        "compare_modes",
         # Ground elevation at a point (#358) — routing comfort ("is this
         # walk hilly", "how high is the pass"), not a street-graph query,
         # but the same "getting between points" family this profile is.
@@ -123,6 +131,11 @@ PROFILES: dict[str, frozenset[str]] = {
         "buildings_at",
         "land_use_at",
         "infrastructure_at",
+        # Same characterize-a-point shape as infrastructure_at (it *is*
+        # infrastructure_at's query path, filtered to stop-like classes):
+        # is there transit near here, not a search for a named line or a
+        # named station.
+        "transit_stops_near",
         # Hydrology is a characterize-the-surroundings question of the same
         # shape as infrastructure_at ("is this parcel waterfront / how far
         # to the nearest canal"), not a find-a-named-thing one, so it lands

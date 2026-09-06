@@ -10,7 +10,22 @@ from __future__ import annotations
 
 import re
 
-from placeroot import categories, overture, routing
+import duckdb
+
+from placeroot import categories, overture, routing, transit
+
+# Why "transit" alone reads a second theme (issue #454): places-theme
+# categories (public_transportation/bus_station/train_station) are
+# business-listing-derived and carry almost no bus stops. A ~2 km box
+# around Dam Square, Amsterdam (release 2026-08-19.0) had 48 bus_stop + 5
+# subway_station + 8 ferry_terminal rows in base/infrastructure
+# subtype='transit' versus 6 bus_station + 16 train_station in places — so
+# scoring "transit" from places alone answers a bus-served street with
+# "weak"/"unknown" even when a stop is 100 m away. transit.transit_stops_near
+# (issue #453) already exposes that base layer with its parking/platform
+# filtering done, so the verdict's transit need takes the nearest of the
+# places match and one bounded transit.transit_stops_near call, and
+# degrades to places-only if that call fails (see _base_transit_nearest).
 
 # Walk-first default: cheapest scan, and the life-decision mode when the
 # asker did not say how they get around.
@@ -213,6 +228,15 @@ def _nearest_for_need(places: list[dict], slugs: tuple[str, ...]) -> dict | None
     return None
 
 
+def _nearest_of(a: dict | None, b: dict | None) -> dict | None:
+    """Nearer of two candidate rows by distance_m; either side may be None."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a if float(a["distance_m"]) <= float(b["distance_m"]) else b
+
+
 def _travel_min(distance_m: float, mode: str) -> float:
     return distance_m / _mode_speed_m_s(mode) / 60.0
 
@@ -221,12 +245,63 @@ def _mode_adverb(mode: str) -> str:
     return {"walk": "walk", "cycle": "bike", "drive": "drive"}[mode]
 
 
-def _detail(minutes: float, mode: str, name: str | None = None) -> str:
+def _detail(
+    minutes: float, mode: str, name: str | None = None, kind_label: str | None = None
+) -> str:
     whole = max(1, int(round(minutes)))
     label = f"{whole} min {_mode_adverb(mode)}"
+    if name and kind_label:
+        return f"{label} ({kind_label} {name!r})"
     if name:
         return f"{label} ({name})"
     return label
+
+
+# Base-theme rows come from transit.transit_stops_near as {"id", "kind",
+# "name", "distance_m"} (no "category" — see transit.py); a readable label
+# for the `kind` (bus_stop -> "bus stop") in _detail's kind_label, so a
+# base-derived row reads "2 min walk (bus stop 'Dam')" instead of exposing
+# the raw Overture class token.
+def _kind_label(kind: str | None) -> str:
+    return (kind or "stop").replace("_", " ")
+
+
+def _base_transit_row(row: dict) -> dict:
+    """Base transit.transit_stops_near row -> the shape _score_need expects.
+
+    Base rows have no category/basic_category (transit.py's compact row is
+    {"id", "kind", "name", "distance_m"}), so "category" here is `kind`
+    (e.g. "bus_stop") rather than a places taxonomy slug, and there is no
+    confidence/operating_status to carry — base rows just lack those keys,
+    same caveat as the recreation layer (docs/RECREATION.md).
+    """
+    return {
+        "id": row.get("id"),
+        "name": row.get("name"),
+        "category": row.get("kind"),
+        "distance_m": row.get("distance_m"),
+        "_kind_label": _kind_label(row.get("kind")),
+    }
+
+
+def _base_transit_nearest(
+    lat: float, lon: float, radius_m: float
+) -> tuple[dict | None, str | None]:
+    """Nearest base-theme transit stop within radius_m, or (None, note).
+
+    Wraps transit.transit_stops_near so an upstream hiccup degrades the
+    "transit" need to places-only rather than failing the whole verdict —
+    mirrors how neighborhood_verdict already degrades an isochrone miss.
+    """
+    try:
+        rows, _radius, _total, _fallback, _missing = transit.transit_stops_near(
+            lat, lon, radius_m=radius_m, limit=1
+        )
+    except (overture.UpstreamUnavailable, overture.SchemaDegraded, duckdb.Error) as e:
+        return None, f"base transit layer unavailable ({e})"
+    if not rows:
+        return None, None
+    return _base_transit_row(rows[0]), None
 
 
 def _score_need(need: str, nearest: dict | None, mode: str, minutes: float) -> dict:
@@ -251,7 +326,7 @@ def _score_need(need: str, nearest: dict | None, mode: str, minutes: float) -> d
         "status": status,
         "nearest": compact,
         "walk_min": round(travel, 1),
-        "detail": _detail(travel, mode, nearest.get("name")),
+        "detail": _detail(travel, mode, nearest.get("name"), nearest.get("_kind_label")),
     }
 
 
@@ -366,15 +441,17 @@ def neighborhood_verdict(
         iso_max = None
         iso_note = e.detail
 
-    checklist = [
-        _score_need(
-            need,
-            _nearest_for_need(places, NEED_SLUGS[need]),
-            resolved_mode,
-            resolved_minutes,
-        )
-        for need in parsed["needs"]
-    ]
+    transit_note = None
+    checklist = []
+    for need in parsed["needs"]:
+        nearest = _nearest_for_need(places, NEED_SLUGS[need])
+        if need == "transit":
+            # See the module docstring header (issue #454): places alone
+            # under-reports bus stops, so transit also takes the nearest
+            # base/infrastructure stop within the same radius.
+            base_nearest, transit_note = _base_transit_nearest(lat, lon, resolved_radius)
+            nearest = _nearest_of(nearest, base_nearest)
+        checklist.append(_score_need(need, nearest, resolved_mode, resolved_minutes))
     # A place beyond the isochrone's reached radius is not actually in
     # budget even if the straight-line time says it is.
     if iso_max is not None:
@@ -415,11 +492,14 @@ def neighborhood_verdict(
         "checklist": checklist,
         "honesty": HONESTY,
     }
+    notes = []
     if iso_note:
-        result["note"] = (
-            f"travel times are straight-line; no street graph nearby ({iso_note})"
-        )
-    elif iso is not None and summary.get("total_places") is not None:
+        notes.append(f"travel times are straight-line; no street graph nearby ({iso_note})")
+    if transit_note:
+        notes.append(transit_note)
+    if notes:
+        result["note"] = "; ".join(notes)
+    if iso is not None and summary.get("total_places") is not None:
         # Tiny character hint, not a dump of top_categories.
         result["area_places"] = summary["total_places"]
     return result
