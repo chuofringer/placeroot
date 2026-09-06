@@ -104,6 +104,10 @@
       "description": "Water near a point, nearest first: waterfront check, distance to river/canal/lake."
     },
     {
+      "name": "transit_stops_near",
+      "description": "Nearest transit stops — bus, rail, subway, tram, ferry — nearest first. No schedules or live arrivals."
+    },
+    {
       "name": "geocode",
       "description": "Free-text place name -> ranked candidate locations, from Overture divisions and places."
     },
@@ -142,6 +146,10 @@
     {
       "name": "geocode_intersection",
       "description": "Locate where two named streets cross: \"5th Avenue\", \"Main Street\", \"Portland\"."
+    },
+    {
+      "name": "resolve_map_url",
+      "description": "Pasted Google/Apple/OpenStreetMap/geo: map link -> its coordinate and place."
     },
     {
       "name": "simplify_geometry",
@@ -214,6 +222,10 @@
     {
       "name": "from_to",
       "description": "Shortest-path walk/cycle/drive between two named places."
+    },
+    {
+      "name": "compare_modes",
+      "description": "Walk vs cycle vs drive between two places in one call: compact per-mode rows, fastest and shortest."
     },
     {
       "name": "find_near",

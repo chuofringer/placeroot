@@ -81,6 +81,31 @@ region-constrained candidates also degrades to an unconstrained search of
 the original query, rather than returning an empty result for a query
 that would otherwise have matched something.
 
+--- #457: "City, Country" parsing ---
+
+The country counterpart to #46, tried as a sibling parse (_parse_country_suffix)
+right after the region parse has failed on the same trailing token — "Paris,
+Texas" and "London, Ontario" are already region matches and never reach this
+at all. Resolves the suffix against an embedded ISO 3166-1 table (COUNTRIES:
+all 249 currently-assigned alpha-2 codes, paired with their alpha-3 and full
+name, plus a small alias set for {UK, USA, U.S., U.S.A.}) first, then against
+country-subtype rows of the local name table (and their #214 alternates) for
+exonyms the embedded table doesn't carry ("Deutschland"). On a hit, divisions
+candidates are constrained on each row's own `country` column, the same
+hierarchy-membership filter #46 applies via `region`. An explicit `country=`
+parameter on geocode()/geocode_batch()/resolve_place() is the same
+constraint stated directly rather than parsed off the query, and composes
+with (or, if it disagrees, raises ValueError naming) a suffix parsed off the
+query itself. Two divergences from #46's degrade rules, both required by
+the issue that added this: a recognized country that turns up zero
+candidates degrades to an unconstrained search of the *base* name (not the
+whole comma-joined string, which no bare Overture name could ever equal
+anyway) with a note; and a comma-suffix recognized as neither a region nor
+a country no longer falls through to searching the literal joined string at
+all — it searches the base name with a note naming the unrecognized
+qualifier, since "Cambridge, Narnia" searched as one string can never match
+anything division names are bare.
+
 --- #47: prominence disambiguation ---
 
 Overture's divisions rows do carry a `population` column (confirmed live:
@@ -491,6 +516,15 @@ _NAME_PREFIX_WORDS = frozenset("""
 # must never displace it. See _pick_anchor_row.
 _ANCHOR_SPECIFIC_SHARE = 0.1
 
+# #463: the same share, applied to the *answer* ranking rather than the
+# anchor pick. A locality carrying at least this fraction of its own region's
+# (or country's) population, under the same name, is what the name means as
+# an answer too — São Paulo city is 25% of São Paulo state, and Nominatim,
+# Photon and Pelias all return the city first. Kept as its own name so the
+# two uses can diverge later without one silently moving the other; see
+# _flag_namesake_localities.
+_NAMESAKE_LOCALITY_SHARE = _ANCHOR_SPECIFIC_SHARE
+
 # Words that say what a place *is*, never where it is. A one-word anchor
 # candidate drawn from this set is refused outright.
 #
@@ -592,6 +626,126 @@ US_STATES = {
     "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
 }
 _US_STATES_BY_NAME = {name.lower(): abbr for abbr, name in US_STATES.items()}
+
+# Embedded ISO 3166-1 table (#457): alpha-2 -> (name, alpha-3). All 249
+# currently-assigned codes, generic lookup rather than a handful of
+# hardcoded countries -- any 2-letter uppercase suffix that is a key here is
+# a country-suffix hit, and the paired alpha-3 is recognized too
+# (COUNTRIES_BY_ALPHA3 below is derived from this, not maintained by hand).
+COUNTRIES = {
+    "AF": ("Afghanistan", "AFG"), "AX": ("Aland Islands", "ALA"), "AL": ("Albania", "ALB"),
+    "DZ": ("Algeria", "DZA"), "AS": ("American Samoa", "ASM"), "AD": ("Andorra", "AND"),
+    "AO": ("Angola", "AGO"), "AI": ("Anguilla", "AIA"), "AQ": ("Antarctica", "ATA"),
+    "AG": ("Antigua and Barbuda", "ATG"), "AR": ("Argentina", "ARG"), "AM": ("Armenia", "ARM"),
+    "AW": ("Aruba", "ABW"), "AU": ("Australia", "AUS"), "AT": ("Austria", "AUT"),
+    "AZ": ("Azerbaijan", "AZE"), "BS": ("Bahamas", "BHS"), "BH": ("Bahrain", "BHR"),
+    "BD": ("Bangladesh", "BGD"), "BB": ("Barbados", "BRB"), "BY": ("Belarus", "BLR"),
+    "BE": ("Belgium", "BEL"), "BZ": ("Belize", "BLZ"), "BJ": ("Benin", "BEN"),
+    "BM": ("Bermuda", "BMU"), "BT": ("Bhutan", "BTN"), "BO": ("Bolivia", "BOL"),
+    "BQ": ("Bonaire, Sint Eustatius and Saba", "BES"), "BA": ("Bosnia and Herzegovina", "BIH"),
+    "BW": ("Botswana", "BWA"), "BV": ("Bouvet Island", "BVT"), "BR": ("Brazil", "BRA"),
+    "IO": ("British Indian Ocean Territory", "IOT"), "BN": ("Brunei Darussalam", "BRN"),
+    "BG": ("Bulgaria", "BGR"), "BF": ("Burkina Faso", "BFA"), "BI": ("Burundi", "BDI"),
+    "CV": ("Cabo Verde", "CPV"), "KH": ("Cambodia", "KHM"), "CM": ("Cameroon", "CMR"),
+    "CA": ("Canada", "CAN"), "KY": ("Cayman Islands", "CYM"),
+    "CF": ("Central African Republic", "CAF"), "TD": ("Chad", "TCD"), "CL": ("Chile", "CHL"),
+    "CN": ("China", "CHN"), "CX": ("Christmas Island", "CXR"),
+    "CC": ("Cocos (Keeling) Islands", "CCK"), "CO": ("Colombia", "COL"),
+    "KM": ("Comoros", "COM"), "CG": ("Congo", "COG"),
+    "CD": ("Congo, Democratic Republic of the", "COD"), "CK": ("Cook Islands", "COK"),
+    "CR": ("Costa Rica", "CRI"), "CI": ("Cote d'Ivoire", "CIV"), "HR": ("Croatia", "HRV"),
+    "CU": ("Cuba", "CUB"), "CW": ("Curacao", "CUW"), "CY": ("Cyprus", "CYP"),
+    "CZ": ("Czechia", "CZE"), "DK": ("Denmark", "DNK"), "DJ": ("Djibouti", "DJI"),
+    "DM": ("Dominica", "DMA"), "DO": ("Dominican Republic", "DOM"), "EC": ("Ecuador", "ECU"),
+    "EG": ("Egypt", "EGY"), "SV": ("El Salvador", "SLV"), "GQ": ("Equatorial Guinea", "GNQ"),
+    "ER": ("Eritrea", "ERI"), "EE": ("Estonia", "EST"), "SZ": ("Eswatini", "SWZ"),
+    "ET": ("Ethiopia", "ETH"), "FK": ("Falkland Islands (Malvinas)", "FLK"),
+    "FO": ("Faroe Islands", "FRO"), "FJ": ("Fiji", "FJI"), "FI": ("Finland", "FIN"),
+    "FR": ("France", "FRA"), "GF": ("French Guiana", "GUF"), "PF": ("French Polynesia", "PYF"),
+    "TF": ("French Southern Territories", "ATF"), "GA": ("Gabon", "GAB"),
+    "GM": ("Gambia", "GMB"), "GE": ("Georgia", "GEO"), "DE": ("Germany", "DEU"),
+    "GH": ("Ghana", "GHA"), "GI": ("Gibraltar", "GIB"), "GR": ("Greece", "GRC"),
+    "GL": ("Greenland", "GRL"), "GD": ("Grenada", "GRD"), "GP": ("Guadeloupe", "GLP"),
+    "GU": ("Guam", "GUM"), "GT": ("Guatemala", "GTM"), "GG": ("Guernsey", "GGY"),
+    "GN": ("Guinea", "GIN"), "GW": ("Guinea-Bissau", "GNB"), "GY": ("Guyana", "GUY"),
+    "HT": ("Haiti", "HTI"), "HM": ("Heard Island and McDonald Islands", "HMD"),
+    "VA": ("Holy See", "VAT"), "HN": ("Honduras", "HND"), "HK": ("Hong Kong", "HKG"),
+    "HU": ("Hungary", "HUN"), "IS": ("Iceland", "ISL"), "IN": ("India", "IND"),
+    "ID": ("Indonesia", "IDN"), "IR": ("Iran", "IRN"), "IQ": ("Iraq", "IRQ"),
+    "IE": ("Ireland", "IRL"), "IM": ("Isle of Man", "IMN"), "IL": ("Israel", "ISR"),
+    "IT": ("Italy", "ITA"), "JM": ("Jamaica", "JAM"), "JP": ("Japan", "JPN"),
+    "JE": ("Jersey", "JEY"), "JO": ("Jordan", "JOR"), "KZ": ("Kazakhstan", "KAZ"),
+    "KE": ("Kenya", "KEN"), "KI": ("Kiribati", "KIR"),
+    "KP": ("Korea, Democratic People's Republic of", "PRK"),
+    "KR": ("Korea, Republic of", "KOR"), "KW": ("Kuwait", "KWT"), "KG": ("Kyrgyzstan", "KGZ"),
+    "LA": ("Lao People's Democratic Republic", "LAO"), "LV": ("Latvia", "LVA"),
+    "LB": ("Lebanon", "LBN"), "LS": ("Lesotho", "LSO"), "LR": ("Liberia", "LBR"),
+    "LY": ("Libya", "LBY"), "LI": ("Liechtenstein", "LIE"), "LT": ("Lithuania", "LTU"),
+    "LU": ("Luxembourg", "LUX"), "MO": ("Macao", "MAC"), "MG": ("Madagascar", "MDG"),
+    "MW": ("Malawi", "MWI"), "MY": ("Malaysia", "MYS"), "MV": ("Maldives", "MDV"),
+    "ML": ("Mali", "MLI"), "MT": ("Malta", "MLT"), "MH": ("Marshall Islands", "MHL"),
+    "MQ": ("Martinique", "MTQ"), "MR": ("Mauritania", "MRT"), "MU": ("Mauritius", "MUS"),
+    "YT": ("Mayotte", "MYT"), "MX": ("Mexico", "MEX"), "FM": ("Micronesia", "FSM"),
+    "MD": ("Moldova", "MDA"), "MC": ("Monaco", "MCO"), "MN": ("Mongolia", "MNG"),
+    "ME": ("Montenegro", "MNE"), "MS": ("Montserrat", "MSR"), "MA": ("Morocco", "MAR"),
+    "MZ": ("Mozambique", "MOZ"), "MM": ("Myanmar", "MMR"), "NA": ("Namibia", "NAM"),
+    "NR": ("Nauru", "NRU"), "NP": ("Nepal", "NPL"), "NL": ("Netherlands", "NLD"),
+    "NC": ("New Caledonia", "NCL"), "NZ": ("New Zealand", "NZL"), "NI": ("Nicaragua", "NIC"),
+    "NE": ("Niger", "NER"), "NG": ("Nigeria", "NGA"), "NU": ("Niue", "NIU"),
+    "NF": ("Norfolk Island", "NFK"), "MK": ("North Macedonia", "MKD"),
+    "MP": ("Northern Mariana Islands", "MNP"), "NO": ("Norway", "NOR"), "OM": ("Oman", "OMN"),
+    "PK": ("Pakistan", "PAK"), "PW": ("Palau", "PLW"), "PS": ("Palestine, State of", "PSE"),
+    "PA": ("Panama", "PAN"), "PG": ("Papua New Guinea", "PNG"), "PY": ("Paraguay", "PRY"),
+    "PE": ("Peru", "PER"), "PH": ("Philippines", "PHL"), "PN": ("Pitcairn", "PCN"),
+    "PL": ("Poland", "POL"), "PT": ("Portugal", "PRT"), "PR": ("Puerto Rico", "PRI"),
+    "QA": ("Qatar", "QAT"), "RE": ("Reunion", "REU"), "RO": ("Romania", "ROU"),
+    "RU": ("Russian Federation", "RUS"), "RW": ("Rwanda", "RWA"),
+    "BL": ("Saint Barthelemy", "BLM"),
+    "SH": ("Saint Helena, Ascension and Tristan da Cunha", "SHN"),
+    "KN": ("Saint Kitts and Nevis", "KNA"), "LC": ("Saint Lucia", "LCA"),
+    "MF": ("Saint Martin (French part)", "MAF"), "PM": ("Saint Pierre and Miquelon", "SPM"),
+    "VC": ("Saint Vincent and the Grenadines", "VCT"), "WS": ("Samoa", "WSM"),
+    "SM": ("San Marino", "SMR"), "ST": ("Sao Tome and Principe", "STP"),
+    "SA": ("Saudi Arabia", "SAU"), "SN": ("Senegal", "SEN"), "RS": ("Serbia", "SRB"),
+    "SC": ("Seychelles", "SYC"), "SL": ("Sierra Leone", "SLE"), "SG": ("Singapore", "SGP"),
+    "SX": ("Sint Maarten (Dutch part)", "SXM"), "SK": ("Slovakia", "SVK"),
+    "SI": ("Slovenia", "SVN"), "SB": ("Solomon Islands", "SLB"), "SO": ("Somalia", "SOM"),
+    "ZA": ("South Africa", "ZAF"),
+    "GS": ("South Georgia and the South Sandwich Islands", "SGS"),
+    "SS": ("South Sudan", "SSD"), "ES": ("Spain", "ESP"), "LK": ("Sri Lanka", "LKA"),
+    "SD": ("Sudan", "SDN"), "SR": ("Suriname", "SUR"), "SJ": ("Svalbard and Jan Mayen", "SJM"),
+    "SE": ("Sweden", "SWE"), "CH": ("Switzerland", "CHE"),
+    "SY": ("Syrian Arab Republic", "SYR"), "TW": ("Taiwan", "TWN"),
+    "TJ": ("Tajikistan", "TJK"), "TZ": ("Tanzania, United Republic of", "TZA"),
+    "TH": ("Thailand", "THA"), "TL": ("Timor-Leste", "TLS"), "TG": ("Togo", "TGO"),
+    "TK": ("Tokelau", "TKL"), "TO": ("Tonga", "TON"), "TT": ("Trinidad and Tobago", "TTO"),
+    "TN": ("Tunisia", "TUN"), "TR": ("Turkiye", "TUR"), "TM": ("Turkmenistan", "TKM"),
+    "TC": ("Turks and Caicos Islands", "TCA"), "TV": ("Tuvalu", "TUV"),
+    "UG": ("Uganda", "UGA"), "UA": ("Ukraine", "UKR"), "AE": ("United Arab Emirates", "ARE"),
+    "GB": ("United Kingdom", "GBR"), "US": ("United States", "USA"),
+    "UM": ("United States Minor Outlying Islands", "UMI"), "UY": ("Uruguay", "URY"),
+    "UZ": ("Uzbekistan", "UZB"), "VU": ("Vanuatu", "VUT"), "VE": ("Venezuela", "VEN"),
+    "VN": ("Viet Nam", "VNM"), "VG": ("Virgin Islands (British)", "VGB"),
+    "VI": ("Virgin Islands (U.S.)", "VIR"), "WF": ("Wallis and Futuna", "WLF"),
+    "EH": ("Western Sahara", "ESH"), "YE": ("Yemen", "YEM"), "ZM": ("Zambia", "ZMB"),
+    "ZW": ("Zimbabwe", "ZWE"),
+}
+# alpha-3 -> alpha-2, derived rather than hand-maintained so the two tables
+# can't drift apart.
+_COUNTRIES_BY_ALPHA3 = {a3: a2 for a2, (_name, a3) in COUNTRIES.items()}
+_COUNTRIES_BY_NAME = {name.lower(): a2 for a2, (name, _a3) in COUNTRIES.items()}
+# Common aliases that aren't the ISO short name itself, or aren't a plain
+# alpha-2/alpha-3 code: "UK" is everyday English for GB (Overture's own
+# `country` column uses GB, never UK), "USA"/"U.S."/"U.S.A." for US. Deliberately
+# small and unambiguous — a name like "Georgia" that is also a US state stays
+# out of this table and off the alias path entirely; it is resolved (if at
+# all) through COUNTRIES/_COUNTRIES_BY_NAME or not resolved as a country.
+_COUNTRY_ALIASES = {
+    "UK": "GB",
+    "U.K.": "GB",
+    "U.S.": "US",
+    "U.S.A.": "US",
+}
 
 
 def _strip_diacritics(s: str) -> str:
@@ -713,6 +867,74 @@ def _home_bias_flag(row: dict, *, active: bool = True) -> int:
     return 0 if home_region.in_home_region(row.get("lat"), row.get("lon")) else 1
 
 
+# #463: private row tag set by _flag_namesake_localities, read by _rank_key:
+# the population of the region/country the tagged locality is the namesake
+# of, which the locality ranks *as if* it carried. Rides along on the row
+# dict like `_variant`/`_fuzzy`; never serialized — geocode() builds each
+# returned entry field by field.
+_NAMESAKE_LOCALITY_KEY = "_namesake_locality"
+
+
+def _flag_namesake_localities(rows: list[dict], query: str) -> None:
+    """#463 pre-pass over one candidate list: tag each locality that is the
+    namesake city of a region/country also present in `rows`.
+
+    A locality qualifies when some region or country row in `rows` (a) has
+    the same folded name, (b) matched `query` at the same strong (exact or
+    prefix) tier — neither side fuzzy — (c) contains the locality (a region
+    row's `region` is its own ISO code, which the locality's `region` must
+    equal; for a country row the `country` codes must match), (d) has a
+    nonzero population, and (e) that population is at most
+    1/_NAMESAKE_LOCALITY_SHARE times the locality's. The share guard is the
+    same one _pick_anchor_row uses: a 0.04% hamlet named after its region
+    is a coincidence, a 25-43% city is the place the name means.
+
+    The tag's value is the containing row's population (the largest, if the
+    locality is the namesake of both its region and its country); _rank_key
+    ranks the locality as if that were its own, and the #47 subtype term
+    then orders it immediately ahead of the region — and nowhere else.
+
+    Idempotent — clears any earlier tag first — and a no-op on a list with no
+    such pair, so every ranking without a namesake pair is byte-identical to
+    before #463. Mutates `rows` in place; the tag is read by _rank_key.
+    """
+    for row in rows:
+        row.pop(_NAMESAKE_LOCALITY_KEY, None)
+    broads = []
+    for row in rows:
+        if row.get("subtype") not in ("region", "country") or row.get("_fuzzy"):
+            continue
+        if (row.get("population") or 0) <= 0:
+            continue
+        tier = _effective_tier(row, query)
+        if tier < _STRONG_TIER:
+            continue
+        broads.append((row, tier, _normalize_for_match(row["name"])))
+    if not broads:
+        return
+    for row in rows:
+        if row.get("subtype") != "locality" or row.get("_fuzzy"):
+            continue
+        population = row.get("population") or 0
+        if population <= 0:
+            continue
+        tier = _effective_tier(row, query)
+        if tier < _STRONG_TIER:
+            continue
+        name = _normalize_for_match(row["name"])
+        for broad, broad_tier, broad_name in broads:
+            if broad_tier != tier or broad_name != name:
+                continue
+            if broad["subtype"] == "region":
+                inside = broad.get("region") is not None and row.get("region") == broad["region"]
+            else:
+                inside = broad.get("country") is not None and row.get("country") == broad["country"]
+            if inside and population >= _NAMESAKE_LOCALITY_SHARE * broad["population"]:
+                row[_NAMESAKE_LOCALITY_KEY] = max(
+                    row.get(_NAMESAKE_LOCALITY_KEY) or 0, broad["population"]
+                )
+
+
 def _rank_key(row: dict, query: str, region_population: dict[str, int], *, home_bias: bool = True):
     """Sort key: (#215) literal-over-fuzzy, then (#221) strong-vs-substring
     tier group, then whether a *nonzero* population is known, then the match
@@ -780,9 +1002,37 @@ def _rank_key(row: dict, query: str, region_population: dict[str, int], *, home_
     only wins when every other signal is tied, which is the case #53 is
     actually documented to care about (two otherwise-identical candidates,
     one found straight, one found through a spelling variant).
+
+    Namesake localities (#463). Two exact-tier, populated rows still order
+    by raw population, and that is wrong for exactly one shape: a city and
+    the region it sits in, sharing a name. "São Paulo" returned the state
+    (45.5M, centroid 259 km from the city) above the city (11.5M) for three
+    weekly corpus runs, where every other geocoder returns the city, because
+    a region's population always includes its namesake city's and so always
+    exceeds it. `_flag_namesake_localities` tags such a locality before the
+    sort — same-name, same strong tier, inside that region, and carrying at
+    least _NAMESAKE_LOCALITY_SHARE of its population, the guard
+    _pick_anchor_row already uses so a namesake hamlet can never displace a
+    genuine region — with the region's population, and the tagged locality
+    is then ranked *as if it carried that population*. Every term above the
+    population one is untouched, so the two rows tie all the way down to
+    the #47 subtype term, where locality (4) orders ahead of region (1): the
+    city lands immediately ahead of its region and nowhere else. That is
+    deliberately not a flag term of its own higher in the tuple: demoting
+    the region there sinks it below every same-name hamlet (a 3,688-person
+    "São Paulo" macrohood would become result #2), and promoting the city
+    there lifts it over everything, including a same-name country ("Mexico"
+    would return Ciudad de México over México, because Overture carries the
+    city both as a locality and as the region MX-CMX). With no tagged row the
+    ordering is byte-identical: "Kansas" still returns the state, "東京"
+    still returns 東京都. rank_score, as above, does not follow it.
     """
     tier = _effective_tier(row, query)
     population = row.get("population")
+    namesake_of = row.get(_NAMESAKE_LOCALITY_KEY)
+    if namesake_of:
+        # #463: rank as the region this locality is the namesake of.
+        population = max(population or 0, namesake_of)
     weight = _SUBTYPE_WEIGHT.get(row.get("subtype"), 0)
     depth = len(row.get("admin_context") or [])
     region_pop = region_population.get(row.get("region")) or 0
@@ -1621,6 +1871,156 @@ def _parse_region_suffix(query: str, local_table: str | None) -> tuple[str, str 
     return query, None, None
 
 
+# --- #457: "City, Country" parsing ---------------------------------------
+
+
+def _resolve_country_code(token: str) -> tuple[str, str] | None:
+    """token (case-insensitive: ISO 3166-1 alpha-2, alpha-3, one of the
+    {UK, U.K., U.S., U.S.A.} aliases, or the full ISO short name) ->
+    (name, alpha-2), or None if it isn't a recognized country.
+
+    Deliberately generic rather than a hardcoded shortlist: any 2-letter
+    token that is a key of COUNTRIES is a hit, any 3-letter token that is a
+    key of _COUNTRIES_BY_ALPHA3 is a hit, so all ~249 currently-assigned
+    ISO codes are covered without listing them twice. "Georgia" (also a US
+    state) still resolves as a country here on purpose — the region path
+    is tried first by every caller in this module, so a query like
+    "Atlanta, Georgia" never reaches this function at all, and "Tbilisi,
+    Georgia" needs it to.
+    """
+    t = token.strip().rstrip(".")
+    upper = t.upper()
+    if upper in COUNTRIES:
+        return COUNTRIES[upper][0], upper
+    alias = _COUNTRY_ALIASES.get(upper)
+    if alias:
+        return COUNTRIES[alias][0], alias
+    a2 = _COUNTRIES_BY_ALPHA3.get(upper)
+    if a2:
+        return COUNTRIES[a2][0], a2
+    a2 = _COUNTRIES_BY_NAME.get(t.lower())
+    if a2:
+        return COUNTRIES[a2][0], a2
+    return None
+
+
+def _resolve_country_from_table(
+    candidate: str, local_table: str, alt_table: str | None = None
+) -> tuple[str, str] | None:
+    """candidate (e.g. "Deutschland") -> (name, alpha-2) if it exactly
+    matches (case-insensitive) a country-subtype row's name.primary in the
+    local divisions table, else — if `alt_table` is given — one of that
+    row's #214 alternate spellings. Covers country names/exonyms outside
+    the embedded ISO table (#457), the same role _resolve_region_from_table
+    plays for regions (#46).
+    """
+    sql = f"""
+        SELECT name, country FROM read_parquet('{local_table}')
+        WHERE subtype = 'country' AND country IS NOT NULL AND name ILIKE $name ESCAPE '\\'
+        LIMIT 1
+    """
+    try:
+        with overture._conn_lock:
+            row = overture.conn().execute(
+                sql, {"name": overture._like_escape(candidate)}
+            ).fetchone()
+    except duckdb.Error:
+        row = None
+    if row is not None:
+        return row[0], row[1]
+    if not alt_table:
+        return None
+    folded = _fold_alt_name(candidate)
+    if not folded:
+        return None
+    sql2 = f"""
+        SELECT d.name, d.country
+        FROM read_parquet('{alt_table}') a
+        JOIN read_parquet('{local_table}') d ON d.id = a.id
+        WHERE d.subtype = 'country' AND d.country IS NOT NULL AND a.alt_name = $folded
+        LIMIT 1
+    """
+    try:
+        with overture._conn_lock:
+            row = overture.conn().execute(sql2, {"folded": folded}).fetchone()
+    except duckdb.Error:
+        return None
+    return (row[0], row[1]) if row is not None else None
+
+
+def _parse_country_suffix(
+    query: str, local_table: str | None, alt_table: str | None = None
+) -> tuple[str, str | None, str | None]:
+    """query -> (base_query, country_code, country_name), the #457
+    counterpart to _parse_region_suffix (#46) for a trailing country
+    instead of a region. Callers try the region parse first and only fall
+    back to this one when it found nothing — see geocode_detailed.
+    """
+    for base, suffix in _split_region_suffix(query):
+        resolved = _resolve_country_code(suffix)
+        if resolved is None and local_table:
+            resolved = _resolve_country_from_table(suffix, local_table, alt_table)
+        if resolved:
+            name, code = resolved
+            return base, code, name
+    return query, None, None
+
+
+def _unrecognized_comma_qualifier(query: str) -> tuple[str, str] | None:
+    """(base, qualifier) when `query` has a comma-separated trailing token
+    that the region and country parses have already failed on — #457's
+    "never search the joined string" rule.
+
+    Comma only, not the bare-trailing-word candidate _split_region_suffix
+    also tries for the region/country parses: flagging every unresolved
+    last WORD of an untagged multi-word query ("New York City") as an
+    "unrecognized qualifier" would be far too aggressive and would add a
+    note to queries that have nothing wrong with them. A comma is
+    deliberate punctuation a caller adds specifically to separate a
+    qualifier from the name, so treating an unresolved one as worth a note
+    (rather than silently searching a string no division name will ever
+    equal) is safe.
+    """
+    if "," not in query:
+        return None
+    base, _, suffix = query.rpartition(",")
+    base, suffix = base.strip(), suffix.strip()
+    if not base or not suffix:
+        return None
+    return base, suffix
+
+
+def _unrecognized_qualifier_note(qualifier: str, base: str) -> str:
+    return (
+        f"qualifier '{qualifier}' not recognized as a region or country; "
+        f"showing matches for '{base}'"
+    )
+
+
+def _country_degrade_note(base: str, country_code: str) -> str:
+    return (
+        f"no match for '{base}' in {country_code}; showing unconstrained matches for '{base}'"
+    )
+
+
+def normalize_country(token: str) -> str:
+    """Validate/normalize an explicit `country=` parameter (#457): ISO
+    3166-1 alpha-2, alpha-3, or a recognized alias/full name,
+    case-insensitive -> uppercase alpha-2.
+
+    Raises ValueError naming the expected form on anything else — server.py
+    turns that into a structured {"error": "bad_request", ...}, the same
+    convention overture.py's other parameter validation uses.
+    """
+    resolved = _resolve_country_code(token)
+    if resolved is None:
+        raise ValueError(
+            f"country={token!r} is not a recognized ISO 3166-1 country code "
+            "(alpha-2 like 'GB', alpha-3 like 'GBR', or a common alias like 'UK'/'USA')"
+        )
+    return resolved[1]
+
+
 # --- #329: city hints, POI aliases, last-resolve LRU ----------------------
 
 # Trailing tokens we will treat as a city= hint without a table lookup.
@@ -1796,7 +2196,7 @@ def _well_known_city_near(row: dict, query: str) -> int:
 
 def _resolve_cache_key(
     query: str, city: str | None, near_lat: float | None, near_lon: float | None,
-    lang: str | None = None,
+    lang: str | None = None, country: str | None = None,
 ) -> tuple:
     near = (
         (round(near_lat, 3), round(near_lon, 3))
@@ -1805,14 +2205,18 @@ def _resolve_cache_key(
     )
     # #410: lang is part of the key — otherwise a lang="de" call would replay
     # a cache entry another lang (or no lang at all) already populated.
-    return (_fold_query_key(query), _fold_query_key(city) if city else "", *near, lang or "")
+    # #457: country too, for the same reason.
+    return (
+        _fold_query_key(query), _fold_query_key(city) if city else "", *near,
+        lang or "", country or "",
+    )
 
 
 def _resolve_cache_get(
     query: str, city: str | None, near_lat: float | None, near_lon: float | None,
-    lang: str | None = None,
+    lang: str | None = None, country: str | None = None,
 ) -> list[dict] | None:
-    key = _resolve_cache_key(query, city, near_lat, near_lon, lang)
+    key = _resolve_cache_key(query, city, near_lat, near_lon, lang, country)
     with _resolve_lru_lock:
         rows = _resolve_lru.get(key)
         if rows is None:
@@ -1828,8 +2232,9 @@ def _resolve_cache_put(
     near_lon: float | None,
     rows: list[dict],
     lang: str | None = None,
+    country: str | None = None,
 ) -> None:
-    key = _resolve_cache_key(query, city, near_lat, near_lon, lang)
+    key = _resolve_cache_key(query, city, near_lat, near_lon, lang, country)
     stored = [dict(r) for r in rows]
     with _resolve_lru_lock:
         _resolve_lru[key] = stored
@@ -2037,17 +2442,33 @@ def _match_tier_order_sql(name_expr: str) -> str:
 
 
 def _query_divisions_from_local(
-    table_path: str, query: str, region_code: str | None, name_match_expr: str = "name"
+    table_path: str,
+    query: str,
+    region_code: str | None,
+    name_match_expr: str = "name",
+    country_code: str | None = None,
 ) -> list[dict]:
     """name_match_expr (#53) is the SQL expression matched against $pattern
     /$exact/$prefix — "name" for a plain literal search, or
     "strip_accents(name)" for the diacritic-folded second-pass query (caller
-    passes an already diacritic-stripped `query` to match against it)."""
-    region_filter = "AND region = $region_code" if region_code else ""
+    passes an already diacritic-stripped `query` to match against it).
+
+    country_code (#457) narrows the same way region_code does, on the row's
+    own `country` column — filtering by hierarchy membership, not a second
+    string match. Both filters may be given together (a region-suffix
+    parse combined with an explicit `country=`)."""
+    filters = []
+    if region_code:
+        filters.append("AND region = $region_code")
+    if country_code:
+        filters.append("AND country = $country_code")
+    region_filter = " ".join(filters)
     q = overture._like_escape(query)
     params: dict = {"pattern": f"%{q}%", "exact": q, "prefix": f"{q}%"}
     if region_code:
         params["region_code"] = region_code
+    if country_code:
+        params["country_code"] = country_code
     sql = f"""
         SELECT id, name, subtype, country, region, lat, lon, admin_chain, population
         FROM read_parquet('{table_path}')
@@ -2073,12 +2494,16 @@ def _query_divisions_from_local(
 
 
 def _query_divisions_from_upstream(
-    query: str, region_code: str | None, name_match_expr: str = "names.primary"
+    query: str,
+    region_code: str | None,
+    name_match_expr: str = "names.primary",
+    country_code: str | None = None,
 ) -> list[dict]:
     """Direct upstream scan — the pre-#43 path, used when no local table is
     available (PLACEROOT_CACHE=off, or materialization failed).
 
     name_match_expr: see _query_divisions_from_local (#53).
+    country_code: see _query_divisions_from_local (#457).
     """
     # type=division (points + hierarchies), not divisions.py's type=division_area
     # (polygons) — the two share a theme but are read from different fixtures/globs.
@@ -2087,12 +2512,16 @@ def _query_divisions_from_upstream(
     if cols is not None and "names" not in cols:
         return []
     population_expr = "population" if cols is None or "population" in cols else "NULL AS population"
-    region_filter = ""
+    filters = []
     q = overture._like_escape(query)
     params: dict = {"pattern": f"%{q}%", "exact": q, "prefix": f"{q}%"}
     if region_code and (cols is None or "region" in cols):
-        region_filter = "AND region = $region_code"
+        filters.append("AND region = $region_code")
         params["region_code"] = region_code
+    if country_code and (cols is None or "country" in cols):
+        filters.append("AND country = $country_code")
+        params["country_code"] = country_code
+    region_filter = " ".join(filters)
     sql = f"""
         SELECT id, names.primary AS name, subtype, country, region,
                bbox.ymin AS lat, bbox.xmin AS lon, hierarchies, {population_expr}
@@ -2122,7 +2551,11 @@ def _query_divisions_from_upstream(
 
 
 def _query_alt_names(
-    alt_table: str, table_path: str, query: str, region_code: str | None
+    alt_table: str,
+    table_path: str,
+    query: str,
+    region_code: str | None,
+    country_code: str | None = None,
 ) -> list[dict]:
     """#214: divisions whose *alternate* (names.common) spelling matches
     `query`, joined back to the local divisions table for the real row.
@@ -2162,10 +2595,14 @@ def _query_alt_names(
         return []
     q = overture._like_escape(folded)
     params: dict = {"pattern": f"%{q}%", "exact": q, "prefix": f"{q}%"}
-    region_filter = ""
+    filters = []
     if region_code:
-        region_filter = "AND d.region = $region_code"
+        filters.append("AND d.region = $region_code")
         params["region_code"] = region_code
+    if country_code:
+        filters.append("AND d.country = $country_code")
+        params["country_code"] = country_code
+    region_filter = " ".join(filters)
     match_order = _match_tier_order_sql("a.alt_name")
     sql = f"""
         SELECT d.id, d.name, d.subtype, d.country, d.region, d.lat, d.lon,
@@ -2200,7 +2637,12 @@ def _query_alt_names(
 
 
 def _alt_rows_not_already_found(
-    alt_table: str, table_path: str, query: str, region_code: str | None, found: list[dict]
+    alt_table: str,
+    table_path: str,
+    query: str,
+    region_code: str | None,
+    found: list[dict],
+    country_code: str | None = None,
 ) -> list[dict]:
     """#214 alternate-name matches for `query`, minus the divisions the
     literal pass already returned — a division found under its canonical
@@ -2214,7 +2656,7 @@ def _alt_rows_not_already_found(
     spellings.
     """
     try:
-        rows = _query_alt_names(alt_table, table_path, query, region_code)
+        rows = _query_alt_names(alt_table, table_path, query, region_code, country_code)
     except overture.UpstreamUnavailable:
         if Path(alt_table).exists():
             raise
@@ -2253,6 +2695,7 @@ def _query_divisions(
     local_table: str | None,
     fold_diacritics: bool = False,
     alt_table: str | None = None,
+    country_code: str | None = None,
 ) -> list[dict]:
     """fold_diacritics (#53): match strip_accents(name) against `query`
     (which the caller must already have run through _strip_diacritics) —
@@ -2263,11 +2706,16 @@ def _query_divisions(
     variant retries leave it None, because the alternate side already folds
     case and diacritics itself, so re-running it on a diacritic-stripped
     spelling of the same query can only return rows this pass already has.
+
+    country_code (#457): same role as region_code, filtering candidates by
+    the row's own `country` column. The two may be combined.
     """
     if local_table is not None:
         name_expr = "strip_accents(name)" if fold_diacritics else "name"
         try:
-            rows = _query_divisions_from_local(local_table, query, region_code, name_expr)
+            rows = _query_divisions_from_local(
+                local_table, query, region_code, name_expr, country_code
+            )
         except overture.UpstreamUnavailable:
             if Path(local_table).exists():
                 raise
@@ -2283,11 +2731,11 @@ def _query_divisions(
         else:
             if alt_table is not None:
                 rows = rows + _alt_rows_not_already_found(
-                    alt_table, local_table, query, region_code, rows
+                    alt_table, local_table, query, region_code, rows, country_code
                 )
             return rows
     name_expr = "strip_accents(names.primary)" if fold_diacritics else "names.primary"
-    return _query_divisions_from_upstream(query, region_code, name_expr)
+    return _query_divisions_from_upstream(query, region_code, name_expr, country_code)
 
 
 # --- #215: fuzzy fallback tier ------------------------------------------
@@ -2327,7 +2775,10 @@ def _has_like_metacharacter(query: str) -> bool:
 
 
 def _query_divisions_fuzzy(
-    table_path: str, query: str, region_code: str | None = None
+    table_path: str,
+    query: str,
+    region_code: str | None = None,
+    country_code: str | None = None,
 ) -> list[dict]:
     """Divisions whose folded name is within _FUZZY_SIMILARITY_THRESHOLD
     jaro-winkler of the folded query — the #215 typo tier.
@@ -2376,10 +2827,14 @@ def _query_divisions_fuzzy(
     if not folded_query:
         return []
     params: dict = {"folded": folded_query}
-    region_filter = ""
+    filters = []
     if region_code:
-        region_filter = "AND region = $region_code"
+        filters.append("AND region = $region_code")
         params["region_code"] = region_code
+    if country_code:
+        filters.append("AND country = $country_code")
+        params["country_code"] = country_code
+    region_filter = " ".join(filters)
     sql = f"""
         SELECT id, name, subtype, country, region, lat, lon, admin_chain, population,
                jaro_winkler_similarity({_FOLDED_NAME_SQL}, $folded) AS similarity
@@ -2482,10 +2937,65 @@ def _fallback_anchor_candidates(
     before this function is ever reached. Without a local divisions table
     for that tier to read (cache off), such a query still lands here and
     still reaches the substring scan of its own typo.
+
+    #464: a split anchor is a *guess* about which words locate the query,
+    and for a query that is nothing but a POI's name the guess is always
+    wrong — there is no city in "Grand Central Terminal" or "Mall of
+    America" to find. Traced live: "Grand Central Terminal" anchored on
+    Chelyabinsk (its leading word "Central" exact-matches Центральный
+    район's alternate name, and 101k people beat Grand Central, PA's
+    none), and "Mall of America" anchored on a Virginia division whose
+    name merely *contains* "of America". Two things follow. First, a
+    trailing split whose division match is only a substring (the trailing
+    words are a fragment of some division's longer name, and that name is
+    not itself in the query) is not acted on at all when the residual is
+    the larger part of the query — the user did not type that division,
+    so the words were never a location. Second, every contender now says
+    how much it should be trusted (see _fallback_anchor_details' `strong`):
+    resolve_place uses that to decide whether a place found near the
+    anchor must account for the anchor's words too, or only for the rest.
+    A trailing exact/prefix match on a city-level division ("San Jose",
+    "Chicago", "Rio de Janeiro" typed whole) is strong — the caller named
+    the city, and a place inside it is not expected to repeat it. A
+    leading-word anchor is never strong: #268's own premise is that the
+    location word is part of the place's name ("Stanford Shopping Center",
+    "Palo Alto Caltrain Station"), so a genuine match contains it, and a
+    coincidence ("Grand Royal", 20 km from a district called Central) does
+    not. A country- or region-level match is never strong either: its
+    centroid locates nothing (see _pick_anchor_row), and "America" as a
+    prefix of the United States' Min Nan name is not the caller naming
+    Kansas.
+    """
+    return [(d["lat"], d["lon"], d["name_query"]) for d in _fallback_anchor_details(
+        search_query, divisions, region_code, local_table,
+        alt_table=alt_table, region_population=region_population,
+    )]
+
+
+def _fallback_anchor_details(
+    search_query: str,
+    divisions: list[dict],
+    region_code: str | None,
+    local_table: str | None,
+    alt_table: str | None = None,
+    region_population: dict[str, int] | None = None,
+) -> list[dict]:
+    """_fallback_anchor_candidates, with each anchor's provenance kept.
+
+    One dict per candidate, best first: "lat", "lon", "name_query" (as the
+    tuple form), plus "candidate" (the query words the anchor was derived
+    from — empty when a division in hand anchored the whole query),
+    "split" (True when the anchor came from a trailing/leading split rather
+    than from `divisions`), and "strong" (#464: whether the caller may
+    treat the anchor's own words as accounted for by *location* rather than
+    requiring a place's name to contain them — see the paragraph above).
     """
     if divisions:
         top = divisions[0]
-        return [(top["lat"], top["lon"], search_query)]
+        return [{
+            "lat": top["lat"], "lon": top["lon"], "name_query": search_query,
+            "candidate": "", "split": False, "strong": True,
+        }]
     tokens = search_query.strip().split()
     pop = region_population or {}
 
@@ -2554,10 +3064,22 @@ def _fallback_anchor_candidates(
         if not rows:
             continue
         row = _pick_anchor_row(rows, candidate, pop)
+        if (
+            not is_leading
+            and _anchor_is_weak(row, candidate, search_query)
+            and len(base.split()) > len(candidate.split())
+        ):
+            # #464: the trailing words are a fragment of some division's
+            # longer name, that name is nowhere in the query, and most of
+            # the query is still unexplained — "of America" inside
+            # "Tradiations of America" does not make "Mall of America" a
+            # query about Virginia. Not a location word; not an anchor.
+            continue
         contenders.append({
             "row": row, "candidate": candidate, "base": base,
             "precedence": precedence,
             "broad": _SUBTYPE_WEIGHT.get(row.get("subtype"), 2) <= 1,
+            "leading": is_leading,
         })
         # The same word's next two cities, as lower-precedence contenders:
         # ambiguous city names lose coin flips — "cambridge" is the UK's,
@@ -2582,6 +3104,7 @@ def _fallback_anchor_candidates(
                 "row": alt, "candidate": candidate, "base": base,
                 "precedence": precedence + 100 * alt_rank,
                 "broad": _SUBTYPE_WEIGHT.get(alt.get("subtype"), 2) <= 1,
+                "leading": is_leading,
             })
     ranked = _rank_anchor_contenders(contenders)
     if not ranked:
@@ -2589,8 +3112,40 @@ def _fallback_anchor_candidates(
     out = []
     for c in ranked:
         name_query = None if _nothing_but_stopwords(c["base"]) else c["base"]
-        out.append((c["row"]["lat"], c["row"]["lon"], name_query))
+        out.append({
+            "lat": c["row"]["lat"], "lon": c["row"]["lon"], "name_query": name_query,
+            "candidate": c["candidate"], "split": True,
+            # #464: see _fallback_anchor_candidates. Trailing, city-level,
+            # and the caller typed the division's name (exact/prefix, or
+            # the whole matched name sits in the query): the anchor words
+            # are a location, not part of the place's name.
+            "strong": (
+                not c["leading"]
+                and not c["broad"]
+                and not _anchor_is_weak(c["row"], c["candidate"], search_query)
+            ),
+        })
     return out
+
+
+def _anchor_is_weak(row: dict, candidate: str, search_query: str) -> bool:
+    """#464: whether `row` matched the split words `candidate` only as a
+    substring of a longer division name that the query does not contain.
+
+    "de Janeiro" is a substring of "Rio de Janeiro", but the caller typed
+    "Copacabana Rio de Janeiro" — the whole name is there, the split just
+    landed a word short, and the anchor is as good as an exact one. "of
+    America" is a substring of "Tradiations of America", which appears
+    nowhere in "Mall of America": the trailing words coincide with a
+    fragment of an unrelated name.
+    """
+    if _effective_tier(row, candidate) >= _STRONG_TIER:
+        return False
+    q = _normalize_for_match(search_query)
+    for name in (row.get("_matched_name"), row.get("name")):
+        if name and _normalize_for_match(name) in q:
+            return False
+    return True
 
 
 # When two splits disagree on which word is the location, more of the query
@@ -3284,12 +3839,19 @@ def _postcode_empty_note(display: str) -> str:
     )
 
 
-def geocode(query: str, limit: int = DEFAULT_LIMIT, lang: str | None = None) -> list[dict]:
-    """Free-text place name -> ranked candidates. See geocode_detailed."""
-    return geocode_detailed(query, limit, lang=lang)["results"]
+def geocode(
+    query: str, limit: int = DEFAULT_LIMIT, lang: str | None = None, country: str | None = None,
+) -> list[dict]:
+    """Free-text place name -> ranked candidates. See geocode_detailed.
+
+    country (#457): see geocode_detailed. May raise ValueError.
+    """
+    return geocode_detailed(query, limit, lang=lang, country=country)["results"]
 
 
-def geocode_batch(queries: list[str], limit_per_query: int = 3) -> list[dict]:
+def geocode_batch(
+    queries: list[str], limit_per_query: int = 3, country: str | None = None,
+) -> list[dict]:
     """Geocode many names against ONE opened local divisions table (#329).
 
     Opens the name table (and its alt-name sibling) once, then looks every
@@ -3300,13 +3862,20 @@ def geocode_batch(queries: list[str], limit_per_query: int = 3) -> list[dict]:
     error shape — a bare "no match" string used to stand in its place);
     input order is preserved. The caller (server.py) applies the 20-query
     cap.
+
+    country (#457) applies the same ISO 3166-1 constraint to every query in
+    the batch. May raise ValueError (validated once, up front, rather than
+    per query).
     """
+    if country is not None:
+        country = normalize_country(country)
     local_table = _local_divisions_table()
     alt_table = _local_alt_names_table(local_table)
     rows = []
     for query in queries:
         hits = geocode_detailed(
             query, limit_per_query, local_table=local_table, alt_table=alt_table,
+            country=country,
         )["results"]
         if not hits:
             rows.append({
@@ -3334,6 +3903,7 @@ def geocode_detailed(
     local_table: str | None = None,
     alt_table: str | None = None,
     lang: str | None = None,
+    country: str | None = None,
 ) -> dict:
     """Free-text place name -> ranked candidates, from Overture divisions (and places fallback).
 
@@ -3385,11 +3955,21 @@ def geocode_detailed(
     are unaffected — same scope line find_places itself draws this round.
     No lang given, or no variant found for a row, leaves it byte-identical
     to the no-lang answer.
+
+    country (#457, ISO 3166-1 alpha-2/alpha-3, case-insensitive; aliases
+    like "UK"/"USA" also accepted) is the explicit form of the "City,
+    Country" suffix parsing below — constrains divisions candidates to
+    that country's own `country` column. Raises ValueError if it isn't a
+    recognized country code, or if it disagrees with a country/region
+    suffix parsed off `query` itself (server.py turns either into a
+    structured bad_request naming both).
     """
     query = query.strip()
     limit = max(1, min(limit, MAX_LIMIT))
     if not query:
         return {"results": []}
+
+    normalized_country = normalize_country(country) if country is not None else None
 
     note = None
     if local_table is None:
@@ -3435,21 +4015,87 @@ def geocode_detailed(
     if alt_table is None:
         alt_table = _local_alt_names_table(local_table)
     base_query, region_code, _region_name = _parse_region_suffix(query, local_table)
-    search_query = base_query if region_code else query
-    # `region_code` is cleared below if its constrained search comes up
-    # empty; the #215 fuzzy pass still wants the code the query itself
-    # carried, so keep it.
-    suffix_region_code = region_code
+    country_code = None
+    _country_name = None
+    qualifier_note = None
+    if region_code is None:
+        # #457: only tried once the region parse has failed — "Springfield,
+        # IL" and "London, Ontario" never reach this at all, so the
+        # region/country parses can't fight over the same suffix.
+        base_query, country_code, _country_name = _parse_country_suffix(
+            query, local_table, alt_table
+        )
+        if country_code is None and normalized_country is None:
+            # #457: neither a region nor a country suffix resolved. "Never
+            # search the joined string" — a comma-separated qualifier
+            # (only a comma counts; see _unrecognized_comma_qualifier) that
+            # names nothing this module recognizes still gets set aside,
+            # with a note, rather than searching a literal string no
+            # division name will ever equal.
+            unrecognized = _unrecognized_comma_qualifier(query)
+            if unrecognized:
+                base_query, suffix_text = unrecognized
+                qualifier_note = _unrecognized_qualifier_note(suffix_text, base_query)
+            else:
+                base_query = query
 
-    divisions = _query_divisions(search_query, region_code, local_table, alt_table=alt_table)
+    # Whether country_code (if any) came from parsing `query` itself, as
+    # opposed to the explicit `country=` param merged in just below — only
+    # a *parsed* country gets the #46-style "degrade to unconstrained on
+    # zero candidates" treatment. An explicit country= is a deliberate
+    # filter the caller stated on purpose; zero matches inside it is a real
+    # answer, not a misparse worth second-guessing.
+    country_code_from_suffix = country_code is not None
+
+    if normalized_country is not None:
+        if country_code is not None and country_code != normalized_country:
+            raise ValueError(
+                f"country={country!r} conflicts with the parsed qualifier "
+                f"{_country_name!r} ({country_code}) in {query!r}"
+            )
+        if region_code is not None:
+            implied = region_code.split("-", 1)[0]
+            if implied and implied != normalized_country:
+                raise ValueError(
+                    f"country={country!r} conflicts with the parsed region "
+                    f"qualifier {_region_name!r} ({implied}) in {query!r}"
+                )
+        country_code = normalized_country
+
+    search_query = base_query if (region_code or country_code or qualifier_note) else query
+    # `region_code`/`country_code` are cleared below if a constrained
+    # search comes up empty; the #215 fuzzy pass still wants the code the
+    # query itself carried, so keep it.
+    suffix_region_code = region_code
+    suffix_country_code = country_code
+
+    divisions = _query_divisions(
+        search_query, region_code, local_table, alt_table=alt_table, country_code=country_code,
+    )
     if region_code and not divisions:
-        # Recognized a region suffix, but nothing in this dataset matches
-        # inside it — degrade to an unconstrained search of the original
-        # query rather than returning empty for a query that would
-        # otherwise have matched something.
+        # #46: recognized a region suffix, but nothing in this dataset
+        # matches inside it — degrade to an unconstrained search of the
+        # original query rather than returning empty for a query that
+        # would otherwise have matched something.
         region_code = None
+        country_code = None
         search_query = query
         divisions = _query_divisions(search_query, None, local_table, alt_table=alt_table)
+    elif country_code and not divisions and country_code_from_suffix:
+        # #457: same idea, but degrading to the BASE name (not the whole
+        # comma-joined string) — Overture names are bare, so re-searching
+        # "Springfield, GB" verbatim could never match anything anyway,
+        # unlike the region path above which still has today's plain
+        # substring behavior to fall back on for a name+suffix combination
+        # its own docstring already documents as unconstrained-original.
+        #
+        # Only for a country parsed off the query itself, not an explicit
+        # country= (see country_code_from_suffix above) — a caller-stated
+        # filter coming up empty is a real, precise answer.
+        country_code = None
+        search_query = base_query
+        divisions = _query_divisions(search_query, None, local_table, alt_table=alt_table)
+        qualifier_note = _country_degrade_note(base_query, suffix_country_code)
 
     # #53: literal query didn't reach an exact-or-prefix division match with
     # some real prominence behind it — retry with normalized variants
@@ -3489,7 +4135,9 @@ def geocode_detailed(
     variant_rows: list[dict] = []
     if not literal_answer_is_good_enough:
         for variant_query in _abbreviation_variant_queries(search_query):
-            for row in _query_divisions(variant_query, region_code, local_table):
+            for row in _query_divisions(
+                variant_query, region_code, local_table, country_code=country_code
+            ):
                 if row["id"] not in seen_ids:
                     row["_variant"] = True
                     # Tier against the variant text it actually matched
@@ -3539,7 +4187,10 @@ def geocode_detailed(
         # whichever places are most populous. The literal pass, matching raw
         # names, correctly returns nothing for those.
         rows = (
-            _query_divisions(stripped_query, region_code, local_table, fold_diacritics=True)
+            _query_divisions(
+                stripped_query, region_code, local_table,
+                fold_diacritics=True, country_code=country_code,
+            )
             if stripped_query
             else []
         )
@@ -3577,8 +4228,10 @@ def geocode_detailed(
             # once its background build lands) handle the real name.
             fuzzy_rows = []
         else:
-            fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query, suffix_region_code)
-        if not fuzzy_rows and suffix_region_code:
+            fuzzy_rows = _query_divisions_fuzzy(
+                local_table, fuzzy_query, suffix_region_code, suffix_country_code
+            )
+        if not fuzzy_rows and (suffix_region_code or suffix_country_code):
             fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query)
         divisions = fuzzy_rows
 
@@ -3605,10 +4258,11 @@ def geocode_detailed(
         # zero-row divisions scan ran ahead of it — and the same upstream
         # scan runs after it instead, only if nothing at all was found
         # (see the empty-candidates recall retry below).
-        divisions = _query_divisions(search_query, region_code, None)
+        divisions = _query_divisions(search_query, region_code, None, country_code=country_code)
         _bundled_recall_pending = False
 
     region_population = _region_population_lookup(local_table)
+    _flag_namesake_localities(divisions, search_query)
     divisions.sort(key=lambda r: _rank_key(r, search_query, region_population))
 
     # #406: cheap on an already-sorted list — the disclosure note only ever
@@ -3774,7 +4428,8 @@ def geocode_detailed(
         # only come back empty, and it was the entire cost of doing so —
         # 11.0s of a fresh install's first landmark query, spent proving a
         # negative that the query's own shape already implies.
-        recalled = _query_divisions(search_query, region_code, None)
+        recalled = _query_divisions(search_query, region_code, None, country_code=country_code)
+        _flag_namesake_localities(recalled, search_query)
         recalled.sort(key=lambda r: _rank_key(r, search_query, region_population))
         candidates = recalled
         # #406: the recall pass replaces `candidates` wholesale, so redo the
@@ -3854,6 +4509,11 @@ def geocode_detailed(
         # against the string actually fuzzed, which is the query minus any
         # region suffix.
         result["note"] = _fuzzy_correction_note(fuzzy_out, fuzzy_query)
+    elif qualifier_note:
+        # #457: same idiom — rides along with real results (an
+        # unrecognized qualifier or a country degrade still searches the
+        # base name and usually finds something), not instead of them.
+        result["note"] = qualifier_note
     if postcode_note and not out:
         # #223: the query was postcode-shaped, the postcode aggregate found
         # nothing, and neither did the name search. What that emptiness means
@@ -4343,6 +5003,7 @@ def resolve_place(
     limit: int = 3,
     city: str | None = None,
     lang: str | None = None,
+    country: str | None = None,
 ) -> list[dict]:
     """Free-text place reference -> ranked, typed GERS ids an agent can hold onto.
 
@@ -4406,11 +5067,37 @@ def resolve_place(
     docstring draws), so they always carry their primary name. A division
     candidate's `name_primary` is present under the same rule as
     geocode()'s: only when the variant actually differs from the primary.
+
+    #464: with no near/city hint and no division matching the whole query,
+    the reference is a *guess* (_fallback_anchor_candidates' split of the
+    caller's own words), and the shared-one-word relatedness gate above is
+    too loose next to a guess — "Grand Central Terminal" anchored on a
+    Chelyabinsk district called Central and returned a restaurant named
+    "Grand Royal". Near a split anchor a place must account for every
+    significant word of the query (see _fallback_anchor_details' `strong`
+    for which words the anchor itself may account for). When nothing
+    survives, the query is treated as the bare name it is: one unanchored,
+    LIMIT-capped scan for the whole query, keeping exact/prefix rows only,
+    under the same remote-dataset gate as geocode()'s own (#105) — so
+    against the live S3 release a bare famous name with no bundled alias
+    returns [] (the server answers need: location) rather than a place on
+    the wrong continent.
+
+    country (#457) composes with `city`: it constrains the divisions half
+    of the merge (threaded through the internal geocode() calls this
+    function makes), the same ISO 3166-1 filter geocode() itself takes.
+    The places half is left unconstrained by it — find_places has no
+    country column to filter on here, and the bbox this function already
+    derives from `city`/near_lat/near_lon does the same job for that half.
+    May raise ValueError for an unrecognized country or one that conflicts
+    with a country/region qualifier parsed off `query` itself.
     """
     query = query.strip()
     limit = max(1, min(limit, MAX_LIMIT))
     if not query:
         return []
+    if country is not None:
+        country = normalize_country(country)
 
     # #329: parse a trailing city / POI alias, or reuse the last good city
     # for a POI-shaped query. Infer *before* the LRU lookup so the key
@@ -4437,7 +5124,7 @@ def resolve_place(
                     city_bounded = True
 
     cache_city, cache_lat, cache_lon = city, near_lat, near_lon
-    cached = _resolve_cache_get(query, cache_city, cache_lat, cache_lon, lang)
+    cached = _resolve_cache_get(query, cache_city, cache_lat, cache_lon, lang, country)
     if cached is not None:
         return cached[:limit]
 
@@ -4459,9 +5146,13 @@ def resolve_place(
     # over a same-named region/country one, falling back to the top hit
     # when nothing at that level matched (the hint may genuinely name a
     # country or region and nothing finer).
+    # #457: only pass `country` through when set, so the many callers and
+    # test doubles that monkeypatch `geocode` with the pre-#457 signature
+    # keep working unchanged; the constraint is opt-in either way.
+    country_kw = {"country": country} if country is not None else {}
     if city and near_lat is None and near_lon is None:
         try:
-            hits = geocode(city, limit=5)
+            hits = geocode(city, limit=5, **country_kw)
         except (overture.UpstreamUnavailable, overture.SchemaDegraded):
             hits = []
         if hits:
@@ -4477,7 +5168,7 @@ def resolve_place(
     # Search the place half when we stripped a trailing city, so
     # "Colosseo Roma" does not return Rome the city as the pin.
     search_query = place_query if city_bounded and place_query != query else query
-    geocode_hits = geocode(search_query, limit=_RESOLVE_OVERFETCH, lang=lang)
+    geocode_hits = geocode(search_query, limit=_RESOLVE_OVERFETCH, lang=lang, **country_kw)
     if city_bounded and near_lat is not None and near_lon is not None:
         geocode_hits = [
             r for r in geocode_hits
@@ -4485,6 +5176,9 @@ def resolve_place(
         ]
     division_hits = [r for r in geocode_hits if r["type"] != "place"]
 
+    # #464: None unless the reference below is a split-derived guess; then
+    # the query words a place candidate must cover to count (see there).
+    split_cover_tokens: list[str] | None = None
     if near_lat is not None and near_lon is not None:
         reference = (near_lat, near_lon)
     elif division_hits:
@@ -4497,11 +5191,35 @@ def resolve_place(
         # the POI-shaped queries that need one, and answered that query with
         # a Plaza Mayor 25 km out of town (#272). One local-index lookup.
         local_table = _local_divisions_table()
-        options = _fallback_anchor_candidates(
+        options = _fallback_anchor_details(
             query, [], None, local_table,
             alt_table=_local_alt_names_table(local_table),
         )
-        reference = (options[0][0], options[0][1]) if options else None
+        reference = (options[0]["lat"], options[0]["lon"]) if options else None
+        if options and options[0]["split"]:
+            # #464: the reference is a guess at which of the caller's own
+            # words locate the query, and _place_match_label's shared-word
+            # gate was written for a reference the caller *stated* (a near
+            # hint, a city, a division that matched the whole query). Near a
+            # guessed one, "shares a word" is exactly the coincidence that
+            # produced the anchor in the first place: "Grand Central
+            # Terminal" anchored on a Chelyabinsk district called Central
+            # and resolved to "Grand Royal, банкет-холл и ресторан" — a
+            # restaurant that shares the word "Grand" with the query and
+            # nothing else. So a place found near a split anchor must
+            # account for every significant word of the query — in its own
+            # name, or (when the anchor is strong: the caller typed a
+            # city-level division's name) by sitting in the place the
+            # anchor's words named. Same containment-or-typo-close test as
+            # #374's cover rule, over the whole query rather than a
+            # residual.
+            exempt = set(overture._fold_poi_name(options[0]["candidate"]).split()) if (
+                options[0]["strong"]
+            ) else set()
+            split_cover_full = _significant_tokens(query)
+            split_cover_tokens = [
+                t for t in split_cover_full if overture._fold_poi_name(t) not in exempt
+            ]
 
     place_rows: list[dict] = []
     gate_tokens: list[str] = []  # #374: set alongside the token loop below
@@ -4680,6 +5398,10 @@ def resolve_place(
             label = "exact"
         if label is None:
             continue
+        if split_cover_tokens is not None and not _fuzzy_place_covers_query(
+            r["name"], split_cover_tokens
+        ):
+            continue  # #464: shares a word with the query, near a guessed anchor
         seen_ids.add(r["id"])
         candidate = {
             "id": r["id"], "kind": "place", "name": r["name"],
@@ -4705,6 +5427,24 @@ def resolve_place(
         label = geocode_place_labels.get(r["id"])
         if label is None:
             continue
+        if split_cover_tokens is not None:
+            # #464: geocode()'s fallback guessed an anchor the same way this
+            # function did ("Mall of America" -> a Virginia division named
+            # "...of America", whose %Mall% scan returned "Mercy Mall of
+            # VA"); its rows are held to the same whole-query rule. The
+            # anchor's own words are only accounted for by *location* for a
+            # row that is actually near this function's anchor — geocode()
+            # may have picked a different namesake (traced: a Bolivian
+            # hamlet named America here, Virginia there), and a row 6,000 km
+            # from the anchor whose word it is excused from containing is
+            # excused from nothing.
+            near_anchor = reference is not None and (
+                geo.haversine_m(reference[0], reference[1], r["lat"], r["lon"])
+                <= _PLACES_FALLBACK_RADIUS_M
+            )
+            required = split_cover_tokens if near_anchor else split_cover_full
+            if not _fuzzy_place_covers_query(r["name"], required):
+                continue
         seen_ids.add(r["id"])
         candidates.append({
             "id": r["id"], "kind": "place", "name": r["name"],
@@ -4713,6 +5453,35 @@ def resolve_place(
             "match": label,
             "_prominence": r.get("rank_score") or 0.0,
         })
+
+    if split_cover_tokens is not None and not candidates:
+        # #464: the guessed anchor explained nothing — the query is a bare
+        # name, and the right thing to do with a bare name is what the
+        # #83 docstring already promises one: the unanchored, LIMIT-capped
+        # scan of the places theme for the WHOLE query. Only exact/prefix
+        # rows count here: the scan is a substring ILIKE, and the one
+        # thing this path must never do is hand back "Mercy Mall of VA"
+        # for "Mall of America" because both contain "Mall" — no result
+        # (and the server's need: location) beats a fast wrong one. Gated
+        # exactly as geocode()'s own unanchored scan is (#105): against a
+        # remote dataset the scan is a full read of the largest theme, so
+        # it does not run and the caller is asked for a location instead.
+        reference = None
+        if not _skip_unanchored_places_scan():
+            for r in _query_places_fallback(query):
+                if not r["id"] or r["id"] in seen_ids or not r["name"]:
+                    continue
+                tier = _match_tier(r["name"], query)
+                if tier < _STRONG_TIER:
+                    continue
+                seen_ids.add(r["id"])
+                candidates.append({
+                    "id": r["id"], "kind": "place", "name": r["name"],
+                    "lat": r["lat"], "lon": r["lon"],
+                    "category": r.get("_category"),
+                    "match": _MATCH_TIER_LABELS[tier],
+                    "_prominence": r.get("_confidence") or 0.0,
+                })
 
     # Distance to the reference before prominence (#272): the reference is
     # the caller's own statement of where they mean (their near-hint, city
@@ -4754,7 +5523,7 @@ def resolve_place(
         del c["_support"]
         c.pop("_type_scan", None)
     out = candidates[:limit]
-    _resolve_cache_put(query, cache_city, cache_lat, cache_lon, out, lang)
+    _resolve_cache_put(query, cache_city, cache_lat, cache_lon, out, lang, country)
     if out:
         _remember_last_city(city, out[0])
         _kick_autowarm(out[0])
@@ -6276,11 +7045,31 @@ def _intersection_unresolved_anchor_note(
     return note
 
 
-def _country_suffix(row: dict) -> str:
-    """" (United Kingdom, GB)" — whatever of the two a row actually carries."""
-    label = (row.get("admin_context") or [None])[0]
+def _country_suffix(row: dict, *, with_type: bool = False) -> str:
+    """" (United Kingdom, GB)" — whatever of the two a row actually carries.
+
+    `with_type` (#465) is for the one place two rows of the *same name and
+    country* are named side by side — the runner-up note below — and spells
+    out what tells them apart: the division type and the whole admin chain,
+    most specific first: " (region; United States, US)" against
+    " (locality; New York, United States, US)", or Springfield
+    " (locality; Massachusetts, United States, US)" against
+    " (locality; Illinois, United States, US)". "New York, NY" resolves to
+    the *region* New York, too broad, and falls back to the *locality* New
+    York; with the plain suffix both halves of that note read "New York
+    (United States, US)" and the sentence looks like it re-picked the state
+    (which is how #465 was filed).
+    """
+    chain = [p for p in (row.get("admin_context") or []) if p]
     code = row.get("country")
-    parts = [p for p in (label, code) if p]
+    if with_type:
+        # "; " between type and place so the type is not read as one more
+        # element of the admin chain.
+        parts = [*reversed(chain), *([code] if code else [])]
+        head = f"{row['type']}; " if row.get("type") else ""
+        body = head + ", ".join(parts)
+        return f" ({body})" if body else ""
+    parts = [p for p in (chain[:1] + [code]) if p]
     return f" ({', '.join(parts)})" if parts else ""
 
 
@@ -6357,11 +7146,16 @@ def _resolve_city_anchor(
             if candidate_bbox is None or _anchor_too_broad(candidate_bbox):
                 continue
             anchor, bbox = row, candidate_bbox
+            # #465: a namesake pair ("New York" the region -> "New York"
+            # the locality) is only tellable apart by type; otherwise the
+            # note names the same label twice.
+            same_name = top["name"] == anchor["name"]
             notes.append(
-                f"\"{city}\" resolved to {top['name']}{_country_suffix(top)}, "
+                f"\"{city}\" resolved to {top['name']}"
+                f"{_country_suffix(top, with_type=same_name)}, "
                 f"{top_reason}, so the {action_label} ran inside "
-                f"{anchor['name']}{_country_suffix(anchor)} -- the next candidate of "
-                f"that name in the same country."
+                f"{anchor['name']}{_country_suffix(anchor, with_type=same_name)} -- "
+                f"the next candidate of that name in the same country."
             )
             break
 
@@ -6375,6 +7169,72 @@ def _resolve_city_anchor(
     )
 
 
+# --- #465: "A & B, City" is an intersection, not a street ------------------
+
+# The separators that write a street crossing in one field. The symbols are
+# unambiguous; "and"/"at" are ordinary English that also appears *inside*
+# street names ("Rock and Roll Hall of Fame Blvd"), so they only split when
+# both halves independently look like streets (_looks_like_street, strict).
+_INTERSECTION_SYMBOL_SPLIT_RE = re.compile(r"\s*&\s*|\s+@\s+|\s+/\s+")
+_INTERSECTION_WORD_SPLIT_RE = re.compile(r"\s+(?:and|at)\s+", re.IGNORECASE)
+
+# What makes a half of "A and B" a street rather than half of one name: a
+# street-type word (the USPS table geocode_address already matches through,
+# plus the common types it has no abbreviation pair for and the numbered-
+# route types) or an ordinal ("5th", "42nd", "Fifth").
+_STREET_TYPE_WORDS: frozenset[str] = (
+    frozenset(_STREET_SUFFIX_VARIANTS)
+    | _LEADING_STREET_TYPES
+    | frozenset({
+        "way", "terrace", "ter", "circle", "cir", "square", "sq", "trail", "trl",
+        "alley", "aly", "expressway", "expy", "freeway", "fwy", "turnpike",
+        "tpke", "plaza", "plz", "broadway", "crescent", "cres", "loop", "path",
+        "row", "walk", "esplanade", "promenade", "quay", "embankment",
+    })
+)
+
+
+def _looks_like_street(half: str, *, strict: bool) -> bool:
+    """Is this half of a split query a street name and not a fragment?
+
+    Loose (symbol separators): non-empty, has a letter, is not a bare number.
+    Strict (word separators): additionally carries a street-type word or an
+    ordinal token, so "Rock" (of "Rock and Roll ...") fails and the query
+    falls through to today's single-street scan.
+    """
+    tokens = half.split()
+    if not tokens or not any(ch.isalpha() for ch in half):
+        return False
+    if not strict:
+        return True
+    for tok in tokens:
+        key = tok.strip(".").lower()
+        if key in _STREET_TYPE_WORDS or _ORDINAL_RE.match(key) or key in _WORD_ORDINALS:
+            return True
+    return False
+
+
+def _split_intersection(street: str) -> tuple[str, str] | None:
+    """"5th Ave & 42nd St" -> ("5th Ave", "42nd St"); a plain street -> None.
+
+    Exactly two halves, each street-looking (see _looks_like_street); any
+    other shape — three pieces, an empty side, a half that is only a number
+    — is not an intersection this parser will vouch for, and the caller
+    scans the text as one street as it always has.
+    """
+    for pattern, strict in (
+        (_INTERSECTION_SYMBOL_SPLIT_RE, False),
+        (_INTERSECTION_WORD_SPLIT_RE, True),
+    ):
+        parts = [p.strip() for p in pattern.split(street)]
+        if len(parts) != 2:
+            continue
+        if all(_looks_like_street(p, strict=strict) for p in parts):
+            return parts[0], parts[1]
+        return None
+    return None
+
+
 def geocode_address(
     query: str = "",
     limit: int = ADDRESS_DEFAULT_LIMIT,
@@ -6383,6 +7243,15 @@ def geocode_address(
     city: str | None = None,
 ) -> dict:
     """"Market Street, San Francisco" -> the address points on that street.
+
+    #465: a street half written as a crossing — "5th Ave & 42nd St", "5th
+    Ave and 42nd St", "5th Ave at 42nd St", "5th Ave / 42nd St" — with no
+    house number is not a street name to scan for (nothing is addressed
+    "5th Ave & 42nd St"); it is routed to geocode_intersection with the same
+    city, and the answer is that tool's, marked "delegated_to":
+    "geocode_intersection". "and"/"at" only split when both halves look
+    like streets (a street-type word or an ordinal each), so "Rock and Roll
+    Hall of Fame Blvd, Cleveland" still scans as one street.
 
     The forward counterpart to address_at: a street-level *search*, where
     geocode answers at city/neighborhood granularity and never at a doorway.
@@ -6458,6 +7327,17 @@ def geocode_address(
         return {"results": [], "note": _ADDRESS_NO_STREET_NOTE}
     if not city:
         return {"results": [], "note": _ADDRESS_NO_ANCHOR_NOTE}
+
+    # #465: no house number and a street half shaped like "A & B" is a
+    # crossing, which the address scan can never find (no address point is
+    # on a street named "5th Ave & 42nd St"). Hand it to the tool built for
+    # it, with the same city, and say so in the payload.
+    if number is None:
+        crossing = _split_intersection(street)
+        if crossing is not None:
+            result = geocode_intersection(crossing[0], crossing[1], city)
+            result["delegated_to"] = "geocode_intersection"
+            return result
 
     resolved = _resolve_city_anchor(city, action_label="scan")
     if resolved.bbox is None:
@@ -6588,6 +7468,15 @@ _STREET_DIRECTIONAL_SUFFIXES: frozenset[str] = frozenset({
 })
 
 
+def _query_has_directional(variants: set[str]) -> bool:
+    """Did the caller's street carry a directional token ("East 42nd St",
+    "Main St N")? _street_variants only respells the tokens the query has,
+    so a directional in any variant means one in the query."""
+    return any(
+        tok in _STREET_DIRECTIONAL_SUFFIXES for v in variants for tok in v.split()
+    )
+
+
 def _matches_street(edge_name: str | None, variants: set[str]) -> bool:
     """Whether an edge's street name is one of the caller's street's spellings.
 
@@ -6595,6 +7484,14 @@ def _matches_street(edge_name: str | None, variants: set[str]) -> bool:
     suffixes, cardinals, ordinals). Equality, or equality followed only by
     directional tokens (_STREET_DIRECTIONAL_SUFFIXES) — never an arbitrary
     longer name.
+
+    #465: when the query carries no directional at all, a single *leading*
+    directional on the map's name is dropped too, so "42nd St" reaches
+    Manhattan's "East 42nd Street" and "West 42nd Street" (5th Avenue is
+    the E/W divide; no segment is named plain "42nd Street" there). A query
+    that does name a side keeps exact matching — "East 42nd St" never
+    matches "West 42nd Street" — and only whole tokens strip, so "Main St"
+    still does not match "Main Street North Extension".
     """
     if not edge_name:
         return False
@@ -6606,6 +7503,13 @@ def _matches_street(edge_name: str | None, variants: set[str]) -> bool:
             rest = enl[len(v) + 1:].split()
             if all(tok in _STREET_DIRECTIONAL_SUFFIXES for tok in rest):
                 return True
+    tokens = enl.split()
+    if (
+        len(tokens) > 1
+        and tokens[0] in _STREET_DIRECTIONAL_SUFFIXES
+        and not _query_has_directional(variants)
+    ):
+        return " ".join(tokens[1:]) in variants
     return False
 
 
@@ -6781,7 +7685,12 @@ def geocode_intersection(
         if matched_pair is None:
             continue
         dist_m = geo.haversine_m(center_lat, center_lon, nlat, nlon)
-        if dist_m > radius_m:
+        # #465: a junction sitting on the rim of the extracted graph is still
+        # a junction in this city -- 5th Avenue & 42nd Street lies 5,003 m
+        # from New York's anchor point against a 5,000 m walk radius and was
+        # dropped by 3 m. Allow one cluster width of slack past the radius;
+        # the graph itself already bounds how far out a node can be.
+        if dist_m > radius_m + INTERSECTION_CLUSTER_M:
             continue
         crossings.append({
             "lat": nlat,
