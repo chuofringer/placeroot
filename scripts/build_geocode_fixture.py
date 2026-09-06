@@ -92,6 +92,17 @@ def build_divisions() -> list[tuple]:
         ))
 
     add("gers-div-us", "United States", "country", "US", None, 39.8, -98.5, _chain("United States"))
+    # #457: country-subtype rows for the fixture's other countries, so
+    # "City, Country" parsing has a country-subtype table to fall back to
+    # (the embedded ISO table already covers "United Kingdom"/GB and
+    # "Canada"/CA, but geocode() also has to answer a country name/exonym
+    # this table alone carries — see _resolve_country_from_table).
+    add(
+        "gers-div-gb", "United Kingdom", "country", "GB", None, 54.0, -2.0,
+        _chain("United Kingdom"),
+    )
+    add("gers-div-ca", "Canada", "country", "CA", None, 56.0, -106.0, _chain("Canada"))
+    add("gers-div-fr", "France", "country", "FR", None, 46.6, 2.2, _chain("France"))
     add(
         "gers-div-ny", "New York", "region", "US", "US-NY", 43.0, -75.0,
         _chain("United States", "New York"), population=19_571_216,
