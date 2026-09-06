@@ -2182,7 +2182,7 @@ def _alias_anchor(query: str) -> tuple[float, float, str | None] | None:
     place_q, _city, coords = _extract_city_hint(query)
     if coords is None:
         return None
-    name_query = None if _nothing_but_stopwords(place_q) else place_q
+    name_query = None if _nothing_but_generic(place_q) else place_q
     return (coords[0], coords[1], name_query)
 
 
@@ -2929,6 +2929,14 @@ def _fallback_anchor_candidates(
     as empty ("H&M Brooklyn", or a two-character Chinese name, has to reach
     the anchored scan). See _nothing_but_stopwords.
 
+    #472 widened that gate by one set: a residual made only of feature nouns
+    ("Station", left over once "Shibuya Station" anchors on Shibuya) is
+    refused the same way. '%Station%' inside the anchor's box matched every
+    station in Tokyo -- 5.5s, answering "Nakameguro Station" -- and the
+    caller's skip-and-say-so is again the better answer. The predicate
+    actually applied is _nothing_but_generic; the stopword rule above is
+    kept intact inside it.
+
     Note this gate is about *emptiness*, not correctness: a misspelling
     like "Sna Francisco" (anchor "Francisco", residual "Sna") clears it
     just fine — "Sna" is not a stopword. Typos are handled a step earlier
@@ -3022,7 +3030,7 @@ def _fallback_anchor_details(
         for i, token in enumerate(tokens[:-1]):
             if (
                 len(token) >= 3
-                and not _nothing_but_stopwords(token)
+                and not _nothing_but_generic(token)
                 and token.lower().strip(".,") not in _NAME_PREFIX_WORDS
             ):
                 splits.append((token, " ".join(tokens[:i] + tokens[i + 1:]).strip(), True))
@@ -3111,7 +3119,9 @@ def _fallback_anchor_details(
         return []
     out = []
     for c in ranked:
-        name_query = None if _nothing_but_stopwords(c["base"]) else c["base"]
+        # #472: "Station" left over from "Shibuya Station" is as empty a
+        # thing to search for as "the" -- see _nothing_but_generic.
+        name_query = None if _nothing_but_generic(c["base"]) else c["base"]
         out.append({
             "lat": c["row"]["lat"], "lon": c["row"]["lon"], "name_query": name_query,
             "candidate": c["candidate"], "split": True,
@@ -4566,7 +4576,8 @@ _REMOTE_GLOB_SCHEMES = ("s3://", "http://", "https://", "gcs://", "gs://", "az:/
 _STOPWORD_RESIDUAL_NOTE = (
     "no division matched this query as a whole, and once its trailing location "
     "word is set aside as an anchor nothing distinctive is left to search place "
-    "names for (only common words like \"the\" or \"of\"), so the places half of "
+    "names for (only common words like \"the\" or \"of\", or generic type words like "
+    "\"Station\" or \"Park\"), so the places half of "
     "the search was skipped -- matching those against every place name is minutes "
     "of scanning for results that would be unrelated anyway. Spell the name out "
     "(\"the Metropolitan Museum of Art\" rather than \"the Met\"), or use "
@@ -4741,6 +4752,36 @@ def _nothing_but_stopwords(text: str) -> bool:
     names). Those are distinctive enough to search on; "the" is not.
     """
     return not any(w.lower() not in _STOPWORDS for w in re.findall(r"[\w'-]+", text))
+
+
+def _nothing_but_generic(text: str) -> bool:
+    """Whether `text` holds no word a place could be *named* — every word in
+    it is a _STOPWORD or a _GENERIC_PLACE_WORDS member, or there are no words
+    at all.
+
+    #472: _nothing_but_stopwords, one level up. "Shibuya Station" anchors on
+    the Shibuya division and leaves "Station" as the residual, and ILIKE
+    '%Station%' over the anchor's box is the same scan #216 refused for
+    '%the%' with a smaller haystack: 5.5s of a 5.7s geocode() call, measured
+    live, answering with "Nakameguro Station" and "Tokyo Station Beer
+    Stand". A type word says what the place is, never which one — every
+    station inside the box matches equally, so the results are junk by
+    construction and the time is spent proving it. Same for "Park",
+    "Museum", "Airport": any anchor split whose residual is only a feature
+    noun.
+
+    This is the residual gate _fallback_anchor_candidates and _alias_anchor
+    actually apply. _nothing_but_stopwords is kept as it was so its meaning
+    stays exact ("H&M" and a two-character CJK name still pass, and so does
+    "Station" — a type word is not a stopword); this widens the *question*
+    rather than the stopword set. One word being generic is not enough:
+    "Blue Bottle Station" and "Westfield Valley Fair" carry a distinctive
+    word alongside the type word and must reach the anchored scan.
+    """
+    return not any(
+        w.lower() not in _STOPWORDS and w.lower() not in _GENERIC_PLACE_WORDS
+        for w in re.findall(r"[\w'-]+", text)
+    )
 
 
 def _significant_tokens(query: str) -> list[str]:

@@ -230,6 +230,69 @@ def test_short_residual_gate_matches_the_note_it_would_have_shown():
     assert geocode._significant_tokens("the Blue Bottle") == ["Blue", "Bottle"]
 
 
+# --- #472: nor on a residual that is nothing but generic type words --------
+# Live repro (2026-08-19.0 release): "Shibuya Station" anchored on the
+# Shibuya division and searched place names for the residual "Station" --
+# 5.5s of a 5.7s geocode() call, answering with "Nakameguro Station" and
+# "Tokyo Station Beer Stand". #216 one level up: a feature noun on its own is
+# as un-searchable as a stopword, so the same skip applies.
+
+
+def test_generic_only_residual_runs_no_places_scan_at_all(monkeypatch):
+    # Trailing "Brooklyn" is the anchor, exactly as #83 intends; what is left
+    # over ("Station") names no place, so the scan must not run.
+    calls = _count_places_fallback(monkeypatch)
+
+    result = geocode.geocode_detailed("Station Brooklyn", limit=5)
+
+    assert calls == [], "a generic-only residual must not touch the places theme"
+    assert result["results"] == []
+    assert "nothing distinctive is left" in result["note"]
+
+
+def test_generic_only_residual_after_a_leading_anchor_runs_no_scan(geocode_cache, monkeypatch):
+    # The live shape: the location word comes first and the type word last
+    # ("Shibuya Station"), so the anchor is a *leading* split, which only the
+    # local divisions table tries (#268). Same residual, same refusal.
+    calls = _count_places_fallback(monkeypatch)
+
+    result = geocode.geocode_detailed("Brooklyn Station", limit=5)
+
+    assert calls == [], "a generic-only residual must not touch the places theme"
+    assert result["results"] == []
+    assert "nothing distinctive is left" in result["note"]
+
+
+def test_distinctive_residual_with_a_type_word_still_scans_places(monkeypatch):
+    # The gate is about *every* word being generic, not any: "Blue Bottle
+    # Station" is a perfectly good name to search for.
+    calls = _count_places_fallback(monkeypatch)
+
+    geocode.geocode_detailed("Blue Bottle Station Brooklyn", limit=5)
+
+    assert [q for q, _ in calls] == ["Blue Bottle Station"]
+    assert calls[0][1] is not None, "and still bounded by the Brooklyn anchor"
+
+
+def test_generic_residual_gate_is_the_stopword_gate_widened():
+    # #472's rule: every word is a _STOPWORD or a _GENERIC_PLACE_WORDS member.
+    assert geocode._nothing_but_generic("Station")
+    assert geocode._nothing_but_generic("Park")
+    assert geocode._nothing_but_generic("the Museum")
+    assert geocode._nothing_but_generic("Airport.")
+    assert geocode._nothing_but_generic("the")
+    assert geocode._nothing_but_generic("   ")
+    assert not geocode._nothing_but_generic("Valley Fair")
+    assert not geocode._nothing_but_generic("H&M")
+    assert not geocode._nothing_but_generic("渋谷")
+    assert not geocode._nothing_but_generic("Shibuya Station")
+    # _nothing_but_stopwords keeps its #216 meaning exactly: a type word on
+    # its own is not a stopword.
+    assert geocode._nothing_but_stopwords("the")
+    assert not geocode._nothing_but_stopwords("H&M")
+    assert not geocode._nothing_but_stopwords("Station")
+
+
 def test_misspelled_prefix_reaches_the_fallback_without_the_fuzzy_tier(monkeypatch):
     # This was #216's test_misspelled_prefix_still_reaches_the_fallback_pending_215.
     # A typo residual isn't a stopword, so this gate never rejects it -- and
