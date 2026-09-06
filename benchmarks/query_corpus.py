@@ -665,7 +665,7 @@ q("x06", "resolve_place", "palo alto caltrain station",
 q("x07", "flow", "stuff to eat near the space needle",
   _flow("space needle seattle", "restaurant"))
 q("x08", "flow", "gas station near disneyland",
-  _flow("disneyland anaheim", "fuel_station", 4000))
+  _flow("disneyland anaheim", "gas_station", 4000))
 q("x09", "flow", "sushi near tsukiji market tokyo",
   _flow("tsukiji market tokyo", "sushi_restaurant", 2000))
 q("x10", "flow", "dentist near the mission district sf",
