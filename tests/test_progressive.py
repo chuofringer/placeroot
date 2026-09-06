@@ -32,12 +32,12 @@ STANDING_COST_CEILING = 1500
 # placeroot_capabilities' answer is read once per conversation that uses it,
 # so it is budgeted like a response, not like documentation. A new tool
 # that doesn't fit under this belongs in a shorter one-liner, not a raised
-# ceiling. 45 tools (geocode_intersection #448 joining the 44-tool surface)
-# measure 1538 — each entry is already a one-liner, so the growth here is
+# ceiling. 47 tools (transit_stops_near #453 and compare_modes #459 joining the
+# 45-tool surface) measure 1610 — each entry is already a one-liner, so the growth here is
 # genuinely tool count and argument count, not verbosity.
 # The headroom is deliberately small: the next few arguments fit, a new
 # tool does not without a look at what it costs.
-CATALOG_CEILING = 1560
+CATALOG_CEILING = 1650
 
 # The subset note's opening words, rendered by the renderer itself rather than
 # retyped here. A phrase typed from memory can drift from what prompts.py
@@ -207,7 +207,7 @@ def test_catalog_summaries_match_the_tools_own_descriptions():
 
 
 def test_required_and_optional_args_are_distinguished():
-    assert server._arg_summary(server._TOOL_FUNCS["geocode"]) == "query,limit?,lang?"
+    assert server._arg_summary(server._TOOL_FUNCS["geocode"]) == "query,limit?,lang?,country?"
     assert server._arg_summary(server._TOOL_FUNCS["data_version"]) == ""
 
 
@@ -298,7 +298,7 @@ def test_unknown_tool_is_a_structured_error_listing_the_valid_names():
 def test_unknown_argument_is_a_bad_request_naming_what_the_tool_accepts():
     result = server.placeroot_call("geocode", {"querry": "Brooklyn"})
     assert result["error"] == "bad_request"
-    assert result["accepts"] == "query,limit?,lang?"
+    assert result["accepts"] == "query,limit?,lang?,country?"
 
 
 def test_missing_required_argument_is_a_bad_request():
@@ -378,7 +378,7 @@ def test_an_uncoercible_value_is_rejected_by_the_same_model_the_sdk_uses():
     result = server.placeroot_call("geocode", {"query": "x", "limit": "many"})
     assert result["error"] == "bad_request"
     assert "limit" in result["detail"]
-    assert result["accepts"] == "query,limit?,lang?"
+    assert result["accepts"] == "query,limit?,lang?,country?"
 
 
 def test_the_validation_detail_is_advice_not_a_pydantic_dump():
