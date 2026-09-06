@@ -53,9 +53,40 @@ def test_schedule_autowarm_is_noop_when_cache_is_off(monkeypatch):
     assert started == []
 
 
+def test_schedule_autowarm_is_noop_when_autowarm_is_off(monkeypatch, tmp_path):
+    """PLACEROOT_AUTOWARM=off (#471): cache on, no thread, no prewarm."""
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "c"))
+    monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
+    monkeypatch.setenv("PLACEROOT_AUTOWARM", "off")
+    assert cache.enabled()
+    assert not autowarm.enabled()
+    started = []
+    monkeypatch.setattr(server, "_prewarm_region", lambda *a, **k: started.append(1))
+    before = {t.name for t in threading.enumerate()}
+    autowarm.clear_autowarm_state()
+    autowarm.schedule_autowarm(CENTER_LAT, CENTER_LON)
+    spawned = {t.name for t in threading.enumerate()} - before
+    assert not any(n.startswith("placeroot-autowarm-") for n in spawned)
+    assert started == []
+    # Not deduped as "in flight" either: turning it on later must still warm.
+    assert autowarm.metro_key(CENTER_LAT, CENTER_LON) not in autowarm._inflight
+
+
+def test_autowarm_env_is_on_by_default_and_off_is_case_insensitive(monkeypatch):
+    monkeypatch.delenv("PLACEROOT_AUTOWARM", raising=False)
+    assert autowarm.enabled()
+    monkeypatch.setenv("PLACEROOT_AUTOWARM", "1")
+    assert autowarm.enabled()
+    monkeypatch.setenv("PLACEROOT_AUTOWARM", " OFF ")
+    assert not autowarm.enabled()
+
+
 def test_schedule_autowarm_returns_without_waiting(monkeypatch, tmp_path):
     monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "c"))
     monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
+    # Opt in to the real thread (conftest's no_autowarm_threads sets it off).
+    monkeypatch.delenv("PLACEROOT_AUTOWARM", raising=False)
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: None)
     entered = threading.Event()
     release = threading.Event()
 
@@ -78,6 +109,12 @@ def test_schedule_autowarm_returns_without_waiting(monkeypatch, tmp_path):
     assert got
     server.db.conn_lock.release()
     release.set()
+    # Join: a thread that outlives its test runs against the next test's
+    # environment (#471); conftest fails any test that leaks one.
+    for t in threading.enumerate():
+        if t.name.startswith("placeroot-autowarm-"):
+            t.join(timeout=5)
+    assert not [t for t in threading.enumerate() if t.name.startswith("placeroot-autowarm-")]
 
 
 def test_disk_marker_skips_a_second_autowarm(monkeypatch, tmp_path):

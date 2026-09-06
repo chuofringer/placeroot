@@ -66,6 +66,7 @@ def test_core_profile():
         "from_to",
         "find_near",
         "ground_location",
+        "resolve_map_url",
         "data_version",
         "preferences",
     }
