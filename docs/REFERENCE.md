@@ -27,9 +27,9 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `water_near` | Water near a point, nearest first — is this waterfront, how far to the nearest river/canal/lake; filter by `subtype`/`water_class` |
 | `transit_stops_near` | Nearest transit stops — bus, rail, subway, tram, ferry — nearest first; filter to one `kind`. No schedules or live arrivals: Overture's base coverage is a static, OSM-derived conflation |
 | `timezone_at` | IANA timezone and current local time at a point, fully offline (tzdb via tzfpy) — tzid, UTC offset, DST status, local time, and abbreviation; a point with no resolvable zone answers `tzid: null` with a note rather than erroring |
-| `geocode` | Free-text place name → ranked candidates with coordinates and admin context (`geocode_batch` for many at once) |
-| `geocode_batch` | Many free-text place names → one best match each, one round-trip |
-| `resolve_place` | Free-text place reference → stable ids an agent can hold onto across turns; a place name with no literal match falls back to `find_places`' alt-spelling/fuzzy tiers, same corrective note |
+| `geocode` | Free-text place name → ranked candidates with coordinates and admin context; parses a trailing "City, ST"/"City, Region"/"City, Country" suffix, or take `country=` (ISO 3166-1) explicitly (`geocode_batch` for many at once) |
+| `geocode_batch` | Many free-text place names → one best match each, one round-trip; `country=` applies the same constraint to every query |
+| `resolve_place` | Free-text place reference → stable ids an agent can hold onto across turns; a place name with no literal match falls back to `find_places`' alt-spelling/fuzzy tiers, same corrective note; `country=` composes with `city` to constrain the divisions half |
 | `resolve_place_batch` | Many GERS ids → compact place rows (batched `place_details`), one round-trip |
 | `reverse_geocode` | Point → nearest address plus its containing admin areas (`reverse_geocode_batch`) |
 | `reverse_geocode_batch` | Many points → nearest address plus containing admin areas, one round-trip |

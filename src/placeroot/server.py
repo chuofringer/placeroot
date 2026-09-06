@@ -3305,7 +3305,9 @@ def water_near(
 
 
 @_tool("Geocode a place name")
-def geocode(query: str, limit: int = 5, lang: _LangArg = None) -> dict:
+def geocode(
+    query: str, limit: int = 5, lang: _LangArg = None, country: str | None = None,
+) -> dict:
     """Free-text place name -> ranked candidate locations, from Overture divisions and places.
 
     No Nominatim, no third-party geocoding API. Matches localities,
@@ -3314,6 +3316,22 @@ def geocode(query: str, limit: int = 5, lang: _LangArg = None) -> dict:
     Returns {"results": [{name, type, lat, lon, id (GERS), admin_context,
     rank_score}, ...]}, budgeted like every other tool. Returns a structured
     {"error": ...} instead of raising if the remote scan fails.
+
+    A trailing "City, ST"/"City, Region" suffix has resolved against a US
+    state or another region since #46; a trailing "City, Country" suffix
+    resolves the same way (#457) — "Cambridge, UK", "Cambridge, GB",
+    "Cambridge, GBR" and "Cambridge, United Kingdom" all constrain the
+    search to the UK's Cambridge, excluding any same-named division
+    elsewhere. `country` (ISO 3166-1 alpha-2, also accepting alpha-3 and
+    aliases like "UK"/"USA", case-insensitive) is the explicit form of the
+    same constraint, for a caller that already knows the country instead
+    of writing it into `query`. An unrecognized `country`, or one that
+    disagrees with a country/region suffix parsed off `query` itself,
+    returns {"error": "bad_request", ...} naming both. A comma-suffix that
+    names neither a region nor a country still searches the name half
+    alone rather than returning nothing, with a "note" naming the
+    unrecognized qualifier; a recognized country/region that matches
+    nothing degrades the same way, with a "note".
 
     A query with no location context in it at all (a bare place name that
     matches no division, e.g. "Blue Bottle Roastery") can't be bounded to a
@@ -3360,9 +3378,11 @@ def geocode(query: str, limit: int = 5, lang: _LangArg = None) -> dict:
     """
     lang = preference_store.resolve_lang(lang)
     try:
-        result = geocoding.geocode_detailed(query, limit, lang=lang)
+        result = geocoding.geocode_detailed(query, limit, lang=lang, country=country)
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
     payload = budget.apply_budget({"results": result["results"]}, "results")
     if "note" in result:
         payload["note"] = result["note"]
@@ -3370,7 +3390,9 @@ def geocode(query: str, limit: int = 5, lang: _LangArg = None) -> dict:
 
 
 @_tool("Geocode names in batch")
-def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
+def geocode_batch(
+    queries: list[str], limit_per_query: int = 3, country: str | None = None,
+) -> dict:
     """Geocode up to 20 free-text queries in one call, one best match each.
 
     Cuts N round-trips of geocode() into one and, more importantly,
@@ -3385,6 +3407,16 @@ def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
     {"error": ...} rather than truncating silently. Budgeted like every
     other tool. Returns a structured {"error": ...} instead of raising if
     the remote scan itself fails.
+
+    country (#457, ISO 3166-1 alpha-2, also accepting alpha-3 and aliases
+    like "UK"/"USA", case-insensitive) applies the same "City, Country"
+    constraint geocode() takes to every query in the batch — e.g.
+    `geocode_batch(["Cambridge", "London"], country="CA")` answers with
+    Ontario's London and a not_found row for Cambridge (no Canadian
+    Cambridge in the dataset), rather than the UK/US namesakes each query
+    would otherwise resolve to on its own. An unrecognized `country`, or a
+    per-query suffix that disagrees with it, returns a structured
+    {"error": "bad_request", ...} for the whole call.
     """
     if len(queries) > 20:
         return {
@@ -3392,9 +3424,11 @@ def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
             "detail": f"geocode_batch accepts at most 20 queries, got {len(queries)}",
         }
     try:
-        rows = geocoding.geocode_batch(queries, limit_per_query)
+        rows = geocoding.geocode_batch(queries, limit_per_query, country=country)
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
     return budget.apply_budget({"results": rows}, "results")
 
 
@@ -3430,6 +3464,7 @@ def resolve_place(
     limit: int = 3,
     city: str | None = None,
     lang: _LangArg = None,
+    country: str | None = None,
 ) -> dict:
     """Free-text place reference -> ranked, typed GERS ids to hold onto.
 
@@ -3481,6 +3516,15 @@ def resolve_place(
     merges from — see geocode()'s docstring. resolve_place does not add its
     own disclosure note for that; its own ranking already leads with
     distance to `near_lat`/`near_lon`/`city` when one is given.
+
+    country (#457, ISO 3166-1 alpha-2, also accepting alpha-3 and aliases
+    like "UK"/"USA", case-insensitive) composes with `city`: it constrains
+    the divisions half of the merge the same way it constrains geocode()
+    itself — `resolve_place("Cambridge", country="GB")` resolves the UK
+    Cambridge rather than whichever namesake ranks first unconstrained. An
+    unrecognized `country`, or one that disagrees with a country/region
+    suffix parsed off `query` itself, returns a structured
+    {"error": "bad_request", ...} naming both.
     """
     if near_lat is not None and near_lon is not None:
         coord_error = _invalid_coord(near_lat, near_lon)
@@ -3489,12 +3533,14 @@ def resolve_place(
     lang = preference_store.resolve_lang(lang)
     try:
         rows = geocoding.resolve_place(
-            query, near_lat, near_lon, limit, city=city, lang=lang,
+            query, near_lat, near_lon, limit, city=city, lang=lang, country=country,
         )
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
         return _schema_error(e)
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
     payload: dict = {"results": rows}
     if not rows and city is None and near_lat is None:
         # Machine-actionable instead of prose: the caller can retry without
