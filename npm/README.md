@@ -117,7 +117,7 @@ If you already use Python tooling, `uvx placeroot` skips this launcher entirely 
 
 ## What it can do
 
-**46 tools**, grouped into four families — every answer fits in a couple of thousand tokens:
+**47 tools**, grouped into four families — every answer fits in a couple of thousand tokens:
 
 | Family | Tools | Answers questions like |
 |---|---|---|
