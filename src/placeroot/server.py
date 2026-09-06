@@ -68,6 +68,7 @@ from placeroot import (
     simplify,
     tool_profiles,
     trace,
+    transit,
     verdict,
     water,
 )
@@ -3022,6 +3023,126 @@ def infrastructure_at(
     return result
 
 
+def _with_transit_notes(
+    payload: dict, total_in_range: int, fallback_used: bool, class_missing: bool
+) -> dict:
+    """Add total_in_range, truncated/note, and the fallback/empty notes transit_stops_near needs.
+
+    Unlike infrastructure_at's truncation-only helper, total_in_range is
+    always present here (issue #453's response shape names it as a
+    top-level field, not something that only shows up once the answer is a
+    slice). truncated/omitted_count still only appear when fewer rows came
+    back than matched, same convention as every other radius search.
+    """
+    shown = len(payload.get("results", []))
+    payload["total_in_range"] = total_in_range
+    truncated = shown < total_in_range
+    if truncated:
+        payload["truncated"] = True
+        payload["omitted_count"] = total_in_range - shown
+
+    notes = []
+    if class_missing:
+        notes.append(
+            "this dataset has no `class` column, so stop-like rows cannot be told "
+            "apart from bicycle parking or duplicate platform/stop_position records; "
+            "returning no results rather than an unfiltered guess."
+        )
+    else:
+        if fallback_used:
+            notes.append(
+                "no bus_stop/station-class row was within radius_m; these are "
+                "platform/stop_position records instead — OSM's per-geometry "
+                "re-tagging of the same physical stops, returned as the next-best "
+                "signal."
+            )
+        elif shown == 0:
+            notes.append(
+                "no transit stop within radius_m. Base-theme coverage is "
+                "OSM-derived and patchy, so this is a real finding, not proof "
+                "there is no transit nearby."
+            )
+        if truncated:
+            notes.append(
+                f"showing the {shown} nearest of {total_in_range} matching stops; "
+                "narrow further with a smaller radius or a more specific kind."
+            )
+    if notes:
+        payload["note"] = " ".join(notes)
+    return payload
+
+
+@_tool("Transit stops near a point")
+def transit_stops_near(
+    lat: float,
+    lon: float,
+    radius_m: float = transit.DEFAULT_RADIUS_M,
+    limit: int = transit.DEFAULT_LIMIT,
+    kind: str | None = None,
+) -> dict:
+    """Nearest transit stops to a point, nearest first — bus, rail, subway, tram, ferry.
+
+    A filtered view over Overture's base/infrastructure `subtype='transit'`
+    rows (the same theme infrastructure_at reads), restricted to real,
+    boardable stop classes: bus_stop, bus_station, railway_station,
+    railway_halt, subway_station, tram_stop, ferry_terminal,
+    aerialway_station. Unfiltered, that layer is dominated by
+    bicycle_parking and by platform/stop_position — OSM's per-geometry
+    re-tagging of the same physical stop — which this tool never returns
+    by default; if zero stop-class rows are within radius_m it falls back
+    to platform/stop_position rows instead of an empty answer, and says so
+    in "note". `kind` restricts the search to exactly one class (any of
+    the stop classes above, or "platform"/"stop_position" directly);
+    an unrecognized kind returns a bad_request naming the accepted values.
+
+    Returns {"center", "radius_m", "results": [{"id", "kind", "name",
+    "distance_m"}, ...], "total_in_range"}, plus "truncated": true and an
+    explanatory "note" whenever fewer rows came back than matched, and a
+    "note" when the fallback fired or the search found nothing at all. id
+    is the GERS id, usable with other GERS-keyed tools. No raw geometry and
+    no schedules or live arrivals — Overture base/infrastructure is a
+    static OpenStreetMap conflation, and neither exists in it even in
+    principle; a caller wanting "next bus" needs a live transit API.
+
+    An empty results list is a valid answer, not an error: base-theme
+    coverage is OSM-derived and patchy, and "no stop within radius_m" is a
+    real finding. radius_m echoes the effective radius, which may be lower
+    than requested (large values are clamped).
+
+    Returns a structured {"error": ...} if upstream is unavailable or the
+    dataset is missing geometry/bbox, and {"error": "bad_request"} for a
+    non-finite or out-of-range coordinate, or an unrecognized kind.
+    """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
+    if kind is not None and kind not in transit.ALLOWED_KINDS:
+        return {
+            "error": "bad_request",
+            "detail": f"unrecognized kind {kind!r}; accepted values: "
+            f"{', '.join(sorted(transit.ALLOWED_KINDS))}",
+        }
+    try:
+        rows, effective_radius_m, total_in_range, fallback_used, class_missing = (
+            transit.transit_stops_near(lat, lon, radius_m, limit, kind=kind)
+        )
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    result = {
+        "center": {"lat": lat, "lon": lon},
+        "radius_m": effective_radius_m,
+        "results": rows,
+    }
+    result = budget.apply_budget(result, "results")
+    result = _with_transit_notes(result, total_in_range, fallback_used, class_missing)
+    degraded = infrastructure.degraded_fields()
+    if degraded:
+        result["degraded_fields"] = degraded
+    return result
+
+
 def _water_notes(
     payload: dict,
     in_range_count: int,
@@ -5700,7 +5821,7 @@ def data_version() -> dict:
 def _arg_summary(fn: Callable) -> str:
     """A tool's parameters as `required,optional?` — the catalog's arg column.
 
-    Names only, no types: the catalog's budget is the whole point (45 tools
+    Names only, no types: the catalog's budget is the whole point (46 tools
 have to fit in about 1.1k tokens), and the names here are already
     self-describing (lat, radius_m, limit, category). A caller that guesses
     a type wrong gets placeroot_call's bad_request naming what the tool

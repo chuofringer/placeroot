@@ -117,12 +117,12 @@ If you already use Python tooling, `uvx placeroot` skips this launcher entirely 
 
 ## What it can do
 
-**45 tools**, grouped into four families — every answer fits in a couple of thousand tokens:
+**46 tools**, grouped into four families — every answer fits in a couple of thousand tokens:
 
 | Family | Tools | Answers questions like |
 |---|---|---|
 | 🔍 **Search & identify** | `find_places`, `find_near`, `geocode`, `reverse_geocode`, `place_details`, `search_categories`, `warmup_city`, … | What cafés are near this point? Coffee near the Eiffel Tower? |
-| 📊 **Area analysis** | `summarize_area`, `compare_areas`, `neighborhood_verdict`, `summarize_buildings`, `land_use_at`, … | What's in this neighborhood, should I live here, and how does it differ from that one? |
+| 📊 **Area analysis** | `summarize_area`, `compare_areas`, `neighborhood_verdict`, `summarize_buildings`, `land_use_at`, `transit_stops_near`, … | What's in this neighborhood, should I live here, and how does it differ from that one? |
 | 🚴 **Routing** | `route`, `from_to`, `isochrone`, `optimize_route`, `places_along_route`, `distance_matrix`, `travel_time_matrix`, `map_match` | How far to walk from A to B? What's reachable in 15 minutes? Best order for 6 stops? Which streets did this GPS trace actually take? |
 | 🗺️ **Geometry & maps** | `render_map`, `simplify_geometry` | Show me this result as an interactive map |
 

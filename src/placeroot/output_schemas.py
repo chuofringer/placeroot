@@ -456,6 +456,7 @@ _GENERIC_TOOLS: list[str] = [
     "summarize_area",
     "summarize_buildings",
     "timezone_at",
+    "transit_stops_near",
     "verify_claims",
     "warmup_city",
     "water_near",
