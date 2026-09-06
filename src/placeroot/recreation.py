@@ -239,8 +239,13 @@ def _cache_theme(type_: str) -> str:
 def _from_source(
     bbox: tuple[float, float, float, float] | None, type_: str,
     upstream_readable: bool = True,
+    schedule_missing: bool = True,
 ) -> str | None:
     """FROM-clause source for one base-theme type, or None to skip the branch.
+
+    schedule_missing=False (#476) is the speculative read: serve from tiles
+    or upstream but leave missing tiles unscheduled — see
+    overture._with_recreation.
 
     Delegates to cache.source_sql — the shared cached-tiles-else-upstream
     resolution — with two policies of its own. For an *unbounded* lookup
@@ -264,7 +269,8 @@ def _from_source(
     )
     try:
         return cache.source_sql(
-            _cache_theme(type_), upstream, bbox, upstream_fallback=fallback_ok
+            _cache_theme(type_), upstream, bbox, upstream_fallback=fallback_ok,
+            schedule_missing=schedule_missing,
         )
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
@@ -385,7 +391,9 @@ def _projection(
         WHERE class IN ({class_list}){prune}"""
 
 
-def union_branches(bbox: tuple[float, float, float, float] | None) -> list[str]:
+def union_branches(
+    bbox: tuple[float, float, float, float] | None, schedule_missing: bool = True
+) -> list[str]:
     """Projected SELECTs to union onto a places query, one per base type.
 
     bbox bounds the tile-cache lookup; pass None for an unbounded id
@@ -412,7 +420,7 @@ def union_branches(bbox: tuple[float, float, float, float] | None) -> list[str]:
         missing, upstream_readable = _branch_missing(type_)
         if missing is None:
             continue
-        source = _from_source(bbox, type_, upstream_readable)
+        source = _from_source(bbox, type_, upstream_readable, schedule_missing=schedule_missing)
         if source is None:
             # Nothing local can serve this branch for this query (an
             # unbounded lookup, or an unreadable upstream whose tiles don't

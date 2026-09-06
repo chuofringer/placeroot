@@ -1,6 +1,6 @@
 """Tests for resolve_place (#22): free-text -> ranked, typed GERS ids."""
 
-from placeroot import geocode, overture, server
+from placeroot import cache, geo, geocode, overture, server
 
 from .conftest import CENTER_LAT, CENTER_LON, DIVISIONS_FIXTURE_PATH
 
@@ -78,7 +78,7 @@ def test_merged_ordering_is_kind_agnostic_by_match_tier(monkeypatch):
     # White-box: verify the merge/sort ranks candidates by match tier
     # regardless of kind, using controlled inputs so the test doesn't
     # depend on incidental overlap between fixture division/place names.
-    def fake_geocode(query, limit=5, lang=None):
+    def fake_geocode(query, limit=5, lang=None, near=None):
         return [
             {
                 "name": "Example Town", "type": "locality", "lat": 1.0, "lon": 2.0,
@@ -134,3 +134,110 @@ def test_server_resolve_place_structured_error_on_unreachable_upstream(tmp_path)
     result = server.resolve_place("Brooklyn", limit=5)
     assert result["error"] == "upstream_unavailable"
     overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions", type_="division")
+
+
+# --- #476: a city pin bounds geocode's own search, not just its output -------
+
+_SG_LAT, _SG_LON = 1.2899, 103.8519
+_MARINA_CA = {
+    "id": "d-marina-ca", "name": "Marina", "subtype": "locality", "country": "US",
+    "region": "US-CA", "lat": 36.684402, "lon": -121.802185, "admin_context": [],
+    "population": 22_000,
+}
+
+
+def _pinned_resolve_doubles(monkeypatch, fake_fallback=True):
+    """The "Marina Bay Sands Singapore" shape, offline: no division is named
+    for the whole place half, but the speculative split "Marina" matches a
+    Californian locality outright — the row the live run anchored on. Returns
+    the recorded division-query kwargs, places-fallback anchors and whether
+    the speculative anchor machinery ran at all."""
+    seen = {"division_kwargs": [], "fallback_anchors": [], "speculative_calls": 0}
+
+    def fake_divisions(query, region_code, local_table, **kwargs):
+        seen["division_kwargs"].append(kwargs)
+        return [dict(_MARINA_CA)] if query == "Marina" else []
+
+    def fake_places_fallback(query, anchor=None, also=None, schedule_tiles=True):
+        seen["fallback_anchors"].append(anchor)
+        return []
+
+    real_candidates = geocode._fallback_anchor_candidates
+
+    def counting_candidates(*a, **k):
+        seen["speculative_calls"] += 1
+        return real_candidates(*a, **k)
+
+    monkeypatch.setattr(geocode, "_query_divisions", fake_divisions)
+    if fake_fallback:
+        monkeypatch.setattr(geocode, "_query_places_fallback", fake_places_fallback)
+    monkeypatch.setattr(geocode, "_fallback_anchor_candidates", counting_candidates)
+    monkeypatch.setattr(overture, "find_places", lambda *a, **k: [])
+    return seen
+
+
+def test_city_pin_is_passed_into_the_division_pass_as_a_constraint(monkeypatch):
+    """The pin used to be applied only as a post-filter on geocode()'s rows,
+    after the unconstrained division pass (and everything it triggered) had
+    already run. Now every division query under a pin carries it."""
+    seen = _pinned_resolve_doubles(monkeypatch)
+
+    geocode.resolve_place("Marina Bay Sands", near_lat=_SG_LAT, near_lon=_SG_LON, limit=3)
+
+    assert seen["division_kwargs"], "the division pass ran"
+    for kwargs in seen["division_kwargs"]:
+        assert kwargs.get("near") == (_SG_LAT, _SG_LON, geocode._CITY_HINT_RADIUS_M), kwargs
+
+
+def test_far_division_never_anchors_the_places_fallback_under_a_pin(monkeypatch):
+    """Under a pin the pin is the anchor. The trailing/leading-word splits
+    that found Marina, California (15,000 km from Singapore) must not run,
+    and no places scan may be aimed anywhere but the pin."""
+    seen = _pinned_resolve_doubles(monkeypatch)
+
+    geocode.resolve_place("Marina Bay Sands", near_lat=_SG_LAT, near_lon=_SG_LON, limit=3)
+
+    assert seen["speculative_calls"] == 0
+    assert seen["fallback_anchors"], "the anchored places fallback still runs, at the pin"
+    for anchor in seen["fallback_anchors"]:
+        assert anchor is not None
+        assert geo.haversine_m(anchor[0], anchor[1], _SG_LAT, _SG_LON) < 1_000, anchor
+
+
+def test_pinned_resolve_schedules_tiles_only_around_the_pin(geocode_cache, monkeypatch):
+    """The user-visible half of #476: a Singapore query left a California
+    places tile (and its base-theme siblings) queued for download. Every
+    cache resolution a pinned resolve performs must be for a box around the
+    pin, and for the places theme (the recreation layer is off in the
+    offline suite, so nothing else has a reason to be touched)."""
+    # The real places fallback runs here, so its cache resolution is observed.
+    seen = _pinned_resolve_doubles(monkeypatch, fake_fallback=False)
+    resolutions = []
+
+    def recording_paths(con, release, theme, bbox, upstream_glob, *a, **k):
+        resolutions.append((theme, bbox, k.get("schedule_missing", True)))
+        return None  # "nothing cached" — the caller falls through to upstream
+
+    monkeypatch.setattr(cache, "local_paths_for_query", recording_paths)
+
+    geocode.resolve_place("Marina Bay Sands", near_lat=_SG_LAT, near_lon=_SG_LON, limit=3)
+
+    assert resolutions, "the pinned fallback resolved the cache for the pin's box"
+    for theme, (xmin, ymin, xmax, ymax), _scheduled in resolutions:
+        assert theme == "places", theme
+        assert xmin <= _SG_LON <= xmax and ymin <= _SG_LAT <= ymax, (theme, xmin, ymin, xmax, ymax)
+    assert seen["speculative_calls"] == 0
+
+
+
+def test_no_pin_query_runs_the_division_pass_unconstrained(monkeypatch):
+    """No city, no near hint: today's global behaviour, byte-for-byte — the
+    division pass is called with the pre-#476 signature."""
+    seen = _pinned_resolve_doubles(monkeypatch)
+
+    geocode.resolve_place("Marina Bay Sands", limit=3)
+
+    assert seen["division_kwargs"]
+    for kwargs in seen["division_kwargs"]:
+        assert "near" not in kwargs, kwargs
+    assert seen["speculative_calls"] >= 1

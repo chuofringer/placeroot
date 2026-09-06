@@ -42,7 +42,7 @@ def _row(name, lat, lon, *, id_, type_="locality", context=(), rank=1.0, matched
 def _patch_geocode(monkeypatch, rows_by_query, seen=None):
     """geocode.geocode -> canned rows, recording every query it is asked for."""
 
-    def fake(query, limit=None, lang=None):
+    def fake(query, limit=None, lang=None, near=None):
         if seen is not None:
             seen.append(query)
         return rows_by_query.get(query, [])

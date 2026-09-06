@@ -68,7 +68,7 @@ def test_the_gare_du_nord_shape_is_refused_offline(monkeypatch):
         "type": "locality", "rank_score": 0.34, "matched_by": "fuzzy",
         "admin_context": ["France", "Bretagne", "Côtes-d'Armor"],
     }
-    monkeypatch.setattr(geocode, "geocode", lambda query, limit=None, lang=None: [row])
+    monkeypatch.setattr(geocode, "geocode", lambda query, limit=None, lang=None, near=None: [row])
     assert geocode.resolve_named_place("Gare du Nord") is None
 
 
