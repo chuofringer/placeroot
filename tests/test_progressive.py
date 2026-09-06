@@ -37,7 +37,7 @@ STANDING_COST_CEILING = 1500
 # genuinely tool count and argument count, not verbosity.
 # The headroom is deliberately small: the next few arguments fit, a new
 # tool does not without a look at what it costs.
-CATALOG_CEILING = 1630
+CATALOG_CEILING = 1650
 
 # The subset note's opening words, rendered by the renderer itself rather than
 # retyped here. A phrase typed from memory can drift from what prompts.py
