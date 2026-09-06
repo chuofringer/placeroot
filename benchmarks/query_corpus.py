@@ -148,49 +148,49 @@ q("r01", "resolve_place", "Where is Stanford Shopping Center?",
 q("r02", "resolve_place", "Where is the Eiffel Tower?",
   _resolve("Eiffel Tower", "Eiffel", (48.858, 2.294, 25)))
 q("r03", "resolve_place", "Where is Shibuya Crossing in Tokyo?",
-  _resolve("Shibuya Crossing Tokyo", None, (35.66, 139.70, 30)))
+  _resolve("Shibuya Crossing Tokyo", "Shibuya Crossing", (35.66, 139.70, 30)))
 q("r04", "resolve_place", "Where is Golden Gate Park?",
   _resolve("Golden Gate Park San Francisco", "Golden Gate", (37.77, -122.47, 25)))
 q("r05", "resolve_place", "Where is Times Square?",
-  _resolve("Times Square New York", None, (40.758, -73.985, 25)))
+  _resolve("Times Square New York", "Times Square", (40.758, -73.985, 25)))
 q("r06", "resolve_place", "Where is Heathrow Airport?",
   _resolve("Heathrow Airport", "Heathrow", (51.47, -0.454, 30)))
 q("r07", "resolve_place", "Where is Sagrada Familia?",
-  _resolve("Sagrada Familia Barcelona", None, (41.404, 2.174, 25)))
+  _resolve("Sagrada Familia Barcelona", "Sagrada Familia", (41.404, 2.174, 25)))
 q("r08", "resolve_place", "Where is Central Park?",
   _resolve("Central Park New York", "Central Park", (40.785, -73.968, 25)))
 q("r09", "resolve_place", "Where is Brandenburg Gate?",
-  _resolve("Brandenburger Tor Berlin", None, (52.516, 13.377, 25)))
+  _resolve("Brandenburger Tor Berlin", "Brandenburger Tor", (52.516, 13.377, 25)))
 q("r10", "resolve_place", "Where is Sydney Opera House?",
   _resolve("Sydney Opera House", "Opera House", (-33.857, 151.215, 25)))
 q("r11", "resolve_place", "Where is Union Station Chicago?",
-  _resolve("Union Station Chicago", None, (41.878, -87.640, 30)))
+  _resolve("Union Station Chicago", "Union Station", (41.878, -87.640, 30)))
 q("r12", "resolve_place", "Where is Mall of America?",
   _resolve("Mall of America", "Mall of America", (44.854, -93.242, 30)))
 q("r13", "resolve_place", "Where is Pike Place Market?",
   _resolve("Pike Place Market Seattle", "Pike Place", (47.609, -122.342, 25)))
 q("r14", "resolve_place", "Where is Schiphol Airport?",
-  _resolve("Schiphol Airport Amsterdam", None, (52.31, 4.76, 30)))
+  _resolve("Schiphol Airport Amsterdam", "Schiphol", (52.31, 4.76, 30)))
 q("r15", "resolve_place", "Where is Marina Bay Sands?",
-  _resolve("Marina Bay Sands Singapore", None, (1.283, 103.860, 25)))
+  _resolve("Marina Bay Sands Singapore", "Marina Bay Sands", (1.283, 103.860, 25)))
 q("r16", "resolve_place", "Where is the Colosseum in Rome?",
-  _resolve("Colosseo Roma", None, (41.890, 12.492, 25)))
+  _resolve("Colosseo Roma", "Colosseo", (41.890, 12.492, 25)))
 q("r17", "resolve_place", "Where is Copacabana Beach?",
-  _resolve("Copacabana Rio de Janeiro", None, (-22.97, -43.18, 30)))
+  _resolve("Copacabana Rio de Janeiro", "Copacabana", (-22.97, -43.18, 30)))
 q("r18", "resolve_place", "Where is Grand Central Terminal?",
   _resolve("Grand Central Terminal", "Grand Central", (40.753, -73.977, 25)))
 q("r19", "resolve_place", "Where is Griffith Observatory?",
   _resolve("Griffith Observatory Los Angeles", "Griffith", (34.118, -118.300, 25)))
 q("r20", "resolve_place", "Where is King's Cross Station?",
-  _resolve("King's Cross Station London", None, (51.531, -0.124, 25)))
+  _resolve("King's Cross Station London", "King's Cross", (51.531, -0.124, 25)))
 q("r21", "resolve_place", "Where is Fisherman's Wharf?",
-  _resolve("Fisherman's Wharf San Francisco", None, (37.808, -122.417, 25)))
+  _resolve("Fisherman's Wharf San Francisco", "Fisherman's Wharf", (37.808, -122.417, 25)))
 q("r22", "resolve_place", "Where is Bondi Beach?",
   _resolve("Bondi Beach Sydney", "Bondi", (-33.891, 151.277, 25)))
 q("r23", "resolve_place", "Where is the Reichstag?",
-  _resolve("Reichstag Berlin", None, (52.518, 13.376, 25)))
+  _resolve("Reichstag Berlin", "Reichstag", (52.518, 13.376, 25)))
 q("r24", "resolve_place", "Where is Ueno Park?",
-  _resolve("Ueno Park Tokyo", None, (35.715, 139.773, 25)))
+  _resolve("Ueno Park Tokyo", "Ueno Park", (35.715, 139.773, 25)))
 q("r25", "resolve_place", "Where is Millennium Park Chicago?",
   _resolve("Millennium Park Chicago", "Millennium", (41.883, -87.622, 25)))
 
@@ -679,17 +679,17 @@ q("c15", "flow", "How far is it to walk from Shibuya Station to Yoyogi Park?",
 # --------------------------------------------------------------------------
 
 q("x01", "resolve_place", "coffe shops near pike place market seatle",
-  _resolve("pike place market seattle", None, (47.609, -122.342, 25)))
+  _resolve("pike place market seattle", "Pike Place", (47.609, -122.342, 25)))
 q("x02", "resolve_place", "wheres the golden gate bridge",
-  _resolve("golden gate bridge san francisco", None, (37.82, -122.48, 25)))
+  _resolve("golden gate bridge san francisco", "Golden Gate Bridge", (37.82, -122.48, 25)))
 q("x03", "resolve_place", "notre dame paris (dropped-word landmark)",
-  _resolve("notre dame paris", None, (48.853, 2.35, 25)))
+  _resolve("notre dame paris", "Notre Dame", (48.853, 2.35, 25)))
 q("x04", "resolve_place", "harvard square cambridge (third city of the name)",
   _resolve("harvard square cambridge", "Harvard Square", (42.373, -71.119, 25)))
 q("x05", "resolve_place", "san jose airport (name-prefix city)",
-  _resolve("san jose airport", None, (37.36, -121.93, 30)))
+  _resolve("san jose airport", "San Jose Airport", (37.36, -121.93, 30)))
 q("x06", "resolve_place", "palo alto caltrain station",
-  _resolve("palo alto caltrain station", None, (37.443, -122.164, 25)))
+  _resolve("palo alto caltrain station", "Palo Alto Caltrain", (37.443, -122.164, 25)))
 q("x07", "flow", "stuff to eat near the space needle",
   _flow("space needle seattle", "restaurant"))
 q("x08", "flow", "gas station near disneyland",

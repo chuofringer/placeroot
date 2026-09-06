@@ -136,6 +136,65 @@ def test_server_resolve_place_structured_error_on_unreachable_upstream(tmp_path)
     overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions", type_="division")
 
 
+def test_place_match_label_separates_containment_from_a_shared_word():
+    """#475: a name that holds the caller's whole query is "contains"; a
+    name that merely shares one significant word with it is "substring".
+    Before this they were both "substring" and an aesthetics clinic
+    ("marina") tied with the hotel whose name contains "Marina Bay Sands"."""
+    label = geocode._place_match_label
+    assert label("Skypark#Marina Bay Sands Hotel,Singapore.", "Marina Bay Sands") == "contains"
+    assert label("Freia Aesthetics | Marina Square", "Marina Bay Sands") == "substring"
+    assert label("Marina Bay Sands Convention Centre", "Marina Bay Sands") == "prefix"
+    assert label("Marina Bay Sands", "Marina Bay Sands") == "exact"
+    # The #22 shape — the query carries context the name doesn't. With the
+    # name leading the query it is a prefix, as before; with the name sitting
+    # mid-query (the reverse-containment branch) it is whole-name containment
+    # too, so "contains" — both directions beat a one-word coincidence.
+    assert label("Mañana Coffee", "Mañana coffee Austin") == "prefix"
+    assert label("Blue Bottle Roastery", "the Blue Bottle Roastery Austin") == "contains"
+    assert label("Freia Aesthetics", "Marina Bay Sands") is None
+
+
+def test_match_label_rank_orders_contains_between_prefix_and_substring():
+    rank = geocode._MATCH_LABEL_RANK
+    assert rank["exact"] > rank["prefix"] > rank["contains"] > rank["substring"] > rank["fuzzy"]
+    assert set(rank) == {"exact", "prefix", "contains", "substring", "fuzzy"}
+
+
+def test_containing_name_outranks_shared_word_name_nearer_the_pin(monkeypatch):
+    """#475 end to end: the city pin sits 1.0 km from a clinic sharing one
+    word with the query and 1.1 km from the hotel whose name contains all
+    of it, and the clinic carries the higher confidence. Km-rounded distance
+    ties (both "1"), so under a shared "substring" label prominence picked
+    the clinic; "contains" decides before either tie-break is consulted."""
+    pin_lat, pin_lon = 1.2899, 103.8519
+    monkeypatch.setattr(geocode, "geocode", lambda query, limit=5, lang=None: [])
+
+    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10):
+        return [
+            {
+                "id": "place-clinic", "name": "Freia Aesthetics | Marina Square",
+                "category": "beauty_salon", "basic_category": "beauty_salon",
+                "operating_status": "open", "confidence": 0.95,
+                "lat": pin_lat + 0.0090, "lon": pin_lon, "distance_m": 1000,
+            },
+            {
+                "id": "place-hotel", "name": "Skypark#Marina Bay Sands Hotel,Singapore.",
+                "category": "hotel", "basic_category": "hotel",
+                "operating_status": "open", "confidence": 0.5,
+                "lat": pin_lat + 0.0099, "lon": pin_lon, "distance_m": 1100,
+            },
+        ]
+
+    monkeypatch.setattr(overture, "find_places", fake_find_places)
+
+    results = geocode.resolve_place(
+        "Marina Bay Sands", near_lat=pin_lat, near_lon=pin_lon, limit=5
+    )
+    assert [r["id"] for r in results] == ["place-hotel", "place-clinic"]
+    assert results[0]["match"] == "contains"
+    assert results[1]["match"] == "substring"
+
 # --- #469: a shared generic type word is not relatedness ------------------
 
 
@@ -156,7 +215,8 @@ def test_gate_accepts_a_shared_distinctive_word():
     )
     # A query that is nothing but a type word has no distinctive word to
     # insist on — plain containment still matches.
-    assert geocode._place_match_label("Snow Peak Land Station", "Station") == "substring"
+    # (#475: whole-query containment is its own label, "contains", above "substring".)
+    assert geocode._place_match_label("Snow Peak Land Station", "Station") == "contains"
 
 
 def test_type_word_categories_are_real_overture_slugs():

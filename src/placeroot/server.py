@@ -3504,11 +3504,14 @@ def resolve_place(
     so the second call can be made without parsing English.
 
     Returns {"results": [{"id" (GERS), "kind": "division" | "place",
-    "name", "lat", "lon", "match": "exact" | "prefix" | "substring" |
-    "fuzzy", plus "admin_context" for a division or "category" for a
-    place}, ...]}, ranked by match tier then prominence ("fuzzy" — reached
-    by close spelling rather than by containing the query at all, #215 for
-    divisions and #373 for places — ranking below every literal match).
+    "name", "lat", "lon", "match": "exact" | "prefix" | "contains" |
+    "substring" | "fuzzy", plus "admin_context" for a division or
+    "category" for a place}, ...]}, ranked by match tier then prominence
+    ("contains", places only, #475: the name holds the whole query or the
+    query the whole name, above "substring", which for a place can mean
+    one shared word; "fuzzy" — reached by close spelling rather than by
+    containing the query at all, #215 for divisions and #373 for places —
+    ranking below every literal match).
     A place found through #373's alt-spelling/typo fallback additionally
     carries "matched_by": "alt_name" | "fuzzy", and a top-level "note"
     names the spelling actually matched. Budgeted like every other tool.
