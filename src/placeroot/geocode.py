@@ -2474,10 +2474,65 @@ def _fallback_anchor_candidates(
     before this function is ever reached. Without a local divisions table
     for that tier to read (cache off), such a query still lands here and
     still reaches the substring scan of its own typo.
+
+    #464: a split anchor is a *guess* about which words locate the query,
+    and for a query that is nothing but a POI's name the guess is always
+    wrong — there is no city in "Grand Central Terminal" or "Mall of
+    America" to find. Traced live: "Grand Central Terminal" anchored on
+    Chelyabinsk (its leading word "Central" exact-matches Центральный
+    район's alternate name, and 101k people beat Grand Central, PA's
+    none), and "Mall of America" anchored on a Virginia division whose
+    name merely *contains* "of America". Two things follow. First, a
+    trailing split whose division match is only a substring (the trailing
+    words are a fragment of some division's longer name, and that name is
+    not itself in the query) is not acted on at all when the residual is
+    the larger part of the query — the user did not type that division,
+    so the words were never a location. Second, every contender now says
+    how much it should be trusted (see _fallback_anchor_details' `strong`):
+    resolve_place uses that to decide whether a place found near the
+    anchor must account for the anchor's words too, or only for the rest.
+    A trailing exact/prefix match on a city-level division ("San Jose",
+    "Chicago", "Rio de Janeiro" typed whole) is strong — the caller named
+    the city, and a place inside it is not expected to repeat it. A
+    leading-word anchor is never strong: #268's own premise is that the
+    location word is part of the place's name ("Stanford Shopping Center",
+    "Palo Alto Caltrain Station"), so a genuine match contains it, and a
+    coincidence ("Grand Royal", 20 km from a district called Central) does
+    not. A country- or region-level match is never strong either: its
+    centroid locates nothing (see _pick_anchor_row), and "America" as a
+    prefix of the United States' Min Nan name is not the caller naming
+    Kansas.
+    """
+    return [(d["lat"], d["lon"], d["name_query"]) for d in _fallback_anchor_details(
+        search_query, divisions, region_code, local_table,
+        alt_table=alt_table, region_population=region_population,
+    )]
+
+
+def _fallback_anchor_details(
+    search_query: str,
+    divisions: list[dict],
+    region_code: str | None,
+    local_table: str | None,
+    alt_table: str | None = None,
+    region_population: dict[str, int] | None = None,
+) -> list[dict]:
+    """_fallback_anchor_candidates, with each anchor's provenance kept.
+
+    One dict per candidate, best first: "lat", "lon", "name_query" (as the
+    tuple form), plus "candidate" (the query words the anchor was derived
+    from — empty when a division in hand anchored the whole query),
+    "split" (True when the anchor came from a trailing/leading split rather
+    than from `divisions`), and "strong" (#464: whether the caller may
+    treat the anchor's own words as accounted for by *location* rather than
+    requiring a place's name to contain them — see the paragraph above).
     """
     if divisions:
         top = divisions[0]
-        return [(top["lat"], top["lon"], search_query)]
+        return [{
+            "lat": top["lat"], "lon": top["lon"], "name_query": search_query,
+            "candidate": "", "split": False, "strong": True,
+        }]
     tokens = search_query.strip().split()
     pop = region_population or {}
 
@@ -2546,10 +2601,22 @@ def _fallback_anchor_candidates(
         if not rows:
             continue
         row = _pick_anchor_row(rows, candidate, pop)
+        if (
+            not is_leading
+            and _anchor_is_weak(row, candidate, search_query)
+            and len(base.split()) > len(candidate.split())
+        ):
+            # #464: the trailing words are a fragment of some division's
+            # longer name, that name is nowhere in the query, and most of
+            # the query is still unexplained — "of America" inside
+            # "Tradiations of America" does not make "Mall of America" a
+            # query about Virginia. Not a location word; not an anchor.
+            continue
         contenders.append({
             "row": row, "candidate": candidate, "base": base,
             "precedence": precedence,
             "broad": _SUBTYPE_WEIGHT.get(row.get("subtype"), 2) <= 1,
+            "leading": is_leading,
         })
         # The same word's next two cities, as lower-precedence contenders:
         # ambiguous city names lose coin flips — "cambridge" is the UK's,
@@ -2574,6 +2641,7 @@ def _fallback_anchor_candidates(
                 "row": alt, "candidate": candidate, "base": base,
                 "precedence": precedence + 100 * alt_rank,
                 "broad": _SUBTYPE_WEIGHT.get(alt.get("subtype"), 2) <= 1,
+                "leading": is_leading,
             })
     ranked = _rank_anchor_contenders(contenders)
     if not ranked:
@@ -2581,8 +2649,40 @@ def _fallback_anchor_candidates(
     out = []
     for c in ranked:
         name_query = None if _nothing_but_stopwords(c["base"]) else c["base"]
-        out.append((c["row"]["lat"], c["row"]["lon"], name_query))
+        out.append({
+            "lat": c["row"]["lat"], "lon": c["row"]["lon"], "name_query": name_query,
+            "candidate": c["candidate"], "split": True,
+            # #464: see _fallback_anchor_candidates. Trailing, city-level,
+            # and the caller typed the division's name (exact/prefix, or
+            # the whole matched name sits in the query): the anchor words
+            # are a location, not part of the place's name.
+            "strong": (
+                not c["leading"]
+                and not c["broad"]
+                and not _anchor_is_weak(c["row"], c["candidate"], search_query)
+            ),
+        })
     return out
+
+
+def _anchor_is_weak(row: dict, candidate: str, search_query: str) -> bool:
+    """#464: whether `row` matched the split words `candidate` only as a
+    substring of a longer division name that the query does not contain.
+
+    "de Janeiro" is a substring of "Rio de Janeiro", but the caller typed
+    "Copacabana Rio de Janeiro" — the whole name is there, the split just
+    landed a word short, and the anchor is as good as an exact one. "of
+    America" is a substring of "Tradiations of America", which appears
+    nowhere in "Mall of America": the trailing words coincide with a
+    fragment of an unrelated name.
+    """
+    if _effective_tier(row, candidate) >= _STRONG_TIER:
+        return False
+    q = _normalize_for_match(search_query)
+    for name in (row.get("_matched_name"), row.get("name")):
+        if name and _normalize_for_match(name) in q:
+            return False
+    return True
 
 
 # When two splits disagree on which word is the location, more of the query
@@ -4256,6 +4356,21 @@ def resolve_place(
     docstring draws), so they always carry their primary name. A division
     candidate's `name_primary` is present under the same rule as
     geocode()'s: only when the variant actually differs from the primary.
+
+    #464: with no near/city hint and no division matching the whole query,
+    the reference is a *guess* (_fallback_anchor_candidates' split of the
+    caller's own words), and the shared-one-word relatedness gate above is
+    too loose next to a guess — "Grand Central Terminal" anchored on a
+    Chelyabinsk district called Central and returned a restaurant named
+    "Grand Royal". Near a split anchor a place must account for every
+    significant word of the query (see _fallback_anchor_details' `strong`
+    for which words the anchor itself may account for). When nothing
+    survives, the query is treated as the bare name it is: one unanchored,
+    LIMIT-capped scan for the whole query, keeping exact/prefix rows only,
+    under the same remote-dataset gate as geocode()'s own (#105) — so
+    against the live S3 release a bare famous name with no bundled alias
+    returns [] (the server answers need: location) rather than a place on
+    the wrong continent.
     """
     query = query.strip()
     limit = max(1, min(limit, MAX_LIMIT))
@@ -4335,6 +4450,9 @@ def resolve_place(
         ]
     division_hits = [r for r in geocode_hits if r["type"] != "place"]
 
+    # #464: None unless the reference below is a split-derived guess; then
+    # the query words a place candidate must cover to count (see there).
+    split_cover_tokens: list[str] | None = None
     if near_lat is not None and near_lon is not None:
         reference = (near_lat, near_lon)
     elif division_hits:
@@ -4347,11 +4465,35 @@ def resolve_place(
         # the POI-shaped queries that need one, and answered that query with
         # a Plaza Mayor 25 km out of town (#272). One local-index lookup.
         local_table = _local_divisions_table()
-        options = _fallback_anchor_candidates(
+        options = _fallback_anchor_details(
             query, [], None, local_table,
             alt_table=_local_alt_names_table(local_table),
         )
-        reference = (options[0][0], options[0][1]) if options else None
+        reference = (options[0]["lat"], options[0]["lon"]) if options else None
+        if options and options[0]["split"]:
+            # #464: the reference is a guess at which of the caller's own
+            # words locate the query, and _place_match_label's shared-word
+            # gate was written for a reference the caller *stated* (a near
+            # hint, a city, a division that matched the whole query). Near a
+            # guessed one, "shares a word" is exactly the coincidence that
+            # produced the anchor in the first place: "Grand Central
+            # Terminal" anchored on a Chelyabinsk district called Central
+            # and resolved to "Grand Royal, банкет-холл и ресторан" — a
+            # restaurant that shares the word "Grand" with the query and
+            # nothing else. So a place found near a split anchor must
+            # account for every significant word of the query — in its own
+            # name, or (when the anchor is strong: the caller typed a
+            # city-level division's name) by sitting in the place the
+            # anchor's words named. Same containment-or-typo-close test as
+            # #374's cover rule, over the whole query rather than a
+            # residual.
+            exempt = set(overture._fold_poi_name(options[0]["candidate"]).split()) if (
+                options[0]["strong"]
+            ) else set()
+            split_cover_full = _significant_tokens(query)
+            split_cover_tokens = [
+                t for t in split_cover_full if overture._fold_poi_name(t) not in exempt
+            ]
 
     place_rows: list[dict] = []
     gate_tokens: list[str] = []  # #374: set alongside the token loop below
@@ -4485,6 +4627,10 @@ def resolve_place(
             )
         if label is None:
             continue
+        if split_cover_tokens is not None and not _fuzzy_place_covers_query(
+            r["name"], split_cover_tokens
+        ):
+            continue  # #464: shares a word with the query, near a guessed anchor
         seen_ids.add(r["id"])
         candidate = {
             "id": r["id"], "kind": "place", "name": r["name"],
@@ -4513,6 +4659,24 @@ def resolve_place(
         )
         if label is None:
             continue
+        if split_cover_tokens is not None:
+            # #464: geocode()'s fallback guessed an anchor the same way this
+            # function did ("Mall of America" -> a Virginia division named
+            # "...of America", whose %Mall% scan returned "Mercy Mall of
+            # VA"); its rows are held to the same whole-query rule. The
+            # anchor's own words are only accounted for by *location* for a
+            # row that is actually near this function's anchor — geocode()
+            # may have picked a different namesake (traced: a Bolivian
+            # hamlet named America here, Virginia there), and a row 6,000 km
+            # from the anchor whose word it is excused from containing is
+            # excused from nothing.
+            near_anchor = reference is not None and (
+                geo.haversine_m(reference[0], reference[1], r["lat"], r["lon"])
+                <= _PLACES_FALLBACK_RADIUS_M
+            )
+            required = split_cover_tokens if near_anchor else split_cover_full
+            if not _fuzzy_place_covers_query(r["name"], required):
+                continue
         seen_ids.add(r["id"])
         candidates.append({
             "id": r["id"], "kind": "place", "name": r["name"],
@@ -4521,6 +4685,35 @@ def resolve_place(
             "match": label,
             "_prominence": r.get("rank_score") or 0.0,
         })
+
+    if split_cover_tokens is not None and not candidates:
+        # #464: the guessed anchor explained nothing — the query is a bare
+        # name, and the right thing to do with a bare name is what the
+        # #83 docstring already promises one: the unanchored, LIMIT-capped
+        # scan of the places theme for the WHOLE query. Only exact/prefix
+        # rows count here: the scan is a substring ILIKE, and the one
+        # thing this path must never do is hand back "Mercy Mall of VA"
+        # for "Mall of America" because both contain "Mall" — no result
+        # (and the server's need: location) beats a fast wrong one. Gated
+        # exactly as geocode()'s own unanchored scan is (#105): against a
+        # remote dataset the scan is a full read of the largest theme, so
+        # it does not run and the caller is asked for a location instead.
+        reference = None
+        if not _skip_unanchored_places_scan():
+            for r in _query_places_fallback(query):
+                if not r["id"] or r["id"] in seen_ids or not r["name"]:
+                    continue
+                tier = _match_tier(r["name"], query)
+                if tier < _STRONG_TIER:
+                    continue
+                seen_ids.add(r["id"])
+                candidates.append({
+                    "id": r["id"], "kind": "place", "name": r["name"],
+                    "lat": r["lat"], "lon": r["lon"],
+                    "category": r.get("_category"),
+                    "match": _MATCH_TIER_LABELS[tier],
+                    "_prominence": r.get("_confidence") or 0.0,
+                })
 
     # Distance to the reference before prominence (#272): the reference is
     # the caller's own statement of where they mean (their near-hint, city

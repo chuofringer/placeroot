@@ -12,5 +12,8 @@
   "louvre museum": {"city": "Paris", "lat": 48.8606, "lon": 2.3376},
   "musee du louvre": {"city": "Paris", "lat": 48.8606, "lon": 2.3376},
   "ebisu": {"city": "Tokyo", "lat": 35.6467, "lon": 139.7101},
-  "heathrow airport": {"city": "London", "lat": 51.4700, "lon": -0.4543}
+  "heathrow airport": {"city": "London", "lat": 51.4700, "lon": -0.4543},
+  "grand central terminal": {"city": "New York", "lat": 40.7524, "lon": -73.9774},
+  "grand central station": {"city": "New York", "lat": 40.7524, "lon": -73.9774},
+  "mall of america": {"city": "Bloomington", "lat": 44.8549, "lon": -93.2422}
 }
