@@ -13,12 +13,23 @@ return, never add latency to the resolve that triggered it.
 Honesty: warming tiles is not a built street graph. Tiles make the extract
 cheaper than a cold S3 scan; the first walk still builds (or loads) a
 graph. Failures log and never fail the user-facing resolve.
+
+PLACEROOT_AUTOWARM=off disables the kick entirely (#471). The thread it
+starts outlives the resolve that triggered it and does real prewarm work
+(tile COPYs, an eviction sweep, a walk-graph build) against whatever
+release, cache dir, and data path are configured *when it runs* — in a
+test process that is the next test's environment, or live S3 in a job
+that is meant to be offline. Operators who never want a background warm
+behind a resolve (an air-gapped mirror, a CI job, a metered link) set it
+too; the explicit `warmup_city` / `PLACEROOT_WARM_REGION` paths are
+unaffected. Default on; PLACEROOT_CACHE=off still implies off.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import os
 import threading
 from pathlib import Path
 
@@ -92,6 +103,15 @@ def write_warm_marker(key: tuple[int, int]) -> None:
     path.write_text("", encoding="utf-8")
 
 
+def enabled() -> bool:
+    """False iff PLACEROOT_AUTOWARM=off. On (the default) otherwise.
+
+    Mirrors cache.enabled(); the cache switch still wins (a warm with no
+    cache to warm is a no-op regardless), see schedule_autowarm.
+    """
+    return os.environ.get("PLACEROOT_AUTOWARM", "").strip().lower() != "off"
+
+
 def clear_autowarm_state() -> None:
     """Drop in-flight keys. Tests only; does not delete disk markers."""
     with _inflight_lock:
@@ -116,12 +136,13 @@ def schedule_autowarm(lat: float, lon: float) -> None:
 
     Does not wait. Does not hold conn_lock. Deduped per metro (in-flight
     set + disk marker) so a session of resolves, or a restart, does not
-    re-COPY the same tiles. No-op when the tile cache is off.
+    re-COPY the same tiles. No-op when the tile cache is off, or when
+    PLACEROOT_AUTOWARM=off (see the module docstring).
 
     Tiles ≠ built graph: this schedules both, but a warm tile cache alone
     does not make the first walk instant.
     """
-    if not cache.enabled():
+    if not enabled() or not cache.enabled():
         return
     key = metro_key(lat, lon)
     with _inflight_lock:

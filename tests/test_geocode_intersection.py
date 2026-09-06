@@ -519,3 +519,96 @@ def test_edge_names_follow_the_lightest_parallel_edge():
 def test_disk_format_bumped_for_edge_names_on_shapeless_graphs():
     """Format-2 shapeless pickles carry no edge names; they must miss, not load."""
     assert routing.GRAPH_DISK_FORMAT >= 3
+
+
+# --- #465: a directional the caller left off, on either end -----------------
+
+
+def test_a_leading_directional_on_the_map_matches_a_query_without_one():
+    """Manhattan writes "East 42nd Street" / "West 42nd Street" and nothing
+    named plain "42nd Street" (5th Avenue is the divide), so a query of
+    "42nd St" has to reach both. A query that names a side stays exact."""
+    plain = {v.lower() for v in geocode._street_variants("42nd St")}
+    assert geocode._matches_street("East 42nd Street", plain) is True
+    assert geocode._matches_street("West 42nd Street", plain) is True
+    assert geocode._matches_street("E 42nd St", plain) is True
+    assert geocode._matches_street("42nd Street E", plain) is True
+    assert geocode._matches_street("42nd Street", plain) is True
+
+    east = {v.lower() for v in geocode._street_variants("East 42nd St")}
+    assert geocode._matches_street("East 42nd Street", east) is True
+    assert geocode._matches_street("E 42nd St", east) is True
+    assert geocode._matches_street("West 42nd Street", east) is False
+    assert geocode._matches_street("42nd Street", east) is False
+
+    # Only whole directional tokens strip, and only one leading token.
+    main = {"main st", "main street"}
+    assert geocode._matches_street("Main Street North Extension", main) is False
+    assert geocode._matches_street("Northern Boulevard", {"boulevard"}) is False
+    assert geocode._matches_street("Eastern Parkway", {"parkway"}) is False
+    assert geocode._matches_street("North East Main Street", {"main street"}) is False
+    assert geocode._matches_street("East", {"east"}) is True
+    assert geocode._matches_street("East Main", {"main street"}) is False
+
+
+def _fifth_and_42nd(g, nid, lat, lon):
+    """5th Avenue runs north-south through (lat, lon); East 42nd Street
+    leaves east, West 42nd Street leaves west — the Manhattan shape."""
+    g.add_node(nid, lat, lon)
+    g.add_node(f"{nid}_n", lat + 0.001, lon)
+    g.add_node(f"{nid}_s", lat - 0.001, lon)
+    g.add_node(f"{nid}_e", lat, lon + 0.001)
+    g.add_node(f"{nid}_w", lat, lon - 0.001)
+    g.add_edge(nid, f"{nid}_n", 100.0, 100.0, directed=False, name="5th Avenue")
+    g.add_edge(nid, f"{nid}_s", 100.0, 100.0, directed=False, name="5th Avenue")
+    g.add_edge(nid, f"{nid}_e", 100.0, 100.0, directed=False, name="East 42nd Street")
+    g.add_edge(nid, f"{nid}_w", 100.0, 100.0, directed=False, name="West 42nd Street")
+
+
+def test_fifth_and_42nd_resolves_through_the_east_west_divide(monkeypatch):
+    """Corpus a07 in miniature: "42nd St" crosses "5th Ave" where the map
+    names the legs East/West. One crossing, and the row tells the caller
+    which side it matched."""
+    _fake_grid_city_anchor(monkeypatch)
+    g = routing.Graph()
+    _fifth_and_42nd(g, "x", CENTER_LAT + 0.001, CENTER_LON)
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: g)
+
+    res = geocode.geocode_intersection("5th Ave", "42nd St", "Grid City")
+
+    assert len(res["results"]) == 1
+    hit = res["results"][0]
+    assert math.isclose(hit["lat"], CENTER_LAT + 0.001, abs_tol=1e-9)
+    assert hit["streets"][0] == "5th Avenue"
+    assert hit["streets"][1] in ("East 42nd Street", "West 42nd Street")
+    assert "note" not in res
+
+    # Naming the side keeps it exact: East finds the same crossing, and a
+    # side the map does not have at that corner is a miss, not a fuzzy hit.
+    east = geocode.geocode_intersection("5th Ave", "East 42nd St", "Grid City")
+    assert len(east["results"]) == 1
+    assert east["results"][0]["streets"] == ["5th Avenue", "East 42nd Street"]
+
+    g2 = routing.Graph()
+    _junction(g2, "y", CENTER_LAT + 0.001, CENTER_LON, "West 42nd Street", "5th Avenue")
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: g2)
+    miss = geocode.geocode_intersection("5th Ave", "East 42nd St", "Grid City")
+    assert miss["results"] == []
+    assert "\"East 42nd St\" did not resolve" in miss["note"]
+    both = geocode.geocode_intersection("5th Ave", "42nd St", "Grid City")
+    assert both["results"][0]["streets"] == ["5th Avenue", "West 42nd Street"]
+
+
+def test_a_divided_east_west_crossing_still_clusters_to_one_row(monkeypatch):
+    """Two connectors 20 m apart, one carrying the East leg and one the West,
+    are the same corner: INTERSECTION_CLUSTER_M folds them, nearest first."""
+    _fake_grid_city_anchor(monkeypatch)
+    g = routing.Graph()
+    _junction(g, "e", CENTER_LAT + 0.0010, CENTER_LON, "East 42nd Street", "5th Avenue")
+    _junction(g, "w", CENTER_LAT + 0.0012, CENTER_LON, "West 42nd Street", "5th Avenue")
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: g)
+
+    res = geocode.geocode_intersection("5th Ave", "42nd St", "Grid City")
+
+    assert len(res["results"]) == 1
+    assert res["results"][0]["streets"] == ["5th Avenue", "East 42nd Street"]
