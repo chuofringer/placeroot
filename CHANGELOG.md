@@ -121,6 +121,26 @@ fixing behavior is patch.
   `ambiguous_place` candidates.
 
 ### Fixed
+- `resolve_place` with a city hint no longer runs geocode's division
+  matching and anchored places fallback over the whole planet for the
+  place half of the query (#476). The pin was applied only as a filter on
+  the rows that came back, after the unconstrained pass had already found
+  five "Marina Bay" neighbourhoods in the US for "Marina Bay Sands
+  Singapore", anchored a places scan on Marina, California, retried five
+  more cities on three continents, and queued California's places and
+  base-theme tiles for background download — two cold European landmark
+  resolves left 807 MB of Florida and California in the cache. geocode
+  now takes the pin as a `near` constraint on every division pass
+  (literal, alternate-name, variant, fuzzy) and uses it as the places
+  anchor outright, so nothing outside the city-hint radius is ever a
+  candidate and the speculative word splits never run; the radius
+  post-filter stays as belt-and-braces. Without a pin, a split-derived
+  anchor is now treated as the guess it is: its box's tiles are scheduled
+  only once it has actually answered, never for a guess that lost. Cold
+  "Marina Bay Sands Singapore" measured 9.3 s -> 3.7 s with only
+  Singapore's tiles on disk afterwards, and — because the pinned fallback
+  now finds the landmark itself — answers "Marina Bay Sands" (exact)
+  instead of a nearby aesthetics clinic. No-hint queries are unchanged.
 - `geocode`/`geocode_batch`/`resolve_place` now parse a trailing "City,
   Country" suffix (#457) — "Cambridge, United Kingdom", "Cambridge, UK",
   "Cambridge, GB" and "Cambridge, GBR" all resolve the UK's Cambridge and

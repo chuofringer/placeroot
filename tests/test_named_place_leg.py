@@ -135,3 +135,55 @@ def test_same_tier_candidates_order_by_prominence():
     assert {h["match"] for h in hits} == {"prefix"}
     confidences = [overture.place_details(id=h["id"])["confidence"] for h in hits]
     assert confidences == sorted(confidences, reverse=True)
+
+
+# --- #469: a trailing well-known city is context geocode did not use --------
+
+
+def _tokyo_geocode(query, limit=5, lang=None, **kw):
+    if query.strip().lower() == "tokyo":
+        return [{
+            "name": "Tokyo", "type": "locality", "lat": 35.68, "lon": 139.76,
+            "id": "div-tokyo", "admin_context": ["Japan"], "rank_score": 0.9,
+        }]
+    # geocode()'s own places half for the whole string: a row *named* for
+    # the query, pinned 7 km from the station, ranked first.
+    return [{
+        "name": "Shibuya Station Tokyo. Japan", "type": "place", "lat": 35.6882,
+        "lon": 139.7815, "id": "p-lone", "rank_score": 0.9,
+        "category": "train_station", "admin_context": [],
+    }]
+
+
+def test_trailing_city_counts_as_extra_context():
+    geocode.clear_resolve_session()
+    assert geocode._has_extra_place_context("Shibuya Station Tokyo")
+    # The cost rule's own case: no city to split off, no pin, no session.
+    assert not geocode._has_extra_place_context("Nowhere At All Xyzzy")
+
+
+def test_named_place_resolver_takes_resolve_places_station(monkeypatch):
+    """from_to's end for "Shibuya Station Tokyo" is what resolve_place says
+    it is — the station complex — not geocode's lone top row (#469)."""
+    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10,
+                         categories=None):
+        if categories:
+            return [
+                {"id": "p-gare", "name": "Gare de Shibuya", "category": "train_station",
+                 "basic_category": "train_station", "operating_status": "open",
+                 "confidence": 0.84, "lat": 35.6585, "lon": 139.7013, "distance_m": 100},
+                {"id": "p-keio", "name": "Inokashira Line Shibuya Sta.",
+                 "category": "train_station", "basic_category": "train_station",
+                 "operating_status": "open", "confidence": 0.77, "lat": 35.6581,
+                 "lon": 139.6984, "distance_m": 100},
+            ]
+        return []
+
+    monkeypatch.setattr(geocode, "geocode", _tokyo_geocode)
+    monkeypatch.setattr(overture, "find_places", fake_find_places)
+    geocode.clear_resolve_session()
+    geocode._resolve_lru.clear()
+
+    hit = geocode.resolve_named_place("Shibuya Station Tokyo")
+    assert hit["id"] == "p-gare"
+    assert hit["type"] == "place"

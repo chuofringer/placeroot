@@ -108,6 +108,21 @@ def _names(rows):
 # resolve_place / geocode: "where is X"
 # --------------------------------------------------------------------------
 
+def _near_miss(top, near):
+    """near=(lat, lon, km): the failure detail when `top` lands outside km of
+    the truth, else None. Shared by every check that anchors on a resolved
+    place (#469: c04 anchored "Shibuya Station" on a sporting-goods store
+    7 km away and passed, because only the follow-up count was checked)."""
+    if not near:
+        return None
+    import math
+    lat, lon, km = near
+    d = math.dist((top["lat"], top["lon"]), (lat, lon)) * 111
+    if d > km:
+        return f"WRONG PLACE ({d:.0f}km off)"
+    return None
+
+
 def _resolve(name, expect_sub=None, near=None):
     """near=(lat, lon, km) asserts the top hit lands in the right part of the
     world — the Stanford bug returned a real place 4,000 km from the answer."""
@@ -121,12 +136,9 @@ def _resolve(name, expect_sub=None, near=None):
         detail = f"{top.get('name')!r} @ {top.get('lat'):.3f},{top.get('lon'):.3f}"
         if expect_sub and expect_sub.lower() not in (top.get("name") or "").lower():
             return False, f"WRONG NAME {detail}"
-        if near:
-            import math
-            lat, lon, km = near
-            d = math.dist((top["lat"], top["lon"]), (lat, lon)) * 111
-            if d > km:
-                return False, f"WRONG PLACE ({d:.0f}km off) {detail}"
+        miss = _near_miss(top, near)
+        if miss:
+            return False, f"{miss} {detail}"
         return True, detail
     return run
 
@@ -136,49 +148,49 @@ q("r01", "resolve_place", "Where is Stanford Shopping Center?",
 q("r02", "resolve_place", "Where is the Eiffel Tower?",
   _resolve("Eiffel Tower", "Eiffel", (48.858, 2.294, 25)))
 q("r03", "resolve_place", "Where is Shibuya Crossing in Tokyo?",
-  _resolve("Shibuya Crossing Tokyo", None, (35.66, 139.70, 30)))
+  _resolve("Shibuya Crossing Tokyo", "Shibuya Crossing", (35.66, 139.70, 30)))
 q("r04", "resolve_place", "Where is Golden Gate Park?",
   _resolve("Golden Gate Park San Francisco", "Golden Gate", (37.77, -122.47, 25)))
 q("r05", "resolve_place", "Where is Times Square?",
-  _resolve("Times Square New York", None, (40.758, -73.985, 25)))
+  _resolve("Times Square New York", "Times Square", (40.758, -73.985, 25)))
 q("r06", "resolve_place", "Where is Heathrow Airport?",
   _resolve("Heathrow Airport", "Heathrow", (51.47, -0.454, 30)))
 q("r07", "resolve_place", "Where is Sagrada Familia?",
-  _resolve("Sagrada Familia Barcelona", None, (41.404, 2.174, 25)))
+  _resolve("Sagrada Familia Barcelona", "Sagrada Familia", (41.404, 2.174, 25)))
 q("r08", "resolve_place", "Where is Central Park?",
   _resolve("Central Park New York", "Central Park", (40.785, -73.968, 25)))
 q("r09", "resolve_place", "Where is Brandenburg Gate?",
-  _resolve("Brandenburger Tor Berlin", None, (52.516, 13.377, 25)))
+  _resolve("Brandenburger Tor Berlin", "Brandenburger Tor", (52.516, 13.377, 25)))
 q("r10", "resolve_place", "Where is Sydney Opera House?",
   _resolve("Sydney Opera House", "Opera House", (-33.857, 151.215, 25)))
 q("r11", "resolve_place", "Where is Union Station Chicago?",
-  _resolve("Union Station Chicago", None, (41.878, -87.640, 30)))
+  _resolve("Union Station Chicago", "Union Station", (41.878, -87.640, 30)))
 q("r12", "resolve_place", "Where is Mall of America?",
   _resolve("Mall of America", "Mall of America", (44.854, -93.242, 30)))
 q("r13", "resolve_place", "Where is Pike Place Market?",
   _resolve("Pike Place Market Seattle", "Pike Place", (47.609, -122.342, 25)))
 q("r14", "resolve_place", "Where is Schiphol Airport?",
-  _resolve("Schiphol Airport Amsterdam", None, (52.31, 4.76, 30)))
+  _resolve("Schiphol Airport Amsterdam", "Schiphol", (52.31, 4.76, 30)))
 q("r15", "resolve_place", "Where is Marina Bay Sands?",
-  _resolve("Marina Bay Sands Singapore", None, (1.283, 103.860, 25)))
+  _resolve("Marina Bay Sands Singapore", "Marina Bay Sands", (1.283, 103.860, 25)))
 q("r16", "resolve_place", "Where is the Colosseum in Rome?",
-  _resolve("Colosseo Roma", None, (41.890, 12.492, 25)))
+  _resolve("Colosseo Roma", "Colosseo", (41.890, 12.492, 25)))
 q("r17", "resolve_place", "Where is Copacabana Beach?",
-  _resolve("Copacabana Rio de Janeiro", None, (-22.97, -43.18, 30)))
+  _resolve("Copacabana Rio de Janeiro", "Copacabana", (-22.97, -43.18, 30)))
 q("r18", "resolve_place", "Where is Grand Central Terminal?",
   _resolve("Grand Central Terminal", "Grand Central", (40.753, -73.977, 25)))
 q("r19", "resolve_place", "Where is Griffith Observatory?",
   _resolve("Griffith Observatory Los Angeles", "Griffith", (34.118, -118.300, 25)))
 q("r20", "resolve_place", "Where is King's Cross Station?",
-  _resolve("King's Cross Station London", None, (51.531, -0.124, 25)))
+  _resolve("King's Cross Station London", "King's Cross", (51.531, -0.124, 25)))
 q("r21", "resolve_place", "Where is Fisherman's Wharf?",
-  _resolve("Fisherman's Wharf San Francisco", None, (37.808, -122.417, 25)))
+  _resolve("Fisherman's Wharf San Francisco", "Fisherman's Wharf", (37.808, -122.417, 25)))
 q("r22", "resolve_place", "Where is Bondi Beach?",
   _resolve("Bondi Beach Sydney", "Bondi", (-33.891, 151.277, 25)))
 q("r23", "resolve_place", "Where is the Reichstag?",
-  _resolve("Reichstag Berlin", None, (52.518, 13.376, 25)))
+  _resolve("Reichstag Berlin", "Reichstag", (52.518, 13.376, 25)))
 q("r24", "resolve_place", "Where is Ueno Park?",
-  _resolve("Ueno Park Tokyo", None, (35.715, 139.773, 25)))
+  _resolve("Ueno Park Tokyo", "Ueno Park", (35.715, 139.773, 25)))
 q("r25", "resolve_place", "Where is Millennium Park Chicago?",
   _resolve("Millennium Park Chicago", "Millennium", (41.883, -87.622, 25)))
 
@@ -546,7 +558,9 @@ q("d06", "gers_lookup", "What is this GERS id (São Paulo place)?", _gers(-23.55
 # Composite flows — the real shape of a user question ("X near Y")
 # --------------------------------------------------------------------------
 
-def _flow(place, category, radius=2000, need=1):
+def _flow(place, category, radius=2000, need=1, near=None):
+    """near=(lat, lon, km) checks the *anchor*, not just the count: any busy
+    neighbourhood has pharmacies, so a wrong anchor passes on count alone."""
     def run():
         m = _mods()
         r = m["geo"].resolve_place(place)
@@ -554,6 +568,11 @@ def _flow(place, category, radius=2000, need=1):
         if not rows:
             return False, f"resolve EMPTY for {place!r}"
         top = rows[0]
+        miss = _near_miss(top, near)
+        if miss:
+            return False, (
+                f"{miss} {top.get('name')!r} @ {top.get('lat'):.3f},{top.get('lon'):.3f}"
+            )
         found = m["overture"].find_places(
             top["lat"], top["lon"], radius_m=radius, category=category, limit=50
         )
@@ -570,7 +589,7 @@ q("c02", "flow", "Coffee shops near the Eiffel Tower?",
 q("c03", "flow", "Restaurants near Union Square San Francisco?",
   _flow("Union Square San Francisco", "restaurant"))
 q("c04", "flow", "Pharmacies near Shibuya Station?",
-  _flow("Shibuya Station Tokyo", "pharmacy"))
+  _flow("Shibuya Station Tokyo", "pharmacy", near=(35.658, 139.7016, 2)))
 q("c05", "flow", "Hotels near Heathrow Airport?",
   _flow("Heathrow Airport", "hotel", 5000))
 q("c06", "flow", "Parks near Brooklyn Bridge?",
@@ -584,7 +603,7 @@ q("c09", "flow", "Restaurants near Sydney Opera House?",
 q("c10", "flow", "Museums near Central Park?",
   _flow("Central Park New York", "museum"))
 q("c11", "flow", "Bars near Shinjuku Station?",
-  _flow("Shinjuku Station Tokyo", "bar"))
+  _flow("Shinjuku Station Tokyo", "bar", near=(35.690, 139.700, 2)))
 q("c12", "flow", "Schools near Golden Gate Park?",
   _flow("Golden Gate Park San Francisco", "school", 3000))
 def _resolve_then(place, follow):
@@ -614,12 +633,17 @@ q("c13", "flow", "What's the neighborhood like around Pike Place Market?",
   _resolve_then("Pike Place Market Seattle", _summarize_follow))
 q("c14", "flow", "Which admin area is the Colosseum in?",
   _resolve_then("Colosseo Roma", _admin_follow))
-def _route_between(from_place, to_place, mode="walk"):
+def _route_between(from_place, to_place, mode="walk", max_m=None):
     """Named walk through from_to so the peek is one hop (#328 / #336).
 
     First call in this process is confirm=false. Second (--warm) is
     confirm=true. Do not pre-resolve then routing.route — that bypasses
     needs_confirm and still pays the 18–40s graph.
+
+    max_m bounds the *confirmed* leg's distance (#469: both ends resolved
+    to the wrong neighbourhood and a 1.5 km walk was reported as 8,570 m,
+    which passed because any route passed). The peek leg carries no
+    distance and is judged as before.
     """
     n = {"i": 0}
 
@@ -635,12 +659,16 @@ def _route_between(from_place, to_place, mode="walk"):
             return False, f"resolve EMPTY ({from_place!r} -> {to_place!r})"
         if isinstance(r, dict) and r.get("error") == "too_far":
             return False, f"too_far {str(r)[:80]}"
-        return _score_routed_result(r, confirm=confirm)
+        ok, detail = _score_routed_result(r, confirm=confirm)
+        d = r.get("distance_m") if isinstance(r, dict) else None
+        if ok and max_m is not None and d is not None and d > max_m:
+            return False, f"TOO FAR {d:.0f}m > {max_m}m ({from_place!r} -> {to_place!r})"
+        return ok, detail
     return run
 
 
 q("c15", "flow", "How far is it to walk from Shibuya Station to Yoyogi Park?",
-  _route_between("Shibuya Station Tokyo", "Yoyogi Park Tokyo"))
+  _route_between("Shibuya Station Tokyo", "Yoyogi Park Tokyo", max_m=3000))
 
 
 # --------------------------------------------------------------------------
@@ -651,21 +679,21 @@ q("c15", "flow", "How far is it to walk from Shibuya Station to Yoyogi Park?",
 # --------------------------------------------------------------------------
 
 q("x01", "resolve_place", "coffe shops near pike place market seatle",
-  _resolve("pike place market seattle", None, (47.609, -122.342, 25)))
+  _resolve("pike place market seattle", "Pike Place", (47.609, -122.342, 25)))
 q("x02", "resolve_place", "wheres the golden gate bridge",
-  _resolve("golden gate bridge san francisco", None, (37.82, -122.48, 25)))
+  _resolve("golden gate bridge san francisco", "Golden Gate Bridge", (37.82, -122.48, 25)))
 q("x03", "resolve_place", "notre dame paris (dropped-word landmark)",
-  _resolve("notre dame paris", None, (48.853, 2.35, 25)))
+  _resolve("notre dame paris", "Notre Dame", (48.853, 2.35, 1)))
 q("x04", "resolve_place", "harvard square cambridge (third city of the name)",
   _resolve("harvard square cambridge", "Harvard Square", (42.373, -71.119, 25)))
 q("x05", "resolve_place", "san jose airport (name-prefix city)",
-  _resolve("san jose airport", None, (37.36, -121.93, 30)))
+  _resolve("san jose airport", "San Jose Airport", (37.36, -121.93, 30)))
 q("x06", "resolve_place", "palo alto caltrain station",
-  _resolve("palo alto caltrain station", None, (37.443, -122.164, 25)))
+  _resolve("palo alto caltrain station", "Palo Alto Caltrain", (37.443, -122.164, 25)))
 q("x07", "flow", "stuff to eat near the space needle",
   _flow("space needle seattle", "restaurant"))
 q("x08", "flow", "gas station near disneyland",
-  _flow("disneyland anaheim", "fuel_station", 4000))
+  _flow("disneyland anaheim", "gas_station", 4000))
 q("x09", "flow", "sushi near tsukiji market tokyo",
   _flow("tsukiji market tokyo", "sushi_restaurant", 2000))
 q("x10", "flow", "dentist near the mission district sf",

@@ -457,6 +457,7 @@ import duckdb
 from placeroot import (
     addresses,
     cache,
+    categories,
     geo,
     home_region,
     manifest,
@@ -540,13 +541,20 @@ _NAMESAKE_LOCALITY_SHARE = _ANCHOR_SPECIFIC_SHARE
 # any of these words *is* allowed to anchor when the user supplies nothing
 # else to go on — the rule is about not preferring a feature noun over a
 # genuine place name, not about banning the string.
+#
+# #469: the same set is what _place_match_label refuses to accept as the
+# *only* word a place candidate shares with the query. The two uses are one
+# judgment: a word that says what a place is cannot say which place it is —
+# not as an anchor, and not as evidence that "Snow Peak Land Station" has
+# anything to do with "Shibuya Station". "hall" and "shrine" were added for
+# that use and are refused as anchors under the same reasoning.
 _GENERIC_PLACE_WORDS = frozenset("""
     academy airport aquarium arena avenue basilica bay beach boulevard bridge dam falls
     building campus castle cathedral centre center chapel church cinema clinic
-    club college crossing dock field fountain garden gardens gate gym harbor
+    club college crossing dock field fountain garden gardens gate gym hall harbor
     harbour hospital hotel institute island junction library mall market
     memorial monument mosque museum observatory palace park pharmacy pier
-    plaza port preschool quay resort restaurant road school square stadium
+    plaza port preschool quay resort restaurant road school shrine square stadium
     station store street studio synagogue temple terminal theater theatre
     tower university wharf zoo
 """.split())
@@ -2128,6 +2136,13 @@ def _extract_city_hint(query: str) -> tuple[str, str | None, tuple[float, float]
     Returns (place_query, city_name, coords). coords come only from the
     bundled alias list — they bound the search, they are not an answer.
     """
+    # #481: a whole-query alias wins over the trailing-city split. "Notre-Dame
+    # de Paris" ends in a well-known city, and splitting first left the head
+    # "Notre-Dame de" (no alias) with a bare city hint — the curated pin for
+    # the landmark, keyed under the full phrase, was never consulted.
+    alias = _lookup_poi_alias(query)
+    if alias:
+        return query, alias["city"], (alias["lat"], alias["lon"])
     tokens = query.strip().split()
     for n in (2, 1):
         if len(tokens) <= n:
@@ -2145,9 +2160,6 @@ def _extract_city_hint(query: str) -> tuple[str, str | None, tuple[float, float]
         if alias:
             return head, alias["city"] or city, (alias["lat"], alias["lon"])
         return head, city, None
-    alias = _lookup_poi_alias(query)
-    if alias:
-        return query, alias["city"], (alias["lat"], alias["lon"])
     return query, None, None
 
 
@@ -2174,7 +2186,7 @@ def _alias_anchor(query: str) -> tuple[float, float, str | None] | None:
     place_q, _city, coords = _extract_city_hint(query)
     if coords is None:
         return None
-    name_query = None if _nothing_but_stopwords(place_q) else place_q
+    name_query = None if _nothing_but_generic(place_q) else place_q
     return (coords[0], coords[1], name_query)
 
 
@@ -2433,12 +2445,47 @@ def _match_tier_order_sql(name_expr: str) -> str:
     return f"{tier_expr}, population DESC NULLS LAST"
 
 
+# #476: a (lat, lon, radius_m) constraint on the division rows a name query
+# may return. resolve_place passes its city pin here so the division pass —
+# literal, alternate-name, variant and fuzzy — is bounded the same way the
+# "City, ST" region filter already bounds it, instead of matching the whole
+# planet and filtering afterwards.
+NearConstraint = tuple[float, float, float]
+
+
+def _near_filter_sql(
+    near: NearConstraint | None, lat_col: str, lon_col: str, params: dict
+) -> str:
+    """AND-clause keeping rows whose point lies in `near`'s bounding box, or
+    "" when there is no constraint. Adds its parameters to `params`.
+
+    A box, not the exact circle: this is a row prefilter on the divisions
+    table (tiny relative to a places scan), and the caller that passes a
+    constraint (resolve_place, #476) still applies the haversine radius to
+    what comes back. Antimeridian-safe the same way geo.bbox_filter_sql is:
+    a box that ran past +/-180 becomes an OR of the two in-range halves.
+    """
+    if near is None:
+        return ""
+    lat, lon, radius_m = near
+    xmin, ymin, xmax, ymax = geo.bbox_around(lat, lon, radius_m)
+    params["near_ymin"], params["near_ymax"] = ymin, ymax
+    lat_clause = f"AND {lat_col} BETWEEN $near_ymin AND $near_ymax"
+    if xmin >= -180.0 and xmax <= 180.0:
+        params["near_xmin"], params["near_xmax"] = xmin, xmax
+        return f"{lat_clause} AND {lon_col} BETWEEN $near_xmin AND $near_xmax"
+    params["near_xmin"] = xmin + 360.0 if xmin < -180.0 else xmin
+    params["near_xmax"] = xmax - 360.0 if xmax > 180.0 else xmax
+    return f"{lat_clause} AND ({lon_col} >= $near_xmin OR {lon_col} <= $near_xmax)"
+
+
 def _query_divisions_from_local(
     table_path: str,
     query: str,
     region_code: str | None,
     name_match_expr: str = "name",
     country_code: str | None = None,
+    near: NearConstraint | None = None,
 ) -> list[dict]:
     """name_match_expr (#53) is the SQL expression matched against $pattern
     /$exact/$prefix — "name" for a plain literal search, or
@@ -2448,7 +2495,10 @@ def _query_divisions_from_local(
     country_code (#457) narrows the same way region_code does, on the row's
     own `country` column — filtering by hierarchy membership, not a second
     string match. Both filters may be given together (a region-suffix
-    parse combined with an explicit `country=`)."""
+    parse combined with an explicit `country=`).
+
+    near (#476): bound the rows to a (lat, lon, radius_m) box — see
+    _near_filter_sql."""
     filters = []
     if region_code:
         filters.append("AND region = $region_code")
@@ -2461,11 +2511,13 @@ def _query_divisions_from_local(
         params["region_code"] = region_code
     if country_code:
         params["country_code"] = country_code
+    near_filter = _near_filter_sql(near, "lat", "lon", params)
     sql = f"""
         SELECT id, name, subtype, country, region, lat, lon, admin_chain, population
         FROM read_parquet('{table_path}')
         WHERE {name_match_expr} ILIKE $pattern ESCAPE '\\'
         {region_filter}
+        {near_filter}
         ORDER BY {_match_tier_order_sql(name_match_expr)}
         LIMIT {DIVISION_OVERFETCH}
     """
@@ -2490,6 +2542,7 @@ def _query_divisions_from_upstream(
     region_code: str | None,
     name_match_expr: str = "names.primary",
     country_code: str | None = None,
+    near: NearConstraint | None = None,
 ) -> list[dict]:
     """Direct upstream scan — the pre-#43 path, used when no local table is
     available (PLACEROOT_CACHE=off, or materialization failed).
@@ -2514,12 +2567,16 @@ def _query_divisions_from_upstream(
         filters.append("AND country = $country_code")
         params["country_code"] = country_code
     region_filter = " ".join(filters)
+    # #476: with a constraint the scan is still a name search over the whole
+    # theme (nothing to prune files by), but the rows it returns are bounded.
+    near_filter = _near_filter_sql(near, "bbox.ymin", "bbox.xmin", params)
     sql = f"""
         SELECT id, names.primary AS name, subtype, country, region,
                bbox.ymin AS lat, bbox.xmin AS lon, hierarchies, {population_expr}
         FROM read_parquet('{glob}', hive_partitioning=1)
         WHERE {name_match_expr} ILIKE $pattern ESCAPE '\\'
         {region_filter}
+        {near_filter}
         ORDER BY {_match_tier_order_sql(name_match_expr)}
         LIMIT {DIVISION_OVERFETCH}
     """
@@ -2548,6 +2605,7 @@ def _query_alt_names(
     query: str,
     region_code: str | None,
     country_code: str | None = None,
+    near: NearConstraint | None = None,
 ) -> list[dict]:
     """#214: divisions whose *alternate* (names.common) spelling matches
     `query`, joined back to the local divisions table for the real row.
@@ -2595,6 +2653,7 @@ def _query_alt_names(
         filters.append("AND d.country = $country_code")
         params["country_code"] = country_code
     region_filter = " ".join(filters)
+    near_filter = _near_filter_sql(near, "d.lat", "d.lon", params)
     match_order = _match_tier_order_sql("a.alt_name")
     sql = f"""
         SELECT d.id, d.name, d.subtype, d.country, d.region, d.lat, d.lon,
@@ -2603,6 +2662,7 @@ def _query_alt_names(
         JOIN read_parquet('{table_path}') d ON d.id = a.id
         WHERE a.alt_name ILIKE $pattern ESCAPE '\\'
         {region_filter}
+        {near_filter}
         QUALIFY row_number() OVER (
             PARTITION BY d.id ORDER BY {match_order}, a.alt_name
         ) = 1
@@ -2635,6 +2695,7 @@ def _alt_rows_not_already_found(
     region_code: str | None,
     found: list[dict],
     country_code: str | None = None,
+    near: NearConstraint | None = None,
 ) -> list[dict]:
     """#214 alternate-name matches for `query`, minus the divisions the
     literal pass already returned — a division found under its canonical
@@ -2648,7 +2709,7 @@ def _alt_rows_not_already_found(
     spellings.
     """
     try:
-        rows = _query_alt_names(alt_table, table_path, query, region_code, country_code)
+        rows = _query_alt_names(alt_table, table_path, query, region_code, country_code, near=near)
     except overture.UpstreamUnavailable:
         if Path(alt_table).exists():
             raise
@@ -2688,6 +2749,7 @@ def _query_divisions(
     fold_diacritics: bool = False,
     alt_table: str | None = None,
     country_code: str | None = None,
+    near: NearConstraint | None = None,
 ) -> list[dict]:
     """fold_diacritics (#53): match strip_accents(name) against `query`
     (which the caller must already have run through _strip_diacritics) —
@@ -2701,12 +2763,17 @@ def _query_divisions(
 
     country_code (#457): same role as region_code, filtering candidates by
     the row's own `country` column. The two may be combined.
+
+    near (#476): a (lat, lon, radius_m) box the rows must fall inside —
+    the city pin resolve_place already holds. Applied to every side of the
+    search (primary, alternate, upstream) so a pinned query never has a
+    far-away namesake in its candidate pool to begin with.
     """
     if local_table is not None:
         name_expr = "strip_accents(name)" if fold_diacritics else "name"
         try:
             rows = _query_divisions_from_local(
-                local_table, query, region_code, name_expr, country_code
+                local_table, query, region_code, name_expr, country_code, near=near
             )
         except overture.UpstreamUnavailable:
             if Path(local_table).exists():
@@ -2723,11 +2790,11 @@ def _query_divisions(
         else:
             if alt_table is not None:
                 rows = rows + _alt_rows_not_already_found(
-                    alt_table, local_table, query, region_code, rows, country_code
+                    alt_table, local_table, query, region_code, rows, country_code, near=near
                 )
             return rows
     name_expr = "strip_accents(names.primary)" if fold_diacritics else "names.primary"
-    return _query_divisions_from_upstream(query, region_code, name_expr, country_code)
+    return _query_divisions_from_upstream(query, region_code, name_expr, country_code, near=near)
 
 
 # --- #215: fuzzy fallback tier ------------------------------------------
@@ -2771,6 +2838,7 @@ def _query_divisions_fuzzy(
     query: str,
     region_code: str | None = None,
     country_code: str | None = None,
+    near: NearConstraint | None = None,
 ) -> list[dict]:
     """Divisions whose folded name is within _FUZZY_SIMILARITY_THRESHOLD
     jaro-winkler of the folded query — the #215 typo tier.
@@ -2781,6 +2849,15 @@ def _query_divisions_fuzzy(
     back empty, mirroring what the literal search one step up already does
     — a region-constrained miss can mean the suffix was misread as a
     region, and answering nothing would be the worse failure.
+
+    `near` (#476) bounds the pass to a (lat, lon, radius_m) box the same
+    way. This is the tier that answered "Marina Bay Sands" — pinned to
+    Singapore by its caller — with five "Marina Bay" neighbourhoods in
+    Florida, California, Massachusetts and Nebraska: a typo correction
+    12,000 km from where the caller said they meant is not a correction.
+    Under a pin the similarity scan runs over the pin's box only, and a
+    miss there is a miss (no unconstrained retry — the pin is the caller's
+    statement, not a parsed suffix that might have been misread).
 
     Local table only, by construction: the caller passes a materialized
     table path or doesn't call this at all. A similarity predicate has
@@ -2827,6 +2904,7 @@ def _query_divisions_fuzzy(
         filters.append("AND country = $country_code")
         params["country_code"] = country_code
     region_filter = " ".join(filters)
+    near_filter = _near_filter_sql(near, "lat", "lon", params)
     sql = f"""
         SELECT id, name, subtype, country, region, lat, lon, admin_chain, population,
                jaro_winkler_similarity({_FOLDED_NAME_SQL}, $folded) AS similarity
@@ -2834,6 +2912,7 @@ def _query_divisions_fuzzy(
         WHERE jaro_winkler_similarity({_FOLDED_NAME_SQL}, $folded)
               >= {_FUZZY_SIMILARITY_THRESHOLD}
         {region_filter}
+        {near_filter}
         ORDER BY similarity DESC, population DESC NULLS LAST
         LIMIT {DIVISION_OVERFETCH}
     """
@@ -2921,6 +3000,14 @@ def _fallback_anchor_candidates(
     as empty ("H&M Brooklyn", or a two-character Chinese name, has to reach
     the anchored scan). See _nothing_but_stopwords.
 
+    #472 widened that gate by one set: a residual made only of feature nouns
+    ("Station", left over once "Shibuya Station" anchors on Shibuya) is
+    refused the same way. '%Station%' inside the anchor's box matched every
+    station in Tokyo -- 5.5s, answering "Nakameguro Station" -- and the
+    caller's skip-and-say-so is again the better answer. The predicate
+    actually applied is _nothing_but_generic; the stopword rule above is
+    kept intact inside it.
+
     Note this gate is about *emptiness*, not correctness: a misspelling
     like "Sna Francisco" (anchor "Francisco", residual "Sna") clears it
     just fine — "Sna" is not a stopword. Typos are handled a step earlier
@@ -2929,10 +3016,65 @@ def _fallback_anchor_candidates(
     before this function is ever reached. Without a local divisions table
     for that tier to read (cache off), such a query still lands here and
     still reaches the substring scan of its own typo.
+
+    #464: a split anchor is a *guess* about which words locate the query,
+    and for a query that is nothing but a POI's name the guess is always
+    wrong — there is no city in "Grand Central Terminal" or "Mall of
+    America" to find. Traced live: "Grand Central Terminal" anchored on
+    Chelyabinsk (its leading word "Central" exact-matches Центральный
+    район's alternate name, and 101k people beat Grand Central, PA's
+    none), and "Mall of America" anchored on a Virginia division whose
+    name merely *contains* "of America". Two things follow. First, a
+    trailing split whose division match is only a substring (the trailing
+    words are a fragment of some division's longer name, and that name is
+    not itself in the query) is not acted on at all when the residual is
+    the larger part of the query — the user did not type that division,
+    so the words were never a location. Second, every contender now says
+    how much it should be trusted (see _fallback_anchor_details' `strong`):
+    resolve_place uses that to decide whether a place found near the
+    anchor must account for the anchor's words too, or only for the rest.
+    A trailing exact/prefix match on a city-level division ("San Jose",
+    "Chicago", "Rio de Janeiro" typed whole) is strong — the caller named
+    the city, and a place inside it is not expected to repeat it. A
+    leading-word anchor is never strong: #268's own premise is that the
+    location word is part of the place's name ("Stanford Shopping Center",
+    "Palo Alto Caltrain Station"), so a genuine match contains it, and a
+    coincidence ("Grand Royal", 20 km from a district called Central) does
+    not. A country- or region-level match is never strong either: its
+    centroid locates nothing (see _pick_anchor_row), and "America" as a
+    prefix of the United States' Min Nan name is not the caller naming
+    Kansas.
+    """
+    return [(d["lat"], d["lon"], d["name_query"]) for d in _fallback_anchor_details(
+        search_query, divisions, region_code, local_table,
+        alt_table=alt_table, region_population=region_population,
+    )]
+
+
+def _fallback_anchor_details(
+    search_query: str,
+    divisions: list[dict],
+    region_code: str | None,
+    local_table: str | None,
+    alt_table: str | None = None,
+    region_population: dict[str, int] | None = None,
+) -> list[dict]:
+    """_fallback_anchor_candidates, with each anchor's provenance kept.
+
+    One dict per candidate, best first: "lat", "lon", "name_query" (as the
+    tuple form), plus "candidate" (the query words the anchor was derived
+    from — empty when a division in hand anchored the whole query),
+    "split" (True when the anchor came from a trailing/leading split rather
+    than from `divisions`), and "strong" (#464: whether the caller may
+    treat the anchor's own words as accounted for by *location* rather than
+    requiring a place's name to contain them — see the paragraph above).
     """
     if divisions:
         top = divisions[0]
-        return [(top["lat"], top["lon"], search_query)]
+        return [{
+            "lat": top["lat"], "lon": top["lon"], "name_query": search_query,
+            "candidate": "", "split": False, "strong": True,
+        }]
     tokens = search_query.strip().split()
     pop = region_population or {}
 
@@ -2959,7 +3101,7 @@ def _fallback_anchor_candidates(
         for i, token in enumerate(tokens[:-1]):
             if (
                 len(token) >= 3
-                and not _nothing_but_stopwords(token)
+                and not _nothing_but_generic(token)
                 and token.lower().strip(".,") not in _NAME_PREFIX_WORDS
             ):
                 splits.append((token, " ".join(tokens[:i] + tokens[i + 1:]).strip(), True))
@@ -3001,10 +3143,22 @@ def _fallback_anchor_candidates(
         if not rows:
             continue
         row = _pick_anchor_row(rows, candidate, pop)
+        if (
+            not is_leading
+            and _anchor_is_weak(row, candidate, search_query)
+            and len(base.split()) > len(candidate.split())
+        ):
+            # #464: the trailing words are a fragment of some division's
+            # longer name, that name is nowhere in the query, and most of
+            # the query is still unexplained — "of America" inside
+            # "Tradiations of America" does not make "Mall of America" a
+            # query about Virginia. Not a location word; not an anchor.
+            continue
         contenders.append({
             "row": row, "candidate": candidate, "base": base,
             "precedence": precedence,
             "broad": _SUBTYPE_WEIGHT.get(row.get("subtype"), 2) <= 1,
+            "leading": is_leading,
         })
         # The same word's next two cities, as lower-precedence contenders:
         # ambiguous city names lose coin flips — "cambridge" is the UK's,
@@ -3029,15 +3183,50 @@ def _fallback_anchor_candidates(
                 "row": alt, "candidate": candidate, "base": base,
                 "precedence": precedence + 100 * alt_rank,
                 "broad": _SUBTYPE_WEIGHT.get(alt.get("subtype"), 2) <= 1,
+                "leading": is_leading,
             })
     ranked = _rank_anchor_contenders(contenders)
     if not ranked:
         return []
     out = []
     for c in ranked:
-        name_query = None if _nothing_but_stopwords(c["base"]) else c["base"]
-        out.append((c["row"]["lat"], c["row"]["lon"], name_query))
+        # #472: "Station" left over from "Shibuya Station" is as empty a
+        # thing to search for as "the" -- see _nothing_but_generic.
+        name_query = None if _nothing_but_generic(c["base"]) else c["base"]
+        out.append({
+            "lat": c["row"]["lat"], "lon": c["row"]["lon"], "name_query": name_query,
+            "candidate": c["candidate"], "split": True,
+            # #464: see _fallback_anchor_candidates. Trailing, city-level,
+            # and the caller typed the division's name (exact/prefix, or
+            # the whole matched name sits in the query): the anchor words
+            # are a location, not part of the place's name.
+            "strong": (
+                not c["leading"]
+                and not c["broad"]
+                and not _anchor_is_weak(c["row"], c["candidate"], search_query)
+            ),
+        })
     return out
+
+
+def _anchor_is_weak(row: dict, candidate: str, search_query: str) -> bool:
+    """#464: whether `row` matched the split words `candidate` only as a
+    substring of a longer division name that the query does not contain.
+
+    "de Janeiro" is a substring of "Rio de Janeiro", but the caller typed
+    "Copacabana Rio de Janeiro" — the whole name is there, the split just
+    landed a word short, and the anchor is as good as an exact one. "of
+    America" is a substring of "Tradiations of America", which appears
+    nowhere in "Mall of America": the trailing words coincide with a
+    fragment of an unrelated name.
+    """
+    if _effective_tier(row, candidate) >= _STRONG_TIER:
+        return False
+    q = _normalize_for_match(search_query)
+    for name in (row.get("_matched_name"), row.get("name")):
+        if name and _normalize_for_match(name) in q:
+            return False
+    return True
 
 
 # When two splits disagree on which word is the location, more of the query
@@ -3242,10 +3431,38 @@ def _query_places_multi_anchor(
     return result, winner
 
 
+def _schedule_places_tiles_near(anchor: tuple[float, float]) -> None:
+    """Schedule the places (and recreation-layer base) tiles for the
+    fallback box around `anchor` — the post-hoc half of #476's
+    schedule-only-the-winner rule. Same resolution overture.find_places
+    runs before every scan (cache.source_sql through _places_source), so
+    the tiles that land are exactly the ones a repeat query reads. Never
+    raises: scheduling is an optimization, the answer is already in hand.
+    """
+    try:
+        _bbox_f, _dist_f, _params, bbox, _r = overture.area_geometry(
+            anchor[0], anchor[1], _PLACES_FALLBACK_RADIUS_M
+        )
+        overture._places_source(bbox)
+    except Exception:  # noqa: BLE001 - cache scheduling must never fail a query
+        # The anchor is a coordinate the caller typed a place name for; keep it
+        # out of the log line (CodeQL: clear-text logging of location data).
+        logger.debug("post-hoc tile scheduling failed for a fallback anchor", exc_info=True)
+
+
 def _query_places_fallback(
-    query: str, anchor: tuple[float, float] | None = None, also: str | None = None
+    query: str, anchor: tuple[float, float] | None = None, also: str | None = None,
+    schedule_tiles: bool = True,
 ) -> list[dict]:
     """Supplement divisions with named places when divisions alone don't fill limit.
+
+    schedule_tiles=False (#476) reads the anchor's box without scheduling
+    its missing places/base tiles for background materialization — cached
+    tiles still serve, and a miss falls through to the manifest-pruned
+    upstream files as always, so the answer is the same either way. The
+    caller passes False for a speculative anchor (one derived by splitting
+    the query rather than stated by the caller or matched outright) and
+    schedules afterwards for the anchor that actually answered.
 
     #83: an unconstrained ILIKE scan over the places theme — Overture's
     largest, least row-group-prunable theme — measured 100s+ live against a
@@ -3334,12 +3551,16 @@ def _query_places_fallback(
     # (_skip_unanchored_places_scan), not by the cache.
     if anchor_bbox is not None:
         try:
-            base_source = cache.source_sql("places", glob, anchor_bbox)
+            base_source = cache.source_sql(
+                "places", glob, anchor_bbox, schedule_missing=schedule_tiles
+            )
         except Exception:  # noqa: BLE001 - cache resolution is an optimization here
             base_source = f"read_parquet('{glob}', hive_partitioning=1)"
     else:
         base_source = f"read_parquet('{glob}', hive_partitioning=1)"
-    from_source, _ = overture._with_recreation(base_source, anchor_bbox)
+    from_source, _ = overture._with_recreation(
+        base_source, anchor_bbox, schedule_missing=schedule_tiles
+    )
     category_expr = "taxonomy.primary" if cols is not None and "taxonomy" in cols else "NULL"
     sql = f"""
         SELECT id, names.primary AS name, bbox.ymin AS lat, bbox.xmin AS lon,
@@ -3733,12 +3954,13 @@ def _postcode_empty_note(display: str) -> str:
 
 def geocode(
     query: str, limit: int = DEFAULT_LIMIT, lang: str | None = None, country: str | None = None,
+    near: NearConstraint | None = None,
 ) -> list[dict]:
     """Free-text place name -> ranked candidates. See geocode_detailed.
 
-    country (#457): see geocode_detailed. May raise ValueError.
+    country (#457) and near (#476): see geocode_detailed. May raise ValueError.
     """
-    return geocode_detailed(query, limit, lang=lang, country=country)["results"]
+    return geocode_detailed(query, limit, lang=lang, country=country, near=near)["results"]
 
 
 def geocode_batch(
@@ -3796,6 +4018,7 @@ def geocode_detailed(
     alt_table: str | None = None,
     lang: str | None = None,
     country: str | None = None,
+    near: NearConstraint | None = None,
 ) -> dict:
     """Free-text place name -> ranked candidates, from Overture divisions (and places fallback).
 
@@ -3855,6 +4078,21 @@ def geocode_detailed(
     recognized country code, or if it disagrees with a country/region
     suffix parsed off `query` itself (server.py turns either into a
     structured bad_request naming both).
+
+    near (#476, a (lat, lon, radius_m) triple) is a caller that already
+    knows where the query means — resolve_place with a city pin — telling
+    this search so. It bounds every division pass (literal, alternate,
+    variant, fuzzy) to that box, and it *is* the places-fallback anchor:
+    _fallback_anchor_candidates' speculative "which trailing or leading
+    word is the city" splits do not run at all, because the caller has
+    already answered that question. Measured before: resolve_place("Marina
+    Bay Sands Singapore") ran geocode("Marina Bay Sands") unconstrained,
+    which anchored on Marina, California (the only division "Marina"
+    matches outright), scanned places there, retried five more cities on
+    three continents, and scheduled California's places and base-theme
+    tiles for background materialization — for a query pinned to
+    Singapore. With near, none of that has a reason to happen. No near
+    given leaves this function byte-identical to before.
     """
     query = query.strip()
     limit = max(1, min(limit, MAX_LIMIT))
@@ -3961,8 +4199,13 @@ def geocode_detailed(
     suffix_region_code = region_code
     suffix_country_code = country_code
 
+    # #476: `near_kw` rather than a bare keyword so the no-constraint call
+    # stays exactly the call it was (the pre-#476 signature is what every
+    # test double of _query_divisions in the suite answers to).
+    near_kw: dict = {"near": near} if near is not None else {}
     divisions = _query_divisions(
-        search_query, region_code, local_table, alt_table=alt_table, country_code=country_code,
+        search_query, region_code, local_table, alt_table=alt_table,
+        country_code=country_code, **near_kw,
     )
     if region_code and not divisions:
         # #46: recognized a region suffix, but nothing in this dataset
@@ -3972,7 +4215,9 @@ def geocode_detailed(
         region_code = None
         country_code = None
         search_query = query
-        divisions = _query_divisions(search_query, None, local_table, alt_table=alt_table)
+        divisions = _query_divisions(
+            search_query, None, local_table, alt_table=alt_table, **near_kw
+        )
     elif country_code and not divisions and country_code_from_suffix:
         # #457: same idea, but degrading to the BASE name (not the whole
         # comma-joined string) — Overture names are bare, so re-searching
@@ -3986,7 +4231,9 @@ def geocode_detailed(
         # filter coming up empty is a real, precise answer.
         country_code = None
         search_query = base_query
-        divisions = _query_divisions(search_query, None, local_table, alt_table=alt_table)
+        divisions = _query_divisions(
+            search_query, None, local_table, alt_table=alt_table, **near_kw
+        )
         qualifier_note = _country_degrade_note(base_query, suffix_country_code)
 
     # #53: literal query didn't reach an exact-or-prefix division match with
@@ -4028,7 +4275,7 @@ def geocode_detailed(
     if not literal_answer_is_good_enough:
         for variant_query in _abbreviation_variant_queries(search_query):
             for row in _query_divisions(
-                variant_query, region_code, local_table, country_code=country_code
+                variant_query, region_code, local_table, country_code=country_code, **near_kw
             ):
                 if row["id"] not in seen_ids:
                     row["_variant"] = True
@@ -4081,7 +4328,7 @@ def geocode_detailed(
         rows = (
             _query_divisions(
                 stripped_query, region_code, local_table,
-                fold_diacritics=True, country_code=country_code,
+                fold_diacritics=True, country_code=country_code, **near_kw,
             )
             if stripped_query
             else []
@@ -4121,10 +4368,10 @@ def geocode_detailed(
             fuzzy_rows = []
         else:
             fuzzy_rows = _query_divisions_fuzzy(
-                local_table, fuzzy_query, suffix_region_code, suffix_country_code
+                local_table, fuzzy_query, suffix_region_code, suffix_country_code, **near_kw
             )
         if not fuzzy_rows and (suffix_region_code or suffix_country_code):
-            fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query)
+            fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query, **near_kw)
         divisions = fuzzy_rows
 
     _bundled_recall_pending = not divisions and _is_bundled_table(local_table)
@@ -4135,6 +4382,9 @@ def geocode_detailed(
         # query naming a feature is not one — it was 12.8s of a 13.1s call,
         # spent proving a negative the query's own shape already implies.
         and not _names_a_feature(search_query)
+        # #476: a pinned query has its anchor already; the places search
+        # gets its chance first, same as when a split derives one.
+        and near is None
         and _fallback_anchor(
             search_query, [], region_code, local_table,
             alt_table=_local_alt_names_table(local_table),
@@ -4208,10 +4458,18 @@ def geocode_detailed(
         # can be derived (a division match already in hand, or a trailing
         # location word in the query) instead of an unconstrained
         # worldwide scan — see _fallback_anchor/_query_places_fallback.
-        anchor_options = _fallback_anchor_candidates(
-            search_query, divisions, region_code, local_table, alt_table=alt_table,
-            region_population=region_population,
-        )
+        #
+        # #476: under a caller's pin the pin is the anchor and the whole
+        # search_query is the name to look for — the caller already split
+        # the city off. The speculative splits are what aimed a Singapore
+        # query at Marina, California; they have nothing to add here.
+        if near is not None:
+            anchor_options = [(near[0], near[1], search_query)]
+        else:
+            anchor_options = _fallback_anchor_candidates(
+                search_query, divisions, region_code, local_table, alt_table=alt_table,
+                region_population=region_population,
+            )
         # #329: a famous landmark with no derivable city still has an
         # alias pin on the bundled index — use it as the places-fallback
         # anchor rather than skipping the search (or aiming at a random
@@ -4251,7 +4509,19 @@ def geocode_detailed(
             note = _UNANCHORED_NAME_SEARCH_NOTE
         else:
             seen_names = {(c["name"].lower()) for c in candidates}
-            places = _query_places_fallback(name_query, anchor=anchor, also=search_query)
+            # #476: an anchor derived by splitting the query is a guess
+            # about where the query means, and the first scan is the test
+            # of that guess. Its box's tiles are not scheduled for
+            # background materialization until the guess has paid off —
+            # measured, the losing guesses left 807 MB of Florida and
+            # California places/base tiles behind two European landmark
+            # resolves. A pin, an alias, or a division match already in
+            # hand is not a guess and schedules as before.
+            speculative = divisions == [] and alias_hit is None and near is None
+            places = _query_places_fallback(
+                name_query, anchor=anchor, also=search_query,
+                schedule_tiles=not speculative,
+            )
             if not places and len(anchor_options) > 1:
                 # The best reading of the query found nothing where it
                 # pointed. Ambiguous city names make that reading a coin
@@ -4268,6 +4538,10 @@ def geocode_detailed(
                     )
                     if places and winner is not None:
                         anchor = winner
+            if speculative and places and anchor is not None:
+                # The guess held: this is the anchor that answered, so its
+                # tiles are worth having for the repeat query (#476).
+                _schedule_places_tiles_near(anchor)
             places = [p for p in places if p["name"].lower() not in seen_names]
             # Rank by the better of the two readings of the query: a row
             # named for the whole query beats one that merely contains the
@@ -4320,7 +4594,9 @@ def geocode_detailed(
         # only come back empty, and it was the entire cost of doing so —
         # 11.0s of a fresh install's first landmark query, spent proving a
         # negative that the query's own shape already implies.
-        recalled = _query_divisions(search_query, region_code, None, country_code=country_code)
+        recalled = _query_divisions(
+            search_query, region_code, None, country_code=country_code, **near_kw
+        )
         _flag_namesake_localities(recalled, search_query)
         recalled.sort(key=lambda r: _rank_key(r, search_query, region_population))
         candidates = recalled
@@ -4458,7 +4734,8 @@ _REMOTE_GLOB_SCHEMES = ("s3://", "http://", "https://", "gcs://", "gs://", "az:/
 _STOPWORD_RESIDUAL_NOTE = (
     "no division matched this query as a whole, and once its trailing location "
     "word is set aside as an anchor nothing distinctive is left to search place "
-    "names for (only common words like \"the\" or \"of\"), so the places half of "
+    "names for (only common words like \"the\" or \"of\", or generic type words like "
+    "\"Station\" or \"Park\"), so the places half of "
     "the search was skipped -- matching those against every place name is minutes "
     "of scanning for results that would be unrelated anyway. Spell the name out "
     "(\"the Metropolitan Museum of Art\" rather than \"the Met\"), or use "
@@ -4500,20 +4777,92 @@ def _skip_unanchored_places_scan() -> bool:
 # metro area" as the top division match, not a general-purpose area search.
 _RESOLVE_PLACE_RADIUS_M = 20_000
 
+# #481: how far from a bundled-alias pin a candidate still counts as *the*
+# landmark the alias names. The alias table is a curated coordinate — the
+# strongest evidence this module ever holds about where a query means — and
+# a candidate sitting on it must outrank one that merely earned a better
+# string tier 4 km away ("notre dame paris" answered Notre Dame de
+# Clignancourt, a parish church in the 18th, on a prefix match while the
+# cathedral 30 m from the pin only *contained* the words). 400 m is a
+# landmark's footprint plus the shops named after it, not a neighbourhood.
+_ALIAS_PIN_RADIUS_M = 400
+# Rows fetched by the one unfiltered nearest-first scan at an alias pin —
+# the landmark itself sits metres from its pin, so the nearest couple of
+# dozen rows always include it even on a square packed with cafés and
+# souvenir shops. find_places clamps to overture.MAX_ROWS (25) regardless.
+_ALIAS_PIN_SCAN_LIMIT = 25
+
 _MATCH_TIER_LABELS = {3: "exact", 2: "prefix", 1: "substring"}
 
-# resolve_place's `match` labels, best first. "fuzzy" (#215) is not a tier
-# the literal search can produce — it means the name doesn't contain the
-# query at all and was reached by edit distance instead — so it ranks
-# below every literal label, matching how _rank_key already orders the
-# rows themselves.
-_MATCH_LABEL_RANK = {"exact": 3, "prefix": 2, "substring": 1, "fuzzy": 0}
+# resolve_place's `match` labels, best first. "contains" (#475) is a place
+# label only — the candidate's whole name contains the whole query, or the
+# reverse — and sits above "substring", which for places also covers a
+# single shared significant word (see _place_match_label). "fuzzy" (#215)
+# is not a tier the literal search can produce — it means the name doesn't
+# contain the query at all and was reached by edit distance instead — so
+# it ranks below every literal label, matching how _rank_key already
+# orders the rows themselves.
+_MATCH_LABEL_RANK = {"exact": 4, "prefix": 3, "contains": 2, "substring": 1, "fuzzy": 0}
 
 # Small enough to filter, generic enough that requiring them in a name
 # match would be actively wrong ("the Whole Foods on Lamar" — "the"/"on"
 # aren't part of any real place name). Dropped before a query is split into
 # per-token find_places searches and before word-overlap scoring.
 _STOPWORDS = {"the", "a", "an", "on", "in", "at", "near", "of", "and", "by"}
+
+# #469: the generic type word a place query ends in -> the Overture category
+# slugs a row of that kind carries. "Shibuya Station" is a *kind* of thing
+# plus a name, and Overture files the thing under a category, not under the
+# English word: the station is "Gare de Shibuya" / "京王井の頭線 渋谷駅",
+# category train_station, and no row anywhere is named "Shibuya Station".
+# A name-only search can never reach it; a category-filtered search on the
+# distinctive word alone ("Shibuya", within train_station) finds it in one
+# bounded scan. See _type_word_slugs and the #469 block in resolve_place.
+#
+# Curated from what categories.search_categories returns for each word
+# rather than looked up live: that search is lexical, and for "station" it
+# ranks gas_station and radio_station level with metro_station. Every slug
+# here is a row in data/overture_categories.csv (tested), and rows come back
+# through find_places' substring category filter, so a scan for "park" also
+# returns "parking" — _type_scan_rows drops those with an exact/hierarchy
+# check against the same CSV. Words whose category is too loose to be
+# useful ("market", "square", "center", "hall", "terminal") are deliberately
+# absent: they still count as generic for the gate, they just get no scan.
+_TYPE_WORD_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "station": ("train_station", "metro_station", "light_rail_and_subway_stations"),
+    "park": ("park",),
+    "airport": ("airport",),
+    "museum": ("museum",),
+    "bridge": ("bridge",),
+    "tower": ("tower",),
+    "temple": ("temple",),
+    "shrine": ("shinto_shrines",),
+    "church": ("church_cathedral",),
+    "cathedral": ("church_cathedral",),
+    "stadium": ("stadium_arena",),
+    "arena": ("stadium_arena",),
+    "university": ("college_university",),
+    "college": ("college_university",),
+    "school": ("school",),
+    "hospital": ("hospital",),
+    "zoo": ("zoo",),
+    "beach": ("beach",),
+    "plaza": ("plaza",),
+    "hotel": ("hotel",),
+    "library": ("library",),
+    "theater": ("theaters_and_performance_venues",),
+    "theatre": ("theaters_and_performance_venues",),
+    "palace": ("palace",),
+    "castle": ("castle",),
+    "mall": ("shopping_center",),
+}
+
+# #469: two rows of the same category this close together are the same
+# feature — a station's exits, lines and operators are each their own
+# places row, a park's lawn and its athletic track likewise. A row that
+# stands alone is the one mis-pinned across town (a "Shibuya Station Tokyo.
+# Japan" 7 km east of every other Shibuya station row, at confidence 0.71).
+_TYPE_SCAN_SUPPORT_RADIUS_M = 1_000
 
 
 def _match_label(row: dict, query: str) -> str:
@@ -4581,6 +4930,36 @@ def _nothing_but_stopwords(text: str) -> bool:
     return not any(w.lower() not in _STOPWORDS for w in re.findall(r"[\w'-]+", text))
 
 
+def _nothing_but_generic(text: str) -> bool:
+    """Whether `text` holds no word a place could be *named* — every word in
+    it is a _STOPWORD or a _GENERIC_PLACE_WORDS member, or there are no words
+    at all.
+
+    #472: _nothing_but_stopwords, one level up. "Shibuya Station" anchors on
+    the Shibuya division and leaves "Station" as the residual, and ILIKE
+    '%Station%' over the anchor's box is the same scan #216 refused for
+    '%the%' with a smaller haystack: 5.5s of a 5.7s geocode() call, measured
+    live, answering with "Nakameguro Station" and "Tokyo Station Beer
+    Stand". A type word says what the place is, never which one — every
+    station inside the box matches equally, so the results are junk by
+    construction and the time is spent proving it. Same for "Park",
+    "Museum", "Airport": any anchor split whose residual is only a feature
+    noun.
+
+    This is the residual gate _fallback_anchor_candidates and _alias_anchor
+    actually apply. _nothing_but_stopwords is kept as it was so its meaning
+    stays exact ("H&M" and a two-character CJK name still pass, and so does
+    "Station" — a type word is not a stopword); this widens the *question*
+    rather than the stopword set. One word being generic is not enough:
+    "Blue Bottle Station" and "Westfield Valley Fair" carry a distinctive
+    word alongside the type word and must reach the anchored scan.
+    """
+    return not any(
+        w.lower() not in _STOPWORDS and w.lower() not in _GENERIC_PLACE_WORDS
+        for w in re.findall(r"[\w'-]+", text)
+    )
+
+
 def _significant_tokens(query: str) -> list[str]:
     """query -> its meaningful words: >=3 chars, not a stopword, in order of
     appearance, capped at _MAX_RESOLVE_TOKENS. Falls back to the whole query
@@ -4592,7 +4971,9 @@ def _significant_tokens(query: str) -> list[str]:
     return (significant or tokens or [query])[:_MAX_RESOLVE_TOKENS]
 
 
-def _place_match_label(name: str, query: str) -> str | None:
+def _place_match_label(
+    name: str, query: str, context_words: frozenset[str] = frozenset()
+) -> str | None:
     """Match label for a place candidate found via per-token search (#22),
     or None if it isn't actually related to `query` — the per-token
     find_places calls below are deliberately loose (OR of significant
@@ -4605,6 +4986,44 @@ def _place_match_label(name: str, query: str) -> str | None:
     Austin" vs. a place literally named "Mañana Coffee") — so containment
     is checked in both directions, and failing that, a shared significant
     word still counts as a (weaker) match.
+
+    Whole-name containment and a shared word are not the same strength of
+    claim, and labeling them both "substring" (#475) let the tie-breaks
+    decide between them: "Marina Bay Sands Singapore" answered "Freia
+    Aesthetics | Marina Square" — an aesthetics clinic that shares the one
+    word "marina" — over "Skypark#Marina Bay Sands Hotel,Singapore.", whose
+    name contains the caller's entire query. Both read as "substring"; the
+    city pin (Singapore's centroid, 1 km from the clinic and ~1.1 km from
+    the hotel, the same km once rounded) settled nothing; prominence
+    picked the clinic. So containment in either direction is its own label,
+    "contains", ranked between "prefix" and "substring": a name that holds
+    every word the caller typed, or a query that holds the candidate's
+    whole name ("the Blue Bottle Roastery Austin" vs. "Blue Bottle
+    Roastery" — the #22 shape, with the name mid-query rather than leading
+    it), beats any one-word coincidence, and the distance/prominence
+    tie-breaks then only ever choose among names that actually contain
+    each other. A shared significant word stays "substring": still related
+    enough to keep, still the weakest literal claim.
+
+    #469: the shared word has to be a *distinctive* one. "Shibuya Station"
+    and "Snow Peak Land Station" share "station"; "Yoyogi Park" and "Park
+    Hotel Tokyo" share "park". Those words say what kind of thing the
+    caller means, and every downtown has hundreds of names carrying them —
+    letting one through as relatedness is what resolved the station to a
+    sporting-goods store 7 km away and routed a 1.5 km walk as 8.6 km.
+    So the generic feature words (_GENERIC_PLACE_WORDS) are set aside from
+    the query's side of the overlap first, and the candidate must share
+    one of the words that remain. Only when the query is *nothing but*
+    generic words ("Station") is there no distinctive word to insist on,
+    and the plain overlap rule stands. The containment rules above are
+    untouched: a name that contains the whole query, type word and all,
+    is still a match.
+
+    context_words are the query's location words — the trailing city
+    resolve_place split off to anchor the search ("tokyo" in "Shibuya
+    Station Tokyo"). They say where, not which, and are set aside from the
+    overlap the same way: "Tokyo Station Beer Stand" shares "tokyo" with
+    that query and is no more the answer for it than Snow Peak was.
     """
     n, q = _normalize_for_match(name), _normalize_for_match(query)
     if n == q:
@@ -4612,16 +5031,64 @@ def _place_match_label(name: str, query: str) -> str | None:
     if n.startswith(q) or q.startswith(n):
         return "prefix"
     if n in q or q in n:
-        return "substring"
+        return "contains"
     n_tokens = set(_significant_tokens(n))
     q_tokens = set(_significant_tokens(q))
-    if n_tokens & q_tokens:
+    q_distinctive = {
+        t for t in q_tokens
+        if t.strip(".,") not in _GENERIC_PLACE_WORDS and t not in context_words
+    }
+    if n_tokens & (q_distinctive or q_tokens):
         return "substring"
     return None
 
 
-def _best_place_label(name: str, query: str, alternates: list[str]) -> str | None:
+def _type_word_slugs(search_query: str) -> tuple[str, ...]:
+    """#469: the category slugs for the generic type word `search_query`
+    ends in, or () when it ends in something else (or in a type word with
+    no usable category — see _TYPE_WORD_CATEGORIES)."""
+    tokens = _significant_tokens(search_query)
+    if not tokens:
+        return ()
+    return _TYPE_WORD_CATEGORIES.get(tokens[-1].lower().strip(".,"), ())
+
+
+def _type_scan_rows(
+    lat: float, lon: float, slugs: tuple[str, ...], token: str
+) -> list[dict]:
+    """#469: one bounded find_places scan for rows OF the query's kind whose
+    name carries its distinctive word — "Shibuya" within train_station.
+
+    Same radius and limit as the per-token scans. find_places' category
+    filter is a substring match (so "park" returns parking lots too); rows
+    are kept only when their own category is one of `slugs` or sits under
+    one in the taxonomy, the exact/hierarchy reading the compose tools use.
+    A row with no category at all is kept — a degraded taxonomy column is
+    not evidence against it. Each kept row is tagged "_type_scan" for the
+    grading in resolve_place.
+    """
+    rows = overture.find_places(
+        lat, lon, radius_m=_RESOLVE_PLACE_RADIUS_M,
+        categories=list(slugs), name=token, limit=_RESOLVE_OVERFETCH,
+    )
+    kept = []
+    for row in rows:
+        cat = row.get("category")
+        if cat:
+            chain = categories.hierarchy_for(cat) or [cat]
+            if not any(slug in chain for slug in slugs):
+                continue
+        row["_type_scan"] = True
+        kept.append(row)
+    return kept
+
+
+def _best_place_label(
+    name: str, query: str, alternates: list[str],
+    context_words: frozenset[str] = frozenset(),
+) -> str | None:
     """The strongest label `name` earns against `query` or any of `alternates`.
+    context_words pass through to _place_match_label (#469).
 
     #429: the alternates are other spellings of the same thing the caller
     asked for — the bundled landmark aliases, and the city-stripped
@@ -4634,9 +5101,9 @@ def _best_place_label(name: str, query: str, alternates: list[str]) -> str | Non
     starts with the word. Graded against the alias spelling "musee du
     louvre" it is an exact match, which is what it actually is.
     """
-    best = _place_match_label(name, query)
+    best = _place_match_label(name, query, context_words)
     for alt in alternates:
-        label = _place_match_label(name, alt)
+        label = _place_match_label(name, alt, context_words)
         if label is not None and (
             best is None or _MATCH_LABEL_RANK[label] > _MATCH_LABEL_RANK[best]
         ):
@@ -4790,24 +5257,56 @@ def resolve_place(
     just down-ranked — see _place_match_label.
 
     Each candidate: {"id" (GERS), "kind": "division" | "place", "name",
-    "lat", "lon", "match": "exact" | "prefix" | "substring" | "fuzzy", plus
-    "admin_context" (division) or "category" (place)}. "fuzzy" (#215 for
-    divisions, #373 for places) means the name doesn't contain the query at
-    all and was reached by close spelling instead — the caller asked for
-    one string and is being handed the answer to another, so it ranks below
-    every literal label. A place candidate reached through #373's fallback
-    tiers (an alt-spelling or fuzzy match on the underlying find_places
-    call) additionally carries "matched_by": "alt_name" | "fuzzy", absent
-    on an ordinary literal match. Ranked by match tier first — kind-agnostic,
-    an exact place beats a prefix-matched division — then by prominence
+    "lat", "lon", "match": "exact" | "prefix" | "contains" | "substring" |
+    "fuzzy", plus "admin_context" (division) or "category" (place)}.
+    "contains" (#475, places only) means the name contains the whole query
+    or the query contains the whole name; "substring" for a place can mean
+    as little as one shared significant word, and for a division the usual
+    literal substring. "fuzzy" (#215 for divisions, #373 for places) means
+    the name doesn't contain the query at all and was reached by close
+    spelling instead — the caller asked for one string and is being handed
+    the answer to another, so it ranks below every literal label. A place
+    candidate reached through #373's fallback tiers (an alt-spelling or
+    fuzzy match on the underlying find_places call) additionally carries
+    "matched_by": "alt_name" | "fuzzy", absent on an ordinary literal match.
+    Ranked by match tier first — kind-agnostic, an exact place beats a
+    prefix-matched division — then by prominence
     (division rank_score / place confidence, both roughly 0-1 scales), then
     id for determinism. Never more than `limit` results.
+
+    One exception to tier-first (#481): when the query hit the bundled
+    landmark alias table, candidates within _ALIAS_PIN_RADIUS_M of that
+    curated pin rank ahead of every other candidate, whatever their tier.
+    The alias coordinate is the strongest evidence this module has about
+    where the caller means — "notre dame paris" pinned on the cathedral
+    must answer the cathedral, not a same-named parish church 4 km away
+    that happened to earn a prefix label. Tier, distance and prominence
+    still order the pinned rows among themselves; a pin with nothing
+    inside its radius changes nothing.
 
     No match is a valid answer, not an error: an unresolvable query returns
     an empty list. Raises overture.UpstreamUnavailable if a remote scan
     fails after retries, or overture.SchemaDegraded if the places dataset
     is missing bbox — the caller (server.py) turns either into a structured
     error like every other tool.
+
+    #469: a query that ends in a generic type word — "Shibuya Station",
+    "Yoyogi Park", "Heathrow Airport" — names a *kind* of feature plus the
+    word that picks it out, and Overture files the kind under a category
+    rather than in the name: the station is "Gare de Shibuya", category
+    train_station, and nothing is literally named "Shibuya Station". So
+    alongside the name scans, one bounded find_places scan filtered to that
+    kind's categories and to the distinctive word runs from the same
+    reference (_TYPE_WORD_CATEGORIES, _type_scan_rows). A row it returns
+    whose name covers every distinctive word has answered both halves of
+    the query — the category is the type word — and is graded "exact";
+    among such rows the one with other rows of its kind within
+    _TYPE_SCAN_SUPPORT_RADIUS_M ranks first, because a station is many rows
+    (its exits, lines, operators) while a mis-pinned duplicate stands alone.
+    The relatedness gate (_place_match_label) meanwhile no longer accepts
+    the type word itself as the shared word, so when nothing of the kind is
+    found the answer is [] — which server.py turns into `need: location` —
+    rather than the nearest business with "Station" in its name.
 
     lang (#410) requests Overture's language-tagged names.common variant,
     the same as geocode() — but only for "kind": "division" candidates
@@ -4817,6 +5316,21 @@ def resolve_place(
     docstring draws), so they always carry their primary name. A division
     candidate's `name_primary` is present under the same rule as
     geocode()'s: only when the variant actually differs from the primary.
+
+    #464: with no near/city hint and no division matching the whole query,
+    the reference is a *guess* (_fallback_anchor_candidates' split of the
+    caller's own words), and the shared-one-word relatedness gate above is
+    too loose next to a guess — "Grand Central Terminal" anchored on a
+    Chelyabinsk district called Central and returned a restaurant named
+    "Grand Royal". Near a split anchor a place must account for every
+    significant word of the query (see _fallback_anchor_details' `strong`
+    for which words the anchor itself may account for). When nothing
+    survives, the query is treated as the bare name it is: one unanchored,
+    LIMIT-capped scan for the whole query, keeping exact/prefix rows only,
+    under the same remote-dataset gate as geocode()'s own (#105) — so
+    against the live S3 release a bare famous name with no bundled alias
+    returns [] (the server answers need: location) rather than a place on
+    the wrong continent.
 
     country (#457) composes with `city`: it constrains the divisions half
     of the merge (threaded through the internal geocode() calls this
@@ -4840,10 +5354,16 @@ def resolve_place(
     # Brooklyn is cached under a bare query and replayed after Paris.
     place_query = query
     city_bounded = False
+    # #481: the pin _extract_city_hint hands back comes only from the bundled
+    # alias table (a plain city split or a caller's near hint yields None
+    # here) — kept separately from near_lat/near_lon because the ranking
+    # below treats it differently from any other reference.
+    alias_pin: tuple[float, float] | None = None
     if city is None and near_lat is None and near_lon is None:
         place_query, inferred_city, inferred_coords = _extract_city_hint(query)
         if inferred_coords is not None:
             near_lat, near_lon = inferred_coords
+            alias_pin = inferred_coords
             city = inferred_city or city
             city_bounded = True
         elif inferred_city:
@@ -4903,14 +5423,31 @@ def resolve_place(
     # Search the place half when we stripped a trailing city, so
     # "Colosseo Roma" does not return Rome the city as the pin.
     search_query = place_query if city_bounded and place_query != query else query
-    geocode_hits = geocode(search_query, limit=_RESOLVE_OVERFETCH, lang=lang, **country_kw)
     if city_bounded and near_lat is not None and near_lon is not None:
+        # #476: the pin bounds geocode's own search, not just its output.
+        # Filtering afterwards (below, kept as belt-and-braces) had already
+        # let the unconstrained pass match "Marina Bay Sands" to five
+        # "Marina Bay" neighbourhoods in the US by spelling, anchor its
+        # places fallback on Marina, California, and schedule that box's
+        # tiles for background download — for a query the caller had
+        # pinned to Singapore. With the constraint, divisions outside the
+        # city-hint radius are never candidates, and geocode anchors its
+        # places search on the pin instead of guessing from the words.
+        geocode_hits = geocode(
+            search_query, limit=_RESOLVE_OVERFETCH, lang=lang,
+            near=(near_lat, near_lon, _CITY_HINT_RADIUS_M), **country_kw,
+        )
         geocode_hits = [
             r for r in geocode_hits
             if geo.haversine_m(near_lat, near_lon, r["lat"], r["lon"]) <= _CITY_HINT_RADIUS_M
         ]
+    else:
+        geocode_hits = geocode(search_query, limit=_RESOLVE_OVERFETCH, lang=lang, **country_kw)
     division_hits = [r for r in geocode_hits if r["type"] != "place"]
 
+    # #464: None unless the reference below is a split-derived guess; then
+    # the query words a place candidate must cover to count (see there).
+    split_cover_tokens: list[str] | None = None
     if near_lat is not None and near_lon is not None:
         reference = (near_lat, near_lon)
     elif division_hits:
@@ -4923,14 +5460,57 @@ def resolve_place(
         # the POI-shaped queries that need one, and answered that query with
         # a Plaza Mayor 25 km out of town (#272). One local-index lookup.
         local_table = _local_divisions_table()
-        options = _fallback_anchor_candidates(
+        options = _fallback_anchor_details(
             query, [], None, local_table,
             alt_table=_local_alt_names_table(local_table),
         )
-        reference = (options[0][0], options[0][1]) if options else None
+        reference = (options[0]["lat"], options[0]["lon"]) if options else None
+        if options and options[0]["split"]:
+            # #464: the reference is a guess at which of the caller's own
+            # words locate the query, and _place_match_label's shared-word
+            # gate was written for a reference the caller *stated* (a near
+            # hint, a city, a division that matched the whole query). Near a
+            # guessed one, "shares a word" is exactly the coincidence that
+            # produced the anchor in the first place: "Grand Central
+            # Terminal" anchored on a Chelyabinsk district called Central
+            # and resolved to "Grand Royal, банкет-холл и ресторан" — a
+            # restaurant that shares the word "Grand" with the query and
+            # nothing else. So a place found near a split anchor must
+            # account for every significant word of the query — in its own
+            # name, or (when the anchor is strong: the caller typed a
+            # city-level division's name) by sitting in the place the
+            # anchor's words named. Same containment-or-typo-close test as
+            # #374's cover rule, over the whole query rather than a
+            # residual.
+            exempt = set(overture._fold_poi_name(options[0]["candidate"]).split()) if (
+                options[0]["strong"]
+            ) else set()
+            split_cover_full = _significant_tokens(query)
+            split_cover_tokens = [
+                t for t in split_cover_full if overture._fold_poi_name(t) not in exempt
+            ]
 
     place_rows: list[dict] = []
     gate_tokens: list[str] = []  # #374: set alongside the token loop below
+    query_alternates = _alias_names_for(query) + (
+        [search_query] if search_query != query else []
+    )
+    # #469: the city words split off the query — location context for the
+    # gate to set aside, not a word a candidate can be related through.
+    context_words = frozenset(
+        t.lower() for t in _significant_tokens(query)
+    ) - frozenset(t.lower() for t in _significant_tokens(search_query))
+    # #469: what each of geocode()'s place-kind rows earns from the gate,
+    # decided once here — both for the coverage count just below (a row the
+    # gate will drop as unrelated is not coverage: before this, ten
+    # "...Station" businesses counted as having answered "Shibuya Station"
+    # and stood the one scan down that could have) and for the merge
+    # further on.
+    geocode_place_labels: dict[str, str | None] = {
+        r["id"]: _best_place_label(r["name"], query, query_alternates, context_words)
+        for r in geocode_hits
+        if r["type"] == "place" and r["id"] and r["name"]
+    }
     # geocode()'s own anchored fallback often already searched the places
     # theme near this same reference with the whole query and its tokens —
     # when it came back with enough place-kind rows, re-scanning per token
@@ -4946,10 +5526,11 @@ def resolve_place(
         1 for r in geocode_hits
         if r["type"] == "place"
         and reference is not None
+        and geocode_place_labels.get(r["id"]) is not None
         and geo.haversine_m(reference[0], reference[1], r["lat"], r["lon"])
         <= _RESOLVE_PLACE_RADIUS_M
     )
-    if reference is not None and geocode_places < limit:
+    if reference is not None:
         ref_lat, ref_lon = reference
         seen_place_ids: set[str] = set()
         # Not every word deserves its own scan (#272). A feature noun
@@ -4993,19 +5574,62 @@ def resolve_place(
         # *alternative* spelling of the query, not extra context the name
         # has to contain too). See _fuzzy_place_covers_query.
         gate_tokens = [t for t in tokens if " " not in t and t not in alias_tokens]
-        for token in tokens:
-            for row in overture.find_places(
-                ref_lat, ref_lon, radius_m=_RESOLVE_PLACE_RADIUS_M,
-                name=token, limit=_RESOLVE_OVERFETCH,
-            ):
+        if geocode_places < limit:
+            for token in tokens:
+                for row in overture.find_places(
+                    ref_lat, ref_lon, radius_m=_RESOLVE_PLACE_RADIUS_M,
+                    name=token, limit=_RESOLVE_OVERFETCH,
+                ):
+                    if row["id"] and row["id"] not in seen_place_ids:
+                        seen_place_ids.add(row["id"])
+                        if row.get("matched_by"):
+                            # Which token the #373 fallback actually matched
+                            # this row against — the #374 gate below trusts
+                            # the fuzzy label only when that was the whole
+                            # query.
+                            row["_matched_token"] = token
+                        place_rows.append(row)
+        # #469: the query's kind, searched by category on its distinctive
+        # word. Runs regardless of coverage — the name scans above cannot
+        # reach a row filed under the category rather than the English
+        # word, however many rows they return. Skipped when no distinctive
+        # word survived the pruning ("Station" alone, or "Tokyo Station"
+        # once the city word is set aside): a category scan with nothing
+        # to match names against is every station in the metro.
+        type_slugs = _type_word_slugs(search_query)
+        if type_slugs and gate_tokens:
+            for row in _type_scan_rows(ref_lat, ref_lon, type_slugs, gate_tokens[0]):
                 if row["id"] and row["id"] not in seen_place_ids:
                     seen_place_ids.add(row["id"])
-                    if row.get("matched_by"):
-                        # Which token the #373 fallback actually matched
-                        # this row against — the #374 gate below trusts the
-                        # fuzzy label only when that was the whole query.
-                        row["_matched_token"] = token
                     place_rows.append(row)
+                    continue
+                # Already in hand from a name scan — carry the tag over so
+                # the grading below sees the row for the kind it is.
+                for held in place_rows:
+                    if held["id"] == row["id"]:
+                        held["_type_scan"] = True
+                        break
+
+    # #481: the alias pin is a curated coordinate for a specific landmark,
+    # so look at what actually stands there. The name-filtered scans above
+    # can miss it entirely — "Cathédrale Notre-Dame de Paris" is not a LIKE
+    # match for "notre dame" or "notre dame cathedral", and when geocode()
+    # already came back with enough same-named shops those scans are
+    # skipped anyway — leaving nothing inside the pin radius for the
+    # pinned-first sort to promote. One nearest-first scan bounded to the
+    # pin radius (warm tiles, no name filter); every row still has to earn
+    # a label against the query or an alias spelling below, so the shops
+    # and bus stops sharing the square are dropped as unrelated, exactly as
+    # a per-token hit would be.
+    if alias_pin is not None:
+        pinned_ids = {r["id"] for r in place_rows}
+        for row in overture.find_places(
+            alias_pin[0], alias_pin[1], radius_m=_ALIAS_PIN_RADIUS_M,
+            limit=_ALIAS_PIN_SCAN_LIMIT,
+        ):
+            if row["id"] and row["id"] not in pinned_ids:
+                pinned_ids.add(row["id"])
+                place_rows.append(row)
 
     candidates = []
     seen_ids: set[str] = set()
@@ -5054,13 +5678,20 @@ def resolve_place(
             else:
                 continue
         else:
-            label = _best_place_label(
-                r["name"],
-                query,
-                _alias_names_for(query) + ([search_query] if search_query != query else []),
-            )
+            label = _best_place_label(r["name"], query, query_alternates, context_words)
+        # #469: a row of the query's own kind whose name covers every
+        # distinctive word has matched the whole query — the category
+        # stands in for the type word ("Gare de Shibuya" + train_station is
+        # "Shibuya Station"). Graded exact so it outranks every name-only
+        # reading, however that reading was labelled.
+        if r.get("_type_scan") and _fuzzy_place_covers_query(r["name"], gate_tokens):
+            label = "exact"
         if label is None:
             continue
+        if split_cover_tokens is not None and not _fuzzy_place_covers_query(
+            r["name"], split_cover_tokens
+        ):
+            continue  # #464: shares a word with the query, near a guessed anchor
         seen_ids.add(r["id"])
         candidate = {
             "id": r["id"], "kind": "place", "name": r["name"],
@@ -5068,6 +5699,7 @@ def resolve_place(
             "category": r["category"],
             "match": label,
             "_prominence": r.get("confidence") or 0.0,
+            "_type_scan": bool(r.get("_type_scan")),
         }
         if r.get("matched_by"):
             candidate["matched_by"] = r["matched_by"]
@@ -5082,13 +5714,27 @@ def resolve_place(
     for r in geocode_hits:
         if r["type"] != "place" or not r["id"] or r["id"] in seen_ids or not r["name"]:
             continue
-        label = _best_place_label(
-            r["name"],
-            query,
-            _alias_names_for(query) + ([search_query] if search_query != query else []),
-        )
+        label = geocode_place_labels.get(r["id"])
         if label is None:
             continue
+        if split_cover_tokens is not None:
+            # #464: geocode()'s fallback guessed an anchor the same way this
+            # function did ("Mall of America" -> a Virginia division named
+            # "...of America", whose %Mall% scan returned "Mercy Mall of
+            # VA"); its rows are held to the same whole-query rule. The
+            # anchor's own words are only accounted for by *location* for a
+            # row that is actually near this function's anchor — geocode()
+            # may have picked a different namesake (traced: a Bolivian
+            # hamlet named America here, Virginia there), and a row 6,000 km
+            # from the anchor whose word it is excused from containing is
+            # excused from nothing.
+            near_anchor = reference is not None and (
+                geo.haversine_m(reference[0], reference[1], r["lat"], r["lon"])
+                <= _PLACES_FALLBACK_RADIUS_M
+            )
+            required = split_cover_tokens if near_anchor else split_cover_full
+            if not _fuzzy_place_covers_query(r["name"], required):
+                continue
         seen_ids.add(r["id"])
         candidates.append({
             "id": r["id"], "kind": "place", "name": r["name"],
@@ -5098,6 +5744,35 @@ def resolve_place(
             "_prominence": r.get("rank_score") or 0.0,
         })
 
+    if split_cover_tokens is not None and not candidates:
+        # #464: the guessed anchor explained nothing — the query is a bare
+        # name, and the right thing to do with a bare name is what the
+        # #83 docstring already promises one: the unanchored, LIMIT-capped
+        # scan of the places theme for the WHOLE query. Only exact/prefix
+        # rows count here: the scan is a substring ILIKE, and the one
+        # thing this path must never do is hand back "Mercy Mall of VA"
+        # for "Mall of America" because both contain "Mall" — no result
+        # (and the server's need: location) beats a fast wrong one. Gated
+        # exactly as geocode()'s own unanchored scan is (#105): against a
+        # remote dataset the scan is a full read of the largest theme, so
+        # it does not run and the caller is asked for a location instead.
+        reference = None
+        if not _skip_unanchored_places_scan():
+            for r in _query_places_fallback(query):
+                if not r["id"] or r["id"] in seen_ids or not r["name"]:
+                    continue
+                tier = _match_tier(r["name"], query)
+                if tier < _STRONG_TIER:
+                    continue
+                seen_ids.add(r["id"])
+                candidates.append({
+                    "id": r["id"], "kind": "place", "name": r["name"],
+                    "lat": r["lat"], "lon": r["lon"],
+                    "category": r.get("_category"),
+                    "match": _MATCH_TIER_LABELS[tier],
+                    "_prominence": r.get("_confidence") or 0.0,
+                })
+
     # Distance to the reference before prominence (#272): the reference is
     # the caller's own statement of where they mean (their near-hint, city
     # hint, or the resolved anchor), and names repeat — "plaza mayor madrid"
@@ -5106,17 +5781,63 @@ def resolve_place(
     # no distance term. Same judgment _rank_place applies in geocode's own
     # fallback, applied to the merged list. Km-rounded so GPS-grade jitter
     # never reorders genuinely co-located candidates.
+    #
+    # #469: among the rows the type scan returned, agreement before distance.
+    # The reference is the *city's* pin, and at metro scale the row nearest
+    # it is whichever duplicate happens to be mis-pinned toward downtown; a
+    # row with other rows of its kind within _TYPE_SCAN_SUPPORT_RADIUS_M is
+    # the real complex. Name-scan rows carry no support and are unaffected
+    # relative to one another.
+    typed = [c for c in candidates if c.get("_type_scan")]
+    for c in candidates:
+        c["_support"] = sum(
+            1 for other in typed
+            if other is not c
+            and geo.haversine_m(c["lat"], c["lon"], other["lat"], other["lon"])
+            <= _TYPE_SCAN_SUPPORT_RADIUS_M
+        ) if c.get("_type_scan") else 0
+
+    # #481: when the pin came from the bundled alias table, that pin is a
+    # curated landmark coordinate — the strongest evidence the server has
+    # about where the query means — and a string-tier heuristic must not
+    # outvote it. "notre dame paris" pinned 30 m from the cathedral and still
+    # answered Notre Dame de Clignancourt 4.4 km north, because the parish
+    # church's name *starts with* the query (prefix) while the cathedral's
+    # only contains it (substring), and tier sorts before distance. Every
+    # candidate within _ALIAS_PIN_RADIUS_M of the pin is tagged and sorts
+    # ahead of all others; tier → distance → prominence still decide among
+    # the pinned rows (the cathedral over the museum named after it). When
+    # nothing sits inside the radius — the alias points at something the
+    # scans missed — no row is tagged and the ordering is unchanged.
+    if alias_pin is not None:
+        for c in candidates:
+            if (
+                geo.haversine_m(alias_pin[0], alias_pin[1], c["lat"], c["lon"])
+                <= _ALIAS_PIN_RADIUS_M
+            ):
+                c["_alias_pinned"] = True
+
     def _rank_candidate(c):
         near_km = 0.0
         if reference is not None:
             near_km = round(
                 geo.haversine_m(reference[0], reference[1], c["lat"], c["lon"]) / 1000.0
             )
-        return (-_MATCH_LABEL_RANK[c["match"]], near_km, -c["_prominence"], c["id"])
+        return (
+            0 if c.get("_alias_pinned") else 1,
+            -_MATCH_LABEL_RANK[c["match"]],
+            -c["_support"],
+            near_km,
+            -c["_prominence"],
+            c["id"],
+        )
 
     candidates.sort(key=_rank_candidate)
     for c in candidates:
         del c["_prominence"]
+        del c["_support"]
+        c.pop("_type_scan", None)
+        c.pop("_alias_pinned", None)
     out = candidates[:limit]
     _resolve_cache_put(query, cache_city, cache_lat, cache_lon, out, lang, country)
     if out:
@@ -5565,9 +6286,20 @@ def _fuzzy_name_covers_tokens(name: str, tokens: list[str]) -> bool:
 
 
 def _has_extra_place_context(query: str) -> bool:
-    """Whether resolve_place knows a location for `query` that geocode did not."""
-    _place_query, _city, coords = _extract_city_hint(query)
-    if coords is not None:
+    """Whether resolve_place knows a location for `query` that geocode did not.
+
+    #469: a trailing well-known city counts. "Shibuya Station Tokyo" gives
+    geocode one opaque string, and its places half returned a row named
+    "Shibuya Station Tokyo. Japan" pinned 7 km east of the station — the
+    top hit, so from_to routed 8.6 km for a 1.5 km walk. resolve_place
+    splits the city off, anchors on its pin, searches the residual by
+    category as well as by name, and grades against the residual. That is
+    a bounded search (one local city lookup plus a few 20 km scans, ~2 s
+    measured), never the unbounded miss the cost rule above guards
+    against — that case has no recognizable city to split off.
+    """
+    _place_query, city, coords = _extract_city_hint(query)
+    if coords is not None or city:
         return True
     with _last_good_lock:
         last_city = _last_good_city
