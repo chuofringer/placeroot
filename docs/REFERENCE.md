@@ -25,10 +25,11 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `land_use_at` | What kind of land is this: land use and land cover classification at a point |
 | `infrastructure_at` | Infrastructure near a point, nearest first — filter by `subtype`/`infra_class` (e.g. `bridge`, `tower`) to see past the street furniture |
 | `water_near` | Water near a point, nearest first — is this waterfront, how far to the nearest river/canal/lake; filter by `subtype`/`water_class` |
+| `transit_stops_near` | Nearest transit stops — bus, rail, subway, tram, ferry — nearest first; filter to one `kind`. No schedules or live arrivals: Overture's base coverage is a static, OSM-derived conflation |
 | `timezone_at` | IANA timezone and current local time at a point, fully offline (tzdb via tzfpy) — tzid, UTC offset, DST status, local time, and abbreviation; a point with no resolvable zone answers `tzid: null` with a note rather than erroring |
-| `geocode` | Free-text place name → ranked candidates with coordinates and admin context (`geocode_batch` for many at once) |
-| `geocode_batch` | Many free-text place names → one best match each, one round-trip |
-| `resolve_place` | Free-text place reference → stable ids an agent can hold onto across turns; a place name with no literal match falls back to `find_places`' alt-spelling/fuzzy tiers, same corrective note |
+| `geocode` | Free-text place name → ranked candidates with coordinates and admin context; parses a trailing "City, ST"/"City, Region"/"City, Country" suffix, or take `country=` (ISO 3166-1) explicitly (`geocode_batch` for many at once) |
+| `geocode_batch` | Many free-text place names → one best match each, one round-trip; `country=` applies the same constraint to every query |
+| `resolve_place` | Free-text place reference → stable ids an agent can hold onto across turns; a place name with no literal match falls back to `find_places`' alt-spelling/fuzzy tiers, same corrective note; `country=` composes with `city` to constrain the divisions half |
 | `resolve_place_batch` | Many GERS ids → compact place rows (batched `place_details`), one round-trip |
 | `reverse_geocode` | Point → nearest address plus its containing admin areas (`reverse_geocode_batch`) |
 | `reverse_geocode_batch` | Many points → nearest address plus containing admin areas, one round-trip |
@@ -42,11 +43,10 @@ Every tool returns a compact, budgeted answer. Several single-item tools have a
 | `elevation_at` | Ground elevation in meters at a point, from Copernicus GLO-30 (~30 m resolution); null with a note where there's no coverage (ocean, or a tile excluded from the public release) |
 | `map_match` | Snap up to 100 ordered GPS points onto the street graph and stitch the matched ones into a routed trip — matched length, road names in travel order, a simplified route polyline, a 0–1 confidence, and which input points didn't match. A trace that matches nothing is a real answer, not an error |
 | `from_to` | Named-place walk/cycle/drive: resolve A and B in parallel, one graph, same shape as `route` including `export` maps/gpx/text and `avoid`. Fails with `too_far` if the ends are a city apart. Same optional `confirm` / `needs_confirm` gate as `route` |
-| `compare_modes` | Walk vs cycle vs drive between two places in one call, instead of three `route` calls: the ends (`from`/`to`, same forms as `from_to`) resolve once, every requested mode routes between the same coordinates, and each mode gets one compact row (`distance_m`, `duration_s`, `duration_min`, optional climb/descent with `include_elevation=true`) — no path, no export. `fastest`/`shortest` name the winning modes and `summary` is a deterministic sentence; a mode that cannot be routed (`too_far`, `needs_confirm`, `no_route`, ...) fails inline in its own row rather than aborting the call. Drive time is a posted-speed model with no live traffic |
 | `find_near` | Category near a named place or city — one hop for "coffee shops near the Eiffel Tower"; compact rows with `trust_note`. Prefer `find_places(where=..., category=...)`, the canonical form; `find_near` stays as a thin alias |
 | `places_along_route` | Places on the way from A to B: corridor search along the route, with each result's detour and how far along it sits, compact trust notes on results, and a verify-before-going line for the weakest stops |
 | `ground_location` | One-hop point grounding: where (reverse geocode), surroundings (area summary at 500m), reach (reachable-area stats for N minutes by mode, no geometry), and the nearest few named places — each section degrades independently to a note rather than failing the call |
-| `neighborhood_verdict` | Should I live here? A ranked verdict from life context (household, mobility, priorities) — strengths, weak points, one thing to verify in person |
+| `neighborhood_verdict` | Should I live here? A ranked verdict from life context (household, mobility, priorities) — strengths, weak points, one thing to verify in person; transit also reads base-theme stops (#454), not just places |
 | `verify_claims` | Grade a listing's spatial claims (travel time, nearby counts, distances) against real routing and places data — confirmed / stretched / false / unverifiable, claimed vs. measured |
 | `optimize_route` | Best order to visit 2–10 stops, solved exactly over the street graph — order, per-leg distance/duration, totals, an `export` object (Google/Apple Maps links, GPX, printable stop list), and `verify_before_going` when stops already carry confidence/operating_status. `keep_order=true` skips the reordering and routes the stops as given, for an itinerary the user dictated |
 | `meeting_point` | Travel-time-fair meeting point for 2–5 people (walk/cycle/drive per person): minimizes the worst-off participant's routed time, tie-broken by spread then total, and returns ranked candidate venues with per-person times |
@@ -83,7 +83,7 @@ PlaceRoot also speaks the MCP 2026-07-28 revision's listing cache hints:
 `tools/list` (and the prompt and resource listings) come back with
 `ttlMs: 86400000` and `cacheScope: "public"`. The listings are frozen at build
 time — nothing at runtime can change them — so a client is free to reuse them
-for a day instead of re-reading a ~38.9k-token schema surface every session.
+for a day instead of re-reading a ~37.9k-token schema surface every session.
 Clients that speak an older revision are unaffected: those fields did not exist
 before 2026-07-28, and the response they get is byte-identical to what it was.
 
@@ -148,8 +148,8 @@ without them registered.
 
 ## Loading fewer tools (`PLACEROOT_TOOLS`)
 
-All 46 tool schemas cost roughly **38.9k tokens** of every conversation's
-context, paid before the agent asks anything — about the cost of 86 median
+All 46 tool schemas cost roughly **38.8k tokens** of every conversation's
+context, paid before the agent asks anything — about the cost of 78 median
 answers. Most installs use a slice of that surface, so `PLACEROOT_TOOLS`
 selects which tools get registered. Unselected tools are never registered and
 never appear in `tools/list`.
@@ -171,20 +171,20 @@ union of everything named:
 
 | `PLACEROOT_TOOLS` | Tools | Schema tokens | Saved |
 |---|---:|---:|---:|
-| unset / `all` (default) | 46 | ~38,926 | — |
+| unset / `all` (default) | 46 | ~38,770 | — |
 | `search` | 14 | ~12,685 | 67% |
 | `core` | 15 | ~16,691 | 56% |
-| `routing` | 11 | ~13,560 | 65% |
-| `analysis` | 13 | ~10,100 | 73% |
+| `routing` | 10 | ~12,549 | 67% |
+| `analysis` | 14 | ~10,842 | 72% |
 | `geometry` | 3 | ~3,355 | 91% |
 | `progressive` | 4 (all 46 reachable) | ~1,406 | 96% |
 
 - **`core`** — `find_places`, `geocode`, `reverse_geocode`, `place_details`, `resolve_place`, `search_categories`, `summarize_area`, `route`, `from_to`, `find_near`, `places_along_route`, `neighborhood_verdict`, `verify_claims`, `warmup_city`, `ground_location`. The single-purpose tools that answer most spatial questions; no batch siblings, no buildings/land-use, no rendering. `search_categories` is in for its own reason: `find_places`' `category` filter takes Overture taxonomy slugs, and a wrong slug comes back as zero results plus a note to look the slug up — a dead end without the lookup tool to call.
 - **`search`** — the find/name/identify family: `find_places`, `find_near`, `place_details`, `geocode`, `resolve_place`, `reverse_geocode`, their `*_batch` siblings, `address_at`, `geocode_address`, `geocode_intersection`, `search_categories`, and `gers_lookup`.
-- **`routing`** — `route`, `from_to`, `isochrone`, `distance_matrix`, `travel_time_matrix`, `within_distance`, `optimize_route`, `elevation_at`, `meeting_point`, `map_match`, `compare_modes`.
-- **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `suggest_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `water_near`, `admin_lookup`, `timezone_at`, `neighborhood_verdict`, `changes_in_area`, `verify_claims`.
+- **`routing`** — `route`, `from_to`, `isochrone`, `distance_matrix`, `travel_time_matrix`, `within_distance`, `optimize_route`, `elevation_at`, `meeting_point`, `map_match`.
+- **`analysis`** — `summarize_area`, `summarize_buildings`, `compare_areas`, `suggest_areas`, `buildings_at`, `land_use_at`, `infrastructure_at`, `transit_stops_near`, `water_near`, `admin_lookup`, `timezone_at`, `neighborhood_verdict`, `changes_in_area`, `verify_claims`.
 - **`geometry`** — `simplify_geometry`, `render_map`, `geometry_op`.
-- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 46 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 38.9k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
+- **`progressive`** — not a slice of the surface but a door to it: `placeroot_capabilities()` returns a ~1,000-token catalog of all 46 tools (name, one-liner, argument list), and `placeroot_call(tool, args)` runs any of them and returns the tool's own answer unchanged. For the install that wants everything available without paying 38.8k tokens for it in every conversation — profiles need you to know up front which tools you want; this doesn't. One extra round trip when the agent needs the catalog. It replaces the surface rather than adding to it, so it has to stand alone: `PLACEROOT_TOOLS=progressive,core` fails at startup rather than registering both.
 
 `data_version` and `preferences` are registered under every profile.
 `data_version` is ~360 tokens and the only way an agent can tell which
@@ -227,6 +227,7 @@ env vars; see below.) The ones an operator is most likely to reach for:
 | `PLACEROOT_TOKEN_BUDGET` | `2000` | Soft per-response token budget (chars/4 heuristic); rows are dropped lowest-ranked first, then optional fields, until a response fits |
 | `PLACEROOT_RECREATION_LAYER` | on | `0`/`false`/`no`/`off` disables the base-theme recreation layer ([docs/RECREATION.md](RECREATION.md)) |
 | `PLACEROOT_CACHE` | on | `off` disables the local tile cache entirely |
+| `PLACEROOT_AUTOWARM` | on | `off` disables the background metro pre-warm a city-scale `geocode`/`resolve_place`/`resolve_area` hit (or `PLACEROOT_HOME`) otherwise kicks on a daemon thread — tile COPYs plus a walk-graph build. `warmup_city` and `PLACEROOT_WARM_REGION` are unaffected. Off is implied by `PLACEROOT_CACHE=off` |
 | `PLACEROOT_CACHE_DIR` | `~/.cache/placeroot` | Where tiles, persisted walk graphs, the geocode name index, and support tables live |
 | `PLACEROOT_ARTIFACT_DIR` | sibling of `PLACEROOT_CACHE_DIR` (`.../artifacts`) | Where `render_map` writes its self-contained HTML files |
 | `PLACEROOT_CACHE_MAX_MB` | `500` | LRU size cap for the cache directory |

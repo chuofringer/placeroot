@@ -104,6 +104,10 @@
       "description": "Water near a point, nearest first: waterfront check, distance to river/canal/lake."
     },
     {
+      "name": "transit_stops_near",
+      "description": "Nearest transit stops — bus, rail, subway, tram, ferry — nearest first. No schedules or live arrivals."
+    },
+    {
       "name": "geocode",
       "description": "Free-text place name -> ranked candidate locations, from Overture divisions and places."
     },

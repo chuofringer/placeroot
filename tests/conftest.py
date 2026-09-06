@@ -191,6 +191,47 @@ def offline_data(request, monkeypatch):
         autowarm.clear_autowarm_state()
 
 
+def _live_autowarm_threads() -> list[threading.Thread]:
+    return [
+        t for t in threading.enumerate()
+        if t.name.startswith("placeroot-autowarm-")
+    ]
+
+
+@pytest.fixture(autouse=True)
+def no_autowarm_threads(monkeypatch):
+    """No test spawns an autowarm thread unless it opts in — and none may
+    leave one running (#471).
+
+    autowarm.schedule_autowarm starts a daemon thread on every city-scale
+    resolve whenever the tile cache is on — i.e. in every geocode_cache
+    test. That thread runs the real prewarm (tile COPYs, evict_if_needed,
+    a walk-graph build) and reads its release / cache dir / data path when
+    it *runs*, not when it was spawned: once its test has torn down it
+    sees an unpinned release, the operator's real ~/.cache/placeroot, and
+    live S3 globs — in the offline suite. Several of those overlapping the
+    next test's own DuckDB work is the thread mix in the #471 segfault
+    dumps (3.11 CI, twice, unrelated PRs).
+
+    A test that needs the real thread opts in with
+    `monkeypatch.delenv("PLACEROOT_AUTOWARM")` and must join it before
+    returning; the teardown check is the regression pin.
+    """
+    monkeypatch.setenv("PLACEROOT_AUTOWARM", "off")
+    yield
+    leaked = _live_autowarm_threads()
+    if leaked:
+        # Join first so a leak fails only this test, not a later one.
+        for t in leaked:
+            t.join(timeout=10)
+        pytest.fail(
+            "autowarm thread(s) still alive after the test: "
+            + ", ".join(t.name for t in leaked)
+            + " -- opt-in tests must join the thread; everything else must "
+            "leave PLACEROOT_AUTOWARM=off (see no_autowarm_threads)"
+        )
+
+
 @pytest.fixture
 def geocode_cache(tmp_path, monkeypatch):
     """Enables the #43 local divisions table (default fixtures otherwise run

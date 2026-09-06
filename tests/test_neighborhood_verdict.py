@@ -7,7 +7,7 @@ rows, so a live compose against it would only exercise the empty path.
 
 import pytest
 
-from placeroot import categories, overture, routing, server, verdict
+from placeroot import categories, overture, routing, server, transit, verdict
 
 from .conftest import CENTER_LAT, CENTER_LON
 
@@ -64,8 +64,21 @@ def _toddler_places():
     ]
 
 
-def _patch_compose(monkeypatch, places=None, summary=None, iso=None, iso_error=None):
-    calls = {"summarize": 0, "isochrone": 0, "places": 0, "find_places": 0}
+def _base_transit_row(kind, name, distance_m):
+    return {"id": f"t-{kind}", "kind": kind, "name": name, "distance_m": distance_m}
+
+
+def _patch_compose(
+    monkeypatch,
+    places=None,
+    summary=None,
+    iso=None,
+    iso_error=None,
+    base_transit=None,
+    base_transit_error=None,
+):
+    calls = {"summarize": 0, "isochrone": 0, "places": 0, "find_places": 0, "base_transit": 0}
+    seen = {"base_transit_radius_m": None}
 
     def fake_summarize(*_a, **_k):
         calls["summarize"] += 1
@@ -85,10 +98,20 @@ def _patch_compose(monkeypatch, places=None, summary=None, iso=None, iso_error=N
         calls["find_places"] += 1
         raise AssertionError("compose must not call find_places N times")
 
+    def fake_transit_stops_near(_lat, _lon, radius_m=800, limit=10, kind=None):
+        calls["base_transit"] += 1
+        seen["base_transit_radius_m"] = radius_m
+        if base_transit_error is not None:
+            raise base_transit_error
+        rows = base_transit if base_transit is not None else []
+        return rows, radius_m, len(rows), False, False
+
     monkeypatch.setattr(overture, "summarize_area", fake_summarize)
     monkeypatch.setattr(overture, "find_places_for_categories", fake_places)
     monkeypatch.setattr(overture, "find_places", boom_find)
     monkeypatch.setattr(routing, "isochrone", fake_iso)
+    monkeypatch.setattr(transit, "transit_stops_near", fake_transit_stops_near)
+    calls["seen"] = seen
     return calls
 
 
@@ -224,7 +247,7 @@ def test_mode_override_beats_context(monkeypatch):
 
 
 def test_same_radius_passed_to_each_internal(monkeypatch):
-    seen = {"summarize": None, "places": None, "isochrone": None}
+    seen = {"summarize": None, "places": None, "isochrone": None, "base_transit": None}
 
     def fake_summarize(lat, lon, radius_m=1000):
         seen["summarize"] = radius_m
@@ -238,12 +261,113 @@ def test_same_radius_passed_to_each_internal(monkeypatch):
         seen["isochrone"] = radius_m
         return _iso()
 
+    def fake_transit_stops_near(lat, lon, radius_m=800, limit=10, kind=None):
+        seen["base_transit"] = radius_m
+        return [], radius_m, 0, False, False
+
     monkeypatch.setattr(overture, "summarize_area", fake_summarize)
     monkeypatch.setattr(overture, "find_places_for_categories", fake_places)
     monkeypatch.setattr(routing, "isochrone", fake_iso)
+    monkeypatch.setattr(transit, "transit_stops_near", fake_transit_stops_near)
     verdict.neighborhood_verdict(CENTER_LAT, CENTER_LON, "no car")
-    assert seen["summarize"] == seen["places"] == seen["isochrone"]
+    assert seen["summarize"] == seen["places"] == seen["isochrone"] == seen["base_transit"]
     assert seen["summarize"] > 0
+
+
+# --- base-theme transit (issue #454) ----------------------------------------
+
+
+def test_base_bus_stop_covers_transit_when_places_has_none(monkeypatch):
+    calls = _patch_compose(
+        monkeypatch,
+        places=[p for p in _toddler_places() if p["category"] != "bus_station"],
+        base_transit=[_base_transit_row("bus_stop", "Dam", 150)],
+    )
+    result = verdict.neighborhood_verdict(CENTER_LAT, CENTER_LON, "no car")
+    by_need = {r["need"]: r for r in result["checklist"]}
+    transit_row = by_need["transit"]
+    assert transit_row["status"] == "covered"
+    assert transit_row["nearest"]["category"] == "bus_stop"
+    assert transit_row["nearest"]["distance_m"] == 150
+    assert "Dam" in transit_row["detail"] or "bus" in transit_row["detail"]
+    assert result["verify_in_person"] != "the walk to the nearest transit stop at rush hour"
+    assert calls["base_transit"] == 1
+
+
+def test_nearer_base_bus_stop_wins_over_farther_places_station(monkeypatch):
+    places = [p for p in _toddler_places() if p["category"] != "bus_station"]
+    places.append(_place("train_station", "Central", 1500))
+    _patch_compose(
+        monkeypatch,
+        places=places,
+        base_transit=[_base_transit_row("bus_stop", "Dam", 100)],
+    )
+    result = verdict.neighborhood_verdict(CENTER_LAT, CENTER_LON, "no car")
+    transit_row = next(r for r in result["checklist"] if r["need"] == "transit")
+    assert transit_row["nearest"]["distance_m"] == 100
+    assert transit_row["nearest"]["category"] == "bus_stop"
+
+
+def test_nearer_places_station_wins_over_farther_base_bus_stop(monkeypatch):
+    places = [p for p in _toddler_places() if p["category"] != "bus_station"]
+    places.append(_place("train_station", "Central", 200))
+    _patch_compose(
+        monkeypatch,
+        places=places,
+        base_transit=[_base_transit_row("bus_stop", "Dam", 900)],
+    )
+    result = verdict.neighborhood_verdict(CENTER_LAT, CENTER_LON, "no car")
+    transit_row = next(r for r in result["checklist"] if r["need"] == "transit")
+    assert transit_row["nearest"]["distance_m"] == 200
+    assert transit_row["nearest"]["category"] == "train_station"
+    travel = verdict._travel_min(200, "walk")
+    assert transit_row["detail"] == verdict._detail(travel, "walk", "Central")
+
+
+def test_base_transit_upstream_failure_degrades_with_note(monkeypatch):
+    _patch_compose(
+        monkeypatch,
+        places=[p for p in _toddler_places() if p["category"] != "bus_station"],
+        base_transit_error=overture.UpstreamUnavailable("scan failed"),
+    )
+    result = verdict.neighborhood_verdict(CENTER_LAT, CENTER_LON, "no car")
+    assert "error" not in result
+    transit_row = next(r for r in result["checklist"] if r["need"] == "transit")
+    assert transit_row["status"] == "unknown"
+    assert "transit" in result.get("note", "").lower()
+    assert "unavailable" in result.get("note", "").lower()
+
+
+def test_base_transit_called_once_and_not_when_transit_not_needed(monkeypatch):
+    calls = _patch_compose(monkeypatch)
+    verdict.neighborhood_verdict(CENTER_LAT, CENTER_LON, "no car, one toddler")
+    # DEFAULT_NEEDS always includes "transit" (see verdict.DEFAULT_NEEDS), so
+    # with the default checklist the base lookup fires exactly once.
+    assert "transit" in verdict.DEFAULT_NEEDS
+    assert calls["base_transit"] == 1
+    assert calls["summarize"] == 1
+
+
+def test_base_transit_not_called_when_transit_excluded_from_needs(monkeypatch):
+    calls = _patch_compose(monkeypatch)
+    parsed = verdict.parse_context("no car, one toddler")
+    parsed["needs"] = [n for n in parsed["needs"] if n != "transit"]
+    monkeypatch.setattr(verdict, "parse_context", lambda _context: parsed)
+    verdict.neighborhood_verdict(CENTER_LAT, CENTER_LON, "no car, one toddler")
+    assert calls["base_transit"] == 0
+
+
+def test_both_places_and_base_empty_transit_is_unknown(monkeypatch):
+    _patch_compose(
+        monkeypatch,
+        places=[p for p in _toddler_places() if p["category"] != "bus_station"],
+        base_transit=[],
+    )
+    result = verdict.neighborhood_verdict(CENTER_LAT, CENTER_LON, "no car")
+    transit_row = next(r for r in result["checklist"] if r["need"] == "transit")
+    assert transit_row["status"] == "unknown"
+    assert transit_row["nearest"] is None
+    assert transit_row["detail"] == "none mapped in range"
 
 
 def test_need_slugs_exist_in_taxonomy():

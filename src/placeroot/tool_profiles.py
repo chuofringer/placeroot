@@ -126,6 +126,11 @@ PROFILES: dict[str, frozenset[str]] = {
         "buildings_at",
         "land_use_at",
         "infrastructure_at",
+        # Same characterize-a-point shape as infrastructure_at (it *is*
+        # infrastructure_at's query path, filtered to stop-like classes):
+        # is there transit near here, not a search for a named line or a
+        # named station.
+        "transit_stops_near",
         # Hydrology is a characterize-the-surroundings question of the same
         # shape as infrastructure_at ("is this parcel waterfront / how far
         # to the nearest canal"), not a find-a-named-thing one, so it lands
