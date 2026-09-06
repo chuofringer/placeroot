@@ -140,7 +140,7 @@ def test_same_tier_candidates_order_by_prominence():
 # --- #469: a trailing well-known city is context geocode did not use --------
 
 
-def _tokyo_geocode(query, limit=5, lang=None):
+def _tokyo_geocode(query, limit=5, lang=None, **kw):
     if query.strip().lower() == "tokyo":
         return [{
             "name": "Tokyo", "type": "locality", "lat": 35.68, "lon": 139.76,

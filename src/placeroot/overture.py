@@ -341,9 +341,16 @@ def _check_schema(
 
 
 def _with_recreation(
-    source: str, bbox: tuple[float, float, float, float] | None, theme: str = THEME
+    source: str, bbox: tuple[float, float, float, float] | None, theme: str = THEME,
+    schedule_missing: bool = True,
 ) -> tuple[str, bool]:
     """`source`, unioned with the recreation layer unless it is switched off.
+
+    schedule_missing=False (#476) resolves the layer's base-theme tiles
+    without scheduling missing ones for background materialization —
+    geocode's speculative-anchor read, which must not leave a losing
+    guess's base tiles on disk. Cached tiles still serve; a miss falls
+    through to the manifest-pruned upstream files as usual.
 
     Returns (sql, layer_active). layer_active is what tells a caller the
     marker column exists and can be referenced — the layer being *enabled*
@@ -375,7 +382,7 @@ def _with_recreation(
     """
     if theme != THEME:
         return source, False
-    branches = recreation.union_branches(bbox)
+    branches = recreation.union_branches(bbox, schedule_missing=schedule_missing)
     if not branches:
         return source, False
     # FALSE, not NULL, on the Overture side: the marker is read as a plain

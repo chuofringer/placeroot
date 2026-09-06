@@ -2441,12 +2441,47 @@ def _match_tier_order_sql(name_expr: str) -> str:
     return f"{tier_expr}, population DESC NULLS LAST"
 
 
+# #476: a (lat, lon, radius_m) constraint on the division rows a name query
+# may return. resolve_place passes its city pin here so the division pass —
+# literal, alternate-name, variant and fuzzy — is bounded the same way the
+# "City, ST" region filter already bounds it, instead of matching the whole
+# planet and filtering afterwards.
+NearConstraint = tuple[float, float, float]
+
+
+def _near_filter_sql(
+    near: NearConstraint | None, lat_col: str, lon_col: str, params: dict
+) -> str:
+    """AND-clause keeping rows whose point lies in `near`'s bounding box, or
+    "" when there is no constraint. Adds its parameters to `params`.
+
+    A box, not the exact circle: this is a row prefilter on the divisions
+    table (tiny relative to a places scan), and the caller that passes a
+    constraint (resolve_place, #476) still applies the haversine radius to
+    what comes back. Antimeridian-safe the same way geo.bbox_filter_sql is:
+    a box that ran past +/-180 becomes an OR of the two in-range halves.
+    """
+    if near is None:
+        return ""
+    lat, lon, radius_m = near
+    xmin, ymin, xmax, ymax = geo.bbox_around(lat, lon, radius_m)
+    params["near_ymin"], params["near_ymax"] = ymin, ymax
+    lat_clause = f"AND {lat_col} BETWEEN $near_ymin AND $near_ymax"
+    if xmin >= -180.0 and xmax <= 180.0:
+        params["near_xmin"], params["near_xmax"] = xmin, xmax
+        return f"{lat_clause} AND {lon_col} BETWEEN $near_xmin AND $near_xmax"
+    params["near_xmin"] = xmin + 360.0 if xmin < -180.0 else xmin
+    params["near_xmax"] = xmax - 360.0 if xmax > 180.0 else xmax
+    return f"{lat_clause} AND ({lon_col} >= $near_xmin OR {lon_col} <= $near_xmax)"
+
+
 def _query_divisions_from_local(
     table_path: str,
     query: str,
     region_code: str | None,
     name_match_expr: str = "name",
     country_code: str | None = None,
+    near: NearConstraint | None = None,
 ) -> list[dict]:
     """name_match_expr (#53) is the SQL expression matched against $pattern
     /$exact/$prefix — "name" for a plain literal search, or
@@ -2456,7 +2491,10 @@ def _query_divisions_from_local(
     country_code (#457) narrows the same way region_code does, on the row's
     own `country` column — filtering by hierarchy membership, not a second
     string match. Both filters may be given together (a region-suffix
-    parse combined with an explicit `country=`)."""
+    parse combined with an explicit `country=`).
+
+    near (#476): bound the rows to a (lat, lon, radius_m) box — see
+    _near_filter_sql."""
     filters = []
     if region_code:
         filters.append("AND region = $region_code")
@@ -2469,11 +2507,13 @@ def _query_divisions_from_local(
         params["region_code"] = region_code
     if country_code:
         params["country_code"] = country_code
+    near_filter = _near_filter_sql(near, "lat", "lon", params)
     sql = f"""
         SELECT id, name, subtype, country, region, lat, lon, admin_chain, population
         FROM read_parquet('{table_path}')
         WHERE {name_match_expr} ILIKE $pattern ESCAPE '\\'
         {region_filter}
+        {near_filter}
         ORDER BY {_match_tier_order_sql(name_match_expr)}
         LIMIT {DIVISION_OVERFETCH}
     """
@@ -2498,6 +2538,7 @@ def _query_divisions_from_upstream(
     region_code: str | None,
     name_match_expr: str = "names.primary",
     country_code: str | None = None,
+    near: NearConstraint | None = None,
 ) -> list[dict]:
     """Direct upstream scan — the pre-#43 path, used when no local table is
     available (PLACEROOT_CACHE=off, or materialization failed).
@@ -2522,12 +2563,16 @@ def _query_divisions_from_upstream(
         filters.append("AND country = $country_code")
         params["country_code"] = country_code
     region_filter = " ".join(filters)
+    # #476: with a constraint the scan is still a name search over the whole
+    # theme (nothing to prune files by), but the rows it returns are bounded.
+    near_filter = _near_filter_sql(near, "bbox.ymin", "bbox.xmin", params)
     sql = f"""
         SELECT id, names.primary AS name, subtype, country, region,
                bbox.ymin AS lat, bbox.xmin AS lon, hierarchies, {population_expr}
         FROM read_parquet('{glob}', hive_partitioning=1)
         WHERE {name_match_expr} ILIKE $pattern ESCAPE '\\'
         {region_filter}
+        {near_filter}
         ORDER BY {_match_tier_order_sql(name_match_expr)}
         LIMIT {DIVISION_OVERFETCH}
     """
@@ -2556,6 +2601,7 @@ def _query_alt_names(
     query: str,
     region_code: str | None,
     country_code: str | None = None,
+    near: NearConstraint | None = None,
 ) -> list[dict]:
     """#214: divisions whose *alternate* (names.common) spelling matches
     `query`, joined back to the local divisions table for the real row.
@@ -2603,6 +2649,7 @@ def _query_alt_names(
         filters.append("AND d.country = $country_code")
         params["country_code"] = country_code
     region_filter = " ".join(filters)
+    near_filter = _near_filter_sql(near, "d.lat", "d.lon", params)
     match_order = _match_tier_order_sql("a.alt_name")
     sql = f"""
         SELECT d.id, d.name, d.subtype, d.country, d.region, d.lat, d.lon,
@@ -2611,6 +2658,7 @@ def _query_alt_names(
         JOIN read_parquet('{table_path}') d ON d.id = a.id
         WHERE a.alt_name ILIKE $pattern ESCAPE '\\'
         {region_filter}
+        {near_filter}
         QUALIFY row_number() OVER (
             PARTITION BY d.id ORDER BY {match_order}, a.alt_name
         ) = 1
@@ -2643,6 +2691,7 @@ def _alt_rows_not_already_found(
     region_code: str | None,
     found: list[dict],
     country_code: str | None = None,
+    near: NearConstraint | None = None,
 ) -> list[dict]:
     """#214 alternate-name matches for `query`, minus the divisions the
     literal pass already returned — a division found under its canonical
@@ -2656,7 +2705,7 @@ def _alt_rows_not_already_found(
     spellings.
     """
     try:
-        rows = _query_alt_names(alt_table, table_path, query, region_code, country_code)
+        rows = _query_alt_names(alt_table, table_path, query, region_code, country_code, near=near)
     except overture.UpstreamUnavailable:
         if Path(alt_table).exists():
             raise
@@ -2696,6 +2745,7 @@ def _query_divisions(
     fold_diacritics: bool = False,
     alt_table: str | None = None,
     country_code: str | None = None,
+    near: NearConstraint | None = None,
 ) -> list[dict]:
     """fold_diacritics (#53): match strip_accents(name) against `query`
     (which the caller must already have run through _strip_diacritics) —
@@ -2709,12 +2759,17 @@ def _query_divisions(
 
     country_code (#457): same role as region_code, filtering candidates by
     the row's own `country` column. The two may be combined.
+
+    near (#476): a (lat, lon, radius_m) box the rows must fall inside —
+    the city pin resolve_place already holds. Applied to every side of the
+    search (primary, alternate, upstream) so a pinned query never has a
+    far-away namesake in its candidate pool to begin with.
     """
     if local_table is not None:
         name_expr = "strip_accents(name)" if fold_diacritics else "name"
         try:
             rows = _query_divisions_from_local(
-                local_table, query, region_code, name_expr, country_code
+                local_table, query, region_code, name_expr, country_code, near=near
             )
         except overture.UpstreamUnavailable:
             if Path(local_table).exists():
@@ -2731,11 +2786,11 @@ def _query_divisions(
         else:
             if alt_table is not None:
                 rows = rows + _alt_rows_not_already_found(
-                    alt_table, local_table, query, region_code, rows, country_code
+                    alt_table, local_table, query, region_code, rows, country_code, near=near
                 )
             return rows
     name_expr = "strip_accents(names.primary)" if fold_diacritics else "names.primary"
-    return _query_divisions_from_upstream(query, region_code, name_expr, country_code)
+    return _query_divisions_from_upstream(query, region_code, name_expr, country_code, near=near)
 
 
 # --- #215: fuzzy fallback tier ------------------------------------------
@@ -2779,6 +2834,7 @@ def _query_divisions_fuzzy(
     query: str,
     region_code: str | None = None,
     country_code: str | None = None,
+    near: NearConstraint | None = None,
 ) -> list[dict]:
     """Divisions whose folded name is within _FUZZY_SIMILARITY_THRESHOLD
     jaro-winkler of the folded query — the #215 typo tier.
@@ -2789,6 +2845,15 @@ def _query_divisions_fuzzy(
     back empty, mirroring what the literal search one step up already does
     — a region-constrained miss can mean the suffix was misread as a
     region, and answering nothing would be the worse failure.
+
+    `near` (#476) bounds the pass to a (lat, lon, radius_m) box the same
+    way. This is the tier that answered "Marina Bay Sands" — pinned to
+    Singapore by its caller — with five "Marina Bay" neighbourhoods in
+    Florida, California, Massachusetts and Nebraska: a typo correction
+    12,000 km from where the caller said they meant is not a correction.
+    Under a pin the similarity scan runs over the pin's box only, and a
+    miss there is a miss (no unconstrained retry — the pin is the caller's
+    statement, not a parsed suffix that might have been misread).
 
     Local table only, by construction: the caller passes a materialized
     table path or doesn't call this at all. A similarity predicate has
@@ -2835,6 +2900,7 @@ def _query_divisions_fuzzy(
         filters.append("AND country = $country_code")
         params["country_code"] = country_code
     region_filter = " ".join(filters)
+    near_filter = _near_filter_sql(near, "lat", "lon", params)
     sql = f"""
         SELECT id, name, subtype, country, region, lat, lon, admin_chain, population,
                jaro_winkler_similarity({_FOLDED_NAME_SQL}, $folded) AS similarity
@@ -2842,6 +2908,7 @@ def _query_divisions_fuzzy(
         WHERE jaro_winkler_similarity({_FOLDED_NAME_SQL}, $folded)
               >= {_FUZZY_SIMILARITY_THRESHOLD}
         {region_filter}
+        {near_filter}
         ORDER BY similarity DESC, population DESC NULLS LAST
         LIMIT {DIVISION_OVERFETCH}
     """
@@ -3360,10 +3427,38 @@ def _query_places_multi_anchor(
     return result, winner
 
 
+def _schedule_places_tiles_near(anchor: tuple[float, float]) -> None:
+    """Schedule the places (and recreation-layer base) tiles for the
+    fallback box around `anchor` — the post-hoc half of #476's
+    schedule-only-the-winner rule. Same resolution overture.find_places
+    runs before every scan (cache.source_sql through _places_source), so
+    the tiles that land are exactly the ones a repeat query reads. Never
+    raises: scheduling is an optimization, the answer is already in hand.
+    """
+    try:
+        _bbox_f, _dist_f, _params, bbox, _r = overture.area_geometry(
+            anchor[0], anchor[1], _PLACES_FALLBACK_RADIUS_M
+        )
+        overture._places_source(bbox)
+    except Exception:  # noqa: BLE001 - cache scheduling must never fail a query
+        # The anchor is a coordinate the caller typed a place name for; keep it
+        # out of the log line (CodeQL: clear-text logging of location data).
+        logger.debug("post-hoc tile scheduling failed for a fallback anchor", exc_info=True)
+
+
 def _query_places_fallback(
-    query: str, anchor: tuple[float, float] | None = None, also: str | None = None
+    query: str, anchor: tuple[float, float] | None = None, also: str | None = None,
+    schedule_tiles: bool = True,
 ) -> list[dict]:
     """Supplement divisions with named places when divisions alone don't fill limit.
+
+    schedule_tiles=False (#476) reads the anchor's box without scheduling
+    its missing places/base tiles for background materialization — cached
+    tiles still serve, and a miss falls through to the manifest-pruned
+    upstream files as always, so the answer is the same either way. The
+    caller passes False for a speculative anchor (one derived by splitting
+    the query rather than stated by the caller or matched outright) and
+    schedules afterwards for the anchor that actually answered.
 
     #83: an unconstrained ILIKE scan over the places theme — Overture's
     largest, least row-group-prunable theme — measured 100s+ live against a
@@ -3452,12 +3547,16 @@ def _query_places_fallback(
     # (_skip_unanchored_places_scan), not by the cache.
     if anchor_bbox is not None:
         try:
-            base_source = cache.source_sql("places", glob, anchor_bbox)
+            base_source = cache.source_sql(
+                "places", glob, anchor_bbox, schedule_missing=schedule_tiles
+            )
         except Exception:  # noqa: BLE001 - cache resolution is an optimization here
             base_source = f"read_parquet('{glob}', hive_partitioning=1)"
     else:
         base_source = f"read_parquet('{glob}', hive_partitioning=1)"
-    from_source, _ = overture._with_recreation(base_source, anchor_bbox)
+    from_source, _ = overture._with_recreation(
+        base_source, anchor_bbox, schedule_missing=schedule_tiles
+    )
     category_expr = "taxonomy.primary" if cols is not None and "taxonomy" in cols else "NULL"
     sql = f"""
         SELECT id, names.primary AS name, bbox.ymin AS lat, bbox.xmin AS lon,
@@ -3851,12 +3950,13 @@ def _postcode_empty_note(display: str) -> str:
 
 def geocode(
     query: str, limit: int = DEFAULT_LIMIT, lang: str | None = None, country: str | None = None,
+    near: NearConstraint | None = None,
 ) -> list[dict]:
     """Free-text place name -> ranked candidates. See geocode_detailed.
 
-    country (#457): see geocode_detailed. May raise ValueError.
+    country (#457) and near (#476): see geocode_detailed. May raise ValueError.
     """
-    return geocode_detailed(query, limit, lang=lang, country=country)["results"]
+    return geocode_detailed(query, limit, lang=lang, country=country, near=near)["results"]
 
 
 def geocode_batch(
@@ -3914,6 +4014,7 @@ def geocode_detailed(
     alt_table: str | None = None,
     lang: str | None = None,
     country: str | None = None,
+    near: NearConstraint | None = None,
 ) -> dict:
     """Free-text place name -> ranked candidates, from Overture divisions (and places fallback).
 
@@ -3973,6 +4074,21 @@ def geocode_detailed(
     recognized country code, or if it disagrees with a country/region
     suffix parsed off `query` itself (server.py turns either into a
     structured bad_request naming both).
+
+    near (#476, a (lat, lon, radius_m) triple) is a caller that already
+    knows where the query means — resolve_place with a city pin — telling
+    this search so. It bounds every division pass (literal, alternate,
+    variant, fuzzy) to that box, and it *is* the places-fallback anchor:
+    _fallback_anchor_candidates' speculative "which trailing or leading
+    word is the city" splits do not run at all, because the caller has
+    already answered that question. Measured before: resolve_place("Marina
+    Bay Sands Singapore") ran geocode("Marina Bay Sands") unconstrained,
+    which anchored on Marina, California (the only division "Marina"
+    matches outright), scanned places there, retried five more cities on
+    three continents, and scheduled California's places and base-theme
+    tiles for background materialization — for a query pinned to
+    Singapore. With near, none of that has a reason to happen. No near
+    given leaves this function byte-identical to before.
     """
     query = query.strip()
     limit = max(1, min(limit, MAX_LIMIT))
@@ -4079,8 +4195,13 @@ def geocode_detailed(
     suffix_region_code = region_code
     suffix_country_code = country_code
 
+    # #476: `near_kw` rather than a bare keyword so the no-constraint call
+    # stays exactly the call it was (the pre-#476 signature is what every
+    # test double of _query_divisions in the suite answers to).
+    near_kw: dict = {"near": near} if near is not None else {}
     divisions = _query_divisions(
-        search_query, region_code, local_table, alt_table=alt_table, country_code=country_code,
+        search_query, region_code, local_table, alt_table=alt_table,
+        country_code=country_code, **near_kw,
     )
     if region_code and not divisions:
         # #46: recognized a region suffix, but nothing in this dataset
@@ -4090,7 +4211,9 @@ def geocode_detailed(
         region_code = None
         country_code = None
         search_query = query
-        divisions = _query_divisions(search_query, None, local_table, alt_table=alt_table)
+        divisions = _query_divisions(
+            search_query, None, local_table, alt_table=alt_table, **near_kw
+        )
     elif country_code and not divisions and country_code_from_suffix:
         # #457: same idea, but degrading to the BASE name (not the whole
         # comma-joined string) — Overture names are bare, so re-searching
@@ -4104,7 +4227,9 @@ def geocode_detailed(
         # filter coming up empty is a real, precise answer.
         country_code = None
         search_query = base_query
-        divisions = _query_divisions(search_query, None, local_table, alt_table=alt_table)
+        divisions = _query_divisions(
+            search_query, None, local_table, alt_table=alt_table, **near_kw
+        )
         qualifier_note = _country_degrade_note(base_query, suffix_country_code)
 
     # #53: literal query didn't reach an exact-or-prefix division match with
@@ -4146,7 +4271,7 @@ def geocode_detailed(
     if not literal_answer_is_good_enough:
         for variant_query in _abbreviation_variant_queries(search_query):
             for row in _query_divisions(
-                variant_query, region_code, local_table, country_code=country_code
+                variant_query, region_code, local_table, country_code=country_code, **near_kw
             ):
                 if row["id"] not in seen_ids:
                     row["_variant"] = True
@@ -4199,7 +4324,7 @@ def geocode_detailed(
         rows = (
             _query_divisions(
                 stripped_query, region_code, local_table,
-                fold_diacritics=True, country_code=country_code,
+                fold_diacritics=True, country_code=country_code, **near_kw,
             )
             if stripped_query
             else []
@@ -4239,10 +4364,10 @@ def geocode_detailed(
             fuzzy_rows = []
         else:
             fuzzy_rows = _query_divisions_fuzzy(
-                local_table, fuzzy_query, suffix_region_code, suffix_country_code
+                local_table, fuzzy_query, suffix_region_code, suffix_country_code, **near_kw
             )
         if not fuzzy_rows and (suffix_region_code or suffix_country_code):
-            fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query)
+            fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query, **near_kw)
         divisions = fuzzy_rows
 
     _bundled_recall_pending = not divisions and _is_bundled_table(local_table)
@@ -4253,6 +4378,9 @@ def geocode_detailed(
         # query naming a feature is not one — it was 12.8s of a 13.1s call,
         # spent proving a negative the query's own shape already implies.
         and not _names_a_feature(search_query)
+        # #476: a pinned query has its anchor already; the places search
+        # gets its chance first, same as when a split derives one.
+        and near is None
         and _fallback_anchor(
             search_query, [], region_code, local_table,
             alt_table=_local_alt_names_table(local_table),
@@ -4326,10 +4454,18 @@ def geocode_detailed(
         # can be derived (a division match already in hand, or a trailing
         # location word in the query) instead of an unconstrained
         # worldwide scan — see _fallback_anchor/_query_places_fallback.
-        anchor_options = _fallback_anchor_candidates(
-            search_query, divisions, region_code, local_table, alt_table=alt_table,
-            region_population=region_population,
-        )
+        #
+        # #476: under a caller's pin the pin is the anchor and the whole
+        # search_query is the name to look for — the caller already split
+        # the city off. The speculative splits are what aimed a Singapore
+        # query at Marina, California; they have nothing to add here.
+        if near is not None:
+            anchor_options = [(near[0], near[1], search_query)]
+        else:
+            anchor_options = _fallback_anchor_candidates(
+                search_query, divisions, region_code, local_table, alt_table=alt_table,
+                region_population=region_population,
+            )
         # #329: a famous landmark with no derivable city still has an
         # alias pin on the bundled index — use it as the places-fallback
         # anchor rather than skipping the search (or aiming at a random
@@ -4369,7 +4505,19 @@ def geocode_detailed(
             note = _UNANCHORED_NAME_SEARCH_NOTE
         else:
             seen_names = {(c["name"].lower()) for c in candidates}
-            places = _query_places_fallback(name_query, anchor=anchor, also=search_query)
+            # #476: an anchor derived by splitting the query is a guess
+            # about where the query means, and the first scan is the test
+            # of that guess. Its box's tiles are not scheduled for
+            # background materialization until the guess has paid off —
+            # measured, the losing guesses left 807 MB of Florida and
+            # California places/base tiles behind two European landmark
+            # resolves. A pin, an alias, or a division match already in
+            # hand is not a guess and schedules as before.
+            speculative = divisions == [] and alias_hit is None and near is None
+            places = _query_places_fallback(
+                name_query, anchor=anchor, also=search_query,
+                schedule_tiles=not speculative,
+            )
             if not places and len(anchor_options) > 1:
                 # The best reading of the query found nothing where it
                 # pointed. Ambiguous city names make that reading a coin
@@ -4386,6 +4534,10 @@ def geocode_detailed(
                     )
                     if places and winner is not None:
                         anchor = winner
+            if speculative and places and anchor is not None:
+                # The guess held: this is the anchor that answered, so its
+                # tiles are worth having for the repeat query (#476).
+                _schedule_places_tiles_near(anchor)
             places = [p for p in places if p["name"].lower() not in seen_names]
             # Rank by the better of the two readings of the query: a row
             # named for the whole query beats one that merely contains the
@@ -4438,7 +4590,9 @@ def geocode_detailed(
         # only come back empty, and it was the entire cost of doing so —
         # 11.0s of a fresh install's first landmark query, spent proving a
         # negative that the query's own shape already implies.
-        recalled = _query_divisions(search_query, region_code, None, country_code=country_code)
+        recalled = _query_divisions(
+            search_query, region_code, None, country_code=country_code, **near_kw
+        )
         _flag_namesake_localities(recalled, search_query)
         recalled.sort(key=lambda r: _rank_key(r, search_query, region_population))
         candidates = recalled
@@ -5234,12 +5388,26 @@ def resolve_place(
     # Search the place half when we stripped a trailing city, so
     # "Colosseo Roma" does not return Rome the city as the pin.
     search_query = place_query if city_bounded and place_query != query else query
-    geocode_hits = geocode(search_query, limit=_RESOLVE_OVERFETCH, lang=lang, **country_kw)
     if city_bounded and near_lat is not None and near_lon is not None:
+        # #476: the pin bounds geocode's own search, not just its output.
+        # Filtering afterwards (below, kept as belt-and-braces) had already
+        # let the unconstrained pass match "Marina Bay Sands" to five
+        # "Marina Bay" neighbourhoods in the US by spelling, anchor its
+        # places fallback on Marina, California, and schedule that box's
+        # tiles for background download — for a query the caller had
+        # pinned to Singapore. With the constraint, divisions outside the
+        # city-hint radius are never candidates, and geocode anchors its
+        # places search on the pin instead of guessing from the words.
+        geocode_hits = geocode(
+            search_query, limit=_RESOLVE_OVERFETCH, lang=lang,
+            near=(near_lat, near_lon, _CITY_HINT_RADIUS_M), **country_kw,
+        )
         geocode_hits = [
             r for r in geocode_hits
             if geo.haversine_m(near_lat, near_lon, r["lat"], r["lon"]) <= _CITY_HINT_RADIUS_M
         ]
+    else:
+        geocode_hits = geocode(search_query, limit=_RESOLVE_OVERFETCH, lang=lang, **country_kw)
     division_hits = [r for r in geocode_hits if r["type"] != "place"]
 
     # #464: None unless the reference below is a split-derived guess; then
