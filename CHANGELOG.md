@@ -9,6 +9,39 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `resolve_map_url(url, include_place=True)` MCP tool (#461): a pasted Google
+  Maps, Apple Maps, OpenStreetMap or `geo:` link back to its coordinate, zoom
+  and place name — parsed offline from the URL itself (`/maps/place/<name>/@lat,lon,17z`,
+  the `!3d!4d` pin, `?q=lat,lon`, `?ll=`, Apple `?ll=`/`?q=`/`?address=`, OSM
+  `#map=`/`?mlat=&mlon=`), with a Google short link (`maps.app.goo.gl`, `goo.gl/maps`,
+  `g.co`) the one case that follows redirects over the network. No API key. A link
+  that only names a place resolves through the place search (`resolved_via: "name"`);
+  `include_place` attaches the reverse-geocoded address and admin chain. The keyless
+  counterpart to Google's Maps Grounding Lite `resolve_maps_urls`.
+- `compare_modes(from, to, modes=None, include_elevation=False, confirm=False)`
+  MCP tool (#459): "should I walk, bike or drive from A to B?" in one call
+  instead of three `route()` calls. The ends (same LocationRef forms as
+  `from_to`) resolve exactly once, every requested mode routes between the
+  same coordinates, and each mode gets one compact row (`distance_m`,
+  `duration_s`, `duration_min`, optional `total_climb_m`/`total_descent_m`)
+  — no path, no export. `fastest`/`shortest` name the winners (null when
+  nothing routed) and `summary` is a deterministic sentence that says drive
+  time has no live traffic. A mode that cannot be routed (`too_far`,
+  `needs_confirm` with its ETA, `no_route`, ...) fails inline in its own row
+  and never aborts the call; only end resolution fails the whole call, with
+  `field: "from" | "to"` as `from_to` reports it. Joins the `routing` profile.
+- `transit_stops_near(lat, lon, radius_m=800, limit=10, kind=None)` MCP tool
+  (#453): nearest bus/rail/subway/tram/ferry stops, a filtered view over the
+  same Overture base/infrastructure `subtype='transit'` rows infrastructure_at
+  reads. Restricted to real, boardable stop classes (bus_stop, bus_station,
+  railway_station, railway_halt, subway_station, tram_stop, ferry_terminal,
+  aerialway_station) rather than the unfiltered layer, which is dominated by
+  bicycle_parking and by platform/stop_position (OSM's per-geometry re-tagging
+  of the same physical stop). Falls back to platform/stop_position rows, with
+  a note, when zero stop-class rows are within radius; `kind` restricts to one
+  class and rejects anything else with a bad_request naming the accepted
+  values. No schedules, no live arrivals — Overture's base coverage is a
+  static, OSM-derived conflation and carries neither.
 - `geocode_intersection(street_a, street_b, city)` MCP tool (#448): locate where
   two named streets cross within a resolved city anchor. Reuses `geocode_address`'s
   anchor-resolution and USPS abbreviation normalization (Parkway/Pkwy, West/W,
@@ -108,6 +141,33 @@ fixing behavior is patch.
   Singapore's tiles on disk afterwards, and — because the pinned fallback
   now finds the landmark itself — answers "Marina Bay Sands" (exact)
   instead of a nearby aesthetics clinic. No-hint queries are unchanged.
+- `geocode`/`geocode_batch`/`resolve_place` now parse a trailing "City,
+  Country" suffix (#457) — "Cambridge, United Kingdom", "Cambridge, UK",
+  "Cambridge, GB" and "Cambridge, GBR" all resolve the UK's Cambridge and
+  exclude its US namesake, where before the joined string matched no bare
+  Overture division name and the query silently returned nothing. Also adds
+  an explicit `country=` parameter (ISO 3166-1 alpha-2, alpha-3, and common
+  aliases like "UK"/"USA" all accepted, case-insensitive) to all three
+  tools for callers that already know the country; an unrecognized
+  `country`, or one that disagrees with a country/region suffix parsed off
+  the query itself, returns a structured `bad_request` naming both. A
+  comma-suffix recognized as neither a region nor a country no longer
+  falls through to searching the unmatchable joined string — it searches
+  the base name with a note naming the unrecognized qualifier, and a
+  recognized country with zero matches inside it degrades to an
+  unconstrained search of the base name, also with a note, rather than
+  returning an empty result either way.
+- `neighborhood_verdict`'s "transit" need now also reads base/infrastructure
+  `subtype='transit'` stops (#454), not just the places-theme
+  `public_transportation`/`bus_station`/`train_station` categories: a
+  ~2 km box around Dam Square, Amsterdam had 48 bus_stop + 5 subway_station +
+  8 ferry_terminal rows in base versus 6 bus_station + 16 train_station in
+  places, so a bus-served street with no rail nearby used to score "weak"/
+  "unknown" and surface "the walk to the nearest transit stop at rush hour"
+  even with a stop 100 m away. The need now resolves to the nearer of the
+  places match and a bounded `transit.transit_stops_near` call at the same
+  radius, and degrades to the places-only answer with a note (mirroring how
+  an isochrone miss already degrades) if the base lookup fails.
 - The `from`-keyword schema patch no longer hand-lists the parameters it
   republishes. `from_to`'s model dropped every parameter it forgot, twice
   (#328, #395); the shared base now dumps every declared field by name, and

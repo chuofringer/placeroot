@@ -46,7 +46,7 @@ def test_famous_poi_does_not_lose_to_an_obscure_exact_division(monkeypatch):
             "rank_score": 1.0,
         }]
 
-    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10):
+    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10, **kwargs):
         if abs(lat - 41.8902) < 0.5 and name and "coloss" in name.lower():
             return [{
                 "id": "colosseum-rome", "name": "Colosseo", "category": "monument",
@@ -76,7 +76,7 @@ def test_ebisu_alias_does_not_aim_at_shikoku(monkeypatch):
             "rank_score": 1.0,
         }]
 
-    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10):
+    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10, **kwargs):
         if abs(lat - 35.6467) < 0.5:
             return [{
                 "id": "ebisu-tokyo", "name": "Ebisu", "category": "neighbourhood",
@@ -125,7 +125,7 @@ def test_last_city_is_reused_for_the_next_poi(monkeypatch):
             "rank_score": 0.5,
         }]
 
-    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10):
+    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10, **kwargs):
         seen["near"] = (lat, lon)
         return [{
             "id": "place-1", "name": "Some Tower", "category": "monument",
@@ -165,7 +165,7 @@ def test_observation_tower_does_not_replay_brooklyn_after_paris(monkeypatch):
             "rank_score": 0.5,
         }]
 
-    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10):
+    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10, **kwargs):
         if abs(lat - 48.857) < 1.0:
             return [{
                 "id": "paris-tower", "name": "Observation Tower",
