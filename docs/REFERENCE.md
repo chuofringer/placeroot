@@ -227,6 +227,7 @@ env vars; see below.) The ones an operator is most likely to reach for:
 | `PLACEROOT_TOKEN_BUDGET` | `2000` | Soft per-response token budget (chars/4 heuristic); rows are dropped lowest-ranked first, then optional fields, until a response fits |
 | `PLACEROOT_RECREATION_LAYER` | on | `0`/`false`/`no`/`off` disables the base-theme recreation layer ([docs/RECREATION.md](RECREATION.md)) |
 | `PLACEROOT_CACHE` | on | `off` disables the local tile cache entirely |
+| `PLACEROOT_AUTOWARM` | on | `off` disables the background metro pre-warm a city-scale `geocode`/`resolve_place`/`resolve_area` hit (or `PLACEROOT_HOME`) otherwise kicks on a daemon thread — tile COPYs plus a walk-graph build. `warmup_city` and `PLACEROOT_WARM_REGION` are unaffected. Off is implied by `PLACEROOT_CACHE=off` |
 | `PLACEROOT_CACHE_DIR` | `~/.cache/placeroot` | Where tiles, persisted walk graphs, the geocode name index, and support tables live |
 | `PLACEROOT_ARTIFACT_DIR` | sibling of `PLACEROOT_CACHE_DIR` (`.../artifacts`) | Where `render_map` writes its self-contained HTML files |
 | `PLACEROOT_CACHE_MAX_MB` | `500` | LRU size cap for the cache directory |
