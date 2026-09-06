@@ -116,6 +116,17 @@ fixing behavior is patch.
   recognized country with zero matches inside it degrades to an
   unconstrained search of the base name, also with a note, rather than
   returning an empty result either way.
+- `neighborhood_verdict`'s "transit" need now also reads base/infrastructure
+  `subtype='transit'` stops (#454), not just the places-theme
+  `public_transportation`/`bus_station`/`train_station` categories: a
+  ~2 km box around Dam Square, Amsterdam had 48 bus_stop + 5 subway_station +
+  8 ferry_terminal rows in base versus 6 bus_station + 16 train_station in
+  places, so a bus-served street with no rail nearby used to score "weak"/
+  "unknown" and surface "the walk to the nearest transit stop at rush hour"
+  even with a stop 100 m away. The need now resolves to the nearer of the
+  places match and a bounded `transit.transit_stops_near` call at the same
+  radius, and degrades to the places-only answer with a note (mirroring how
+  an isochrone miss already degrades) if the base lookup fails.
 - The `from`-keyword schema patch no longer hand-lists the parameters it
   republishes. `from_to`'s model dropped every parameter it forgot, twice
   (#328, #395); the shared base now dumps every declared field by name, and

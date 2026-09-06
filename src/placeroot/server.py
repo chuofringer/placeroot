@@ -5151,7 +5151,11 @@ def neighborhood_verdict(
     generic walk-first daily-needs check and says what was assumed.
     Optional radius_m / minutes / mode override what the context implies
     (no car / walk-first -> walk, bike -> cycle, car -> drive; default
-    walk, 15 minutes). Does not call out to extra remote APIs.
+    walk, 15 minutes). Does not call out to extra remote APIs; the
+    "transit" need additionally reads base/infrastructure transit stops
+    (bus_stop, subway_station, ferry_terminal, ...) alongside the
+    places-theme categories, since places alone under-reports bus stops
+    (#454).
 
     Returns a structured {"error": ...} for bad coordinates, an unknown
     mode, a radius past the mode cap, upstream failure, or a degraded
