@@ -2870,7 +2870,9 @@ def _schedule_places_tiles_near(anchor: tuple[float, float]) -> None:
         )
         overture._places_source(bbox)
     except Exception:  # noqa: BLE001 - cache scheduling must never fail a query
-        logger.debug("post-hoc tile scheduling failed for %s", anchor, exc_info=True)
+        # The anchor is a coordinate the caller typed a place name for; keep it
+        # out of the log line (CodeQL: clear-text logging of location data).
+        logger.debug("post-hoc tile scheduling failed for a fallback anchor", exc_info=True)
 
 
 def _query_places_fallback(
