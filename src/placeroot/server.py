@@ -252,6 +252,15 @@ _ModeArgContextDefault = Annotated[
         json_schema_extra={"enum": _MODE_ENUM},
     ),
 ]
+# compare_modes' subset (#459): enum on `items` like _AvoidArg, runtime type a
+# plain list so an unknown mode comes back as a self-correcting bad_request.
+_CompareModesArg = Annotated[
+    list | None,
+    Field(
+        description="Modes to compare, in answer order. Default: walk, cycle, drive.",
+        json_schema_extra={"items": {"type": "string", "enum": _MODE_ENUM}},
+    ),
+]
 _ModeSetArg = Annotated[
     str | None,
     Field(
@@ -4791,37 +4800,9 @@ def _route_between_refs(
     the resolved name/id echoed onto the answer's "from"/"to" — are one
     implementation rather than two that can drift.
     """
-    if isinstance(from_, str) and not from_.strip():
-        return {
-            "error": "bad_request",
-            "detail": "from must be a non-empty place name",
-            "field": "from",
-        }
-    if isinstance(to, str) and not to.strip():
-        return {
-            "error": "bad_request",
-            "detail": "to must be a non-empty place name",
-            "field": "to",
-        }
-    # Both ends still plain names (not GERS ids): the original, byte-
-    # identical path — same parallel _resolve_pair call, same
-    # ambiguous_place/not_found shape as before this feature existed.
-    if (
-        isinstance(from_, str) and isinstance(to, str)
-        and not _GERS_ID_RE.match(from_.strip()) and not _GERS_ID_RE.match(to.strip())
-    ):
-        origin, dest = _resolve_pair(from_, to)
-        if "error" in origin:
-            return {**origin, "field": "from"}
-        if "error" in dest:
-            return {**dest, "field": "to"}
-    else:
-        origin, origin_error = _resolve_location_ref(from_)
-        if origin_error is not None:
-            return {**origin_error, "field": "from"}
-        dest, dest_error = _resolve_location_ref(to)
-        if dest_error is not None:
-            return {**dest_error, "field": "to"}
+    origin, dest, end_error = _resolve_route_ends(from_, to)
+    if end_error is not None:
+        return end_error
     mode = preference_store.resolve_mode(mode, default_mode)
     if mode not in routing.MODE_CONFIG:
         return {
@@ -4862,6 +4843,235 @@ def _route_between_refs(
         # maps/gpx/text use the named endpoints rather than bare coordinates.
         result["export"] = export.from_route_result(result)
     return result
+
+
+def _resolve_route_ends(from_, to) -> tuple[dict | None, dict | None, dict | None]:
+    """Resolve a routing call's two LocationRef ends — (origin, dest, error).
+
+    Exactly one of the two shapes comes back: (origin, dest, None) with both
+    ends resolved to dicts carrying lat/lon (plus name/id/type/admin_context
+    when the input was a name or GERS id), or (None, None, error) where the
+    error dict names the offending side in "field": "from" | "to". Shared by
+    _route_between_refs (route/from_to) and compare_modes so the end
+    semantics — empty-string bad_request, the byte-identical parallel
+    _resolve_pair fast path for two plain names, per-side field — are one
+    implementation rather than two that can drift.
+    """
+    if isinstance(from_, str) and not from_.strip():
+        return None, None, {
+            "error": "bad_request",
+            "detail": "from must be a non-empty place name",
+            "field": "from",
+        }
+    if isinstance(to, str) and not to.strip():
+        return None, None, {
+            "error": "bad_request",
+            "detail": "to must be a non-empty place name",
+            "field": "to",
+        }
+    # Both ends still plain names (not GERS ids): the original, byte-
+    # identical path — same parallel _resolve_pair call, same
+    # ambiguous_place/not_found shape as before this feature existed.
+    if (
+        isinstance(from_, str) and isinstance(to, str)
+        and not _GERS_ID_RE.match(from_.strip()) and not _GERS_ID_RE.match(to.strip())
+    ):
+        origin, dest = _resolve_pair(from_, to)
+        if "error" in origin:
+            return None, None, {**origin, "field": "from"}
+        if "error" in dest:
+            return None, None, {**dest, "field": "to"}
+        return origin, dest, None
+    origin, origin_error = _resolve_location_ref(from_)
+    if origin_error is not None:
+        return None, None, {**origin_error, "field": "from"}
+    dest, dest_error = _resolve_location_ref(to)
+    if dest_error is not None:
+        return None, None, {**dest_error, "field": "to"}
+    return origin, dest, None
+
+
+# compare_modes' row order and the verbs its deterministic summary uses.
+_COMPARE_MODES_DEFAULT = ("walk", "cycle", "drive")
+_COMPARE_MODES_VERB = {"walk": "walking", "cycle": "cycling", "drive": "driving"}
+# Keys a route() answer carries that a compact compare_modes row must not:
+# geometry, export, endpoint echoes (the call carries one from/to), and the
+# progress middleware's per-call status lines.
+_COMPARE_MODES_DROP = frozenset(
+    {"from", "to", "export", "path", "path_max_deviation_m", "path_omitted",
+     "elevation", "elevation_omitted", "progress", "status", "timing", "mode"}
+)
+
+
+def _compare_modes_row(mode: str, origin: dict, dest: dict, *, include_elevation: bool,
+                       confirm: bool) -> dict:
+    """One compact per-mode row for compare_modes; failures stay inline."""
+    straight_m = geo.haversine_m(origin["lat"], origin["lon"], dest["lat"], dest["lon"])
+    cap_m = routing.ROUTE_MAX_STRAIGHT_LINE_M[mode]
+    if straight_m > cap_m:
+        origin_label = origin.get("name") or f"({origin['lat']}, {origin['lon']})"
+        dest_label = dest.get("name") or f"({dest['lat']}, {dest['lon']})"
+        return {
+            "mode": mode,
+            "error": "too_far",
+            "detail": (
+                f"{origin_label!r} and {dest_label!r} are {round(straight_m)} m "
+                f"apart; compare_modes stays inside one city ({mode} cap {round(cap_m)} m)"
+            ),
+            "max_distance_m": cap_m,
+        }
+    result = route(
+        origin["lat"], origin["lon"], dest["lat"], dest["lon"], mode=mode,
+        include_elevation=include_elevation, confirm=confirm,
+    )
+    if "error" in result:
+        row = {"mode": mode}
+        row.update({k: v for k, v in result.items() if k not in _COMPARE_MODES_DROP})
+        return row
+    row = {
+        "mode": mode,
+        "distance_m": result.get("distance_m"),
+        "duration_s": result.get("duration_s"),
+    }
+    duration_s = result.get("duration_s")
+    if isinstance(duration_s, (int, float)) and not isinstance(duration_s, bool):
+        row["duration_min"] = int(round(duration_s / 60))
+    if "truncated" in result:
+        row["truncated"] = result["truncated"]
+    elevation_block = result.get("elevation") if include_elevation else None
+    if isinstance(elevation_block, dict):
+        for key in ("total_climb_m", "total_descent_m"):
+            if key in elevation_block:
+                row[key] = elevation_block[key]
+    return row
+
+
+def _compare_modes_summary(rows: list[dict], fastest: str | None) -> str:
+    """Deterministic one-or-two-sentence read of the rows — no LLM, no randomness."""
+    ok = [r for r in rows if "error" not in r]
+    failed = [r for r in rows if "error" in r]
+    verb = _COMPARE_MODES_VERB
+    if not ok:
+        reasons = "; ".join(f"{r['mode']} — {r['error']}" for r in failed)
+        return f"No mode could be routed: {reasons}."
+    if len(ok) == 1:
+        (only,) = ok
+        text = (
+            f"Only {verb[only['mode']]} could be routed: {only['duration_min']} min "
+            f"over {round(only['distance_m'])} m."
+        )
+    else:
+        lead = next(r for r in ok if r["mode"] == fastest)
+        others = [r for r in ok if r["mode"] != fastest]
+        others_text = ", ".join(f"{verb[r['mode']]} {r['duration_min']} min" for r in others)
+        text = (
+            f"{verb[lead['mode']].capitalize()} is fastest at {lead['duration_min']} min; "
+            f"{others_text}."
+        )
+    if any(r["mode"] == "drive" for r in ok):
+        text += " Driving time is a posted-speed model with no live traffic."
+    if failed:
+        text += " Not routed: " + ", ".join(f"{r['mode']} ({r['error']})" for r in failed) + "."
+    return text
+
+
+@_tool("Compare walk / cycle / drive")
+def compare_modes(
+    from_: str | dict,
+    to: str | dict,
+    modes: list | None = None,
+    include_elevation: bool = False,
+    confirm: bool = False,
+) -> dict:
+    """Walk vs cycle vs drive between two places, in one call.
+
+    "Should I walk, bike or drive from A to B?" is three route() calls;
+    this is one. The ends resolve exactly once and every mode routes
+    between the same two coordinates, so the rows are comparable. Use it
+    when the user is choosing a mode; when the mode is already known,
+    route() or from_to() gives the fuller answer (export maps/gpx/text,
+    optional polyline).
+
+    Pass each of from/to as a free-text place name, a {"lat", "lon"} dict,
+    or a GERS id — mixed freely, exactly as from_to takes them.
+    Do not call geocode(), resolve_place(), or geocode_batch() first. modes
+    is an optional subset of ["walk", "cycle", "drive"]; omitted means all three
+    in that order (stored mode preferences are not consulted — every mode
+    asked for is computed). A mode outside that vocabulary, or an empty
+    list, returns {"error": "bad_request"}; duplicates collapse, order kept.
+
+    Returns {"from", "to", "modes", "fastest", "shortest", "summary"}.
+    "from"/"to" carry what each end resolved to (name/id when the input was
+    a name or GERS id, lat/lon always). "modes" is one compact row per
+    requested mode, in the requested order: {"mode", "distance_m",
+    "duration_s", "duration_min"} — no path, no export, no per-row
+    endpoints; with include_elevation=true a row also carries
+    "total_climb_m"/"total_descent_m" where the DEM covered the route
+    (never faked as 0). "fastest"/"shortest" name the mode with the lowest
+    duration/distance among the rows that routed, or null if none did.
+    "summary" is a short deterministic sentence or two built from the rows.
+
+    A mode that cannot be routed fails inline in its own row — {"mode",
+    "error", "detail"} — and never aborts the call: "too_far" when the ends
+    exceed that mode's straight-line cap (walk ~7.5 km, cycle ~23.5 km,
+    drive ~95.5 km — so a cross-town pair often gives a drive row and a
+    too_far walk row), "needs_confirm" with its eta/eta_s when that mode's
+    street graph is cold and confirm is false, or whatever error route()
+    returned (no_graph_nearby, no_route, ...). Only end resolution fails
+    the whole call: {"error": "ambiguous_place" | "not_found" |
+    "bad_request"} with "field": "from" | "to", as from_to does.
+
+    Same cost model as route(): walk 1.4 m/s, cycle 4.2 m/s, drive from
+    posted speed limits or a class default — a posted-speed model with no
+    live traffic, which the summary says whenever drive routed.
+
+    confirm=true after the user agreed to wait for a first-time street-graph
+    build (about 5–25 seconds per cold mode — each mode is its own graph).
+    Pass it only after a needs_confirm row and they said yes. A warm or
+    cached graph never needs it. Omit confirm unless you just asked and
+    they said yes.
+    """
+    if modes is None:
+        wanted = list(_COMPARE_MODES_DEFAULT)
+    else:
+        if not isinstance(modes, list) or not modes:
+            return {
+                "error": "bad_request",
+                "detail": "modes must be a non-empty list drawn from "
+                f"{list(_COMPARE_MODES_DEFAULT)}, or omitted for all three",
+                "supported": list(_COMPARE_MODES_DEFAULT),
+            }
+        wanted = []
+        for mode in modes:
+            if not isinstance(mode, str) or mode not in routing.MODE_CONFIG:
+                return {
+                    "error": "bad_request",
+                    "detail": f"unsupported mode {mode!r} in modes; supported: "
+                    f"{list(_COMPARE_MODES_DEFAULT)}",
+                    "supported": list(_COMPARE_MODES_DEFAULT),
+                }
+            if mode not in wanted:
+                wanted.append(mode)
+    origin, dest, end_error = _resolve_route_ends(from_, to)
+    if end_error is not None:
+        return end_error
+    rows = [
+        _compare_modes_row(
+            mode, origin, dest, include_elevation=include_elevation, confirm=confirm
+        )
+        for mode in wanted
+    ]
+    ok = [r for r in rows if "error" not in r]
+    fastest = min(ok, key=lambda r: r["duration_s"])["mode"] if ok else None
+    shortest = min(ok, key=lambda r: r["distance_m"])["mode"] if ok else None
+    return {
+        "from": origin,
+        "to": dest,
+        "modes": rows,
+        "fastest": fastest,
+        "shortest": shortest,
+        "summary": _compare_modes_summary(rows, fastest),
+    }
 
 
 @_tool("Find places near a name")
@@ -5825,7 +6035,7 @@ def data_version() -> dict:
 def _arg_summary(fn: Callable) -> str:
     """A tool's parameters as `required,optional?` — the catalog's arg column.
 
-    Names only, no types: the catalog's budget is the whole point (46 tools
+    Names only, no types: the catalog's budget is the whole point (47 tools
 have to fit in about 1.1k tokens), and the names here are already
     self-describing (lat, radius_m, limit, category). A caller that guesses
     a type wrong gets placeroot_call's bad_request naming what the tool
@@ -5923,7 +6133,11 @@ def placeroot_call(tool: str, args: dict | None = None) -> dict:
             "valid_tools": sorted(_TOOL_FUNCS),
         }
     call_args = {} if args is None else args
-    if tool in ("from_to", "route") and isinstance(call_args, dict) and "from" in call_args:
+    if (
+        tool in ("from_to", "route", "compare_modes")
+        and isinstance(call_args, dict)
+        and "from" in call_args
+    ):
         call_args = {**call_args, "from_": call_args["from"]}
         call_args.pop("from", None)
     if not isinstance(call_args, dict):
@@ -6152,6 +6366,21 @@ def _from_to_arg_model():
     return FromToArguments
 
 
+def _compare_modes_arg_model():
+    """compare_modes' published argument model: `from_` as `from`, the rest verbatim (#459)."""
+    from pydantic import ConfigDict, Field
+
+    class CompareModesArguments(_from_alias_base()):
+        model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
+        from_: str | dict = Field(alias="from")
+        to: str | dict
+        modes: _CompareModesArg = None
+        include_elevation: bool = False
+        confirm: bool = False
+
+    return CompareModesArguments
+
+
 def _route_arg_model():
     """route's published argument model: the four scalars, from/to, and the rest (#419)."""
     from pydantic import ConfigDict, Field
@@ -6175,9 +6404,9 @@ def _route_arg_model():
 
 
 def _publish_from_keyword(mcp_server) -> None:
-    """Advertise from_to's and route's origin as `from` — a reserved word in Python.
+    """Advertise from_to's, route's and compare_modes' origin as `from` — a reserved word in Python.
 
-    The implementation parameter is from_ on both tools. The public schema
+    The implementation parameter is from_ on all three tools. The public schema
     and the validator both use from so the agent never sees the underscore.
 
     Each model is checked against the function's real signature before it is
@@ -6191,6 +6420,7 @@ def _publish_from_keyword(mcp_server) -> None:
     for name, fn, build in (
         ("from_to", from_to, _from_to_arg_model),
         ("route", route, _route_arg_model),
+        ("compare_modes", compare_modes, _compare_modes_arg_model),
     ):
         try:
             tool = mcp_server._tool_manager.get_tool(name)
