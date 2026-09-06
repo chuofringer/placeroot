@@ -108,6 +108,9 @@ PROFILES: dict[str, frozenset[str]] = {
         "optimize_route",
         # Named-place compose over route().
         "from_to",
+        # One-call walk/cycle/drive comparison over route(): the ends
+        # resolve once, each mode routes between the same coordinates.
+        "compare_modes",
         # Ground elevation at a point (#358) — routing comfort ("is this
         # walk hilly", "how high is the pass"), not a street-graph query,
         # but the same "getting between points" family this profile is.
@@ -128,6 +131,11 @@ PROFILES: dict[str, frozenset[str]] = {
         "buildings_at",
         "land_use_at",
         "infrastructure_at",
+        # Same characterize-a-point shape as infrastructure_at (it *is*
+        # infrastructure_at's query path, filtered to stop-like classes):
+        # is there transit near here, not a search for a named line or a
+        # named station.
+        "transit_stops_near",
         # Hydrology is a characterize-the-surroundings question of the same
         # shape as infrastructure_at ("is this parcel waterfront / how far
         # to the nearest canal"), not a find-a-named-thing one, so it lands
