@@ -55,6 +55,7 @@ from placeroot import (
     honesty,
     infrastructure,
     land_use,
+    map_urls,
     mapexplain,
     mapview,
     meeting,
@@ -3837,6 +3838,85 @@ def geocode_intersection(
     return budget.apply_budget(result, "results")
 
 
+@_tool("Resolve a pasted map link")
+def resolve_map_url(url: str, include_place: bool = True) -> dict:
+    """Pasted Google/Apple/OpenStreetMap/geo: map link -> its coordinate and place.
+
+    One call for the "meet here: https://maps.app.goo.gl/..." message: hand
+    over the link as pasted (scheme optional; a wrapping <...> and trailing
+    punctuation are tolerated) and get back {"lat", "lon", "provider"} plus
+    whatever the link itself carried — "zoom" when it had one, "label" when
+    it named a place or search ("Ferry Building", URL-decoded), "note" for a
+    directions link whose coordinate is only the viewport centre.
+
+    Parsed offline, no API key: Google Maps (/maps/place/<name>/@lat,lon,17z,
+    /maps/@lat,lon, the !3d!4d pin inside data= — preferred over the viewport
+    centre when both exist — ?q=lat,lon, ?ll=, ?z=, /maps/search/, /maps/dir/,
+    any google.<tld> host), Apple Maps (?ll=, ?q=, ?address=, ?sll=, ?z=),
+    OpenStreetMap (#map=z/lat/lon, ?mlat=&mlon= — the marker wins over the
+    viewport) and geo:lat,lon?z= URIs. The only network hop is a Google short
+    link (maps.app.goo.gl, goo.gl/maps, g.co): its redirects are followed
+    (at most 5, 5 s each) and the destination parsed; then "resolved_via" is
+    "redirect" and "final_url" is the page it landed on. Otherwise
+    "resolved_via" is "url". A link that names a place but carries no
+    coordinate (google.com/maps?q=Ferry+Building, Apple ?address=) is
+    resolved by name through resolve_place — "resolved_via": "name", with
+    the top hit's coordinate and "match": {"name", "id"}.
+
+    include_place (default true) adds "place": the reverse_geocode answer for
+    the coordinate (nearest address and containing admin areas), or that
+    call's own error dict — a place lookup failure never fails this call.
+    Pass false for the bare coordinate.
+
+    Errors are structured, never raised: "unsupported_url" (with the
+    "supported" provider list) for a link on none of these hosts,
+    "no_location" for a link with no usable coordinate or name (a Google
+    ?cid= id, an OSM /node/<id> page, out-of-range coordinates, or a name
+    the place search cannot find — then "label" is kept), "redirect_failed"
+    (with "status" when HTTP said so) for a short link that would not
+    expand, "bad_request" for an empty or non-string url.
+    """
+    result = map_urls.resolve(url)
+    if result.get("error") == "no_location" and result.get("label"):
+        label = result["label"]
+        try:
+            hits = resolve_place(label, limit=1)
+        except Exception as e:  # noqa: BLE001 — a name lookup must not raise past the tool
+            hits = {"error": "lookup_failed", "detail": str(e)}
+        rows = hits.get("results") if isinstance(hits, dict) else None
+        if not rows or hits.get("error"):
+            out = {
+                "error": "no_location",
+                "detail": f"the link names {label!r} but carries no coordinate, "
+                "and the name did not resolve to a place",
+                "label": label,
+                "provider": result.get("provider"),
+            }
+            if isinstance(hits, dict) and hits.get("error"):
+                out["lookup_error"] = hits["error"]
+            return out
+        top = rows[0]
+        parsed = result
+        result = {
+            "lat": top["lat"],
+            "lon": top["lon"],
+            "label": label,
+            "provider": parsed.get("provider"),
+            "resolved_via": "name",
+            "match": {"name": top.get("name"), "id": top.get("id")},
+        }
+        if "final_url" in parsed:
+            result["final_url"] = parsed["final_url"]
+    if "error" in result:
+        return result
+    if include_place:
+        try:
+            result["place"] = reverse_geocode(result["lat"], result["lon"])
+        except Exception as e:  # noqa: BLE001 — the coordinate is the answer; the place row is a bonus
+            result["place"] = {"error": "lookup_failed", "detail": str(e)}
+    return result
+
+
 @_tool("Reverse geocode points in batch")
 def reverse_geocode_batch(points: list[dict]) -> dict:
     """Reverse-geocode many points in one call, to cut N round-trips down to one.
@@ -6035,7 +6115,7 @@ def data_version() -> dict:
 def _arg_summary(fn: Callable) -> str:
     """A tool's parameters as `required,optional?` — the catalog's arg column.
 
-    Names only, no types: the catalog's budget is the whole point (47 tools
+    Names only, no types: the catalog's budget is the whole point (48 tools
 have to fit in about 1.1k tokens), and the names here are already
     self-describing (lat, radius_m, limit, category). A caller that guesses
     a type wrong gets placeroot_call's bad_request naming what the tool

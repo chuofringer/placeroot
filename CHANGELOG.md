@@ -9,6 +9,15 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- `resolve_map_url(url, include_place=True)` MCP tool (#461): a pasted Google
+  Maps, Apple Maps, OpenStreetMap or `geo:` link back to its coordinate, zoom
+  and place name — parsed offline from the URL itself (`/maps/place/<name>/@lat,lon,17z`,
+  the `!3d!4d` pin, `?q=lat,lon`, `?ll=`, Apple `?ll=`/`?q=`/`?address=`, OSM
+  `#map=`/`?mlat=&mlon=`), with a Google short link (`maps.app.goo.gl`, `goo.gl/maps`,
+  `g.co`) the one case that follows redirects over the network. No API key. A link
+  that only names a place resolves through the place search (`resolved_via: "name"`);
+  `include_place` attaches the reverse-geocoded address and admin chain. The keyless
+  counterpart to Google's Maps Grounding Lite `resolve_maps_urls`.
 - `compare_modes(from, to, modes=None, include_elevation=False, confirm=False)`
   MCP tool (#459): "should I walk, bike or drive from A to B?" in one call
   instead of three `route()` calls. The ends (same LocationRef forms as

@@ -64,6 +64,9 @@ PROFILES: dict[str, frozenset[str]] = {
         # Single-hop point compose: where/surroundings/reach/notable in
         # one call, the install-to-wow "orient me here" question (#362).
         "ground_location",
+        # A pasted map link is an install-to-wow input: "meet here: <link>"
+        # answered without an API key (#461).
+        "resolve_map_url",
     }),
     # Find/name/identify, including the batch siblings and the category
     # lookup that makes find_places' category filter usable.
@@ -84,6 +87,8 @@ PROFILES: dict[str, frozenset[str]] = {
         "geocode_address",
         # ...and the intersection twin: where two named streets cross.
         "geocode_intersection",
+        # A pasted Google/Apple/OSM link back to a coordinate and place.
+        "resolve_map_url",
         "search_categories",
         # Identify: any GERS id back to the entity it names.
         "gers_lookup",

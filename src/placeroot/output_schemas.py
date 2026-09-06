@@ -448,6 +448,7 @@ _GENERIC_TOOLS: list[str] = [
     "places_along_route",
     "preferences",
     "render_map",
+    "resolve_map_url",
     "resolve_place_batch",
     "reverse_geocode",
     "reverse_geocode_batch",
