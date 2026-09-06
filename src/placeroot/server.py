@@ -55,6 +55,7 @@ from placeroot import (
     honesty,
     infrastructure,
     land_use,
+    map_urls,
     mapexplain,
     mapview,
     meeting,
@@ -68,6 +69,7 @@ from placeroot import (
     simplify,
     tool_profiles,
     trace,
+    transit,
     verdict,
     water,
 )
@@ -249,6 +251,15 @@ _ModeArgContextDefault = Annotated[
     Field(
         description="Travel mode override. Default: inferred from context, else walk.",
         json_schema_extra={"enum": _MODE_ENUM},
+    ),
+]
+# compare_modes' subset (#459): enum on `items` like _AvoidArg, runtime type a
+# plain list so an unknown mode comes back as a self-correcting bad_request.
+_CompareModesArg = Annotated[
+    list | None,
+    Field(
+        description="Modes to compare, in answer order. Default: walk, cycle, drive.",
+        json_schema_extra={"items": {"type": "string", "enum": _MODE_ENUM}},
     ),
 ]
 _ModeSetArg = Annotated[
@@ -3022,6 +3033,126 @@ def infrastructure_at(
     return result
 
 
+def _with_transit_notes(
+    payload: dict, total_in_range: int, fallback_used: bool, class_missing: bool
+) -> dict:
+    """Add total_in_range, truncated/note, and the fallback/empty notes transit_stops_near needs.
+
+    Unlike infrastructure_at's truncation-only helper, total_in_range is
+    always present here (issue #453's response shape names it as a
+    top-level field, not something that only shows up once the answer is a
+    slice). truncated/omitted_count still only appear when fewer rows came
+    back than matched, same convention as every other radius search.
+    """
+    shown = len(payload.get("results", []))
+    payload["total_in_range"] = total_in_range
+    truncated = shown < total_in_range
+    if truncated:
+        payload["truncated"] = True
+        payload["omitted_count"] = total_in_range - shown
+
+    notes = []
+    if class_missing:
+        notes.append(
+            "this dataset has no `class` column, so stop-like rows cannot be told "
+            "apart from bicycle parking or duplicate platform/stop_position records; "
+            "returning no results rather than an unfiltered guess."
+        )
+    else:
+        if fallback_used:
+            notes.append(
+                "no bus_stop/station-class row was within radius_m; these are "
+                "platform/stop_position records instead — OSM's per-geometry "
+                "re-tagging of the same physical stops, returned as the next-best "
+                "signal."
+            )
+        elif shown == 0:
+            notes.append(
+                "no transit stop within radius_m. Base-theme coverage is "
+                "OSM-derived and patchy, so this is a real finding, not proof "
+                "there is no transit nearby."
+            )
+        if truncated:
+            notes.append(
+                f"showing the {shown} nearest of {total_in_range} matching stops; "
+                "narrow further with a smaller radius or a more specific kind."
+            )
+    if notes:
+        payload["note"] = " ".join(notes)
+    return payload
+
+
+@_tool("Transit stops near a point")
+def transit_stops_near(
+    lat: float,
+    lon: float,
+    radius_m: float = transit.DEFAULT_RADIUS_M,
+    limit: int = transit.DEFAULT_LIMIT,
+    kind: str | None = None,
+) -> dict:
+    """Nearest transit stops to a point, nearest first — bus, rail, subway, tram, ferry.
+
+    A filtered view over Overture's base/infrastructure `subtype='transit'`
+    rows (the same theme infrastructure_at reads), restricted to real,
+    boardable stop classes: bus_stop, bus_station, railway_station,
+    railway_halt, subway_station, tram_stop, ferry_terminal,
+    aerialway_station. Unfiltered, that layer is dominated by
+    bicycle_parking and by platform/stop_position — OSM's per-geometry
+    re-tagging of the same physical stop — which this tool never returns
+    by default; if zero stop-class rows are within radius_m it falls back
+    to platform/stop_position rows instead of an empty answer, and says so
+    in "note". `kind` restricts the search to exactly one class (any of
+    the stop classes above, or "platform"/"stop_position" directly);
+    an unrecognized kind returns a bad_request naming the accepted values.
+
+    Returns {"center", "radius_m", "results": [{"id", "kind", "name",
+    "distance_m"}, ...], "total_in_range"}, plus "truncated": true and an
+    explanatory "note" whenever fewer rows came back than matched, and a
+    "note" when the fallback fired or the search found nothing at all. id
+    is the GERS id, usable with other GERS-keyed tools. No raw geometry and
+    no schedules or live arrivals — Overture base/infrastructure is a
+    static OpenStreetMap conflation, and neither exists in it even in
+    principle; a caller wanting "next bus" needs a live transit API.
+
+    An empty results list is a valid answer, not an error: base-theme
+    coverage is OSM-derived and patchy, and "no stop within radius_m" is a
+    real finding. radius_m echoes the effective radius, which may be lower
+    than requested (large values are clamped).
+
+    Returns a structured {"error": ...} if upstream is unavailable or the
+    dataset is missing geometry/bbox, and {"error": "bad_request"} for a
+    non-finite or out-of-range coordinate, or an unrecognized kind.
+    """
+    coord_error = _invalid_coord(lat, lon)
+    if coord_error is not None:
+        return coord_error
+    if kind is not None and kind not in transit.ALLOWED_KINDS:
+        return {
+            "error": "bad_request",
+            "detail": f"unrecognized kind {kind!r}; accepted values: "
+            f"{', '.join(sorted(transit.ALLOWED_KINDS))}",
+        }
+    try:
+        rows, effective_radius_m, total_in_range, fallback_used, class_missing = (
+            transit.transit_stops_near(lat, lon, radius_m, limit, kind=kind)
+        )
+    except overture.UpstreamUnavailable as e:
+        return _upstream_error(e)
+    except overture.SchemaDegraded as e:
+        return _schema_error(e)
+    result = {
+        "center": {"lat": lat, "lon": lon},
+        "radius_m": effective_radius_m,
+        "results": rows,
+    }
+    result = budget.apply_budget(result, "results")
+    result = _with_transit_notes(result, total_in_range, fallback_used, class_missing)
+    degraded = infrastructure.degraded_fields()
+    if degraded:
+        result["degraded_fields"] = degraded
+    return result
+
+
 def _water_notes(
     payload: dict,
     in_range_count: int,
@@ -3184,7 +3315,9 @@ def water_near(
 
 
 @_tool("Geocode a place name")
-def geocode(query: str, limit: int = 5, lang: _LangArg = None) -> dict:
+def geocode(
+    query: str, limit: int = 5, lang: _LangArg = None, country: str | None = None,
+) -> dict:
     """Free-text place name -> ranked candidate locations, from Overture divisions and places.
 
     No Nominatim, no third-party geocoding API. Matches localities,
@@ -3193,6 +3326,22 @@ def geocode(query: str, limit: int = 5, lang: _LangArg = None) -> dict:
     Returns {"results": [{name, type, lat, lon, id (GERS), admin_context,
     rank_score}, ...]}, budgeted like every other tool. Returns a structured
     {"error": ...} instead of raising if the remote scan fails.
+
+    A trailing "City, ST"/"City, Region" suffix has resolved against a US
+    state or another region since #46; a trailing "City, Country" suffix
+    resolves the same way (#457) — "Cambridge, UK", "Cambridge, GB",
+    "Cambridge, GBR" and "Cambridge, United Kingdom" all constrain the
+    search to the UK's Cambridge, excluding any same-named division
+    elsewhere. `country` (ISO 3166-1 alpha-2, also accepting alpha-3 and
+    aliases like "UK"/"USA", case-insensitive) is the explicit form of the
+    same constraint, for a caller that already knows the country instead
+    of writing it into `query`. An unrecognized `country`, or one that
+    disagrees with a country/region suffix parsed off `query` itself,
+    returns {"error": "bad_request", ...} naming both. A comma-suffix that
+    names neither a region nor a country still searches the name half
+    alone rather than returning nothing, with a "note" naming the
+    unrecognized qualifier; a recognized country/region that matches
+    nothing degrades the same way, with a "note".
 
     A query with no location context in it at all (a bare place name that
     matches no division, e.g. "Blue Bottle Roastery") can't be bounded to a
@@ -3239,9 +3388,11 @@ def geocode(query: str, limit: int = 5, lang: _LangArg = None) -> dict:
     """
     lang = preference_store.resolve_lang(lang)
     try:
-        result = geocoding.geocode_detailed(query, limit, lang=lang)
+        result = geocoding.geocode_detailed(query, limit, lang=lang, country=country)
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
     payload = budget.apply_budget({"results": result["results"]}, "results")
     if "note" in result:
         payload["note"] = result["note"]
@@ -3249,7 +3400,9 @@ def geocode(query: str, limit: int = 5, lang: _LangArg = None) -> dict:
 
 
 @_tool("Geocode names in batch")
-def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
+def geocode_batch(
+    queries: list[str], limit_per_query: int = 3, country: str | None = None,
+) -> dict:
     """Geocode up to 20 free-text queries in one call, one best match each.
 
     Cuts N round-trips of geocode() into one and, more importantly,
@@ -3264,6 +3417,16 @@ def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
     {"error": ...} rather than truncating silently. Budgeted like every
     other tool. Returns a structured {"error": ...} instead of raising if
     the remote scan itself fails.
+
+    country (#457, ISO 3166-1 alpha-2, also accepting alpha-3 and aliases
+    like "UK"/"USA", case-insensitive) applies the same "City, Country"
+    constraint geocode() takes to every query in the batch — e.g.
+    `geocode_batch(["Cambridge", "London"], country="CA")` answers with
+    Ontario's London and a not_found row for Cambridge (no Canadian
+    Cambridge in the dataset), rather than the UK/US namesakes each query
+    would otherwise resolve to on its own. An unrecognized `country`, or a
+    per-query suffix that disagrees with it, returns a structured
+    {"error": "bad_request", ...} for the whole call.
     """
     if len(queries) > 20:
         return {
@@ -3271,9 +3434,11 @@ def geocode_batch(queries: list[str], limit_per_query: int = 3) -> dict:
             "detail": f"geocode_batch accepts at most 20 queries, got {len(queries)}",
         }
     try:
-        rows = geocoding.geocode_batch(queries, limit_per_query)
+        rows = geocoding.geocode_batch(queries, limit_per_query, country=country)
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
     return budget.apply_budget({"results": rows}, "results")
 
 
@@ -3309,6 +3474,7 @@ def resolve_place(
     limit: int = 3,
     city: str | None = None,
     lang: _LangArg = None,
+    country: str | None = None,
 ) -> dict:
     """Free-text place reference -> ranked, typed GERS ids to hold onto.
 
@@ -3360,6 +3526,15 @@ def resolve_place(
     merges from — see geocode()'s docstring. resolve_place does not add its
     own disclosure note for that; its own ranking already leads with
     distance to `near_lat`/`near_lon`/`city` when one is given.
+
+    country (#457, ISO 3166-1 alpha-2, also accepting alpha-3 and aliases
+    like "UK"/"USA", case-insensitive) composes with `city`: it constrains
+    the divisions half of the merge the same way it constrains geocode()
+    itself — `resolve_place("Cambridge", country="GB")` resolves the UK
+    Cambridge rather than whichever namesake ranks first unconstrained. An
+    unrecognized `country`, or one that disagrees with a country/region
+    suffix parsed off `query` itself, returns a structured
+    {"error": "bad_request", ...} naming both.
     """
     if near_lat is not None and near_lon is not None:
         coord_error = _invalid_coord(near_lat, near_lon)
@@ -3368,12 +3543,14 @@ def resolve_place(
     lang = preference_store.resolve_lang(lang)
     try:
         rows = geocoding.resolve_place(
-            query, near_lat, near_lon, limit, city=city, lang=lang,
+            query, near_lat, near_lon, limit, city=city, lang=lang, country=country,
         )
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
         return _schema_error(e)
+    except ValueError as e:
+        return {"error": "bad_request", "detail": str(e)}
     payload: dict = {"results": rows}
     if not rows and city is None and near_lat is None:
         # Machine-actionable instead of prose: the caller can retry without
@@ -3667,6 +3844,85 @@ def geocode_intersection(
     except overture.SchemaDegraded as e:
         return _schema_error(e)
     return budget.apply_budget(result, "results")
+
+
+@_tool("Resolve a pasted map link")
+def resolve_map_url(url: str, include_place: bool = True) -> dict:
+    """Pasted Google/Apple/OpenStreetMap/geo: map link -> its coordinate and place.
+
+    One call for the "meet here: https://maps.app.goo.gl/..." message: hand
+    over the link as pasted (scheme optional; a wrapping <...> and trailing
+    punctuation are tolerated) and get back {"lat", "lon", "provider"} plus
+    whatever the link itself carried — "zoom" when it had one, "label" when
+    it named a place or search ("Ferry Building", URL-decoded), "note" for a
+    directions link whose coordinate is only the viewport centre.
+
+    Parsed offline, no API key: Google Maps (/maps/place/<name>/@lat,lon,17z,
+    /maps/@lat,lon, the !3d!4d pin inside data= — preferred over the viewport
+    centre when both exist — ?q=lat,lon, ?ll=, ?z=, /maps/search/, /maps/dir/,
+    any google.<tld> host), Apple Maps (?ll=, ?q=, ?address=, ?sll=, ?z=),
+    OpenStreetMap (#map=z/lat/lon, ?mlat=&mlon= — the marker wins over the
+    viewport) and geo:lat,lon?z= URIs. The only network hop is a Google short
+    link (maps.app.goo.gl, goo.gl/maps, g.co): its redirects are followed
+    (at most 5, 5 s each) and the destination parsed; then "resolved_via" is
+    "redirect" and "final_url" is the page it landed on. Otherwise
+    "resolved_via" is "url". A link that names a place but carries no
+    coordinate (google.com/maps?q=Ferry+Building, Apple ?address=) is
+    resolved by name through resolve_place — "resolved_via": "name", with
+    the top hit's coordinate and "match": {"name", "id"}.
+
+    include_place (default true) adds "place": the reverse_geocode answer for
+    the coordinate (nearest address and containing admin areas), or that
+    call's own error dict — a place lookup failure never fails this call.
+    Pass false for the bare coordinate.
+
+    Errors are structured, never raised: "unsupported_url" (with the
+    "supported" provider list) for a link on none of these hosts,
+    "no_location" for a link with no usable coordinate or name (a Google
+    ?cid= id, an OSM /node/<id> page, out-of-range coordinates, or a name
+    the place search cannot find — then "label" is kept), "redirect_failed"
+    (with "status" when HTTP said so) for a short link that would not
+    expand, "bad_request" for an empty or non-string url.
+    """
+    result = map_urls.resolve(url)
+    if result.get("error") == "no_location" and result.get("label"):
+        label = result["label"]
+        try:
+            hits = resolve_place(label, limit=1)
+        except Exception as e:  # noqa: BLE001 — a name lookup must not raise past the tool
+            hits = {"error": "lookup_failed", "detail": str(e)}
+        rows = hits.get("results") if isinstance(hits, dict) else None
+        if not rows or hits.get("error"):
+            out = {
+                "error": "no_location",
+                "detail": f"the link names {label!r} but carries no coordinate, "
+                "and the name did not resolve to a place",
+                "label": label,
+                "provider": result.get("provider"),
+            }
+            if isinstance(hits, dict) and hits.get("error"):
+                out["lookup_error"] = hits["error"]
+            return out
+        top = rows[0]
+        parsed = result
+        result = {
+            "lat": top["lat"],
+            "lon": top["lon"],
+            "label": label,
+            "provider": parsed.get("provider"),
+            "resolved_via": "name",
+            "match": {"name": top.get("name"), "id": top.get("id")},
+        }
+        if "final_url" in parsed:
+            result["final_url"] = parsed["final_url"]
+    if "error" in result:
+        return result
+    if include_place:
+        try:
+            result["place"] = reverse_geocode(result["lat"], result["lon"])
+        except Exception as e:  # noqa: BLE001 — the coordinate is the answer; the place row is a bonus
+            result["place"] = {"error": "lookup_failed", "detail": str(e)}
+    return result
 
 
 @_tool("Reverse geocode points in batch")
@@ -4632,37 +4888,9 @@ def _route_between_refs(
     the resolved name/id echoed onto the answer's "from"/"to" — are one
     implementation rather than two that can drift.
     """
-    if isinstance(from_, str) and not from_.strip():
-        return {
-            "error": "bad_request",
-            "detail": "from must be a non-empty place name",
-            "field": "from",
-        }
-    if isinstance(to, str) and not to.strip():
-        return {
-            "error": "bad_request",
-            "detail": "to must be a non-empty place name",
-            "field": "to",
-        }
-    # Both ends still plain names (not GERS ids): the original, byte-
-    # identical path — same parallel _resolve_pair call, same
-    # ambiguous_place/not_found shape as before this feature existed.
-    if (
-        isinstance(from_, str) and isinstance(to, str)
-        and not _GERS_ID_RE.match(from_.strip()) and not _GERS_ID_RE.match(to.strip())
-    ):
-        origin, dest = _resolve_pair(from_, to)
-        if "error" in origin:
-            return {**origin, "field": "from"}
-        if "error" in dest:
-            return {**dest, "field": "to"}
-    else:
-        origin, origin_error = _resolve_location_ref(from_)
-        if origin_error is not None:
-            return {**origin_error, "field": "from"}
-        dest, dest_error = _resolve_location_ref(to)
-        if dest_error is not None:
-            return {**dest_error, "field": "to"}
+    origin, dest, end_error = _resolve_route_ends(from_, to)
+    if end_error is not None:
+        return end_error
     mode = preference_store.resolve_mode(mode, default_mode)
     if mode not in routing.MODE_CONFIG:
         return {
@@ -4703,6 +4931,235 @@ def _route_between_refs(
         # maps/gpx/text use the named endpoints rather than bare coordinates.
         result["export"] = export.from_route_result(result)
     return result
+
+
+def _resolve_route_ends(from_, to) -> tuple[dict | None, dict | None, dict | None]:
+    """Resolve a routing call's two LocationRef ends — (origin, dest, error).
+
+    Exactly one of the two shapes comes back: (origin, dest, None) with both
+    ends resolved to dicts carrying lat/lon (plus name/id/type/admin_context
+    when the input was a name or GERS id), or (None, None, error) where the
+    error dict names the offending side in "field": "from" | "to". Shared by
+    _route_between_refs (route/from_to) and compare_modes so the end
+    semantics — empty-string bad_request, the byte-identical parallel
+    _resolve_pair fast path for two plain names, per-side field — are one
+    implementation rather than two that can drift.
+    """
+    if isinstance(from_, str) and not from_.strip():
+        return None, None, {
+            "error": "bad_request",
+            "detail": "from must be a non-empty place name",
+            "field": "from",
+        }
+    if isinstance(to, str) and not to.strip():
+        return None, None, {
+            "error": "bad_request",
+            "detail": "to must be a non-empty place name",
+            "field": "to",
+        }
+    # Both ends still plain names (not GERS ids): the original, byte-
+    # identical path — same parallel _resolve_pair call, same
+    # ambiguous_place/not_found shape as before this feature existed.
+    if (
+        isinstance(from_, str) and isinstance(to, str)
+        and not _GERS_ID_RE.match(from_.strip()) and not _GERS_ID_RE.match(to.strip())
+    ):
+        origin, dest = _resolve_pair(from_, to)
+        if "error" in origin:
+            return None, None, {**origin, "field": "from"}
+        if "error" in dest:
+            return None, None, {**dest, "field": "to"}
+        return origin, dest, None
+    origin, origin_error = _resolve_location_ref(from_)
+    if origin_error is not None:
+        return None, None, {**origin_error, "field": "from"}
+    dest, dest_error = _resolve_location_ref(to)
+    if dest_error is not None:
+        return None, None, {**dest_error, "field": "to"}
+    return origin, dest, None
+
+
+# compare_modes' row order and the verbs its deterministic summary uses.
+_COMPARE_MODES_DEFAULT = ("walk", "cycle", "drive")
+_COMPARE_MODES_VERB = {"walk": "walking", "cycle": "cycling", "drive": "driving"}
+# Keys a route() answer carries that a compact compare_modes row must not:
+# geometry, export, endpoint echoes (the call carries one from/to), and the
+# progress middleware's per-call status lines.
+_COMPARE_MODES_DROP = frozenset(
+    {"from", "to", "export", "path", "path_max_deviation_m", "path_omitted",
+     "elevation", "elevation_omitted", "progress", "status", "timing", "mode"}
+)
+
+
+def _compare_modes_row(mode: str, origin: dict, dest: dict, *, include_elevation: bool,
+                       confirm: bool) -> dict:
+    """One compact per-mode row for compare_modes; failures stay inline."""
+    straight_m = geo.haversine_m(origin["lat"], origin["lon"], dest["lat"], dest["lon"])
+    cap_m = routing.ROUTE_MAX_STRAIGHT_LINE_M[mode]
+    if straight_m > cap_m:
+        origin_label = origin.get("name") or f"({origin['lat']}, {origin['lon']})"
+        dest_label = dest.get("name") or f"({dest['lat']}, {dest['lon']})"
+        return {
+            "mode": mode,
+            "error": "too_far",
+            "detail": (
+                f"{origin_label!r} and {dest_label!r} are {round(straight_m)} m "
+                f"apart; compare_modes stays inside one city ({mode} cap {round(cap_m)} m)"
+            ),
+            "max_distance_m": cap_m,
+        }
+    result = route(
+        origin["lat"], origin["lon"], dest["lat"], dest["lon"], mode=mode,
+        include_elevation=include_elevation, confirm=confirm,
+    )
+    if "error" in result:
+        row = {"mode": mode}
+        row.update({k: v for k, v in result.items() if k not in _COMPARE_MODES_DROP})
+        return row
+    row = {
+        "mode": mode,
+        "distance_m": result.get("distance_m"),
+        "duration_s": result.get("duration_s"),
+    }
+    duration_s = result.get("duration_s")
+    if isinstance(duration_s, (int, float)) and not isinstance(duration_s, bool):
+        row["duration_min"] = int(round(duration_s / 60))
+    if "truncated" in result:
+        row["truncated"] = result["truncated"]
+    elevation_block = result.get("elevation") if include_elevation else None
+    if isinstance(elevation_block, dict):
+        for key in ("total_climb_m", "total_descent_m"):
+            if key in elevation_block:
+                row[key] = elevation_block[key]
+    return row
+
+
+def _compare_modes_summary(rows: list[dict], fastest: str | None) -> str:
+    """Deterministic one-or-two-sentence read of the rows — no LLM, no randomness."""
+    ok = [r for r in rows if "error" not in r]
+    failed = [r for r in rows if "error" in r]
+    verb = _COMPARE_MODES_VERB
+    if not ok:
+        reasons = "; ".join(f"{r['mode']} — {r['error']}" for r in failed)
+        return f"No mode could be routed: {reasons}."
+    if len(ok) == 1:
+        (only,) = ok
+        text = (
+            f"Only {verb[only['mode']]} could be routed: {only['duration_min']} min "
+            f"over {round(only['distance_m'])} m."
+        )
+    else:
+        lead = next(r for r in ok if r["mode"] == fastest)
+        others = [r for r in ok if r["mode"] != fastest]
+        others_text = ", ".join(f"{verb[r['mode']]} {r['duration_min']} min" for r in others)
+        text = (
+            f"{verb[lead['mode']].capitalize()} is fastest at {lead['duration_min']} min; "
+            f"{others_text}."
+        )
+    if any(r["mode"] == "drive" for r in ok):
+        text += " Driving time is a posted-speed model with no live traffic."
+    if failed:
+        text += " Not routed: " + ", ".join(f"{r['mode']} ({r['error']})" for r in failed) + "."
+    return text
+
+
+@_tool("Compare walk / cycle / drive")
+def compare_modes(
+    from_: str | dict,
+    to: str | dict,
+    modes: list | None = None,
+    include_elevation: bool = False,
+    confirm: bool = False,
+) -> dict:
+    """Walk vs cycle vs drive between two places, in one call.
+
+    "Should I walk, bike or drive from A to B?" is three route() calls;
+    this is one. The ends resolve exactly once and every mode routes
+    between the same two coordinates, so the rows are comparable. Use it
+    when the user is choosing a mode; when the mode is already known,
+    route() or from_to() gives the fuller answer (export maps/gpx/text,
+    optional polyline).
+
+    Pass each of from/to as a free-text place name, a {"lat", "lon"} dict,
+    or a GERS id — mixed freely, exactly as from_to takes them.
+    Do not call geocode(), resolve_place(), or geocode_batch() first. modes
+    is an optional subset of ["walk", "cycle", "drive"]; omitted means all three
+    in that order (stored mode preferences are not consulted — every mode
+    asked for is computed). A mode outside that vocabulary, or an empty
+    list, returns {"error": "bad_request"}; duplicates collapse, order kept.
+
+    Returns {"from", "to", "modes", "fastest", "shortest", "summary"}.
+    "from"/"to" carry what each end resolved to (name/id when the input was
+    a name or GERS id, lat/lon always). "modes" is one compact row per
+    requested mode, in the requested order: {"mode", "distance_m",
+    "duration_s", "duration_min"} — no path, no export, no per-row
+    endpoints; with include_elevation=true a row also carries
+    "total_climb_m"/"total_descent_m" where the DEM covered the route
+    (never faked as 0). "fastest"/"shortest" name the mode with the lowest
+    duration/distance among the rows that routed, or null if none did.
+    "summary" is a short deterministic sentence or two built from the rows.
+
+    A mode that cannot be routed fails inline in its own row — {"mode",
+    "error", "detail"} — and never aborts the call: "too_far" when the ends
+    exceed that mode's straight-line cap (walk ~7.5 km, cycle ~23.5 km,
+    drive ~95.5 km — so a cross-town pair often gives a drive row and a
+    too_far walk row), "needs_confirm" with its eta/eta_s when that mode's
+    street graph is cold and confirm is false, or whatever error route()
+    returned (no_graph_nearby, no_route, ...). Only end resolution fails
+    the whole call: {"error": "ambiguous_place" | "not_found" |
+    "bad_request"} with "field": "from" | "to", as from_to does.
+
+    Same cost model as route(): walk 1.4 m/s, cycle 4.2 m/s, drive from
+    posted speed limits or a class default — a posted-speed model with no
+    live traffic, which the summary says whenever drive routed.
+
+    confirm=true after the user agreed to wait for a first-time street-graph
+    build (about 5–25 seconds per cold mode — each mode is its own graph).
+    Pass it only after a needs_confirm row and they said yes. A warm or
+    cached graph never needs it. Omit confirm unless you just asked and
+    they said yes.
+    """
+    if modes is None:
+        wanted = list(_COMPARE_MODES_DEFAULT)
+    else:
+        if not isinstance(modes, list) or not modes:
+            return {
+                "error": "bad_request",
+                "detail": "modes must be a non-empty list drawn from "
+                f"{list(_COMPARE_MODES_DEFAULT)}, or omitted for all three",
+                "supported": list(_COMPARE_MODES_DEFAULT),
+            }
+        wanted = []
+        for mode in modes:
+            if not isinstance(mode, str) or mode not in routing.MODE_CONFIG:
+                return {
+                    "error": "bad_request",
+                    "detail": f"unsupported mode {mode!r} in modes; supported: "
+                    f"{list(_COMPARE_MODES_DEFAULT)}",
+                    "supported": list(_COMPARE_MODES_DEFAULT),
+                }
+            if mode not in wanted:
+                wanted.append(mode)
+    origin, dest, end_error = _resolve_route_ends(from_, to)
+    if end_error is not None:
+        return end_error
+    rows = [
+        _compare_modes_row(
+            mode, origin, dest, include_elevation=include_elevation, confirm=confirm
+        )
+        for mode in wanted
+    ]
+    ok = [r for r in rows if "error" not in r]
+    fastest = min(ok, key=lambda r: r["duration_s"])["mode"] if ok else None
+    shortest = min(ok, key=lambda r: r["distance_m"])["mode"] if ok else None
+    return {
+        "from": origin,
+        "to": dest,
+        "modes": rows,
+        "fastest": fastest,
+        "shortest": shortest,
+        "summary": _compare_modes_summary(rows, fastest),
+    }
 
 
 @_tool("Find places near a name")
@@ -4992,7 +5449,11 @@ def neighborhood_verdict(
     generic walk-first daily-needs check and says what was assumed.
     Optional radius_m / minutes / mode override what the context implies
     (no car / walk-first -> walk, bike -> cycle, car -> drive; default
-    walk, 15 minutes). Does not call out to extra remote APIs.
+    walk, 15 minutes). Does not call out to extra remote APIs; the
+    "transit" need additionally reads base/infrastructure transit stops
+    (bus_stop, subway_station, ferry_terminal, ...) alongside the
+    places-theme categories, since places alone under-reports bus stops
+    (#454).
 
     Returns a structured {"error": ...} for bad coordinates, an unknown
     mode, a radius past the mode cap, upstream failure, or a degraded
@@ -5662,7 +6123,7 @@ def data_version() -> dict:
 def _arg_summary(fn: Callable) -> str:
     """A tool's parameters as `required,optional?` — the catalog's arg column.
 
-    Names only, no types: the catalog's budget is the whole point (45 tools
+    Names only, no types: the catalog's budget is the whole point (48 tools
 have to fit in about 1.1k tokens), and the names here are already
     self-describing (lat, radius_m, limit, category). A caller that guesses
     a type wrong gets placeroot_call's bad_request naming what the tool
@@ -5760,7 +6221,11 @@ def placeroot_call(tool: str, args: dict | None = None) -> dict:
             "valid_tools": sorted(_TOOL_FUNCS),
         }
     call_args = {} if args is None else args
-    if tool in ("from_to", "route") and isinstance(call_args, dict) and "from" in call_args:
+    if (
+        tool in ("from_to", "route", "compare_modes")
+        and isinstance(call_args, dict)
+        and "from" in call_args
+    ):
         call_args = {**call_args, "from_": call_args["from"]}
         call_args.pop("from", None)
     if not isinstance(call_args, dict):
@@ -5989,6 +6454,21 @@ def _from_to_arg_model():
     return FromToArguments
 
 
+def _compare_modes_arg_model():
+    """compare_modes' published argument model: `from_` as `from`, the rest verbatim (#459)."""
+    from pydantic import ConfigDict, Field
+
+    class CompareModesArguments(_from_alias_base()):
+        model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
+        from_: str | dict = Field(alias="from")
+        to: str | dict
+        modes: _CompareModesArg = None
+        include_elevation: bool = False
+        confirm: bool = False
+
+    return CompareModesArguments
+
+
 def _route_arg_model():
     """route's published argument model: the four scalars, from/to, and the rest (#419)."""
     from pydantic import ConfigDict, Field
@@ -6012,9 +6492,9 @@ def _route_arg_model():
 
 
 def _publish_from_keyword(mcp_server) -> None:
-    """Advertise from_to's and route's origin as `from` — a reserved word in Python.
+    """Advertise from_to's, route's and compare_modes' origin as `from` — a reserved word in Python.
 
-    The implementation parameter is from_ on both tools. The public schema
+    The implementation parameter is from_ on all three tools. The public schema
     and the validator both use from so the agent never sees the underscore.
 
     Each model is checked against the function's real signature before it is
@@ -6028,6 +6508,7 @@ def _publish_from_keyword(mcp_server) -> None:
     for name, fn, build in (
         ("from_to", from_to, _from_to_arg_model),
         ("route", route, _route_arg_model),
+        ("compare_modes", compare_modes, _compare_modes_arg_model),
     ):
         try:
             tool = mcp_server._tool_manager.get_tool(name)
