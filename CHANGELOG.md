@@ -9,6 +9,8 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Added
+- Listed on [punkpeye/awesome-mcp-servers](https://github.com/punkpeye/awesome-mcp-servers)
+  under Location Services ([PR #12190](https://github.com/punkpeye/awesome-mcp-servers/pull/12190)).
 - `resolve_map_url(url, include_place=True)` MCP tool (#461): a pasted Google
   Maps, Apple Maps, OpenStreetMap or `geo:` link back to its coordinate, zoom
   and place name — parsed offline from the URL itself (`/maps/place/<name>/@lat,lon,17z`,
