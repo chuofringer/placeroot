@@ -16,6 +16,12 @@ name: Listings Check
 #   - https://placeroot.dev resolves (the site)
 #   - the published install command (uvx placeroot) actually runs
 #
+# placeroot.dev sits behind Cloudflare Bot Fight Mode. curl / GitHub Actions
+# often get HTTP 403 with cf-mitigated: challenge ("Just a moment...") while
+# browsers still load the site. scripts/check_listings.sh treats that
+# interstitial as a false 403 only when the same path still serves real HTML
+# from placeroot.pages.dev — a bare origin 403 still fails the check (#495).
+#
 # The issue is opened, refreshed AND closed from here, same as the Overture
 # canary: a watch nobody has to tidy up by hand is one that keeps being
 # trusted.
