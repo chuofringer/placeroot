@@ -74,7 +74,10 @@ url_check() {
     headers=$(mktemp)
     # curl writes the body even on non-2xx; -f would abort before we can
     # inspect a challenge response, so leave it off.
-    code=$(curl -sS -D "$headers" -o "$body" -w '%{http_code}' -L --max-time 30 "$url" || echo "000")
+    # On connect failure curl prints 000 via -w and exits nonzero; keep that
+    # single 000 rather than appending a second one.
+    code=$(curl -sS -D "$headers" -o "$body" -w '%{http_code}' -L --max-time 30 "$url" || true)
+    code=${code:-000}
 
     if [ "$code" = "200" ]; then
         echo "- OK: $label ($url) -> $code"
@@ -86,11 +89,12 @@ url_check() {
         origin=$(pages_origin_url "$url")
         if [ -n "$origin" ]; then
             origin_body=$(mktemp)
-            origin_code=$(curl -sS -o "$origin_body" -w '%{http_code}' -L --max-time 30 "$origin" || echo "000")
-            # Require a real HTML document from the Pages origin — a challenge
-            # on both hosts, or a bare 200 with no page, still fails.
+            origin_code=$(curl -sS -o "$origin_body" -w '%{http_code}' -L --max-time 30 "$origin" || true)
+            origin_code=${origin_code:-000}
+            # Require a PlaceRoot page from the Pages origin — a challenge on
+            # both hosts, or a 200 for some other site, still fails.
             if [ "$origin_code" = "200" ] \
-                && grep -q '<title>' "$origin_body" \
+                && grep -qiE '<title>[^<]*PlaceRoot' "$origin_body" \
                 && ! grep -q 'Just a moment...' "$origin_body"; then
                 echo "- OK: $label ($url) -> Cloudflare bot challenge (HTTP $code); content verified via $origin -> $origin_code"
                 rm -f "$body" "$headers" "$origin_body"

@@ -32,6 +32,10 @@ WHY_HTML = (
     "<!DOCTYPE html><html><head><title>Why we built PlaceRoot</title></head>"
     "<body><h1>Why</h1></body></html>"
 )
+WRONG_HTML = (
+    "<!DOCTYPE html><html><head><title>Welcome to nginx</title></head>"
+    "<body><h1>Welcome to nginx!</h1></body></html>"
+)
 
 
 class _ChallengeHandler(BaseHTTPRequestHandler):
@@ -64,7 +68,7 @@ class _ChallengeHandler(BaseHTTPRequestHandler):
 
 
 class _OriginHandler(BaseHTTPRequestHandler):
-    """Pages-origin stand-in. mode: live | challenge | down."""
+    """Pages-origin stand-in. mode: live | challenge | down | wrong."""
 
     mode = "live"
 
@@ -76,6 +80,14 @@ class _OriginHandler(BaseHTTPRequestHandler):
         if _OriginHandler.mode == "down":
             self.send_response(503)
             self.end_headers()
+            return
+        if _OriginHandler.mode == "wrong":
+            body = WRONG_HTML.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=UTF-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if _OriginHandler.mode == "challenge":
             body = CF_CHALLENGE_BODY.encode()
@@ -198,3 +210,57 @@ def test_challenge_fails_when_origin_also_challenged(dual_servers):
     assert result.returncode == 1, result.stdout + result.stderr
     assert "content not verified" in result.stdout
     assert "no Pages origin fallback" in result.stdout
+
+
+def test_challenge_fails_when_origin_down(dual_servers):
+    dual_servers["set_origin_mode"]("down")
+    custom = dual_servers["custom_base"]
+    custom_host = custom.removeprefix("http://")
+    origin = dual_servers["origin_host"]
+    result = _run_check(
+        {
+            "CHECK_LISTINGS_CUSTOM_DOMAIN_HOST": custom_host,
+            "CHECK_LISTINGS_PAGES_ORIGIN_HOST": origin,
+            "CHECK_LISTINGS_PAGES_ORIGIN_SCHEME": "http",
+            "CHECK_LISTINGS_SITE_URL": f"{custom}/",
+            "CHECK_LISTINGS_WHY_URL": f"{custom}/why-placeroot",
+            "CHECK_LISTINGS_GLAMA_URL": f"http://{origin}/",
+        }
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "content not verified" in result.stdout
+
+
+def test_challenge_fails_when_origin_lacks_placeroot_title(dual_servers):
+    dual_servers["set_origin_mode"]("wrong")
+    custom = dual_servers["custom_base"]
+    custom_host = custom.removeprefix("http://")
+    origin = dual_servers["origin_host"]
+    result = _run_check(
+        {
+            "CHECK_LISTINGS_CUSTOM_DOMAIN_HOST": custom_host,
+            "CHECK_LISTINGS_PAGES_ORIGIN_HOST": origin,
+            "CHECK_LISTINGS_PAGES_ORIGIN_SCHEME": "http",
+            "CHECK_LISTINGS_SITE_URL": f"{custom}/",
+            "CHECK_LISTINGS_WHY_URL": f"{custom}/why-placeroot",
+            "CHECK_LISTINGS_GLAMA_URL": f"http://{origin}/",
+        }
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "content not verified" in result.stdout
+    assert "content verified via" not in result.stdout
+
+
+def test_unreachable_url_reports_single_000(dual_servers):
+    dual_servers["set_origin_mode"]("live")
+    origin = dual_servers["origin_host"]
+    result = _run_check(
+        {
+            "CHECK_LISTINGS_SITE_URL": "http://127.0.0.1:1/",
+            "CHECK_LISTINGS_WHY_URL": f"http://{origin}/why-placeroot",
+            "CHECK_LISTINGS_GLAMA_URL": f"http://{origin}/",
+        }
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "-> 000\n" in result.stdout
+    assert "000000" not in result.stdout
