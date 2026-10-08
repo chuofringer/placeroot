@@ -8,6 +8,13 @@ fixing behavior is patch.
 
 ## [Unreleased]
 
+### Fixed
+- Quarterly listings check no longer fails on Cloudflare Bot Fight Mode
+  interstitials for placeroot.dev (#495). A `403` with `cf-mitigated:
+  challenge` (the "Just a moment..." page) is treated as a false outage only
+  when the same path still serves real HTML from `placeroot.pages.dev`; a
+  plain origin `403` still fails the check. Package version remains 0.10.0.
+
 ### Added
 - Listed on [punkpeye/awesome-mcp-servers](https://github.com/punkpeye/awesome-mcp-servers)
   under Location Services ([PR #12190](https://github.com/punkpeye/awesome-mcp-servers/pull/12190)).
