@@ -108,6 +108,22 @@ def _names(rows):
 # resolve_place / geocode: "where is X"
 # --------------------------------------------------------------------------
 
+def _name_has(name, expect_sub):
+    """Case-, accent- and punctuation-insensitive containment. The gate
+    failed every weekday on x03 because "Notre Dame" is not a substring of
+    the right answer, "Cathédrale Notre-Dame de Paris" — the hyphen."""
+    import re
+    import unicodedata
+
+    def norm(s):
+        s = unicodedata.normalize("NFKD", s or "")
+        s = "".join(c for c in s if not unicodedata.combining(c))
+        s = re.sub(r"['\u2019]", "", s.casefold())
+        return " ".join(re.sub(r"[\W_]+", " ", s).split())
+
+    return norm(expect_sub) in norm(name)
+
+
 def _near_miss(top, near):
     """near=(lat, lon, km): the failure detail when `top` lands outside km of
     the truth, else None. Shared by every check that anchors on a resolved
@@ -134,7 +150,7 @@ def _resolve(name, expect_sub=None, near=None):
             return False, "EMPTY"
         top = rows[0]
         detail = f"{top.get('name')!r} @ {top.get('lat'):.3f},{top.get('lon'):.3f}"
-        if expect_sub and expect_sub.lower() not in (top.get("name") or "").lower():
+        if expect_sub and not _name_has(top.get("name"), expect_sub):
             return False, f"WRONG NAME {detail}"
         miss = _near_miss(top, near)
         if miss:
@@ -204,7 +220,7 @@ def _geocode(name, near=None, expect_sub=None):
             return False, "EMPTY"
         top = rows[0]
         detail = f"{top.get('name')!r} @ {top.get('lat'):.2f},{top.get('lon'):.2f}"
-        if expect_sub and expect_sub.lower() not in (top.get("name") or "").lower():
+        if expect_sub and not _name_has(top.get("name"), expect_sub):
             return False, f"WRONG NAME {detail}"
         if near:
             import math
