@@ -102,8 +102,40 @@ def _s3_endpoint() -> str | None:
     return os.environ.get("PLACEROOT_S3_ENDPOINT") or None
 
 
+def _extension_directory() -> str | None:
+    """Where DuckDB looks for (and installs) extensions, if the operator
+    overrode DuckDB's default (~/.duckdb/extensions) via
+    PLACEROOT_DUCKDB_EXTENSION_DIR — e.g. a pre-populated, read-only
+    directory on an air-gapped host. None means DuckDB's own default."""
+    return os.environ.get("PLACEROOT_DUCKDB_EXTENSION_DIR") or None
+
+
+def load_extension(con: duckdb.DuckDBPyConnection, name: str) -> None:
+    """LOAD a DuckDB extension, installing it first only if LOAD fails.
+
+    `INSTALL x` is not a no-op when x is already installed: it still
+    contacts extensions.duckdb.org (a version check), which on an offline
+    host fails outright and takes the whole connection with it. LOAD alone
+    is purely local, so a machine that has the extension already (an
+    earlier run, a pre-installed PLACEROOT_DUCKDB_EXTENSION_DIR) never
+    touches the network. Only a genuinely missing extension pays the
+    download — and if that fails too, the error is DuckDB's own, naming the
+    extension and URL.
+    """
+    try:
+        con.execute(f"LOAD {name};")
+        return
+    except duckdb.Error as e:
+        logger.debug("LOAD %s failed (%s); trying INSTALL first", name, e)
+    con.execute(f"INSTALL {name}; LOAD {name};")
+
+
 def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
-    con.execute("INSTALL httpfs; LOAD httpfs;")
+    ext_dir = _extension_directory()
+    if ext_dir:
+        # Must precede the first LOAD: it is where LOAD looks.
+        con.execute(f"SET extension_directory={_sql_str(ext_dir)};")
+    load_extension(con, "httpfs")
     # An MCP tool call isn't an interactive terminal; a progress bar just
     # clutters (or, piped through a wrapping process, can garble) output.
     con.execute("SET enable_progress_bar=false;")
@@ -251,7 +283,8 @@ def ensure_spatial() -> None:
 
     Lock-held internally. Idempotent and cheap to call on every query that
     needs ST_* functions (divisions.py, buildings.py, routing.py all do);
-    the actual INSTALL/LOAD only ever runs once per process.
+    the actual LOAD (and INSTALL, if the extension is missing locally — see
+    load_extension) only ever runs once per process.
     """
     global _spatial_loaded
     if _spatial_loaded:
@@ -259,7 +292,7 @@ def ensure_spatial() -> None:
     with conn_lock:
         if _spatial_loaded:
             return
-        shared_conn().execute("INSTALL spatial; LOAD spatial;")
+        load_extension(shared_conn(), "spatial")
         _spatial_loaded = True
 
 
