@@ -196,7 +196,7 @@ def test_named_place_is_two_serial_legs_and_is_unchanged(timeline):
     assert hit["id"] == "pl-gare-shibuya"
     assert timeline.rounds() == 10
     assert timeline.rounds({"find_places", "_query_places_fallback"}) == 3
-    assert timeline.wall() >= 10 * SLEEP_S * 0.9  # lower bound only; a shared runner adds arbitrary wall time
+    assert timeline.wall() >= 10 * SLEEP_S * 0.9  # lower bound only; see above
     assert timeline.call_set() == SHIBUYA_NAMED_CALLS
 
 
@@ -223,7 +223,7 @@ def test_pair_of_name_and_gers_id_overlaps(timeline):
     assert dest["matched_by"] == "gers_id"
     assert timeline.overlapping("gers_lookup", "_query_divisions"), "ends ran in turn"
     assert timeline.rounds() == 10
-    assert timeline.wall() >= 10 * SLEEP_S * 0.9  # lower bound only; a shared runner adds arbitrary wall time
+    assert timeline.wall() >= 10 * SLEEP_S * 0.9  # lower bound only; see above
     name_calls = [c for c in timeline.call_set() if c[0] != "gers_lookup"]
     assert name_calls == SHIBUYA_NAMED_CALLS
 
