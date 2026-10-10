@@ -118,10 +118,52 @@ def resolve_place(
     May raise ValueError for an unrecognized country or one that conflicts
     with a country/region qualifier parsed off `query` itself.
     """
+    rows, commit = _resolve_place_impl(
+        query, near_lat, near_lon, limit, city, lang, country, defer=False,
+    )
+    commit()
+    return rows
+
+
+def _resolve_place_impl(
+    query: str,
+    near_lat: float | None,
+    near_lon: float | None,
+    limit: int,
+    city: str | None,
+    lang: str | None,
+    country: str | None,
+    *,
+    defer: bool,
+) -> tuple[list[dict], Callable[[], None]]:
+    """resolve_place()'s body, with every write to shared state made explicit.
+
+    defer=False applies each write as it is reached, which is resolve_place()
+    exactly as before; the returned commit() is then a no-op.
+
+    defer=True reads the same state but queues each write, so the caller can
+    run this speculatively and call commit() only if the answer is used. The
+    writes are the resolve LRU put (or its LRU touch on a hit), the last-good
+    city memory (or its LRU touch), the last-city memory, and the autowarm
+    kick on the top hit. commit() applies them in the order they would have
+    happened. A discarded run leaves all of them untouched.
+    """
+    writes: list[Callable[[], None]] = []
+
+    def _write(fn: Callable[[], None]) -> None:
+        if defer:
+            writes.append(fn)
+        else:
+            fn()
+
+    def _commit() -> None:
+        for fn in writes:
+            fn()
+
     query = query.strip()
     limit = max(1, min(limit, _pkg.MAX_LIMIT))
     if not query:
-        return []
+        return [], _commit
     if country is not None:
         country = _pkg.normalize_country(country)
 
@@ -146,7 +188,9 @@ def resolve_place(
         elif inferred_city:
             city = inferred_city
         elif _pkg._query_is_poi_shaped(query):
-            last_city, last_coords = _pkg._last_good()
+            last_city, last_coords = _pkg._last_good(touch=not defer)
+            if defer:
+                writes.append(_pkg._last_good)  # the LRU touch the read above skipped
             if last_city:
                 city = last_city
                 if last_coords is not None:
@@ -154,9 +198,15 @@ def resolve_place(
                     city_bounded = True
 
     cache_city, cache_lat, cache_lon = city, near_lat, near_lon
-    cached = _pkg._resolve_cache_get(query, cache_city, cache_lat, cache_lon, lang, country)
+    cached = _pkg._resolve_cache_get(
+        query, cache_city, cache_lat, cache_lon, lang, country, touch=not defer,
+    )
     if cached is not None:
-        return cached[:limit]
+        if defer:
+            writes.append(lambda: _pkg._resolve_cache_get(
+                query, cache_city, cache_lat, cache_lon, lang, country,
+            ))
+        return cached[:limit], _commit
 
     # #271: a caller-supplied (or now inferred) city is the location half
     # of the query, stated rather than guessed at. Resolving it first and
@@ -661,8 +711,10 @@ def resolve_place(
     out = candidates[:limit]
     # The whole ranked list, not `out`: the key carries no limit, and a
     # later call with a larger limit slices the cached list on read.
-    _pkg._resolve_cache_put(query, cache_city, cache_lat, cache_lon, candidates, lang, country)
+    _write(lambda: _pkg._resolve_cache_put(
+        query, cache_city, cache_lat, cache_lon, candidates, lang, country,
+    ))
     if out:
-        _pkg._remember_last_city(city, out[0])
-        _pkg._kick_autowarm(out[0])
-    return out
+        _write(lambda: _pkg._remember_last_city(city, out[0]))
+        _write(lambda: _pkg._kick_autowarm(out[0]))
+    return out, _commit
