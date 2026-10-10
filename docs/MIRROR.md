@@ -70,15 +70,15 @@ uv run python scripts/mirror_theme.py --dry-run --target s3://my-bucket/overture
 ```
 
 Sample output — a real dry run against a live release
-(`2026-07-22.0`, `places`/`place`):
+(`2026-08-19.0`, `places`/`place`):
 
 ```
-part-00000-721bdadd-4327-5b81-bc83-aa244c71ceaa-c000.zstd.parquet     642712932
-part-00001-1ca5badf-9d79-5942-9102-67a0db79e5ff-c000.zstd.parquet     943424032
-part-00002-845ec8ef-52e8-5eca-87c2-05310205b0da-c000.zstd.parquet     937741772
+part-00000-c7e47654-8483-5b8f-b183-7ba73334f7a5-c000.zstd.parquet     634918674
+part-00001-01525d53-9fbf-5f59-aa2a-c557934aeb8a-c000.zstd.parquet     704551514
+part-00002-06d0251d-44ae-5400-ab29-cb4457570b0d-c000.zstd.parquet     701485400
 ...
 
-TOTAL   16 files   11246851752 bytes (10.5GB)
+TOTAL   16 files   10480684059 bytes (9.8GB)
 ```
 
 Counts and sizes vary release to release — always re-run `--dry-run` rather

@@ -73,7 +73,7 @@ bundled data's release name and a file count:
 tests/test_manifest.py::test_bundled_manifests_load_and_prune_for_real
 ```
 
-Update its `"2026-07-22.0"` literals to the new release, and its
+Update its release literals (`"2026-08-19.0"` as of this writing) to the new release, and its
 `len(m["files"]) == 512` / `kept <= 16` assertions if the new release's file
 counts differ (Overture's own theme partitioning can change release to
 release).
@@ -115,7 +115,8 @@ add a new one, it just means these are now stale until re-run:
 
 None of these gate correctness — the code doesn't read them — so they're a
 "catch up when convenient" sweep, not a blocker for shipping the pin bump
-itself. `git grep 2026-07-22.0` (substituting the old release) after a bump
+itself. `git grep <old-release>` (e.g. `git grep 2026-08-19.0` when moving off
+the current pin) after a bump
 finds every remaining mention if you want the full list at bump time.
 
 ### Test literals unrelated to the pin — no action needed
