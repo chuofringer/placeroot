@@ -467,6 +467,7 @@ from placeroot import (
     progress,
     release,
     routing,
+    session,
     trace,
 )
 from placeroot.errors import AmbiguousArea, AmbiguousPlace, AnchoredNotFound
@@ -2238,12 +2239,21 @@ _CITY_HINT_RADIUS_M = 50_000
 _RESOLVE_LRU_MAX = 256
 _resolve_lru: OrderedDict[tuple, list[dict]] = OrderedDict()
 _resolve_lru_lock = threading.Lock()
-# One lock around the last-good pair: #335 _resolve_pair runs two
+# The last good (city, coords) a resolve pinned, per client session. Over
+# --http one process serves every connected client, and a module global
+# here made client A's city the inferred city for client B's POI-shaped
+# query -- and, since the inferred city is part of the resolve cache key,
+# handed B A's answer. Keyed by session.session_id() (the SDK's
+# Mcp-Session-Id over HTTP, one constant over stdio), bounded as an LRU
+# so a long-lived HTTP server never grows with the clients it has seen.
+# One lock around the whole structure: #335 _resolve_pair runs two
 # resolve_place calls concurrently, and two bare assignments can tear
 # (city from one pin, coords from the other).
+_LAST_GOOD_SESSIONS_MAX = 256
 _last_good_lock = threading.Lock()
-_last_good_city: str | None = None
-_last_good_coords: tuple[float, float] | None = None
+_last_good_by_session: OrderedDict[str, tuple[str | None, tuple[float, float] | None]] = (
+    OrderedDict()
+)
 _POI_ALIASES: dict[str, dict] | None = None
 
 
@@ -2422,8 +2432,18 @@ def _resolve_cache_put(
             _resolve_lru.popitem(last=False)
 
 
+def _last_good() -> tuple[str | None, tuple[float, float] | None]:
+    """The (city, coords) the current session last pinned; (None, None) if none."""
+    sid = session.session_id()
+    with _last_good_lock:
+        state = _last_good_by_session.get(sid)
+        if state is None:
+            return None, None
+        _last_good_by_session.move_to_end(sid)
+        return state
+
+
 def _remember_last_city(city: str | None, top: dict) -> None:
-    global _last_good_city, _last_good_coords
     name = (city or "").strip() or None
     if name is None:
         ctx = top.get("admin_context") or []
@@ -2431,26 +2451,42 @@ def _remember_last_city(city: str | None, top: dict) -> None:
     coords = None
     if top.get("lat") is not None and top.get("lon") is not None:
         coords = (top["lat"], top["lon"])
+    sid = session.session_id()
+    if session.is_ephemeral(sid):
+        # A one-request session: no later call can read this back, so
+        # storing it would only evict a session that can.
+        return
     with _last_good_lock:
+        last_city, last_coords = _last_good_by_session.get(sid, (None, None))
         if name:
-            _last_good_city = name
+            last_city = name
         if coords is not None:
-            _last_good_coords = coords
+            last_coords = coords
+        _last_good_by_session[sid] = (last_city, last_coords)
+        _last_good_by_session.move_to_end(sid)
+        while len(_last_good_by_session) > _LAST_GOOD_SESSIONS_MAX:
+            _last_good_by_session.popitem(last=False)
 
 
-def clear_resolve_session() -> None:
+def clear_resolve_session(*, clear_all: bool = False) -> None:
     """Drop the in-process resolve LRU and last-city memory (#329).
 
     Tests and a fresh conversation call this so one resolve cannot leak a
     city hint into the next. Not a second cache — the tile cache is
     cache.py's, and this is only the last-resolve dict in this module.
+
+    The last-city memory is per client session (see session.py): the
+    default drops the current session's; `clear_all=True` drops every
+    session's. The resolve LRU is keyed by the resolved inputs rather than
+    by session and is always dropped whole.
     """
-    global _last_good_city, _last_good_coords
     with _resolve_lru_lock:
         _resolve_lru.clear()
     with _last_good_lock:
-        _last_good_city = None
-        _last_good_coords = None
+        if clear_all:
+            _last_good_by_session.clear()
+        else:
+            _last_good_by_session.pop(session.session_id(), None)
     _clear_table_derived_caches()
 
 
@@ -5634,9 +5670,7 @@ def resolve_place(
         elif inferred_city:
             city = inferred_city
         elif _query_is_poi_shaped(query):
-            with _last_good_lock:
-                last_city = _last_good_city
-                last_coords = _last_good_coords
+            last_city, last_coords = _last_good()
             if last_city:
                 city = last_city
                 if last_coords is not None:
@@ -6569,8 +6603,7 @@ def _has_extra_place_context(query: str) -> bool:
     _place_query, city, coords = _extract_city_hint(query)
     if coords is not None or city:
         return True
-    with _last_good_lock:
-        last_city = _last_good_city
+    last_city, _last_coords = _last_good()
     return bool(last_city) and _query_is_poi_shaped(query)
 
 
