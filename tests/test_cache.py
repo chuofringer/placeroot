@@ -32,6 +32,32 @@ def con():
 
 
 @pytest.fixture
+def local_probe(monkeypatch):
+    """Schema probe over a plain local connection, for tests whose subject is
+    the cache's keying logic rather than the shared connection. The real
+    probe runs on db.shared_conn(), whose setup needs the httpfs extension
+    — a network install that an offline test environment does not have —
+    while the fixtures these tests read are local parquet files that a bare
+    connection reads fine. Successful probes are cached per glob like the
+    real one's (resolve_fingerprint is called several times per query)."""
+    cache_: dict[str, frozenset] = {}
+
+    def probe(glob: str):
+        if glob not in cache_:
+            try:
+                desc = duckdb.connect().execute(
+                    f"SELECT * FROM read_parquet({db._sql_str(glob)}) LIMIT 0"
+                ).description
+            except duckdb.Error:
+                return None
+            cache_[glob] = frozenset(c[0] for c in desc)
+        return cache_[glob]
+
+    monkeypatch.setattr(db, "probe_schema", probe)
+    return probe
+
+
+@pytest.fixture
 def sync_cache(monkeypatch):
     """PLACEROOT_CACHE_SYNC=1: local_paths_for_query materializes missing
     tiles inline instead of handing them to a background thread, so tests
@@ -161,8 +187,9 @@ def test_offline_fallback_picks_most_recently_used_not_most_recently_created(
     # outage that can drop the whole active cache for a barely-populated
     # newer dir. Rank by newest contained tile instead.
     base = cache_dir / RELEASE / THEME
-    fp_active = base / "aaaaaaaaaaaa"   # the real working set
-    fp_stray = base / "bbbbbbbbbbbb"    # a later one-off, near-empty
+    source = cache.source_key("unused-glob")
+    fp_active = base / f"aaaaaaaaaaaa-{source}"   # the real working set
+    fp_stray = base / f"bbbbbbbbbbbb-{source}"    # a later one-off, near-empty
     fp_active.mkdir(parents=True)
     for i in range(5):
         (fp_active / f"tile_{i}_0.parquet").write_bytes(b"x")
@@ -184,7 +211,7 @@ def test_offline_fallback_picks_most_recently_used_not_most_recently_created(
 
     # Force the offline branch (upstream unreachable → no fresh fingerprint).
     monkeypatch.setattr(cache, "schema_fingerprint", lambda _glob: None)
-    assert cache.resolve_fingerprint(RELEASE, THEME, "unused-glob") == "aaaaaaaaaaaa"
+    assert cache.resolve_fingerprint(RELEASE, THEME, "unused-glob") == f"aaaaaaaaaaaa-{source}"
 
 
 def test_conn_lock_is_reentrant_for_the_cache_path_probe(cache_dir):
@@ -259,6 +286,104 @@ def test_ensure_tile_materializes_from_upstream_then_reuses_local_file(con, cach
     # Query the materialized local files directly; they must contain rows.
     joined = ", ".join(f"'{p}'" for p in paths)
     (n,) = con.execute(f"SELECT count(*) FROM read_parquet([{joined}])").fetchone()
+    assert n > 0
+
+
+def test_concurrent_writers_of_one_tile_do_not_clobber_each_other(cache_dir, local_probe):
+    """Two writers COPYing the same not-yet-cached tile at once (a sync
+    fetch racing a background fetch in-process, or two server processes
+    sharing one cache dir) must each use their own temp file: with one
+    shared `<tile>.parquet.tmp`, the second rename found its temp file
+    already moved (FileNotFoundError) or published the other writer's
+    partial COPY as a finished tile. Both COPYs are held at a barrier
+    after writing and before renaming, so they genuinely overlap."""
+    tile = cache.tiles_for_bbox(-73.95, 40.65, -73.85, 40.75)[0]
+    fingerprint = cache.resolve_fingerprint(RELEASE, THEME, str(FIXTURE_PATH))
+    path = cache.tile_path(RELEASE, THEME, fingerprint, tile)
+    assert not path.exists()
+    barrier = threading.Barrier(2, timeout=10)
+    errors: list[BaseException] = []
+
+    class _Writer(threading.Thread):
+        def run(self):
+            con = duckdb.connect()
+            real_execute = con.execute
+
+            def execute_then_wait(sql, *args, **kwargs):
+                result = real_execute(sql, *args, **kwargs)
+                if "COPY" in sql:
+                    barrier.wait()  # both COPYs done; neither has renamed yet
+                return result
+
+            # DuckDBPyConnection attributes are read-only; wrap it instead.
+            class _Con:
+                def execute(self, sql, *args, **kwargs):
+                    return execute_then_wait(sql, *args, **kwargs)
+
+            try:
+                cache.ensure_tile(_Con(), RELEASE, THEME, tile, str(FIXTURE_PATH), fingerprint)
+            except BaseException as e:  # noqa: BLE001 - collected for the assertion
+                errors.append(e)
+
+    writers = [_Writer(), _Writer()]
+    for w in writers:
+        w.start()
+    for w in writers:
+        w.join(timeout=30)
+    assert not any(w.is_alive() for w in writers)
+    assert errors == []
+    assert path.exists()
+    (n,) = duckdb.connect().execute(
+        f"SELECT count(*) FROM read_parquet({db._sql_str(str(path))})"
+    ).fetchone()
+    assert n > 0  # a complete, readable tile — not a clobbered or partial one
+    assert list(path.parent.glob("*.tmp")) == []  # no temp files left behind
+
+
+def test_failed_tile_copy_leaves_no_temp_file(cache_dir, local_probe, tmp_path):
+    tile = cache.tiles_for_bbox(-73.95, 40.65, -73.85, 40.75)[0]
+    fingerprint = cache.resolve_fingerprint(RELEASE, THEME, str(FIXTURE_PATH))
+    path = cache.tile_path(RELEASE, THEME, fingerprint, tile)
+
+    class _BrokenCon:
+        def execute(self, sql, *args, **kwargs):
+            raise duckdb.IOException("upstream went away mid-COPY")
+
+    with pytest.raises(duckdb.Error):
+        cache.ensure_tile(_BrokenCon(), RELEASE, THEME, tile, str(FIXTURE_PATH), fingerprint)
+    assert not path.exists()
+    assert list(path.parent.glob("*.tmp")) == []
+
+
+def test_paths_with_a_single_quote_are_quoted_into_sql(
+    con, cache_dir, local_probe, monkeypatch, tmp_path
+):
+    """A `'` in PLACEROOT_CACHE_DIR or in the upstream path is data, not SQL:
+    both are interpolated into COPY/read_parquet statements and must go
+    through db._sql_str rather than a bare f-string quote."""
+    quoted_cache = tmp_path / "o'brien" / "placeroot-cache"
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(quoted_cache))
+    upstream = tmp_path / "it's here" / "places.parquet"
+    upstream.parent.mkdir()
+    upstream.write_bytes(FIXTURE_PATH.read_bytes())
+
+    from placeroot import release
+
+    tile = cache.tiles_for_bbox(-73.95, 40.65, -73.85, 40.75)[0]
+    # source_sql lists tiles of the *active* release, so write under it.
+    path = cache.ensure_tile(con, release.resolve_release(), THEME, tile, str(upstream))
+    assert path.exists() and "o'brien" in str(path)
+
+    source = cache.source_sql(THEME, str(upstream), None)  # the cached-tiles listing
+    assert source.startswith("read_parquet([")
+    assert db._sql_str(str(path)) in source
+    (n,) = con.execute(f"SELECT count(*) FROM {source}").fetchone()
+    assert n > 0
+
+    monkeypatch.setenv("PLACEROOT_CACHE", "off")
+    plain = cache.source_sql(THEME, str(upstream), None)
+    assert plain == f"read_parquet({db._sql_str(str(upstream))}, hive_partitioning=1)"
+    (n,) = con.execute(f"SELECT count(*) FROM {plain}").fetchone()
     assert n > 0
 
 
@@ -358,6 +483,65 @@ def test_eviction_exempts_non_tile_support_tables(con, cache_dir, monkeypatch):
     assert table.exists()
     remaining_tiles = list(cache.cache_dir().rglob("tile_*.parquet"))
     assert len(remaining_tiles) < len(tiles)  # tiles, not the table, were evicted
+
+
+def test_division_polygons_have_their_own_lru_cap(cache_dir, monkeypatch):
+    """#153's persisted division polygons used to sit outside the accounting
+    altogether and grow without bound. They are swept LRU under their own
+    cap, oldest-used first."""
+    monkeypatch.setenv("PLACEROOT_CACHE_DIVISIONS_MAX_MB", str(2500 / 1024 / 1024))
+    d = cache.division_polygons_dir() / "0123456789abcdef"
+    d.mkdir(parents=True)
+    polygons = []
+    for i in range(4):
+        f = d / f"{i:032x}.bin"
+        f.write_bytes(b"p" * 1000)
+        os.utime(f, (1000 + i, 1000 + i))
+        polygons.append(f)
+        cache.note_division_polygon_written(f)  # what overture.py does after a write
+    # 4000 bytes against a 2500-byte cap: the two least recently used went.
+    assert [f.exists() for f in polygons] == [False, False, True, True]
+
+
+def test_division_polygons_do_not_count_against_the_tile_cap(con, cache_dir, monkeypatch):
+    """A single large polygon must not squeeze the tile budget (the #230
+    argument for keeping support tables out of the tile accounting): the
+    two classes are capped separately."""
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", "1")  # tiles fit comfortably
+    big = cache.division_polygons_dir() / "0123456789abcdef" / ("f" * 32 + ".bin")
+    big.parent.mkdir(parents=True)
+    big.write_bytes(b"p" * 2_000_000)  # 2 MB: more than the whole tile cap
+    os.utime(big, (1, 1))
+    tile = cache.ensure_tile(con, RELEASE, THEME, (-74, 40), str(FIXTURE_PATH))
+    assert tile.exists()  # not evicted to make room for the polygon
+    assert big.exists()  # and under its own (default) cap the polygon stays
+
+
+def test_tile_writes_under_cap_do_not_rewalk_the_cache(con, cache_dir, monkeypatch):
+    """The accounting is incremental: after the first walk, a write that
+    keeps the class under cap bumps the running total and skips the
+    rglob+stat sweep; a write that crosses the cap walks and evicts."""
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", "100")
+    walks: list[str] = []
+    real_list = cache._list_class
+
+    def counting_list(root, kind):
+        walks.append(kind)
+        return real_list(root, kind)
+
+    monkeypatch.setattr(cache, "_list_class", counting_list)
+
+    cache.ensure_tile(con, RELEASE, THEME, (-74, 40), str(FIXTURE_PATH))
+    first = len(walks)
+    assert first >= 1  # totals unknown for a fresh cache root: one walk per class
+    cache.ensure_tile(con, RELEASE, THEME, (-75, 40), str(FIXTURE_PATH))
+    cache.ensure_tile(con, RELEASE, THEME, (-76, 40), str(FIXTURE_PATH))
+    assert len(walks) == first  # under cap: no re-walk
+
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", str(5000 / 1024 / 1024))
+    cache.ensure_tile(con, RELEASE, THEME, (15, 78), str(FIXTURE_PATH))
+    assert len(walks) > first  # crossed the cap: walked, and evicted
+    assert len(list(cache.cache_dir().rglob("tile_*.parquet"))) < 4
 
 
 def test_lru_eviction_removes_oldest_tiles_when_over_cap(con, cache_dir, monkeypatch):
@@ -519,13 +703,62 @@ def test_offline_fallback_serves_newest_existing_fingerprint_dir(
     assert populated
 
     # Simulate upstream going unreachable: the schema probe fails no matter
-    # what glob is passed.
+    # what glob is passed. The glob itself is unchanged — an outage changes
+    # reachability, not the configured source.
     monkeypatch.setattr(db, "probe_schema", lambda glob: None)
 
     served = cache.local_paths_for_query(
-        con, RELEASE, THEME, bbox, "s3://unreachable/*", lambda: con
+        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con
     )
     assert served == populated  # same on-disk tiles, served without touching "upstream"
+
+
+def test_offline_fallback_never_serves_another_sources_tiles(
+    con, cache_dir, sync_cache, local_probe, monkeypatch
+):
+    """The fallback is scoped to the configured upstream: tiles materialized
+    from source A are not an answer for source B just because B is down —
+    that would be exactly the stale-data hazard the source key exists to
+    close, dressed up as resilience."""
+    bbox = (-74.0, 40.0, -73.0, 41.0)
+    assert cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con)
+
+    monkeypatch.setattr(db, "probe_schema", lambda glob: None)
+    assert cache.local_paths_for_query(
+        con, RELEASE, THEME, bbox, "s3://some-other-mirror/*", lambda: con
+    ) is None
+    assert cache.cached_tile_paths(RELEASE, THEME, "s3://some-other-mirror/*") == []
+
+
+def test_tile_key_includes_upstream_source(con, cache_dir, sync_cache, local_probe, tmp_path):
+    """Same release, same theme, same schema, different upstream (a local
+    extract vs. a mirror vs. the public bucket, all claiming the release):
+    the tiles must not be shared. Two byte-identical copies of the fixture
+    at two paths stand in for two sources."""
+    bbox = (-74.0, 40.0, -73.0, 41.0)
+    source_a = tmp_path / "extract" / "places.parquet"
+    source_b = tmp_path / "mirror" / "places.parquet"
+    for src in (source_a, source_b):
+        src.parent.mkdir()
+        src.write_bytes(FIXTURE_PATH.read_bytes())
+
+    fp_a = cache.resolve_fingerprint(RELEASE, THEME, str(source_a))
+    fp_b = cache.resolve_fingerprint(RELEASE, THEME, str(source_b))
+    assert cache.schema_fingerprint(str(source_a)) == cache.schema_fingerprint(str(source_b))
+    assert fp_a != fp_b
+    assert fp_a.endswith("-" + cache.source_key(str(source_a)))
+    assert fp_b.endswith("-" + cache.source_key(str(source_b)))
+
+    paths_a = cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(source_a), lambda: con)
+    assert paths_a
+    # Nothing is cached for source B yet: a query against it must not be
+    # handed A's tiles, and must materialize its own.
+    assert cache.cached_tile_paths(RELEASE, THEME, str(source_b)) == []
+    paths_b = cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(source_b), lambda: con)
+    assert paths_b
+    assert set(paths_a).isdisjoint(paths_b)
+    for p in paths_b:
+        assert f"/{fp_b}/" in p
 
 
 def test_offline_fallback_with_no_existing_fingerprint_dir_returns_none(
@@ -595,8 +828,11 @@ def test_inflight_dedup_key_includes_fingerprint(con, cache_dir, monkeypatch):
     cache.local_paths_for_query(con, RELEASE, THEME, bbox, "upstreamB", duckdb.connect)
     time.sleep(0.3)  # let both background attempts finish
 
-    assert ("fingerprintA", tile) in calls
-    assert ("fingerprintB", tile) in calls
+    fp_a = cache.resolve_fingerprint(RELEASE, THEME, "upstreamA")
+    fp_b = cache.resolve_fingerprint(RELEASE, THEME, "upstreamB")
+    assert fp_a.startswith("fingerprintA-") and fp_b.startswith("fingerprintB-")
+    assert (fp_a, tile) in calls
+    assert (fp_b, tile) in calls
 
 
 def test_parse_warm_region_valid():
