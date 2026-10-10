@@ -304,10 +304,14 @@ def warm_metadata() -> None:
             continue
         upstream = _upstream_glob(theme, type_)
         try:
-            db.new_connection().execute(
-                f"SELECT * FROM read_parquet({db._sql_str(upstream)}, hive_partitioning=1) "
-                "LIMIT 0"
-            )
+            # One cursor per theme, closed on the way out: the warm lives in
+            # the shared instance's metadata cache, not in the cursor, and
+            # a cursor left open per theme per startup is a leak.
+            with db.new_connection() as cur:
+                cur.execute(
+                    f"SELECT * FROM read_parquet({db._sql_str(upstream)}, "
+                    "hive_partitioning=1) LIMIT 0"
+                )
         except duckdb.Error as e:
             logger.warning("Metadata pre-warm failed for %s (continuing): %s", upstream, e)
             continue
