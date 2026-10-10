@@ -38,15 +38,25 @@ dev) must never be read back once upstream's schema has moved on — a
 column that used to exist and got selected into the tile might not exist
 in a later query's SELECT list, or vice versa. So every tile lives under
 `<cache_dir>/<release>/<theme>/<fingerprint>/tile_Y_X.parquet`, where
-`fingerprint` is the first 12 hex chars of sha256 over the *sorted* column
-names of the upstream dataset (probed via db.probe_schema, which is
-lru_cached — the probe itself is a `LIMIT 0` metadata-only read, cheap
-enough to redo per query). Two schemas with the same columns in a
-different order hash identically (sorted first) since column order isn't
-what breaks a SELECT *; two schemas differing by even one column name hash
-differently and land in separate directories, so a query against the new
-schema can never read an old-schema tile (or vice versa) — see
-resolve_fingerprint().
+`fingerprint` is `<schema>-<source>`: the first 12 hex chars of sha256 over
+the *sorted* column names of the upstream dataset (probed via
+db.probe_schema, which is lru_cached — the probe itself is a `LIMIT 0`
+metadata-only read, cheap enough to redo per query), then the first 8 hex
+chars of sha256 over the upstream glob/path itself (source_key). Two
+schemas with the same columns in a different order hash identically
+(sorted first) since column order isn't what breaks a SELECT *; two schemas
+differing by even one column name hash differently and land in separate
+directories, so a query against the new schema can never read an
+old-schema tile (or vice versa) — see resolve_fingerprint().
+
+The source half keys the tile by *where it came from*. A release name
+alone does not identify the data: PLACEROOT_DATA_PATH (a local extract),
+PLACEROOT_UPSTREAM_BASE (a mirror) and the public bucket can all claim the
+same release and the same schema while holding different rows (a regional
+extract, a partial mirror, an older snapshot). Without the source in the
+key, switching between them served whichever tiles were materialized
+first, forever. With it, each source has its own tiles, and the offline
+fallback below only ever falls back to a directory of the *same* source.
 
 Old-layout tiles (materialized before this change, sitting directly under
 `<theme>/`) and any other-fingerprint directories are deliberately left
@@ -315,11 +325,25 @@ def schema_fingerprint(upstream_glob: str) -> str | None:
     return hashlib.sha256(",".join(sorted(cols)).encode()).hexdigest()[:12]
 
 
-def _fingerprint_dirs(release: str, theme: str) -> list[Path]:
+def source_key(upstream_glob: str) -> str:
+    """First 8 hex chars of sha256 over the upstream glob/path string.
+
+    Pure string hash — no probe, no I/O — so it is available offline too.
+    """
+    return hashlib.sha256(upstream_glob.encode("utf-8")).hexdigest()[:8]
+
+
+def _fingerprint_dirs(release: str, theme: str, source: str | None = None) -> list[Path]:
+    """Fingerprint directories under release/theme, optionally only those
+    keyed to `source` (a source_key): tiles of another upstream are never
+    a fallback for this one, however recently they were used."""
     d = cache_dir() / release / theme
     if not d.exists():
         return []
-    return [p for p in d.iterdir() if p.is_dir()]
+    dirs = [p for p in d.iterdir() if p.is_dir()]
+    if source is not None:
+        dirs = [p for p in dirs if p.name.endswith(f"-{source}")]
+    return dirs
 
 
 def _fingerprint_last_use(fp_dir: Path) -> float:
@@ -340,22 +364,25 @@ def _fingerprint_last_use(fp_dir: Path) -> float:
 
 
 def resolve_fingerprint(release: str, theme: str, upstream_glob: str) -> str | None:
-    """The schema fingerprint to read/write release/theme tiles under.
+    """The fingerprint (`<schema>-<source>`) to read/write release/theme tiles under.
 
     The common case: probe upstream_glob's current schema and return its
-    fingerprint. If upstream can't be reached (schema_fingerprint returns
-    None), fall back to the most-recently-used existing fingerprint
-    directory for this release/theme — see the module docstring's
-    "Schema fingerprinting" section for why that's the right offline
-    behavior. Returns None only when upstream is unreachable AND there's no
-    existing fingerprint directory to fall back to either — nothing to key
-    a tile under, nothing cached to serve; callers should treat this the
-    same as any other upstream-unavailable case.
+    fingerprint, suffixed with upstream_glob's own source_key. If upstream
+    can't be reached (schema_fingerprint returns None), fall back to the
+    most-recently-used existing fingerprint directory for this
+    release/theme *and source* — see the module docstring's "Schema
+    fingerprinting" section for why that's the right offline behavior, and
+    why a directory keyed to a different upstream never qualifies. Returns
+    None only when upstream is unreachable AND there's no existing
+    fingerprint directory of this source to fall back to either — nothing
+    to key a tile under, nothing cached to serve; callers should treat this
+    the same as any other upstream-unavailable case.
     """
+    source = source_key(upstream_glob)
     fp = schema_fingerprint(upstream_glob)
     if fp is not None:
-        return fp
-    dirs = _fingerprint_dirs(release, theme)
+        return f"{fp}-{source}"
+    dirs = _fingerprint_dirs(release, theme, source)
     if not dirs:
         return None
     newest = max(dirs, key=_fingerprint_last_use)

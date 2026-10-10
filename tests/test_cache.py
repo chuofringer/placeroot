@@ -32,6 +32,32 @@ def con():
 
 
 @pytest.fixture
+def local_probe(monkeypatch):
+    """Schema probe over a plain local connection, for tests whose subject is
+    the cache's keying logic rather than the shared connection. The real
+    probe runs on db.shared_conn(), whose setup needs the httpfs extension
+    — a network install that an offline test environment does not have —
+    while the fixtures these tests read are local parquet files that a bare
+    connection reads fine. Successful probes are cached per glob like the
+    real one's (resolve_fingerprint is called several times per query)."""
+    cache_: dict[str, frozenset] = {}
+
+    def probe(glob: str):
+        if glob not in cache_:
+            try:
+                desc = duckdb.connect().execute(
+                    f"SELECT * FROM read_parquet({db._sql_str(glob)}) LIMIT 0"
+                ).description
+            except duckdb.Error:
+                return None
+            cache_[glob] = frozenset(c[0] for c in desc)
+        return cache_[glob]
+
+    monkeypatch.setattr(db, "probe_schema", probe)
+    return probe
+
+
+@pytest.fixture
 def sync_cache(monkeypatch):
     """PLACEROOT_CACHE_SYNC=1: local_paths_for_query materializes missing
     tiles inline instead of handing them to a background thread, so tests
@@ -161,8 +187,9 @@ def test_offline_fallback_picks_most_recently_used_not_most_recently_created(
     # outage that can drop the whole active cache for a barely-populated
     # newer dir. Rank by newest contained tile instead.
     base = cache_dir / RELEASE / THEME
-    fp_active = base / "aaaaaaaaaaaa"   # the real working set
-    fp_stray = base / "bbbbbbbbbbbb"    # a later one-off, near-empty
+    source = cache.source_key("unused-glob")
+    fp_active = base / f"aaaaaaaaaaaa-{source}"   # the real working set
+    fp_stray = base / f"bbbbbbbbbbbb-{source}"    # a later one-off, near-empty
     fp_active.mkdir(parents=True)
     for i in range(5):
         (fp_active / f"tile_{i}_0.parquet").write_bytes(b"x")
@@ -184,7 +211,7 @@ def test_offline_fallback_picks_most_recently_used_not_most_recently_created(
 
     # Force the offline branch (upstream unreachable → no fresh fingerprint).
     monkeypatch.setattr(cache, "schema_fingerprint", lambda _glob: None)
-    assert cache.resolve_fingerprint(RELEASE, THEME, "unused-glob") == "aaaaaaaaaaaa"
+    assert cache.resolve_fingerprint(RELEASE, THEME, "unused-glob") == f"aaaaaaaaaaaa-{source}"
 
 
 def test_conn_lock_is_reentrant_for_the_cache_path_probe(cache_dir):
@@ -519,13 +546,62 @@ def test_offline_fallback_serves_newest_existing_fingerprint_dir(
     assert populated
 
     # Simulate upstream going unreachable: the schema probe fails no matter
-    # what glob is passed.
+    # what glob is passed. The glob itself is unchanged — an outage changes
+    # reachability, not the configured source.
     monkeypatch.setattr(db, "probe_schema", lambda glob: None)
 
     served = cache.local_paths_for_query(
-        con, RELEASE, THEME, bbox, "s3://unreachable/*", lambda: con
+        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con
     )
     assert served == populated  # same on-disk tiles, served without touching "upstream"
+
+
+def test_offline_fallback_never_serves_another_sources_tiles(
+    con, cache_dir, sync_cache, local_probe, monkeypatch
+):
+    """The fallback is scoped to the configured upstream: tiles materialized
+    from source A are not an answer for source B just because B is down —
+    that would be exactly the stale-data hazard the source key exists to
+    close, dressed up as resilience."""
+    bbox = (-74.0, 40.0, -73.0, 41.0)
+    assert cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con)
+
+    monkeypatch.setattr(db, "probe_schema", lambda glob: None)
+    assert cache.local_paths_for_query(
+        con, RELEASE, THEME, bbox, "s3://some-other-mirror/*", lambda: con
+    ) is None
+    assert cache.cached_tile_paths(RELEASE, THEME, "s3://some-other-mirror/*") == []
+
+
+def test_tile_key_includes_upstream_source(con, cache_dir, sync_cache, local_probe, tmp_path):
+    """Same release, same theme, same schema, different upstream (a local
+    extract vs. a mirror vs. the public bucket, all claiming the release):
+    the tiles must not be shared. Two byte-identical copies of the fixture
+    at two paths stand in for two sources."""
+    bbox = (-74.0, 40.0, -73.0, 41.0)
+    source_a = tmp_path / "extract" / "places.parquet"
+    source_b = tmp_path / "mirror" / "places.parquet"
+    for src in (source_a, source_b):
+        src.parent.mkdir()
+        src.write_bytes(FIXTURE_PATH.read_bytes())
+
+    fp_a = cache.resolve_fingerprint(RELEASE, THEME, str(source_a))
+    fp_b = cache.resolve_fingerprint(RELEASE, THEME, str(source_b))
+    assert cache.schema_fingerprint(str(source_a)) == cache.schema_fingerprint(str(source_b))
+    assert fp_a != fp_b
+    assert fp_a.endswith("-" + cache.source_key(str(source_a)))
+    assert fp_b.endswith("-" + cache.source_key(str(source_b)))
+
+    paths_a = cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(source_a), lambda: con)
+    assert paths_a
+    # Nothing is cached for source B yet: a query against it must not be
+    # handed A's tiles, and must materialize its own.
+    assert cache.cached_tile_paths(RELEASE, THEME, str(source_b)) == []
+    paths_b = cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(source_b), lambda: con)
+    assert paths_b
+    assert set(paths_a).isdisjoint(paths_b)
+    for p in paths_b:
+        assert f"/{fp_b}/" in p
 
 
 def test_offline_fallback_with_no_existing_fingerprint_dir_returns_none(
@@ -595,8 +671,11 @@ def test_inflight_dedup_key_includes_fingerprint(con, cache_dir, monkeypatch):
     cache.local_paths_for_query(con, RELEASE, THEME, bbox, "upstreamB", duckdb.connect)
     time.sleep(0.3)  # let both background attempts finish
 
-    assert ("fingerprintA", tile) in calls
-    assert ("fingerprintB", tile) in calls
+    fp_a = cache.resolve_fingerprint(RELEASE, THEME, "upstreamA")
+    fp_b = cache.resolve_fingerprint(RELEASE, THEME, "upstreamB")
+    assert fp_a.startswith("fingerprintA-") and fp_b.startswith("fingerprintB-")
+    assert (fp_a, tile) in calls
+    assert (fp_b, tile) in calls
 
 
 def test_parse_warm_region_valid():
