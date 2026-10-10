@@ -272,6 +272,21 @@ def _classify(
     # full geometry column (measured 18.5s vs 1.6s on 4 remote files).
     # Candidates at a single point are the polygon nesting depth (single
     # digits), so fetch them unordered and rank by area client-side.
+    #
+    # One row per id. A cache tile is a bbox-*intersection* materialization
+    # (cache.ensure_tile), so a polygon crossing a tile edge is copied into
+    # both tiles, and when the query point sits within POINT_QUERY_RADIUS_M
+    # of that edge the source is a two-tile read that returns the polygon
+    # twice — which read as "multiple overlapping polygons contain this
+    # point" and set the ambiguity note for a lone match. The QUALIFY keeps
+    # the first copy per id, in this same SELECT after the WHERE so the
+    # bbox prefilter still reaches the scan's row-group statistics
+    # (recreation._projection's recipe). With no id column there is
+    # nothing to key on and no dedupe.
+    dedupe = (
+        "" if "id" in missing
+        else "QUALIFY id IS NULL OR row_number() OVER (PARTITION BY id) = 1"
+    )
     sql = f"""
         SELECT
             {subtype_expr} AS subtype,
@@ -280,6 +295,7 @@ def _classify(
             ST_Area({geom_expr}) AS area
         FROM {_from_source((xmin, ymin, xmax, ymax), type_)}
         WHERE {bbox_prefilter} AND ST_Contains({geom_expr}, ST_Point($lon, $lat))
+        {dedupe}
         LIMIT {_CANDIDATE_LIMIT}
     """
     try:

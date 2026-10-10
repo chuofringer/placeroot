@@ -480,3 +480,132 @@ def test_prefilter_ring_features_are_not_dropped(tmp_path):
             assert row["distance_m"] == pytest.approx(float(row["name"].split()[-1]), abs=0.2)
     finally:
         infrastructure.set_data_path(None)
+
+
+# --- multi-tile reads return a straddling feature once -----------------------
+#
+# Offline harness: the spatial extension cannot be installed here, so these
+# tests run the module's real query on a bare connection whose ST_* names
+# are stub macros over a [lon, lat] list geometry (each feature's centre,
+# which the ST_ClosestPoint stub returns as-is). The bbox prefilter — the
+# part the tile edge affects — is the real one.
+
+
+def _stub_spatial_conn():
+    con = duckdb.connect()
+    for ddl in (
+        "CREATE MACRO ST_GeomFromWKB(g) AS g",
+        "CREATE MACRO ST_Point(x, y) AS [x, y]",
+        "CREATE MACRO ST_X(g) AS g[1]",
+        "CREATE MACRO ST_Y(g) AS g[2]",
+        "CREATE MACRO ST_Scale(g, kx, ky) AS [g[1] * kx, g[2] * ky]",
+        "CREATE MACRO ST_ClosestPoint(a, b) AS a",
+    ):
+        con.execute(ddl)
+    return con
+
+
+def _bbox_of(lat_min, lat_max, lon_min, lon_max):
+    return {"xmin": lon_min, "ymin": lat_min, "xmax": lon_max, "ymax": lat_max}
+
+
+# A bridge deck crossing the tile edge at lon=-74, and a tower wholly
+# inside the eastern tile.
+_EDGE_BRIDGE = ("infra-straddle", _bbox_of(40.649, 40.651, -74.01, -73.99),
+                "bridge", "bridge", "Edge Bridge")
+_INSIDE_TOWER = ("infra-inside", _bbox_of(40.65, 40.65, -73.995, -73.995),
+                 "communication", "communication_tower", "Inside Tower")
+
+
+def _write_centre_geometry_fixture(path, rows) -> None:
+    con = duckdb.connect()
+    con.execute("""
+        CREATE TABLE infrastructure (
+            id VARCHAR,
+            geometry DOUBLE[],
+            bbox STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE),
+            subtype VARCHAR,
+            class VARCHAR,
+            names STRUCT("primary" VARCHAR)
+        )
+    """)
+    for id_, bbox, subtype, class_, name in rows:
+        centre = [(bbox["xmin"] + bbox["xmax"]) / 2, (bbox["ymin"] + bbox["ymax"]) / 2]
+        con.execute(
+            "INSERT INTO infrastructure VALUES (?, ?, ?, ?, ?, ?)",
+            [id_, centre, bbox, subtype, class_, {"primary": name}],
+        )
+    con.execute(f"COPY infrastructure TO '{path}' (FORMAT PARQUET)")
+    con.close()
+
+
+@pytest.fixture
+def straddling_infrastructure(tmp_path, monkeypatch):
+    """Both tiles either side of lon=-74 materialized from the fixture, the
+    straddling bridge proven to be in both, and infrastructure.py reading
+    the pair."""
+    from placeroot import cache, db
+
+    monkeypatch.setenv("PLACEROOT_CACHE", "on")
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "placeroot-cache"))
+    con = _stub_spatial_conn()
+    monkeypatch.setattr(db, "shared_conn", lambda: con)
+    monkeypatch.setattr(db, "ensure_spatial", lambda: None)
+    src = tmp_path / "infrastructure.parquet"
+    _write_centre_geometry_fixture(src, [_EDGE_BRIDGE, _INSIDE_TOWER])
+    infrastructure.set_data_path(str(src))
+    theme = infrastructure._cache_theme()
+    deg = cache.tile_deg_for(theme)
+    ty = int(40.65 // deg)
+    tiles = [(round(-74.0 / deg) - 1, ty), (round(-74.0 / deg), ty)]
+    fingerprint = cache.resolve_fingerprint("2026-07-22.0", theme, str(src))
+    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint)
+             for t in tiles]
+    for p in paths:
+        (n,) = con.execute(
+            f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) "
+            "WHERE id = 'infra-straddle'"
+        ).fetchone()
+        assert n == 1
+    source = f"read_parquet([{', '.join(db._sql_str(str(p)) for p in paths)}])"
+    monkeypatch.setattr(infrastructure, "_from_source", lambda bbox: source)
+    try:
+        yield con
+    finally:
+        infrastructure.set_data_path(None)
+
+
+def test_a_feature_straddling_a_tile_edge_is_listed_once_and_counted_once(
+    straddling_infrastructure,
+):
+    """Two rows, not three — and total_in_range, the COUNT(*) OVER () the
+    LIMIT is reported against, agrees because the dedupe runs before it."""
+    rows, _radius, total_in_range = infrastructure.infrastructure_at(
+        40.65, -74.0005, radius_m=1000, limit=10
+    )
+    assert [r["id"] for r in rows] == ["infra-straddle", "infra-inside"]
+    assert total_in_range == 2
+
+
+def test_total_is_deduped_even_when_the_limit_clips(straddling_infrastructure):
+    """limit=1 shows only the bridge; the total still says 2, not 3."""
+    rows, _radius, total_in_range = infrastructure.infrastructure_at(
+        40.65, -74.0005, radius_m=1000, limit=1
+    )
+    assert [r["id"] for r in rows] == ["infra-straddle"]
+    assert total_in_range == 2
+
+
+def test_no_id_column_means_no_dedupe_in_infrastructure(
+    straddling_infrastructure, monkeypatch
+):
+    """Without id there is nothing to key on (a NULL partition would
+    collapse every row into one), so no QUALIFY is emitted and the
+    duplicate shows — the harness really does see both copies."""
+    monkeypatch.setattr(infrastructure, "_check_schema", lambda glob: ["id"])
+    assert infrastructure._dedupe_clause({"id"}) == ""
+    rows, _radius, total_in_range = infrastructure.infrastructure_at(
+        40.65, -74.0005, radius_m=1000, limit=10
+    )
+    assert [r["name"] for r in rows] == ["Edge Bridge", "Edge Bridge", "Inside Tower"]
+    assert total_in_range == 3

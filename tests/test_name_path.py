@@ -113,7 +113,7 @@ def test_repeat_resolve_hits_the_lru():
 
 def test_last_city_is_reused_for_the_next_poi(monkeypatch):
     geocode.resolve_place("Brooklyn")
-    assert geocode._last_good_city
+    assert geocode._last_good()[0]
 
     seen = {}
 
@@ -150,7 +150,7 @@ def test_observation_tower_does_not_replay_brooklyn_after_paris(monkeypatch):
     replay the Brooklyn cache entry.
     """
     geocode.resolve_place("Brooklyn")
-    assert geocode._last_good_city
+    assert geocode._last_good()[0]
 
     def fake_geocode(query, limit=5, lang=None, near=None):
         q = query.lower()
@@ -194,8 +194,7 @@ def test_observation_tower_does_not_replay_brooklyn_after_paris(monkeypatch):
 
 
 def test_last_city_does_not_bind_a_bare_city_query(monkeypatch):
-    geocode._last_good_city = "Palo Alto"
-    geocode._last_good_coords = (37.44, -122.14)
+    geocode._remember_last_city("Palo Alto", {"lat": 37.44, "lon": -122.14})
     assert not geocode._query_is_poi_shaped("Paris")
     place, city, coords = geocode._extract_city_hint("Paris")
     assert city is None and coords is None
@@ -245,4 +244,4 @@ def test_clear_resolve_session_drops_lru_and_last_city():
     assert geocode._resolve_lru
     geocode.clear_resolve_session()
     assert not geocode._resolve_lru
-    assert geocode._last_good_city is None
+    assert geocode._last_good() == (None, None)

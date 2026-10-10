@@ -112,9 +112,11 @@ TYPE_ = "water"
 
 # geometry/bbox are essential (no distance and no containment test can be
 # made without them); everything else degrades to None/absent in its field
-# rather than failing the call — see degraded_fields().
+# rather than failing the call — see degraded_fields(). id is never
+# reported, but it keys the multi-tile dedupe (_dedupe_clause), so its
+# absence has to be knowable.
 REQUIRED_COLUMNS = [
-    "geometry", "bbox", "subtype", "class", "names", "is_salt", "is_intermittent",
+    "id", "geometry", "bbox", "subtype", "class", "names", "is_salt", "is_intermittent",
 ]
 ESSENTIAL_COLUMNS = {"geometry", "bbox"}
 
@@ -236,6 +238,24 @@ def _sql_list(values: tuple[str, ...]) -> str:
     return ", ".join(f"'{v}'" for v in values)
 
 
+def _dedupe_clause(missing: set[str]) -> str:
+    """QUALIFY keeping one row per id, or "" when the schema has no id.
+
+    A cache tile is a bbox-*intersection* materialization
+    (cache.ensure_tile), so a lake or canal crossing a tile edge is copied
+    into both tiles and a multi-tile read (`read_parquet([tile, tile])`)
+    returns it twice — once as a second containment candidate, once as a
+    duplicate distance row that also inflated in_range_count. Applied in
+    the same SELECT as the bbox WHERE so that prune still reaches the
+    scan's row-group statistics (recreation._projection's recipe). With no
+    id column there is nothing to key on: partitioning on a NULL
+    projection would collapse every row into one, so there is no dedupe.
+    """
+    if "id" in missing:
+        return ""
+    return "QUALIFY id IS NULL OR row_number() OVER (PARTITION BY id) = 1"
+
+
 def _generalized_expr(missing: set[str], geom_expr: str) -> str:
     """SQL predicate: is this row a generalized, tile-cut marine body?
 
@@ -350,6 +370,7 @@ def _containing_body(
         FROM {_from_source(bbox)}
         WHERE {_BBOX_CONTAINS_POINT}
           AND ST_Contains({geom_expr}, ST_Point($lon, $lat))
+        {_dedupe_clause(missing)}
         ORDER BY area ASC
         LIMIT {_CONTAINMENT_LIMIT}
     """
@@ -466,6 +487,7 @@ def water_near(
                 {nlat_expr} AS nlat
             FROM {_from_source(bbox)}
             WHERE {' AND '.join(filters)}
+            {_dedupe_clause(missing)}
         ),
         in_range AS (
             SELECT name, subtype, class, is_salt, is_intermittent,

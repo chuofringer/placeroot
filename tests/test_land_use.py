@@ -327,3 +327,123 @@ def test_warm_tiles_prefer_the_exact_path(tmp_path, monkeypatch):
     )
     land_use.land_use_at(CENTER_LAT, CENTER_LON)
     assert called == []
+
+
+# --- multi-tile reads return a straddling polygon once ---------------------
+#
+# Offline harness: the spatial extension cannot be installed here, so these
+# tests run the module's real query on a bare connection whose ST_* names
+# are stub macros over a [lon, lat] list geometry. Containment is decided
+# by the bbox prefilter alone (ST_Contains is TRUE), which is exactly the
+# part the tile edge affects.
+
+
+def _stub_spatial_conn():
+    con = duckdb.connect()
+    for ddl in (
+        "CREATE MACRO ST_GeomFromWKB(g) AS g",
+        "CREATE MACRO ST_Point(x, y) AS [x, y]",
+        "CREATE MACRO ST_Contains(g, p) AS TRUE",
+        "CREATE MACRO ST_Area(g) AS 1.0",
+    ):
+        con.execute(ddl)
+    return con
+
+
+def _write_point_geometry_fixture(path, rows) -> None:
+    """(id, bbox, subtype, class, name) rows, geometry as a [lon, lat] list."""
+    con = duckdb.connect()
+    con.execute("""
+        CREATE TABLE land_use (
+            id VARCHAR,
+            geometry DOUBLE[],
+            bbox STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE),
+            subtype VARCHAR,
+            class VARCHAR,
+            names STRUCT("primary" VARCHAR)
+        )
+    """)
+    for id_, bbox, subtype, class_, name in rows:
+        centre = [(bbox["xmin"] + bbox["xmax"]) / 2, (bbox["ymin"] + bbox["ymax"]) / 2]
+        con.execute(
+            "INSERT INTO land_use VALUES (?, ?, ?, ?, ?, ?)",
+            [id_, centre, bbox, subtype, class_, {"primary": name}],
+        )
+    con.execute(f"COPY land_use TO '{path}' (FORMAT PARQUET)")
+    con.close()
+
+
+def _two_tile_source(con, theme, src):
+    """Materialize the two tiles either side of lon=-74 and prove the
+    straddling row landed in both; returns the two-tile read_parquet SQL."""
+    from placeroot import cache, db
+
+    deg = cache.tile_deg_for(theme)
+    ty = int(40.65 // deg)
+    tiles = [(round(-74.0 / deg) - 1, ty), (round(-74.0 / deg), ty)]
+    fingerprint = cache.resolve_fingerprint("2026-07-22.0", theme, str(src))
+    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint)
+             for t in tiles]
+    for p in paths:
+        (n,) = con.execute(
+            f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) "
+            "WHERE id = 'lu-straddle'"
+        ).fetchone()
+        assert n == 1
+    return f"read_parquet([{', '.join(db._sql_str(str(p)) for p in paths)}])"
+
+
+@pytest.fixture
+def straddling_land_use(tmp_path, monkeypatch):
+    """A land_use polygon crossing the tile edge at lon=-74, read from both
+    tiles, with the query point inside it and 50 m from the edge."""
+    from placeroot import db
+
+    monkeypatch.setenv("PLACEROOT_CACHE", "on")
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "placeroot-cache"))
+    con = _stub_spatial_conn()
+    monkeypatch.setattr(db, "shared_conn", lambda: con)
+    monkeypatch.setattr(db, "ensure_spatial", lambda: None)
+    rows = [
+        ("lu-straddle", _bbox_of(40.60, 40.70, -74.01, -73.99),
+         "residential", "residential", "Edge Residential"),
+    ]
+    src = tmp_path / "land_use.parquet"
+    _write_point_geometry_fixture(src, rows)
+    land_use.set_data_path(str(src), type_=land_use.TYPE_LAND_USE)
+    source = _two_tile_source(con, land_use._cache_theme("land_use"), src)
+    monkeypatch.setattr(land_use, "_from_source", lambda bbox, type_: source)
+    try:
+        yield con
+    finally:
+        land_use.set_data_path(None, type_=land_use.TYPE_LAND_USE)
+
+
+def test_a_polygon_straddling_a_tile_edge_is_classified_once(straddling_land_use):
+    """The duplicate copy used to read as a second containing polygon, so a
+    lone match came back flagged as ambiguous."""
+    result, ambiguous = land_use._classify(
+        40.65, -74.0005, land_use.TYPE_LAND_USE, True, con=straddling_land_use
+    )
+    assert result == {"subtype": "residential", "class": "residential",
+                      "name": "Edge Residential"}
+    assert ambiguous is False
+
+
+def test_no_id_column_means_no_dedupe(straddling_land_use, monkeypatch):
+    """Without id there is nothing to key on: the query must not partition
+    on a NULL projection (which would collapse every row into one), so it
+    carries no QUALIFY at all and the duplicate is visible again."""
+    monkeypatch.setattr(land_use, "_check_schema", lambda glob: ["id"])
+    captured = []
+
+    class Spy:
+        def execute(self, sql, *args, **kwargs):
+            captured.append(sql)
+            return straddling_land_use.execute(sql, *args, **kwargs)
+
+    _result, ambiguous = land_use._classify(
+        40.65, -74.0005, land_use.TYPE_LAND_USE, True, con=Spy()
+    )
+    assert "QUALIFY" not in captured[-1]
+    assert ambiguous is True
