@@ -45,13 +45,16 @@ jobs:
         run: uv pip install maturin
 
       - name: Build placeroot_native (release)
-        run: uv run maturin develop --release -m native/Cargo.toml
+        # --no-sync: a plain `uv run` re-syncs .venv to the lockfile, which
+        # removes maturin (installed ad hoc above) and, later, the built
+        # placeroot_native module.
+        run: uv run --no-sync maturin develop --release -m native/Cargo.toml
 
       - name: Equivalence tests with the extension present
-        run: uv run pytest tests/test_native_routing.py -q -p no:cacheprovider -rs
+        run: uv run --no-sync pytest tests/test_native_routing.py -q -p no:cacheprovider -rs
 
       - name: Timing, Python vs native (200k segments, 50 searches)
-        run: uv run python native/bench_routing.py --segments 200000 --queries 50 | tee native-timing.txt
+        run: uv run --no-sync python native/bench_routing.py --segments 200000 --queries 50 | tee native-timing.txt
 
       - name: Upload timing
         if: always()
