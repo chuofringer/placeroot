@@ -25,11 +25,15 @@ to return. Measured on main (#511) with these fakes:
       BEFORE  10 rounds, 3 of them places-theme. Leg 1 is geocode(full query):
               4 division rounds and the anchored fallback. Leg 2 is
               _resolve_place_leg -> resolve_place: the pin, literal, folded,
-              fallback, and round 1 — 5 more rounds. Leg 2 runs only when leg 1
-              found no division and the query carries extra place context, and
-              resolve_place writes the resolve LRU and the last-good city
-              memory, so running it speculatively could leave session state
-              behind. Wall ~2.0 s. Not overlapped.
+              fallback, and round 1 — 5 more rounds, run only after leg 1 and
+              only when it found no division. Wall ~2.0 s.
+      AFTER   5 rounds, wall ~1.0 s. Leg 2 is speculated on a worker while
+              leg 1 runs (_named_places._speculate_place_leg). Its writes (the
+              resolve LRU, the last-city memory, the autowarm kick) are deferred
+              into commit() and applied only when leg 2's answer is used, so a
+              discarded leg (leg 1 found a division) leaves no state behind.
+              Rounds = max(leg 1, leg 2). PLACEROOT_SPECULATE_RESOLVE=0 restores
+              the 10-round serial path.
 
     _resolve_route_ends (route/from_to, the server pair path)
       Two plain names: BEFORE already overlaps — _resolve_pair runs both named
@@ -189,14 +193,17 @@ def test_single_resolve_place_critical_path_is_unchanged(timeline):
     assert timeline.call_set() == SHIBUYA_PLACE_CALLS
 
 
-def test_named_place_is_two_serial_legs_and_is_unchanged(timeline):
-    """BEFORE and AFTER: resolve_named_place runs geocode(full query) and then,
-    when no division matched, resolve_place. 10 rounds, ~2.0 s."""
+def test_named_place_legs_overlap_into_five_rounds(timeline):
+    """AFTER: leg 2 (resolve_place) runs beside leg 1 (geocode) rather than
+    after it. 5 rounds, ~1.0 s, the same calls as the serial pair (BEFORE was
+    10 rounds, ~2.0 s)."""
     hit = geocode.resolve_named_place("Shibuya Station Tokyo")
     assert hit["id"] == "pl-gare-shibuya"
-    assert timeline.rounds() == 10
-    assert timeline.rounds({"find_places", "_query_places_fallback"}) == 3
-    assert timeline.wall() >= 10 * SLEEP_S * 0.9  # lower bound only; see above
+    assert timeline.rounds() <= 6
+    # Leg 1's first division scan and leg 2's pin scan start together.
+    assert timeline.overlapping("_query_divisions", "_query_divisions"), "legs ran in turn"
+    assert timeline.wall() >= 5 * SLEEP_S * 0.9  # lower bound only; see above
+    assert timeline.wall() < 10 * SLEEP_S * 0.75  # well under the serial sum
     assert timeline.call_set() == SHIBUYA_NAMED_CALLS
 
 
@@ -217,8 +224,9 @@ def test_pair_of_plain_names_already_overlaps(timeline):
 
 def test_pair_of_name_and_gers_id_overlaps(timeline):
     """BEFORE: the name resolve (~2.0 s) and the GERS lookup run in turn
-    (11 rounds, ~2.2 s). AFTER: both ends side by side (10 rounds, ~2.0 s);
-    the name's own calls are the same set as a lone resolve_named_place."""
+    (11 rounds, ~2.2 s). AFTER: both ends side by side, and the name alone is
+    5 rounds (~1.0 s); the name's own calls are the same set as a lone
+    resolve_named_place."""
     origin, dest, error = server._resolve_route_ends("Shibuya Station Tokyo", GERS_ID)
     assert error is None
     assert origin["id"] == "pl-gare-shibuya"
@@ -228,7 +236,7 @@ def test_pair_of_name_and_gers_id_overlaps(timeline):
     # side by side the id lookup merges into one of the name's rounds, which
     # one depends on thread scheduling, so only the bound is asserted.
     assert timeline.rounds() < 11
-    assert timeline.wall() >= 10 * SLEEP_S * 0.9  # lower bound only; see above
+    assert timeline.wall() >= 5 * SLEEP_S * 0.9  # lower bound only; see above
     name_calls = [c for c in timeline.call_set() if c[0] != "gers_lookup"]
     assert name_calls == SHIBUYA_NAMED_CALLS
 

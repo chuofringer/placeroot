@@ -237,20 +237,24 @@ def _resolve_cache_key(
 
 def _resolve_cache_get(
     query: str, city: str | None, near_lat: float | None, near_lon: float | None,
-    lang: str | None = None, country: str | None = None,
+    lang: str | None = None, country: str | None = None, *, touch: bool = True,
 ) -> list[dict] | None:
     """The full ranked candidate list cached for this key, or None.
 
     `limit` is deliberately not part of the key: resolve_place caches the
     *un-truncated* list and slices on read, so a `limit=1` call followed
     by a `limit=3` one for the same query gets three rows, not one.
+
+    touch=False (the speculative resolve, _resolve.py) reads without moving
+    the entry to the most-recent end: a LRU reorder is a write too.
     """
     key = _resolve_cache_key(query, city, near_lat, near_lon, lang, country)
     with _resolve_lru_lock:
         rows = _pkg._resolve_lru.get(key)
         if rows is None:
             return None
-        _pkg._resolve_lru.move_to_end(key)
+        if touch:
+            _pkg._resolve_lru.move_to_end(key)
         return [dict(r) for r in rows]
 
 
@@ -274,14 +278,19 @@ def _resolve_cache_put(
 
 
 
-def _last_good() -> tuple[str | None, tuple[float, float] | None]:
-    """The (city, coords) the current session last pinned; (None, None) if none."""
+def _last_good(*, touch: bool = True) -> tuple[str | None, tuple[float, float] | None]:
+    """The (city, coords) the current session last pinned; (None, None) if none.
+
+    touch=False reads without refreshing the session's LRU position (see
+    _resolve_cache_get).
+    """
     sid = session.session_id()
     with _last_good_lock:
         state = _pkg._last_good_by_session.get(sid)
         if state is None:
             return None, None
-        _pkg._last_good_by_session.move_to_end(sid)
+        if touch:
+            _pkg._last_good_by_session.move_to_end(sid)
         return state
 
 

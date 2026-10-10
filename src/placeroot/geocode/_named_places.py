@@ -1,8 +1,15 @@
 """resolve_area(), resolve_named_place(), the typo tier and comma-qualified names."""
 
+import contextlib
+import contextvars
+import os
 import sys as _sys
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 
-from placeroot import geo
+import duckdb
+
+from placeroot import db, geo
 from placeroot.errors import AmbiguousArea, AmbiguousPlace, AnchoredNotFound
 
 _pkg = _sys.modules["placeroot.geocode"]
@@ -119,18 +126,31 @@ def resolve_named_place(query: str) -> dict | None:
         if anchor is not None:
             return _resolve_inside_anchor(query, head, anchor)
 
-    rows = [
-        r for r in _pkg.geocode(query, limit=_pkg._RESOLVE_OVERFETCH)
-        if r.get("lat") is not None and r.get("lon") is not None
-        # #431: a fuzzy row that only ever proved itself against part of
-        # what the caller typed is not an answer. See the block below.
-        and not _pkg._fuzzy_row_is_too_weak(query, r)
-    ]
+    # perf: leg 2 is started now, alongside leg 1, rather than after it. It is
+    # only kept when leg 1 finds no division (see _SpeculativeLeg).
+    spec = _speculate_place_leg(query)
+    try:
+        rows = [
+            r for r in _pkg.geocode(query, limit=_pkg._RESOLVE_OVERFETCH)
+            if r.get("lat") is not None and r.get("lon") is not None
+            # #431: a fuzzy row that only ever proved itself against part of
+            # what the caller typed is not an answer. See the block below.
+            and not _pkg._fuzzy_row_is_too_weak(query, r)
+        ]
+    except BaseException:
+        if spec is not None:
+            spec.discard()  # leg 1 failed: the serial path would never have run leg 2
+        raise
     hit = None
-    if not any(r["type"] != "place" for r in rows) and _pkg._has_extra_place_context(query):
+    # A speculative leg exists only when the extra-context gate already passed.
+    if not any(r["type"] != "place" for r in rows) and (
+        spec is not None or _pkg._has_extra_place_context(query)
+    ):
         # #429: no division matched, so this is a places question — and the
         # places resolver is resolve_place, not geocode. See the block below.
-        hit = _resolve_place_leg(query)
+        hit = _resolve_place_leg(query, spec)
+    elif spec is not None:
+        spec.discard()
     if hit is None:
         if not rows:
             return None
@@ -327,7 +347,125 @@ def _has_extra_place_context(query: str) -> bool:
 
 
 
-def _resolve_place_leg(query: str) -> dict | None:
+# --- perf: leg 2 speculated alongside leg 1 ----------------------------------
+#
+# resolve_named_place's two legs used to run in series: geocode(query) first,
+# then resolve_place(query) only when geocode found no division. For a
+# POI-shaped name leg 1 always misses, so both were paid in full: ~10 round
+# trips, ~2.0 s with 0.2 s scans, the cold half of the c15 walk. Leg 2 now
+# starts on a worker while leg 1 runs. Its writes (resolve LRU, last-city
+# memory, autowarm) are deferred into a commit() that runs only if leg 2's
+# answer is used, so a speculative run that leg 1 makes unnecessary leaves
+# no state behind: rounds become max(leg 1, leg 2) instead of their sum.
+#
+# Rules: a division from leg 1 discards leg 2 without commit (its exception,
+# if any, is logged at debug, not raised). A leg-1 exception discards leg 2
+# and propagates, as the serial path would have. Otherwise leg 2's result is
+# joined and committed, and any exception it raised surfaces exactly as the
+# serial call would have raised it.
+#
+# The pool is bounded: a speculative leg holds one read cursor for its whole
+# run, and the read pool has a fixed cursor cap (db.DEFAULT_READ_CURSORS), so
+# at most _SPECULATE_WORKERS of them are ever held here. A discarded leg is
+# cancelled if it has not started; a running one is not waited for.
+
+SPECULATE_NAMED_RESOLVE = True
+
+SPECULATE_ENV = "PLACEROOT_SPECULATE_RESOLVE"
+
+_SPECULATE_WORKERS = 4
+
+_SPECULATE_POOL = ThreadPoolExecutor(
+    max_workers=_SPECULATE_WORKERS, thread_name_prefix="resolve-speculative",
+)
+
+# Legs submitted and not yet finished. Tests drain it so a discarded leg
+# cannot outlive the monkeypatches of the test that started it.
+_IN_FLIGHT: set[Future] = set()
+_IN_FLIGHT_LOCK = threading.Lock()
+
+
+def wait_for_speculative_legs(timeout: float | None = None) -> None:
+    """Block until every speculative leg started so far has finished."""
+    with _IN_FLIGHT_LOCK:
+        pending = list(_IN_FLIGHT)
+    wait(pending, timeout=timeout)
+
+
+def _speculation_enabled() -> bool:
+    if not SPECULATE_NAMED_RESOLVE:
+        return False
+    raw = os.environ.get(SPECULATE_ENV, "").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+class _SpeculativeLeg:
+    """A leg-2 run in flight: join() commits and returns, discard() abandons."""
+
+    def __init__(self, future: "Future[tuple[list[dict], object]]"):
+        self._future = future
+
+    def join(self) -> list[dict]:
+        rows, commit = self._future.result()  # re-raises the leg's own exception
+        commit()
+        return rows
+
+    def discard(self) -> None:
+        self._future.cancel()  # no-op once running; its result is never committed
+        self._future.add_done_callback(_log_discarded_leg)
+
+
+def _log_discarded_leg(future: "Future") -> None:
+    if not future.cancelled() and future.exception() is not None:
+        _pkg.logger.debug(
+            "speculative resolve_place leg failed (discarded)", exc_info=future.exception(),
+        )
+
+
+def _speculative_leg_worker(query: str):
+    """Leg 2 on a worker thread: reads only; returns (rows, commit)."""
+    from placeroot.geocode import _resolve  # call time: the module is loaded by now
+
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(db.isolated_reads())
+        except duckdb.Error:
+            _pkg.logger.debug(
+                "isolated cursor unavailable; speculative leg unisolated", exc_info=True,
+            )
+        return _resolve._resolve_place_impl(
+            query, None, None, _pkg._RESOLVE_OVERFETCH, None, None, None, defer=True,
+        )
+
+
+def _speculate_place_leg(query: str) -> _SpeculativeLeg | None:
+    """Start leg 2 for `query` now, or None when it must stay serial.
+
+    Serial when speculation is switched off, when the extra-context gate
+    fails (leg 2 would never run), or when resolve_place has been replaced
+    (a test double or caller's own resolver must still be the one called).
+    """
+    if not _speculation_enabled():
+        return None
+    from placeroot.geocode import _resolve
+
+    if _pkg.resolve_place is not _resolve.resolve_place:
+        return None
+    if not _pkg._has_extra_place_context(query):
+        return None
+    future = _SPECULATE_POOL.submit(contextvars.copy_context().run, _speculative_leg_worker, query)
+    with _IN_FLIGHT_LOCK:
+        _IN_FLIGHT.add(future)
+    future.add_done_callback(_forget_leg)
+    return _SpeculativeLeg(future)
+
+
+def _forget_leg(future: Future) -> None:
+    with _IN_FLIGHT_LOCK:
+        _IN_FLIGHT.discard(future)
+
+
+def _resolve_place_leg(query: str, spec: _SpeculativeLeg | None = None) -> dict | None:
     """resolve_place's top place candidate for `query`, or None.
 
     No ambiguity check: same reading as the anchored path in
@@ -340,9 +478,15 @@ def _resolve_place_leg(query: str) -> dict | None:
     resolve: resolve_place raises SchemaDegraded where geocode does not, and
     a caller who used to get geocode's own answer (or an honest None) must
     not start getting an exception because a *supplementary* search failed.
+
+    `spec` is the speculative run started by resolve_named_place; when given,
+    its answer is joined and committed instead of running leg 2 again.
     """
     try:
-        hits = _pkg.resolve_place(query, limit=_pkg._RESOLVE_OVERFETCH)
+        if spec is None:
+            hits = _pkg.resolve_place(query, limit=_pkg._RESOLVE_OVERFETCH)
+        else:
+            hits = spec.join()
     except _pkg.overture.SchemaDegraded as e:
         _pkg.logger.info("resolve_named_place: places leg unavailable (%s); using geocode's rows", e)  # noqa: E501
         return None
