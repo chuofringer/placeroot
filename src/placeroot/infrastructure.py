@@ -178,6 +178,28 @@ def _from_source(bbox: tuple[float, float, float, float]) -> str:
 _NEAREST_DISTANCE_EXPR = geo.haversine_sql("nlat", "nlon")
 
 
+def _dedupe_clause(missing: set[str]) -> str:
+    """QUALIFY keeping one row per id, or "" when the schema has no id.
+
+    A cache tile is a bbox-*intersection* materialization
+    (cache.ensure_tile), so a bridge, runway or power line crossing a tile
+    edge is copied into both tiles and a multi-tile read
+    (`read_parquet([tile, tile])`) returns it twice — two identical rows,
+    and a total_in_range one too high. Applied in the same SELECT as the
+    bbox WHERE so that prune still reaches the scan's row-group statistics
+    (recreation._projection's recipe), and before the COUNT(*) OVER ()
+    that total_in_range rides on. With no id column there is nothing to
+    key on: partitioning on a NULL projection would collapse every row
+    into one, so there is no dedupe.
+
+    Shared with transit.py, whose _run_query reads the same layer through
+    _from_source and has the same two-tile exposure.
+    """
+    if "id" in missing:
+        return ""
+    return "QUALIFY id IS NULL OR row_number() OVER (PARTITION BY id) = 1"
+
+
 def _attribute_filters(
     missing: set[str], subtype: str | None, infra_class: str | None, params: dict
 ) -> list[str]:
@@ -295,6 +317,7 @@ def infrastructure_at(
                 {nlat_expr} AS nlat
             FROM {_from_source(bbox)}
             WHERE {' AND '.join(filters)}
+            {_dedupe_clause(missing)}
         ),
         in_range AS (
             SELECT id, subtype, class, name, {_NEAREST_DISTANCE_EXPR} AS distance_m

@@ -67,6 +67,7 @@ from placeroot import (
     release,
     resources,
     routing,
+    session,
     simplify,
     tool_profiles,
     trace,
@@ -687,6 +688,26 @@ def _resolve_pair(a: str, b: str) -> tuple[dict, dict]:
     def _isolated(query: str) -> dict:
         with db.isolated_reads():
             return _resolve_named_place(query)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fa = pool.submit(contextvars.copy_context().run, _isolated, a)
+        fb = pool.submit(contextvars.copy_context().run, _isolated, b)
+        return fa.result(), fb.result()
+
+
+def _resolve_ref_pair(a: str, b: str) -> tuple[tuple, tuple]:
+    """Two string LocationRefs (names and/or GERS ids), each on its own cursor.
+
+    perf: the same fan-out as _resolve_pair, for the route ends that
+    _resolve_pair's plain-name fast path does not take (a GERS id on one or
+    both sides). Returns ((origin, origin_error), (dest, dest_error)) so
+    the caller keeps the origin-first error order it had when the ends ran
+    in turn.
+    """
+
+    def _isolated(ref: str):
+        with db.isolated_reads():
+            return _resolve_location_ref(ref)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         fa = pool.submit(contextvars.copy_context().run, _isolated, a)
@@ -5007,10 +5028,17 @@ def _resolve_route_ends(from_, to) -> tuple[dict | None, dict | None, dict | Non
         if "error" in dest:
             return None, None, {**dest, "field": "to"}
         return origin, dest, None
-    origin, origin_error = _resolve_location_ref(from_)
+    if isinstance(from_, str) and isinstance(to, str):
+        # perf: two network lookups (a name and a GERS id, or two ids) run
+        # side by side; the origin's error still wins, as in turn order.
+        (origin, origin_error), (dest, dest_error) = _resolve_ref_pair(from_, to)
+    else:
+        origin, origin_error = _resolve_location_ref(from_)
+        dest, dest_error = (
+            (None, None) if origin_error is not None else _resolve_location_ref(to)
+        )
     if origin_error is not None:
         return None, None, {**origin_error, "field": "from"}
-    dest, dest_error = _resolve_location_ref(to)
     if dest_error is not None:
         return None, None, {**dest_error, "field": "to"}
     return origin, dest, None
@@ -5808,7 +5836,9 @@ def preferences(
     Call with no arguments to read. Pass mode, pace, household tags, a
     free-text note, or lang to merge those fields.
     clear=true deletes the file and cannot be combined with other fields.
-    Nothing is sent off this machine.
+    Nothing is sent off this machine. Over HTTP, preferences are
+    per-connection and not persisted (this session's values overlay the
+    host's file and are gone when the session ends).
     """
     fields = (mode, pace, household, note, lang)
     if clear and any(value is not None for value in fields):
@@ -6414,6 +6444,56 @@ def _render_tool_text(payload: dict) -> str:
     return pydantic_core.to_json(payload, fallback=str, indent=2).decode()
 
 
+def _session_id_of(ctx) -> str:
+    """The client session a request belongs to, from the SDK's request context.
+
+    Over stateful streamable HTTP (the default for --http) the SDK's
+    StreamableHTTPSessionManager hands `http_transport.mcp_session_id` —
+    the `Mcp-Session-Id` the client echoes on every request — to
+    `serve_loop`, which stores it as `Connection.session_id`; the
+    middleware's `ctx.session` is a `ServerSession` over that connection
+    (its `_connection`; the SDK exposes no public accessor from the
+    middleware tier). That id is the stable per-client identity. Where the
+    connection carries none, the request itself decides: no HTTP request
+    object means stdio (one process = one session, session.STDIO_SESSION_ID).
+    An HTTP request without one — a stateless app, or a 2026-07-28 client,
+    whose era has no handshake and no session (the SDK's
+    `handle_modern_request` builds a fresh `Connection` per request and the
+    client never learns an id) — uses the header if the client sent one and
+    is otherwise its own ephemeral session: nothing persists between two
+    such requests, which is that era's own contract, and nothing leaks.
+    """
+    connection = getattr(getattr(ctx, "session", None), "_connection", None)
+    sid = getattr(connection, "session_id", None)
+    if isinstance(sid, str) and sid:
+        return sid
+    request = getattr(ctx, "request", None)
+    if request is None:
+        return session.STDIO_SESSION_ID
+    headers = getattr(request, "headers", None)
+    try:
+        sid = headers.get("mcp-session-id") if headers is not None else None
+    except Exception:  # noqa: BLE001 - an odd request object must not fail the call
+        sid = None
+    if isinstance(sid, str) and sid:
+        return sid
+    return session.new_ephemeral_id()
+
+
+async def _session_middleware(ctx, call_next):
+    """Bind the client session id for the whole request (session.py).
+
+    Outermost in the chain so every handler — tools, resources, prompts —
+    runs with session.session_id() set to the client it serves; the
+    contextvar follows the request onto the worker thread the SDK runs a
+    sync tool on (anyio copies the context), and into the pools server.py
+    itself fans out to (which copy it explicitly). geocode's last-city
+    memory and preferences' HTTP overlay key on it.
+    """
+    with session.bind_session(_session_id_of(ctx)):
+        return await call_next(ctx)
+
+
 async def _progress_middleware(ctx, call_next):
     """Narrate slow tool calls via MCP progress notifications.
 
@@ -6766,7 +6846,7 @@ def build_server(spec=_UNSET) -> MCPServer:
     server = MCPServer(
         "placeroot", version=version,
         instructions=BASE_INSTRUCTIONS, cache_hints=CACHE_HINTS,
-        middleware=[_progress_middleware, _trace_middleware],
+        middleware=[_session_middleware, _progress_middleware, _trace_middleware],
     )
     # One registry for the loop: `progressive` selects meta-tool names, every
     # other selection selects only real ones, so the two never mix in a

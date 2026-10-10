@@ -11,12 +11,30 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12", "3.13"]
+        # pyproject claims "OS Independent" and the .mcpb bundle targets
+        # Claude Desktop on macOS/Windows, so one cell per platform keeps
+        # that claim honest. One Python version each (3.12, the bundle's
+        # typical runtime) keeps CI minutes sane; the 3.11-3.13 spread is
+        # covered on Linux.
+        include:
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
+    env:
+      # Several tests and scripts read repo files (README, docs, site HTML,
+      # all with non-ASCII) via read_text() without an explicit encoding.
+      # Python < 3.15 defaults that to the locale encoding, which is cp1252
+      # on the Windows runner; UTF-8 mode makes it UTF-8 everywhere, the
+      # same as Linux/macOS, instead of forcing an `encoding=` on every call.
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -28,15 +46,19 @@ jobs:
           enable-cache: true
 
       - name: Set up Python ${{ matrix.python-version }}
+        shell: bash
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
+        shell: bash
         run: uv sync --python ${{ matrix.python-version }}
 
       - name: Ruff
+        shell: bash
         run: uv run ruff check .
 
       - name: Pytest (offline)
+        shell: bash
         run: uv run pytest
 
   browser-smoke:

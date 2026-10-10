@@ -34,6 +34,30 @@ the startup warm-start want deterministic, synchronous behavior instead —
 set PLACEROOT_CACHE_SYNC to materialize missing tiles inline, on the
 caller's own connection, before returning.
 
+Heavy themes (HEAVY_THEME_TILE_DEG: transportation, buildings, water,
+infrastructure) follow the same query-first rule by default. They used to
+COPY their (finer) tiles inline on first touch, under db.conn_lock: a
+3.4 km walking route in Tokyo fetched a ~157 km² transportation tile for
+an ~11 km² box, ~14x the area the query read, and every other tool call in
+the process queued behind the lock for the 6-20 s (60 s+ for buildings)
+the COPY took. Now source_sql() answers such a query from a direct,
+manifest-pruned upstream scan with the bbox pushed down to parquet
+row-group pruning, and the missing tiles warm on the background fetch
+path (own cursor, off conn_lock, bounded by the fetch-concurrency
+semaphore) so the next query over the area reads local tiles. Set
+PLACEROOT_INLINE_TILE_COPY=1 to restore the inline first-touch COPY for a
+deployment that prefers paying the whole tile up front (a slow pipe where
+the bounded COPY measured faster than the scan, or an operator who wants
+the area warm after one query). Tiles already on disk are read locally
+either way; PLACEROOT_CACHE_SYNC and the explicit warmup path
+(prewarm_bbox) still materialize inline, as before.
+
+No path in this module holds db.conn_lock across a tile COPY: source_sql
+does not take the lock at all (nothing it does runs on the shared
+connection — the schema probe takes the lock itself), inline fetches run
+on db.new_connection() cursors, and the background fetcher has its own
+pooled cursors.
+
 Schema fingerprinting (issue #63): a tile materialized under one column
 layout (an older code version, or a fixture with a different schema during
 dev) must never be read back once upstream's schema has moved on — a
@@ -104,14 +128,17 @@ TILE_DEG = 1.0
 DEFAULT_CACHE_DIR = os.path.expanduser("~/.cache/placeroot")
 DEFAULT_MAX_MB = 500
 
-# Heavy themes get finer tiles and first-touch synchronous materialization.
-# Buildings and transportation rows carry full geometries, and a truly cold
-# query measured 60-181s on the direct-scan fallback (Tokyo box) — the scan
-# itself moves too many bytes to ever answer fast, so for these themes the
-# right first-touch is the places strategy inverted: COPY a *small* tile
-# (1/16th the area of the 1-degree grid), then answer locally. Measured
-# effect is the difference between racing a scan that loses and paying a
-# bounded, narrated fetch once per neighborhood.
+# Heavy themes get finer tiles. Buildings and transportation rows carry
+# full geometries, and a truly cold query measured 60-181s on the
+# (then unpruned) direct-scan fallback (Tokyo box), so these themes used
+# to COPY a *small* tile (1/16th the area of the 1-degree grid) inline on
+# first touch and answer locally. With the bundled release manifest
+# pruning the scan to the files a box intersects and the bbox pushed
+# down to row-group pruning, the default first touch is now the direct
+# scan with the tiles warming in the background (see the module
+# docstring); PLACEROOT_INLINE_TILE_COPY=1 restores the inline COPY. The
+# finer grid stays either way: it is what keeps a background tile COPY
+# seconds-scale rather than a minute-plus.
 HEAVY_THEME_TILE_DEG: dict[str, float] = {
     # Buildings queries are point-radius (≤ ~1km), so tiles can be small
     # without any query spanning many of them; a 0.0625° tile (~7km) COPYs
@@ -138,6 +165,26 @@ HEAVY_THEME_TILE_DEG: dict[str, float] = {
 # the query falls back to the ordinary direct-scan-plus-background path
 # rather than stalling on a fetch marathon.
 HEAVY_SYNC_MAX_TILES = 12
+
+
+def _replace_published(tmp_path: Path, path: Path) -> None:
+    """os.replace with the Windows retry it needs.
+
+    POSIX swaps the directory entry even while another handle has the old
+    file open; Windows refuses with PermissionError until that handle
+    closes — and a concurrent writer of the same tile (or DuckDB's just
+    finished COPY) can hold one for a moment. A short bounded retry covers
+    that window; the last attempt raises as before.
+    """
+    attempts = 20 if os.name == "nt" else 1
+    for i in range(attempts):
+        try:
+            os.replace(tmp_path, path)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.05 * (i + 1))
 
 
 def tile_deg_for(theme: str) -> float:
@@ -235,6 +282,19 @@ def sync_mode() -> bool:
     already an explicit, best-effort blocking call).
     """
     value = os.environ.get("PLACEROOT_CACHE_SYNC", "").strip().lower()
+    return value not in ("", "0", "false", "off")
+
+
+def inline_tile_copy() -> bool:
+    """True iff PLACEROOT_INLINE_TILE_COPY is set to a truthy value.
+
+    Restores the pre-direct-scan first touch for heavy themes: a query
+    whose tiles are not all on disk COPYs them inline (bounded by
+    HEAVY_SYNC_MAX_TILES) before answering, instead of answering from a
+    direct upstream scan while the tiles warm in the background. See the
+    module docstring.
+    """
+    value = os.environ.get("PLACEROOT_INLINE_TILE_COPY", "").strip().lower()
     return value not in ("", "0", "false", "off")
 
 
@@ -480,7 +540,7 @@ def ensure_tile(
             con.execute(sql)
         # Last writer wins, whole-file: a concurrent writer that finished
         # first produced byte-equivalent content from the same upstream.
-        os.replace(tmp_path, path)
+        _replace_published(tmp_path, path)
     finally:
         try:
             tmp_path.unlink()  # only still here if the COPY or rename failed
@@ -632,12 +692,12 @@ _claims: dict[str, float] = {}
 # interleave -- a snapshot-then-delete check would still leave a (small)
 # window where a tile is claimed after the snapshot and deleted anyway.
 #
-# RLock, and deliberately never held across a DB call: local_paths_for_query
-# runs under db.conn_lock, so the only lock order that ever occurs is
-# conn_lock -> _claims_lock. Nothing takes conn_lock while holding this one
-# (the tile COPY in ensure_tile happens outside it), so the two can't
-# deadlock against each other -- cf. #145, where a non-reentrant lock
-# re-entered on one thread hung a worker.
+# RLock, and deliberately never held across a DB call: a caller may hold
+# db.conn_lock when it reaches local_paths_for_query, so the only lock
+# order that ever occurs is conn_lock -> _claims_lock. Nothing takes
+# conn_lock while holding this one (the tile COPY in ensure_tile happens
+# outside it), so the two can't deadlock against each other -- cf. #145,
+# where a non-reentrant lock re-entered on one thread hung a worker.
 _claims_lock = threading.RLock()
 
 
@@ -916,12 +976,17 @@ def local_paths_for_query(
 
     If any touched tile is missing, this does NOT block materializing it
     (a tile COPY costs seconds — issue #31): under PLACEROOT_CACHE_SYNC it
-    fetches the missing tiles inline on `con` and returns the complete set
-    of paths; otherwise it schedules background fetches (via
+    fetches the missing tiles inline and returns the complete set of
+    paths; otherwise it schedules background fetches (via
     `new_connection`, a zero-arg factory for a fresh connection — required
     whenever caching is enabled, since the background thread must not share
     `con`) and returns None so the caller queries upstream directly for
-    this one query instead of waiting.
+    this one query instead of waiting. Heavy themes (HEAVY_THEME_TILE_DEG)
+    take the same background path by default; PLACEROOT_INLINE_TILE_COPY
+    makes them fetch inline (up to HEAVY_SYNC_MAX_TILES tiles) instead —
+    see the module docstring. `con` is only ever used for an inline fetch
+    when no `new_connection` factory is given, so a caller that passes
+    the factory may pass None for it.
 
     force_sync=True is the city-warmup / operator-prewarm path: materialize
     missing tiles inline even when PLACEROOT_CACHE_SYNC is unset, so the
@@ -951,12 +1016,15 @@ def local_paths_for_query(
     if not missing:
         return [str(p) for p in cached]
 
-    # Heavy themes materialize inline even without PLACEROOT_CACHE_SYNC:
-    # their direct-scan fallback measured 60-181s truly cold (the bytes,
-    # not the plan), so racing it loses — a few small-tile COPYs, narrated
-    # per tile, is the fast path AND leaves the area warm. A query wide
-    # enough to need more than HEAVY_SYNC_MAX_TILES fetches falls back to
-    # the ordinary path rather than stalling on a fetch marathon.
+    # Heavy themes materialize inline without PLACEROOT_CACHE_SYNC only
+    # under PLACEROOT_INLINE_TILE_COPY: a few small-tile COPYs, narrated
+    # per tile, then leave the area warm — at the price of fetching a
+    # whole tile (~14x a short route's box) before answering, and of
+    # stalling every other caller that queues on the connection meanwhile.
+    # The default answers from the manifest-pruned direct scan and warms
+    # the same tiles in the background (the path right below). A query
+    # wide enough to need more than HEAVY_SYNC_MAX_TILES fetches falls
+    # back to the ordinary path rather than stalling on a fetch marathon.
     #
     # force_sync used to bypass that cap. A 25 km transportation warmup
     # (~20 tiles at 6-20s each) then held the caller for minutes. Cap
@@ -977,7 +1045,9 @@ def local_paths_for_query(
                 )
 
     heavy_sync = (
-        theme in HEAVY_THEME_TILE_DEG and len(missing) <= HEAVY_SYNC_MAX_TILES
+        inline_tile_copy()
+        and theme in HEAVY_THEME_TILE_DEG
+        and len(missing) <= HEAVY_SYNC_MAX_TILES
     )
 
     if sync_mode() or heavy_sync or force_sync:
@@ -1039,6 +1109,8 @@ def local_paths_for_query(
             # run two COPYs at once (a DuckDB connection is single-user;
             # a caller's factory may also just return `con`, which the
             # sequential loop tolerates and a pool would corrupt).
+            if con is None:
+                raise ValueError("local_paths_for_query needs con or new_connection")
             for t in missing:
                 cached.append(_fetch(t, con))
         elif len(missing) == 1:
@@ -1102,7 +1174,10 @@ def source_sql(
     (and let diverge); the other theme modules can migrate here too.
 
     With a bbox, missing tiles are materialized per local_paths_for_query's
-    contract (inline under PLACEROOT_CACHE_SYNC, in the background otherwise).
+    contract (inline under PLACEROOT_CACHE_SYNC or, for a heavy theme,
+    PLACEROOT_INLINE_TILE_COPY; in the background otherwise, in which case
+    the returned source is the manifest-pruned upstream read, and the
+    caller's own bbox WHERE clause does the row-group pruning).
     bbox None is the unbounded-lookup case (an id or name query with no
     location to bound it): only tiles already on disk are used and nothing
     new is materialized — an unbounded lookup must not trigger a world-sized
@@ -1118,6 +1193,12 @@ def source_sql(
 
     Raises duckdb.Error on cache resolution failure; callers wrap it in their
     own unavailable-upstream error the way they wrap the query itself.
+
+    Never holds db.conn_lock: nothing here runs on the shared connection.
+    Tile presence is a filesystem check, the schema probe takes the lock
+    itself (and is lru-cached), and any inline COPY runs on a
+    db.new_connection() cursor — so a multi-second fetch no longer stalls
+    every other tool call in the process behind the lock.
     """
     if enabled():
         from placeroot import release as release_mod
@@ -1128,11 +1209,10 @@ def source_sql(
         elif not upstream_fallback:
             paths = cached_tile_paths_for_bbox(active_release, theme, upstream_glob, bbox)
         else:
-            with db.conn_lock:
-                paths = local_paths_for_query(
-                    db.shared_conn(), active_release, theme, bbox, upstream_glob,
-                    db.new_connection, schedule_missing=schedule_missing,
-                )
+            paths = local_paths_for_query(
+                None, active_release, theme, bbox, upstream_glob,
+                db.new_connection, schedule_missing=schedule_missing,
+            )
         if paths:
             joined = ", ".join(db._sql_str(str(p)) for p in paths)
             return f"read_parquet([{joined}])"

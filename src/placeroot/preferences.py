@@ -14,6 +14,17 @@ mode does for routing.
 
 Nothing leaves the machine: the file lives under the user's config
 directory (or PLACEROOT_PREFERENCES_PATH) and is never sent upstream.
+
+Layering. The document a read sees is, per key: the current client
+session's overlay, then the host file, then the built-in default (get()).
+Over stdio one process serves one client and there is no overlay: reads
+and writes are the file, as they always were. Over --http one process
+serves every connected client, and the file is the *host's* document, so
+each HTTP session (session.py: the SDK's Mcp-Session-Id) writes into an
+in-memory overlay of its own, layered over the file for reads and never
+persisted — one client's "I cycle" must not become every other client's
+routing default. clear over HTTP empties that session's view (every key
+shadowed by its default) and leaves the host file alone.
 """
 
 from __future__ import annotations
@@ -22,10 +33,13 @@ import json
 import os
 import re
 import threading
+from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+from placeroot import session
 
 MODES = frozenset({"walk", "cycle", "drive"})
 
@@ -54,6 +68,52 @@ def is_valid_lang(value: str) -> bool:
     return bool(_LANG_PATTERN.match(str(value).strip().lower()))
 
 _THREAD_LOCK = threading.Lock()
+
+# Per-session overlays for --http (see the module docstring). Keyed by
+# session.session_id(); each value holds only the fields that session set
+# (a clear sets every field, so the file is fully shadowed). Bounded as an
+# LRU so a long-lived server never grows with the clients it has seen; the
+# stdio session never gets an entry.
+_OVERLAY_SESSIONS_MAX = 256
+_overlay_lock = threading.Lock()
+_overlays: OrderedDict[str, dict[str, Any]] = OrderedDict()
+
+
+def _overlay_session() -> str | None:
+    """The session whose overlay applies, or None when reads/writes are the file."""
+    sid = session.session_id()
+    return None if sid == session.STDIO_SESSION_ID else sid
+
+
+def _overlay(sid: str) -> dict[str, Any]:
+    with _overlay_lock:
+        found = _overlays.get(sid)
+        if found is None:
+            return {}
+        _overlays.move_to_end(sid)
+        return dict(found)
+
+
+def _set_overlay(sid: str, fields: dict[str, Any], *, replace: bool = False) -> None:
+    """Merge `fields` into the session's overlay (or replace it) under the lock,
+    so two concurrent updates on one session cannot drop each other's fields.
+
+    A one-request (ephemeral) session stores nothing: no later request can
+    read it back, and storing it would only evict a session that can."""
+    if session.is_ephemeral(sid):
+        return
+    with _overlay_lock:
+        current = {} if replace else _overlays.get(sid, {})
+        _overlays[sid] = {**current, **fields}
+        _overlays.move_to_end(sid)
+        while len(_overlays) > _OVERLAY_SESSIONS_MAX:
+            _overlays.popitem(last=False)
+
+
+def clear_overlays() -> None:
+    """Drop every session overlay (tests)."""
+    with _overlay_lock:
+        _overlays.clear()
 
 
 class PreferencesError(Exception):
@@ -89,7 +149,31 @@ def empty() -> dict[str, Any]:
 
 
 def load() -> dict[str, Any]:
-    """Read the document. A missing file is empty; a torn file is an error.
+    """Read the document the current session sees (overlay over file).
+
+    Over stdio this is the file. Over HTTP each key is the session's
+    overlay value when it set one, else the file's — get()'s layering,
+    assembled from one file read so a torn file is reported once.
+    """
+    doc = _file_doc()
+    sid = _overlay_session()
+    if sid is not None:
+        doc.update(_overlay(sid))
+    return doc
+
+
+def get(key: str) -> Any:
+    """One field: session overlay, then the host file, then the default."""
+    sid = _overlay_session()
+    if sid is not None:
+        overlay = _overlay(sid)
+        if key in overlay:
+            return overlay[key]
+    return _file_doc().get(key, empty().get(key))
+
+
+def _file_doc() -> dict[str, Any]:
+    """Read the host file. A missing file is empty; a torn file is an error.
 
     Never treat corrupt JSON as empty: an update that did that would
     silently replace the torn file and drop every field it still held.
@@ -135,7 +219,16 @@ def save(doc: dict[str, Any]) -> dict[str, Any]:
 
 
 def clear() -> dict[str, Any]:
-    """Delete the file. Returns the empty document."""
+    """Delete the file (stdio) or empty this session's view (HTTP).
+
+    Returns the empty document either way. Over HTTP the host file is not
+    touched: the session's overlay is set to a full empty document, so
+    every key shadows whatever the file holds.
+    """
+    sid = _overlay_session()
+    if sid is not None:
+        _set_overlay(sid, empty(), replace=True)
+        return empty()
     with _exclusive():
         dest = path()
         try:
@@ -165,19 +258,30 @@ def update(
 
     Holds an exclusive lock for the load-merge-save so two concurrent
     updates cannot drop each other's fields.
+
+    Over HTTP the given fields go into the session's overlay (normalized
+    exactly as a save would normalize them) and the layered document is
+    returned; the host file is neither read under lock nor written.
     """
+    given = {
+        key: value
+        for key, value in (
+            ("mode", mode), ("pace", pace), ("household", household),
+            ("note", note), ("lang", lang),
+        )
+        if value is not None
+    }
+    sid = _overlay_session()
+    if sid is not None:
+        normalized = _normalize({**empty(), **given})
+        fields = {key: normalized[key] for key in given}
+        _set_overlay(sid, fields)
+        # Assembled here rather than re-read so an ephemeral session (which
+        # stores nothing) still answers with what it was just given.
+        return {**load(), **fields}
     with _exclusive():
         current = load()
-        if mode is not None:
-            current["mode"] = mode
-        if pace is not None:
-            current["pace"] = pace
-        if household is not None:
-            current["household"] = household
-        if note is not None:
-            current["note"] = note
-        if lang is not None:
-            current["lang"] = lang
+        current.update(given)
         return save(current)
 
 

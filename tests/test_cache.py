@@ -80,10 +80,13 @@ def test_heavy_themes_get_finer_tiles_and_suffixed_paths():
 
 
 def test_heavy_theme_first_touch_materializes_inline(cache_dir, con, monkeypatch):
-    """A heavy theme's first query COPYs its (small) tiles synchronously even
-    without PLACEROOT_CACHE_SYNC — its direct-scan fallback measured
-    60-181s cold, so racing the scan loses (see HEAVY_THEME_TILE_DEG)."""
+    """Under PLACEROOT_INLINE_TILE_COPY a heavy theme's first query COPYs
+    its (small) tiles synchronously even without PLACEROOT_CACHE_SYNC —
+    the pre-direct-scan behaviour, kept for operators who prefer it (see
+    HEAVY_THEME_TILE_DEG and tests/test_routing_direct_scan.py for the
+    default)."""
     monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
+    monkeypatch.setenv("PLACEROOT_INLINE_TILE_COPY", "1")
     monkeypatch.setitem(cache.HEAVY_THEME_TILE_DEG, THEME, cache.TILE_DEG)
     glob = str(FIXTURE_PATH)
     paths = cache.local_paths_for_query(
@@ -642,7 +645,7 @@ def test_stale_tile_ignored_after_upstream_schema_changes(con, cache_dir, sync_c
     assert paths_a
     fingerprint_a = cache.resolve_fingerprint(RELEASE, THEME, str(FIXTURE_PATH))
     for p in paths_a:
-        assert f"/{fingerprint_a}/" in p
+        assert fingerprint_a in Path(p).parts
 
     # Schema B: same rows/bbox, but missing the "confidence" column — a
     # different upstream dataset (older/newer code, a different fixture
@@ -659,7 +662,7 @@ def test_stale_tile_ignored_after_upstream_schema_changes(con, cache_dir, sync_c
     # it did not (and could not have) read schema A's stale tile.
     assert paths_b != paths_a
     for p in paths_b:
-        assert f"/{fingerprint_b}/" in p
+        assert fingerprint_b in Path(p).parts
     quoted = ", ".join(f"'{p}'" for p in paths_b)
     desc = con.execute(f"SELECT * FROM read_parquet([{quoted}]) LIMIT 0").description
     assert "confidence" not in {c[0] for c in desc}
@@ -758,7 +761,7 @@ def test_tile_key_includes_upstream_source(con, cache_dir, sync_cache, local_pro
     assert paths_b
     assert set(paths_a).isdisjoint(paths_b)
     for p in paths_b:
-        assert f"/{fp_b}/" in p
+        assert fp_b in Path(p).parts
 
 
 def test_offline_fallback_with_no_existing_fingerprint_dir_returns_none(
@@ -826,10 +829,19 @@ def test_inflight_dedup_key_includes_fingerprint(con, cache_dir, monkeypatch):
     tile = cache.tiles_for_bbox(*bbox)[0]
     cache.local_paths_for_query(con, RELEASE, THEME, bbox, "upstreamA", duckdb.connect)
     cache.local_paths_for_query(con, RELEASE, THEME, bbox, "upstreamB", duckdb.connect)
-    time.sleep(0.3)  # let both background attempts finish
 
     fp_a = cache.resolve_fingerprint(RELEASE, THEME, "upstreamA")
     fp_b = cache.resolve_fingerprint(RELEASE, THEME, "upstreamB")
+    # Wait on the condition, not a fixed sleep: the fakes sleep 0.1 s each
+    # and the background fetches share bounded slots, so on a slow runner
+    # (macOS CI) schema B's fetch can start well after 0.3 s.
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        with lock:
+            seen = set(calls)
+        if (fp_a, tile) in seen and (fp_b, tile) in seen:
+            break
+        time.sleep(0.05)
     assert fp_a.startswith("fingerprintA-") and fp_b.startswith("fingerprintB-")
     assert (fp_a, tile) in calls
     assert (fp_b, tile) in calls

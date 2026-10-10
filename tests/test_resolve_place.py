@@ -670,11 +670,67 @@ def _no_session_state(monkeypatch):
     """resolve_place reuses the last good city for POI-shaped queries (#329)
     and replays an LRU by (query, hint); both would let one test's run
     answer the next test's question. Start each #464 test cold."""
-    monkeypatch.setattr(geocode, "_last_good_city", None)
-    monkeypatch.setattr(geocode, "_last_good_coords", None)
-    geocode._resolve_lru.clear()
+    geocode.clear_resolve_session(clear_all=True)
     monkeypatch.setattr(geocode, "_local_divisions_table", lambda: None)
     monkeypatch.setattr(geocode, "geocode", lambda query, limit=5, lang=None: [])
+
+
+def test_last_city_and_its_cache_hit_stay_with_the_session_that_pinned_it(monkeypatch):
+    """Over --http one process serves every client. Session A resolves
+    Brooklyn and then a POI-shaped "Observation Tower", which inherits
+    Brooklyn as its city (#329) and is cached under that inferred city.
+    Session B asking the same bare question must neither inherit A's city
+    nor replay A's cache entry: B has no city of its own, so B's key is
+    the bare query and its search runs unanchored."""
+    from placeroot import session
+
+    geocode.clear_resolve_session(clear_all=True)
+    monkeypatch.setattr(geocode, "_POI_ALIASES", {})
+    monkeypatch.setattr(geocode, "_local_divisions_table", lambda: None)
+    calls = {"geocode": [], "find_places": []}
+
+    def fake_geocode(query, limit=5, lang=None, **kw):
+        calls["geocode"].append(query)
+        if query.lower() == "brooklyn":
+            return [{
+                "name": "Brooklyn", "type": "locality", "lat": CENTER_LAT, "lon": CENTER_LON,
+                "id": "div-brooklyn", "admin_context": ["United States", "New York"],
+                "rank_score": 0.9,
+            }]
+        return []
+
+    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10, **kw):
+        calls["find_places"].append((round(lat, 3), round(lon, 3)))
+        return [{
+            "id": "bk-tower", "name": "Observation Tower", "category": "monument",
+            "basic_category": "monument", "operating_status": "open",
+            "confidence": 0.7, "lat": CENTER_LAT, "lon": CENTER_LON, "distance_m": 5,
+        }]
+
+    monkeypatch.setattr(geocode, "geocode", fake_geocode)
+    monkeypatch.setattr(overture, "find_places", fake_find_places)
+
+    with session.bind_session("client-a"):
+        assert geocode.resolve_place("Brooklyn")[0]["id"] == "div-brooklyn"
+        first = geocode.resolve_place("Observation Tower")
+        assert first and first[0]["id"] == "bk-tower"
+        # Every scan was anchored on the inherited Brooklyn pin.
+        assert calls["find_places"]
+        assert set(calls["find_places"]) == {(round(CENTER_LAT, 3), round(CENTER_LON, 3))}
+        scans = len(calls["find_places"])
+        # A's own repeat is the cache hit: no new search.
+        assert geocode.resolve_place("Observation Tower") == first
+        assert len(calls["find_places"]) == scans
+
+    with session.bind_session("client-b"):
+        assert geocode._last_good() == (None, None)
+        second = geocode.resolve_place("Observation Tower")
+        # B's search ran unanchored (no Brooklyn pin), so it was neither
+        # A's cache hit nor A's pinned find_places scan.
+        assert len(calls["find_places"]) == scans
+        assert second != first
+
+    geocode.clear_resolve_session(clear_all=True)
 
 
 def _division(name, lat, lon, **extra):

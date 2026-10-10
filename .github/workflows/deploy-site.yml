@@ -26,6 +26,11 @@ on:
     paths:
       - 'site/**'
       - '.github/workflows/deploy-site.yml'
+      # The Desktop Extension bundle served at /placeroot.mcpb is built
+      # into site/ by this workflow (see "Build the Desktop Extension
+      # bundle" below), so its inputs redeploy the site too.
+      - 'mcpb/**'
+      - 'scripts/build_mcpb.py'
   # A published release always redeploys production from the tagged tree,
   # even if that release's merge didn't touch site/ (or its deploy failed).
   # Belt and braces for "a release ships the website": the version bump lands
@@ -74,6 +79,26 @@ jobs:
         with:
           # wrangler v4 (npx …@latest) requires Node >= 22.
           node-version: '22'
+
+      # The Desktop Extension bundle (#233) is a build product, not a
+      # committed file (site/placeroot.mcpb is gitignored): build it into
+      # site/ here so https://placeroot.dev/placeroot.mcpb — the link on
+      # add-to-your-ai.html — ships with every deploy, from the same tree
+      # the rest of the site comes from. Release events deploy from the
+      # tag, so production's bundle is the tagged one.
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        with:
+          # v10 auto-disables cache on `release` when enable-cache is auto.
+          # Keep true so uv still installs *and* the uv cache is used.
+          enable-cache: true
+      - name: Build the Desktop Extension bundle into site/
+        run: uv run python scripts/build_mcpb.py site/placeroot.mcpb
+      - name: Check the built bundle (version matches pyproject, fits Pages' 25 MiB limit)
+        run: uv run pytest tests/test_mcpb_bundle.py -q
+        env:
+          PLACEROOT_MCPB: site/placeroot.mcpb
+
       - name: Deploy site/ to Cloudflare Pages (production on main, else preview)
         id: deploy
         run: |

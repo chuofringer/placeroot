@@ -4,6 +4,11 @@ __pycache__/
 dist/
 .DS_Store
 
+# Desktop Extension bundle: a ~23 MB build product (scripts/build_mcpb.py),
+# built by release.yml (release asset) and by the site deploy workflows
+# into site/ so placeroot.dev/placeroot.mcpb keeps serving. Never commit it.
+site/placeroot.mcpb
+
 # Local Claude Code session state (agent worktrees, etc.) — never shipped.
 .claude/
 

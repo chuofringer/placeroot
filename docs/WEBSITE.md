@@ -9,6 +9,12 @@ build step. Recreated from the design handoff (issue #84).
 - `site/how-it-works.html` — the animated four-node pipeline
 - `site/add-to-your-ai.html` — the tabbed per-tool installer
 - assets: `logo-mark.svg` (also the favicon), `logo-lockup.png`, `og-image.png`
+- `placeroot.mcpb` — the Claude Desktop one-click bundle the installer page
+  links. **Not in git** (`site/placeroot.mcpb` is gitignored): both deploy
+  workflows build it into `site/` with `scripts/build_mcpb.py` right before
+  uploading, so it is live at https://placeroot.dev/placeroot.mcpb without a
+  23 MB binary per release in history. See
+  [PUBLISHING.md](PUBLISHING.md#desktop-extension-bundle-mcpb-issue-233).
 
 Fonts (Sora + Fira Code) load from Google Fonts; everything else is local.
 `tests/test_site.py` guards structure, the external-reference allowlist, the
@@ -52,7 +58,9 @@ guard together.
 cd site && python3 -m http.server 8000
 # open http://localhost:8000/
 ```
-Any static file server works; there is nothing to build.
+Any static file server works; the pages need no build. Only the bundle
+download needs one — `uv run python scripts/build_mcpb.py site/placeroot.mcpb`
+if you want `/placeroot.mcpb` to resolve locally.
 
 ## Deploy — Cloudflare Pages (primary)
 `.github/workflows/deploy-site.yml` direct-uploads `site/` on every push to

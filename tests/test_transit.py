@@ -292,3 +292,86 @@ def test_missing_geometry_raises_schema_degraded(tmp_path):
 def test_server_rejects_out_of_range_coordinate(transit_fixture):
     result = server.transit_stops_near(lat=91.0, lon=0.0)
     assert result["error"] == "bad_request"
+
+
+# --- multi-tile reads: a platform straddling a tile edge --------------------
+#
+# Offline harness, as in tests/test_infrastructure.py: the spatial extension
+# cannot be installed here, so the module's real query runs on a bare
+# connection whose ST_* names are stub macros over a [lon, lat] list
+# geometry (the feature's centre). The bbox prefilter is the real one.
+
+
+def _stub_spatial_conn():
+    con = duckdb.connect()
+    for ddl in (
+        "CREATE MACRO ST_GeomFromWKB(g) AS g",
+        "CREATE MACRO ST_Point(x, y) AS [x, y]",
+        "CREATE MACRO ST_X(g) AS g[1]",
+        "CREATE MACRO ST_Y(g) AS g[2]",
+        "CREATE MACRO ST_Scale(g, kx, ky) AS [g[1] * kx, g[2] * ky]",
+        "CREATE MACRO ST_ClosestPoint(a, b) AS a",
+    ):
+        con.execute(ddl)
+    return con
+
+
+@pytest.fixture
+def straddling_platform(tmp_path, monkeypatch):
+    """A transit platform polygon crossing the tile edge at lon=-74, read
+    from both tiles (the straddling row proven to be in both)."""
+    from placeroot import cache, db
+
+    monkeypatch.setenv("PLACEROOT_CACHE", "on")
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "placeroot-cache"))
+    con = _stub_spatial_conn()
+    monkeypatch.setattr(db, "shared_conn", lambda: con)
+    monkeypatch.setattr(db, "ensure_spatial", lambda: None)
+    src = tmp_path / "infrastructure.parquet"
+    build = duckdb.connect()
+    build.execute("""
+        CREATE TABLE infrastructure (
+            id VARCHAR,
+            geometry DOUBLE[],
+            bbox STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE),
+            subtype VARCHAR,
+            class VARCHAR,
+            names STRUCT("primary" VARCHAR)
+        )
+    """)
+    build.execute(
+        "INSERT INTO infrastructure VALUES (?, ?, ?, ?, ?, ?)",
+        ["transit-straddle", [-74.0, 40.65],
+         {"xmin": -74.001, "ymin": 40.649, "xmax": -73.999, "ymax": 40.651},
+         "transit", "platform", {"primary": "Edge Platform"}],
+    )
+    build.execute(f"COPY infrastructure TO '{src}' (FORMAT PARQUET)")
+    build.close()
+    infrastructure.set_data_path(str(src))
+    theme = infrastructure._cache_theme()
+    deg = cache.tile_deg_for(theme)
+    ty = int(40.65 // deg)
+    tiles = [(round(-74.0 / deg) - 1, ty), (round(-74.0 / deg), ty)]
+    fingerprint = cache.resolve_fingerprint("2026-07-22.0", theme, str(src))
+    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint)
+             for t in tiles]
+    for p in paths:
+        (n,) = con.execute(
+            f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) "
+            "WHERE id = 'transit-straddle'"
+        ).fetchone()
+        assert n == 1
+    source = f"read_parquet([{', '.join(db._sql_str(str(p)) for p in paths)}])"
+    monkeypatch.setattr(infrastructure, "_from_source", lambda bbox: source)
+    try:
+        yield con
+    finally:
+        infrastructure.set_data_path(None)
+
+
+def test_a_platform_straddling_a_tile_edge_is_listed_once(straddling_platform):
+    rows, _radius, total_in_range, _fallback, _class_missing = transit.transit_stops_near(
+        40.65, -74.0005, radius_m=500, limit=10, kind="platform"
+    )
+    assert [r["id"] for r in rows] == ["transit-straddle"]
+    assert total_in_range == 1

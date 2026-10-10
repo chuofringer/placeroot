@@ -8,7 +8,9 @@ while browsers still load placeroot.dev. A plain origin 403 must still fail.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
+import sys
 import threading
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +20,18 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "check_listings.sh"
+
+# The script under test is bash + curl; a runner without both (a bare
+# Windows box, say — GitHub's windows-latest does ship Git Bash and curl)
+# cannot exercise it, which is a missing tool, not a regression.
+# On windows-latest `bash` on PATH is System32's WSL launcher, which prints
+# "Windows Subsystem for Linux has no installed distributions" and exits 1
+# before Git Bash is ever consulted; the script is not meaningfully testable
+# there.
+pytestmark = pytest.mark.skipif(
+    shutil.which("bash") is None or shutil.which("curl") is None or sys.platform == "win32",
+    reason="scripts/check_listings.sh needs a POSIX bash and curl on PATH",
+)
 
 CF_CHALLENGE_BODY = (
     "<!DOCTYPE html><html><head><title>Just a moment...</title></head>"
