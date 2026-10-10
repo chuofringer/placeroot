@@ -57,7 +57,7 @@ def _validate_input(geometry, label: str) -> None:
     except InvalidGeometryOp as e:
         detail = e.detail
         if detail.startswith("geometry"):
-            detail = label + detail[len("geometry"):]
+            detail = label + detail[len("geometry") :]
         else:
             detail = f"{label}: {detail}"
         raise InvalidGeometryOp(detail) from e
@@ -128,8 +128,7 @@ def _set_op(op: str, geometry, geometry2) -> dict:
         raise overture.UpstreamUnavailable(f"could not load spatial extension: {e}") from e
     sql_op = _OPS[op]
     sql = (
-        f"SELECT ST_AsGeoJSON({sql_op}(ST_GeomFromGeoJSON($g1), ST_GeomFromGeoJSON($g2))) "
-        "AS result"
+        f"SELECT ST_AsGeoJSON({sql_op}(ST_GeomFromGeoJSON($g1), ST_GeomFromGeoJSON($g2))) AS result"
     )
     params = {"g1": json.dumps(geometry), "g2": json.dumps(geometry2)}
     try:

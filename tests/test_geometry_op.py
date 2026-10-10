@@ -323,9 +323,7 @@ def test_buffer_radius_is_capped():
     assert out["error"] == "bad_request"
     assert str(int(geometry_ops.MAX_BUFFER_RADIUS_M)) in out["detail"]
     # At the cap itself (away from the antimeridian) the ring is still valid.
-    ok = server.geometry_op(
-        "buffer", point=P(0.0, 0.0), radius_m=geometry_ops.MAX_BUFFER_RADIUS_M
-    )
+    ok = server.geometry_op("buffer", point=P(0.0, 0.0), radius_m=geometry_ops.MAX_BUFFER_RADIUS_M)
     assert ok["geometry"]["type"] == "Polygon"
 
 
@@ -333,9 +331,9 @@ def test_buffer_exterior_ring_is_counterclockwise():
     out = server.geometry_op("buffer", point=P(40.0, -73.0), radius_m=500.0)
     ring = out["geometry"]["coordinates"][0]
     assert _signed_ring_area(ring) > 0  # CCW per RFC 7946, matching convex_hull
-    hull = server.geometry_op(
-        "convex_hull", points=[P(0, 0), P(0, 1), P(1, 1), P(1, 0)]
-    )["geometry"]["coordinates"][0]
+    hull = server.geometry_op("convex_hull", points=[P(0, 0), P(0, 1), P(1, 1), P(1, 0)])[
+        "geometry"
+    ]["coordinates"][0]
     assert _signed_ring_area(hull) > 0
 
 

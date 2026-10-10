@@ -343,9 +343,7 @@ def test_find_center_seed_crosses_the_antimeridian_correctly():
     """Origins at lon 179.9 and -179.9 are ~22km apart across the seam;
     an arithmetic mean would seed the search near lon 0, half a world
     away. The circular mean lands on the seam."""
-    center_lat, center_lon = meeting.find_center(
-        [(10.0, 179.9, "walk"), (10.0, -179.9, "walk")]
-    )
+    center_lat, center_lon = meeting.find_center([(10.0, 179.9, "walk"), (10.0, -179.9, "walk")])
     assert center_lat == pytest.approx(10.0, abs=0.1)
     assert abs(abs(center_lon) - 180.0) < 0.2
 
@@ -396,9 +394,7 @@ def test_routing_outage_is_a_structured_error_not_unroutable(meeting_places, mon
         raise server.routing.UpstreamUnavailable("transportation scan failed")
 
     monkeypatch.setattr(server.routing, "route", outage)
-    result = server.meeting_point(
-        _origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True
-    )
+    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True)
     assert result["error"] == "upstream_unavailable"
     assert result["retry_advised"] is True
 
@@ -408,9 +404,7 @@ def test_routing_schema_degraded_is_a_structured_error(meeting_places, monkeypat
         raise server.routing.SchemaDegraded(["connectors"])
 
     monkeypatch.setattr(server.routing, "route", degraded)
-    result = server.meeting_point(
-        _origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True
-    )
+    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True)
     assert result["error"] == "schema_degraded"
     assert result["missing_columns"] == ["connectors"]
 
@@ -424,9 +418,7 @@ def test_truncated_leg_flags_candidate_and_note(meeting_places, monkeypatch):
         return result
 
     monkeypatch.setattr(server.routing, "route", truncated_route)
-    result = server.meeting_point(
-        _origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True
-    )
+    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True)
     assert result["candidates"]
     top = result["candidates"][0]
     assert top["truncated"] is True
@@ -439,9 +431,7 @@ def test_route_too_long_note_suggests_a_different_mode(meeting_places, monkeypat
         raise server.routing.RouteTooLong(9000.0, 7500.0)
 
     monkeypatch.setattr(server.routing, "route", too_long)
-    result = server.meeting_point(
-        _origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True
-    )
+    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True)
     assert "error" not in result
     assert result["candidates"] == []
     assert "cap" in result["note"]
@@ -471,8 +461,12 @@ def test_named_origin_adds_resolved_and_defaults_to_walk_mode(meeting_places, mo
     assert "error" not in result
     assert result["resolved"] == [
         {
-            "index": 0, "name": "Origin A", "id": "gers-origin-a",
-            "lat": a_lat, "lon": a_lon, "matched_by": "name",
+            "index": 0,
+            "name": "Origin A",
+            "id": "gers-origin-a",
+            "lat": a_lat,
+            "lon": a_lon,
+            "matched_by": "name",
         }
     ]
     assert result["candidates"], "the named origin must still resolve to a routable point"
@@ -483,9 +477,7 @@ def test_ambiguous_origin_name_is_an_indexed_error(monkeypatch):
         raise errors.AmbiguousPlace(query, candidates=[{"name": "X"}])
 
     monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
-    result = server.meeting_point(
-        ["Ambiguous", {"lat": ORIGIN_B[0], "lon": ORIGIN_B[1]}]
-    )
+    result = server.meeting_point(["Ambiguous", {"lat": ORIGIN_B[0], "lon": ORIGIN_B[1]}])
     assert result["error"] == "ambiguous_place"
     assert result["index"] == 0
     assert result["detail"].startswith("origins[0]: ")
@@ -504,8 +496,11 @@ def test_two_named_origins_resolve_in_parallel(meeting_places, monkeypatch):
         seen.append(query)
         coords = {"Origin A": (a_lat, a_lon), "Origin B": (b_lat, b_lon)}[query]
         return {
-            "name": query, "lat": coords[0], "lon": coords[1],
-            "id": f"gers-{query.lower().replace(' ', '-')}", "type": "place",
+            "name": query,
+            "lat": coords[0],
+            "lon": coords[1],
+            "id": f"gers-{query.lower().replace(' ', '-')}",
+            "type": "place",
         }
 
     monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
@@ -520,6 +515,7 @@ def test_two_named_origins_resolve_in_parallel(meeting_places, monkeypatch):
 def test_two_ambiguous_origin_names_report_the_lowest_index(monkeypatch):
     """Both string origins fail resolution; the deterministic lowest-index
     failure must win regardless of which parallel worker finishes first."""
+
     def fake_resolve(query):
         raise errors.AmbiguousPlace(query, candidates=[{"name": "X"}])
 

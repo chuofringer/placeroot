@@ -105,8 +105,7 @@ def _points_list_coord_error(points, label: str) -> dict | None:
         return {
             "error": "bad_request",
             "detail": (
-                f"{label} accepts at most {geometry_ops.MAX_BATCH_POINTS} points, "
-                f"got {len(points)}"
+                f"{label} accepts at most {geometry_ops.MAX_BATCH_POINTS} points, got {len(points)}"
             ),
         }
     for i, p in enumerate(points):

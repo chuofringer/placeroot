@@ -52,10 +52,22 @@ def _build_land_use_fixture(path, include_class=True) -> None:
         f"SELECT ST_AsWKB(ST_GeomFromText('{box_wkt(*_PARK_BOX)}'))"
     ).fetchone()
     rows = [
-        ("lu-residential", residential_wkb, _bbox_of(*_RESIDENTIAL_BOX),
-         "residential", "residential" if include_class else None, "Downtown Residential"),
-        ("lu-park", park_wkb, _bbox_of(*_PARK_BOX), "park",
-         "park" if include_class else None, "Test Park"),
+        (
+            "lu-residential",
+            residential_wkb,
+            _bbox_of(*_RESIDENTIAL_BOX),
+            "residential",
+            "residential" if include_class else None,
+            "Downtown Residential",
+        ),
+        (
+            "lu-park",
+            park_wkb,
+            _bbox_of(*_PARK_BOX),
+            "park",
+            "park" if include_class else None,
+            "Test Park",
+        ),
     ]
     class_col = "class VARCHAR," if include_class else ""
     con.execute(f"""
@@ -69,7 +81,8 @@ def _build_land_use_fixture(path, include_class=True) -> None:
         )
     """)
     insert_rows = [
-        (r[0], r[1], r[2], r[3], {"primary": r[5]}) if not include_class
+        (r[0], r[1], r[2], r[3], {"primary": r[5]})
+        if not include_class
         else (r[0], r[1], r[2], r[3], r[4], {"primary": r[5]})
         for r in rows
     ]
@@ -153,7 +166,9 @@ def test_point_only_in_the_big_polygon_is_unambiguous(land_use_fixture):
     lat, lon = 40.72, -73.90  # within _RESIDENTIAL_BOX, outside _PARK_BOX
     result = land_use.land_use_at(lat, lon)
     assert result["land_use"] == {
-        "subtype": "residential", "class": "residential", "name": "Downtown Residential",
+        "subtype": "residential",
+        "class": "residential",
+        "name": "Downtown Residential",
     }
     assert "note" not in result
 
@@ -220,7 +235,7 @@ def test_cache_theme_is_a_portable_path_component():
     for type_ in (land_use.TYPE_LAND_USE, land_use.TYPE_LAND_COVER):
         theme = land_use._cache_theme(type_)
         assert theme  # non-empty
-        assert not any(c in theme for c in ':\\/'), theme
+        assert not any(c in theme for c in ":\\/"), theme
 
 
 def test_server_land_use_at_happy_path(land_use_fixture):
@@ -322,7 +337,8 @@ def test_warm_tiles_prefer_the_exact_path(tmp_path, monkeypatch):
     called = []
     monkeypatch.setattr(land_use, "_land_cover_tiles_warm", lambda lat, lon: True)
     monkeypatch.setattr(
-        land_use, "_grid_land_cover",
+        land_use,
+        "_grid_land_cover",
         lambda lat, lon: called.append(1) or {"subtype": "x", "class": None},
     )
     land_use.land_use_at(CENTER_LAT, CENTER_LON)
@@ -382,12 +398,10 @@ def _two_tile_source(con, theme, src):
     ty = int(40.65 // deg)
     tiles = [(round(-74.0 / deg) - 1, ty), (round(-74.0 / deg), ty)]
     fingerprint = cache.resolve_fingerprint("2026-07-22.0", theme, str(src))
-    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint)
-             for t in tiles]
+    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint) for t in tiles]
     for p in paths:
         (n,) = con.execute(
-            f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) "
-            "WHERE id = 'lu-straddle'"
+            f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) WHERE id = 'lu-straddle'"
         ).fetchone()
         assert n == 1
     return f"read_parquet([{', '.join(db._sql_str(str(p)) for p in paths)}])"
@@ -405,8 +419,13 @@ def straddling_land_use(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "shared_conn", lambda: con)
     monkeypatch.setattr(db, "ensure_spatial", lambda: None)
     rows = [
-        ("lu-straddle", _bbox_of(40.60, 40.70, -74.01, -73.99),
-         "residential", "residential", "Edge Residential"),
+        (
+            "lu-straddle",
+            _bbox_of(40.60, 40.70, -74.01, -73.99),
+            "residential",
+            "residential",
+            "Edge Residential",
+        ),
     ]
     src = tmp_path / "land_use.parquet"
     _write_point_geometry_fixture(src, rows)
@@ -425,8 +444,7 @@ def test_a_polygon_straddling_a_tile_edge_is_classified_once(straddling_land_use
     result, ambiguous = land_use._classify(
         40.65, -74.0005, land_use.TYPE_LAND_USE, True, con=straddling_land_use
     )
-    assert result == {"subtype": "residential", "class": "residential",
-                      "name": "Edge Residential"}
+    assert result == {"subtype": "residential", "class": "residential", "name": "Edge Residential"}
     assert ambiguous is False
 
 

@@ -61,7 +61,7 @@ def test_number_and_street_lands_on_the_exact_point():
 
 
 def test_trailing_house_number_is_the_german_convention():
-    """"Hauptstraße 5" — the number is the *last* token, and the street name
+    """ "Hauptstraße 5" — the number is the *last* token, and the street name
     needs no suffix transformation at all (verified live for DE/NL)."""
     result = geocode.geocode_address("Hauptstraße 5, Berlin")
 
@@ -155,7 +155,9 @@ def test_calle_8_searches_for_the_street_not_house_number_8():
 
 def test_first_comma_splits_street_from_place_and_the_rest_goes_to_geocode():
     assert geocode._parse_address_query("1600 Amphitheatre Parkway, Mountain View, CA") == (
-        "1600", "Amphitheatre Parkway", "Mountain View, CA",
+        "1600",
+        "Amphitheatre Parkway",
+        "Mountain View, CA",
     )
 
 
@@ -379,9 +381,12 @@ def test_same_country_compares_iso_codes_then_the_admin_chain():
     assert geocode._same_country(us, dict(us)) is True
     assert geocode._same_country(us, gb) is False
     # No code on either side -> the top of the admin chain decides.
-    assert geocode._same_country(
-        {"admin_context": ["Canada", "Ontario"]}, {"admin_context": ["Canada", "Quebec"]}
-    ) is True
+    assert (
+        geocode._same_country(
+            {"admin_context": ["Canada", "Ontario"]}, {"admin_context": ["Canada", "Quebec"]}
+        )
+        is True
+    )
     # Nothing to compare is not a match: a places-fallback row carries
     # neither, and "unknown" must not read as "same".
     assert geocode._same_country({"country": None, "admin_context": []}, us) is False
@@ -435,6 +440,7 @@ def _failing_conn(state, real):
     because a connection that fails outright never reaches the anchor step --
     geocode() itself would raise first, which is a different bug.
     """
+
     class _Blip:
         def execute(self, sql, *a, **kw):
             if state["fail"] and "division_id = $id" in sql:
@@ -622,13 +628,26 @@ def test_street_variants_fold_ordinals_both_ways():
     assert "1st street" in up
 
 
-@pytest.mark.parametrize("key,expected", [
-    ("5th", ["5"]), ("22nd", ["22"]), ("3rd", ["3"]), ("101st", ["101"]),
-    ("11th", ["11"]), ("13th", ["13"]),
-    ("5", ["5th"]), ("2", ["2nd"]), ("11", ["11th"]), ("112", ["112th"]),
-    ("21", ["21st"]), ("103", ["103rd"]),
-    ("main", []), ("5b", []), ("th", []),
-])
+@pytest.mark.parametrize(
+    "key,expected",
+    [
+        ("5th", ["5"]),
+        ("22nd", ["22"]),
+        ("3rd", ["3"]),
+        ("101st", ["101"]),
+        ("11th", ["11"]),
+        ("13th", ["13"]),
+        ("5", ["5th"]),
+        ("2", ["2nd"]),
+        ("11", ["11th"]),
+        ("112", ["112th"]),
+        ("21", ["21st"]),
+        ("103", ["103rd"]),
+        ("main", []),
+        ("5b", []),
+        ("th", []),
+    ],
+)
 def test_ordinal_variants_table(key, expected):
     assert geocode._ordinal_variants(key) == expected
 
@@ -678,15 +697,17 @@ def test_exact_match_carries_the_tier_and_is_otherwise_unchanged():
     match = result.pop("match")
     assert match == "exact"
     assert result == {
-        "results": [{
-            "number": "1600",
-            "street": "AMPHITHEATRE PKWY",
-            "postcode": "94043",
-            "country": "US",
-            "distance_m": 3991.9,
-            "lat": 37.422,
-            "lon": -122.0841,
-        }],
+        "results": [
+            {
+                "number": "1600",
+                "street": "AMPHITHEATRE PKWY",
+                "postcode": "94043",
+                "country": "US",
+                "distance_m": 3991.9,
+                "lat": 37.422,
+                "lon": -122.0841,
+            }
+        ],
         "anchor": {
             "name": "Mountain View",
             "id": "gers-div-mountain-view",
@@ -786,7 +807,7 @@ def test_no_points_on_the_street_at_all_is_the_street_tier_not_a_bracket():
 
 
 def test_a_non_numeric_target_cannot_be_bracketed_and_falls_to_street():
-    """"Apt 3"-shaped numbers have no leading digit run to compare
+    """ "Apt 3"-shaped numbers have no leading digit run to compare
     against -- see _parse_leading_int -- so there is nothing honest to
     bracket the miss with."""
     result = geocode.geocode_address(
@@ -850,10 +871,18 @@ def test_the_neighbor_query_reads_the_same_bbox_the_exact_scan_used():
     assert {r[0] for r in rows} == {"1600", "1601", "1900"}
 
 
-@pytest.mark.parametrize("number,expected", [
-    ("12", 12), ("12-14", 12), ("5A", 5), ("221B", 221),
-    ("Lot 4", None), ("", None), (None, None),
-])
+@pytest.mark.parametrize(
+    "number,expected",
+    [
+        ("12", 12),
+        ("12-14", 12),
+        ("5A", 5),
+        ("221B", 221),
+        ("Lot 4", None),
+        ("", None),
+        (None, None),
+    ],
+)
 def test_leading_int_parse(number, expected):
     assert geocode._parse_leading_int(number) == expected
 
@@ -877,15 +906,18 @@ def _spy_intersection(monkeypatch):
     return calls
 
 
-@pytest.mark.parametrize("query", [
-    "5th Ave & 42nd St, New York, NY",
-    "5th Ave&42nd St, New York, NY",
-    "5th Ave and 42nd St, New York, NY",
-    "5th Ave AND 42nd St, New York, NY",
-    "5th Ave at 42nd St, New York, NY",
-    "5th Ave / 42nd St, New York, NY",
-    "5th Ave @ 42nd St, New York, NY",
-])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "5th Ave & 42nd St, New York, NY",
+        "5th Ave&42nd St, New York, NY",
+        "5th Ave and 42nd St, New York, NY",
+        "5th Ave AND 42nd St, New York, NY",
+        "5th Ave at 42nd St, New York, NY",
+        "5th Ave / 42nd St, New York, NY",
+        "5th Ave @ 42nd St, New York, NY",
+    ],
+)
 def test_intersection_syntax_is_routed_to_geocode_intersection(monkeypatch, query):
     """Corpus a07: the street half is a crossing, which no address scan can
     find. It goes to the tool built for it, with the parsed city."""
@@ -913,17 +945,20 @@ def test_a_house_numbered_query_never_delegates(monkeypatch):
     assert "delegated_to" not in result
 
 
-@pytest.mark.parametrize("query", [
-    "Rock and Roll Blvd, Cleveland",
-    "Rock and Roll Hall of Fame Blvd, Cleveland",
-    "Market Street, San Francisco",
-    # Three pieces or a bare number on one side is not a crossing this
-    # parser vouches for.
-    "A St & B St & C St, San Francisco",
-    "5 & 42, New York, NY",
-])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Rock and Roll Blvd, Cleveland",
+        "Rock and Roll Hall of Fame Blvd, Cleveland",
+        "Market Street, San Francisco",
+        # Three pieces or a bare number on one side is not a crossing this
+        # parser vouches for.
+        "A St & B St & C St, San Francisco",
+        "5 & 42, New York, NY",
+    ],
+)
 def test_a_street_name_containing_and_is_still_one_street(monkeypatch, query):
-    """"and" only splits when both halves look like streets: "Rock" does not,
+    """ "and" only splits when both halves look like streets: "Rock" does not,
     so the whole name scans as one street, as it always has."""
     calls = _spy_intersection(monkeypatch)
 
@@ -961,22 +996,25 @@ def test_the_server_tool_passes_the_delegation_through(monkeypatch):
     assert result["results"][0]["streets"] == ["5th Ave", "42nd St"]
 
 
-@pytest.mark.parametrize("street, expected", [
-    ("5th Ave & 42nd St", ("5th Ave", "42nd St")),
-    ("Fifth Avenue and Broadway", ("Fifth Avenue", "Broadway")),
-    ("Main St at Church Rd", ("Main St", "Church Rd")),
-    ("Broadway / Wall Street", ("Broadway", "Wall Street")),
-    # Symbol separators need only a letter on each side and no bare number.
-    ("Broadway & Wall", ("Broadway", "Wall")),
-    # Word separators need a street-type word or ordinal on each side.
-    ("Main and Broadway", None),
-    ("Rock and Roll Hall of Fame Blvd", None),
-    ("Land at Sea Rd", None),
-    ("Market Street", None),
-    ("A & B & C", None),
-    ("5 & 42", None),
-    ("& 42nd St", None),
-])
+@pytest.mark.parametrize(
+    "street, expected",
+    [
+        ("5th Ave & 42nd St", ("5th Ave", "42nd St")),
+        ("Fifth Avenue and Broadway", ("Fifth Avenue", "Broadway")),
+        ("Main St at Church Rd", ("Main St", "Church Rd")),
+        ("Broadway / Wall Street", ("Broadway", "Wall Street")),
+        # Symbol separators need only a letter on each side and no bare number.
+        ("Broadway & Wall", ("Broadway", "Wall")),
+        # Word separators need a street-type word or ordinal on each side.
+        ("Main and Broadway", None),
+        ("Rock and Roll Hall of Fame Blvd", None),
+        ("Land at Sea Rd", None),
+        ("Market Street", None),
+        ("A & B & C", None),
+        ("5 & 42", None),
+        ("& 42nd St", None),
+    ],
+)
 def test_split_intersection_table(street, expected):
     assert geocode._split_intersection(street) == expected
 
@@ -989,14 +1027,22 @@ def _namesake_anchor(monkeypatch):
     the region is too broad and the fallback picks the locality. Same name,
     same country: only the type tells them apart."""
     region = {
-        "id": "gers-div-ny-state", "name": "New York", "type": "region",
-        "country": "US", "admin_context": ["United States"],
-        "lat": 42.9, "lon": -75.5,
+        "id": "gers-div-ny-state",
+        "name": "New York",
+        "type": "region",
+        "country": "US",
+        "admin_context": ["United States"],
+        "lat": 42.9,
+        "lon": -75.5,
     }
     locality = {
-        "id": "gers-div-nyc", "name": "New York", "type": "locality",
-        "country": "US", "admin_context": ["United States", "New York"],
-        "lat": 40.7127, "lon": -74.006,
+        "id": "gers-div-nyc",
+        "name": "New York",
+        "type": "locality",
+        "country": "US",
+        "admin_context": ["United States", "New York"],
+        "lat": 40.7127,
+        "lon": -74.006,
     }
     bboxes = {
         "gers-div-ny-state": (-79.76, 40.50, -71.86, 45.01),

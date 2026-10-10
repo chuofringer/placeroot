@@ -20,8 +20,12 @@ _pkg = _sys.modules["placeroot.geocode"]
 
 
 def _local_divisions_table_path(active_release: str) -> Path:
-    return _pkg.cache.cache_dir() / active_release / _pkg._DIVISIONS_TABLE_SUBDIR / _pkg._DIVISIONS_TABLE_FILENAME  # noqa: E501
-
+    return (
+        _pkg.cache.cache_dir()
+        / active_release
+        / _pkg._DIVISIONS_TABLE_SUBDIR
+        / _pkg._DIVISIONS_TABLE_FILENAME
+    )  # noqa: E501
 
 
 def _unique_tmp_path(path: Path) -> Path:
@@ -40,7 +44,6 @@ def _unique_tmp_path(path: Path) -> Path:
     return Path(name)
 
 
-
 def _copy_and_publish(con: duckdb.DuckDBPyConnection, sql: str, tmp_path: Path, path: Path) -> None:
     """Run the COPY in `sql` (which writes `tmp_path`) and publish it as
     `path`; a failed COPY leaves no orphaned temp file behind."""
@@ -52,7 +55,6 @@ def _copy_and_publish(con: duckdb.DuckDBPyConnection, sql: str, tmp_path: Path, 
         raise
 
 
-
 def _clear_table_derived_caches() -> None:
     """Drop every in-process memo derived from a local table's contents:
     called when a table is (re)published and from clear_resolve_session."""
@@ -60,7 +62,6 @@ def _clear_table_derived_caches() -> None:
     _pkg._division_named_exactly_cached.cache_clear()
     with _pkg._anchor_memo_lock:
         _pkg._anchor_memo.clear()
-
 
 
 def _publish_copied_parquet(con: duckdb.DuckDBPyConnection, tmp_path: Path, path: Path) -> None:
@@ -100,7 +101,6 @@ def _publish_copied_parquet(con: duckdb.DuckDBPyConnection, tmp_path: Path, path
     # The table at `path` just changed: anything memoized from its rows
     # (region populations, exact-name probes, anchor derivations) is stale.
     _clear_table_derived_caches()
-
 
 
 def _materialize_alt_names_table(path: Path, glob: str) -> None:
@@ -155,7 +155,6 @@ def _materialize_alt_names_table(path: Path, glob: str) -> None:
     _copy_and_publish(con, sql, tmp_path, path)
 
 
-
 def _materialize_lang_names_table(path: Path, glob: str) -> None:
     """COPY the #410 language-tagged name table — one row per (division id,
     names.common language key) — into a local parquet at `path`.
@@ -189,15 +188,12 @@ def _materialize_lang_names_table(path: Path, glob: str) -> None:
     _copy_and_publish(con, sql, tmp_path, path)
 
 
-
 def _is_remote_glob(glob: str) -> bool:
     return glob.startswith(("s3://", "http://", "https://"))
 
 
-
 def _stage1_sentinel(path: Path) -> Path:
     return path.with_suffix(".stage1")
-
 
 
 def _materialize_divisions_table(path: Path, glob: str) -> None:
@@ -241,8 +237,9 @@ def _materialize_divisions_table(path: Path, glob: str) -> None:
     else:
         _materialize_divisions_pass(path, glob, with_hierarchies=True)
         _pkg._try_materialize_alt_names_table(path.with_name(_pkg._ALT_NAMES_TABLE_FILENAME), glob)
-        _pkg._try_materialize_lang_names_table(path.with_name(_pkg._LANG_NAMES_TABLE_FILENAME), glob)  # noqa: E501
-
+        _pkg._try_materialize_lang_names_table(
+            path.with_name(_pkg._LANG_NAMES_TABLE_FILENAME), glob
+        )  # noqa: E501
 
 
 def _materialize_divisions_pass(path: Path, glob: str, with_hierarchies: bool) -> None:
@@ -273,7 +270,6 @@ def _materialize_divisions_pass(path: Path, glob: str, with_hierarchies: bool) -
     _copy_and_publish(con, sql, tmp_path, path)
 
 
-
 # Upgrade threads already started this process, keyed by table path — one
 # upgrade per table at a time; a failed upgrade discards its key so the next
 # geocode retries.
@@ -294,7 +290,6 @@ _build_lock = threading.Lock()
 # see db.isolated_reads) could both run _materialize_divisions_table
 # against the same table.parquet.tmp and race the final rename.
 _blocking_build_lock = threading.Lock()
-
 
 
 def _spawn_divisions_build(path: Path, glob: str) -> None:
@@ -339,7 +334,6 @@ _upgrade_started: set[str] = set()
 _upgrade_lock = threading.Lock()
 
 
-
 def _spawn_divisions_upgrade(path: Path, glob: str) -> None:
     key = str(path)
     with _upgrade_lock:
@@ -358,14 +352,11 @@ def _spawn_divisions_upgrade(path: Path, glob: str) -> None:
             with _pkg.cache._background_fetch_slots, _blocking_build_lock:
                 _pkg._upgrade_divisions_table(path, glob)
         except Exception as e:  # noqa: BLE001 - background upgrade must never surface
-            _pkg.logger.warning(
-                "divisions table upgrade failed (next geocode retries): %s", e
-            )
+            _pkg.logger.warning("divisions table upgrade failed (next geocode retries): %s", e)
             with _upgrade_lock:
                 _upgrade_started.discard(key)
 
     threading.Thread(target=_run, daemon=True).start()
-
 
 
 def _upgrade_divisions_table(path: Path, glob: str) -> None:
@@ -378,9 +369,9 @@ def _upgrade_divisions_table(path: Path, glob: str) -> None:
     _pkg._stage1_sentinel(path).unlink(missing_ok=True)
     _pkg.logger.info(
         "divisions table upgraded with admin chains in %.1fs -> %s",
-        time.time() - t0, path,
+        time.time() - t0,
+        path,
     )
-
 
 
 # #214: releases whose alt table this process has already tried (and failed)
@@ -391,7 +382,6 @@ def _upgrade_divisions_table(path: Path, glob: str) -> None:
 # one attempt per release per process so a persistent failure (no network, a
 # release without names.common) costs one try, not one per geocode call.
 _ALT_BUILD_ATTEMPTED: set[str] = set()
-
 
 
 def _try_materialize_alt_names_table(alt_path: Path, glob: str) -> None:
@@ -411,17 +401,14 @@ def _try_materialize_alt_names_table(alt_path: Path, glob: str) -> None:
     except (duckdb.Error, _pkg.overture.UpstreamUnavailable, OSError) as e:
         _pkg.logger.warning(
             "alternate-name table materialization failed, geocode will search "
-            "primary names only: %s", e,
+            "primary names only: %s",
+            e,
         )
         return
-    _pkg.logger.info(
-        "alternate-name table materialized in %.1fs -> %s", time.time() - t0, alt_path
-    )
-
+    _pkg.logger.info("alternate-name table materialized in %.1fs -> %s", time.time() - t0, alt_path)
 
 
 _LANG_BUILD_ATTEMPTED: set[str] = set()
-
 
 
 def _try_materialize_lang_names_table(lang_path: Path, glob: str) -> None:
@@ -437,13 +424,13 @@ def _try_materialize_lang_names_table(lang_path: Path, glob: str) -> None:
     except (duckdb.Error, _pkg.overture.UpstreamUnavailable, OSError) as e:
         _pkg.logger.warning(
             "language-tagged name table materialization failed, lang lookups "
-            "will find no variant: %s", e,
+            "will find no variant: %s",
+            e,
         )
         return
     _pkg.logger.info(
         "language-tagged name table materialized in %.1fs -> %s", time.time() - t0, lang_path
     )
-
 
 
 def _local_lang_names_table(local_table: str | None) -> str | None:
@@ -468,14 +455,15 @@ def _local_lang_names_table(local_table: str | None) -> str | None:
         if key in _pkg._LANG_BUILD_ATTEMPTED:
             return None
         _pkg._LANG_BUILD_ATTEMPTED.add(key)
-        _pkg.logger.info("no language-tagged name table at %s (cache predates #410); building it", path)  # noqa: E501
+        _pkg.logger.info(
+            "no language-tagged name table at %s (cache predates #410); building it", path
+        )  # noqa: E501
         _pkg._try_materialize_lang_names_table(
             path, _pkg.overture.upstream_glob(theme="divisions", type_="division")
         )
         if path.exists():
             return str(path)
     return None
-
 
 
 def _lang_variants_for(lang_table: str | None, ids: list[str], lang: str) -> dict[str, str]:
@@ -501,7 +489,6 @@ def _lang_variants_for(lang_table: str | None, ids: list[str], lang: str) -> dic
     except duckdb.Error:
         return {}
     return dict(rows)
-
 
 
 def _local_alt_names_table(local_table: str | None) -> str | None:
@@ -536,7 +523,6 @@ def _local_alt_names_table(local_table: str | None) -> str | None:
     return None
 
 
-
 # #224: divisions tables this process has already checked for the bbox columns
 # (and, if they were missing, tried once to rebuild). Same shape and same
 # reasoning as _ALT_BUILD_ATTEMPTED above — an existing cache directory has a
@@ -548,7 +534,6 @@ def _local_alt_names_table(local_table: str | None) -> str | None:
 _DIVISIONS_BBOX_CHECKED: set[str] = set()
 
 
-
 def _divisions_table_has_bbox(path: Path) -> bool:
     """Whether the materialized table at `path` carries the #224 bbox columns.
 
@@ -558,14 +543,15 @@ def _divisions_table_has_bbox(path: Path) -> bool:
     """
     try:
         with _pkg.overture._conn_lock:
-            cols = _pkg.overture.conn().execute(
-                f"SELECT * FROM read_parquet('{path}') LIMIT 0"
-            ).description
+            cols = (
+                _pkg.overture.conn()
+                .execute(f"SELECT * FROM read_parquet('{path}') LIMIT 0")
+                .description
+            )
     except duckdb.Error:
         return False
     names = {c[0] for c in cols or []}
     return all(c in names for c in _pkg._DIVISIONS_BBOX_COLUMNS)
-
 
 
 def _division_bbox(
@@ -610,10 +596,11 @@ def _division_bbox(
     # `BETWEEN xmin AND xmax`, which an inverted box turns into a silently
     # empty range. Supporting wrapped extents means splitting the box at ±180,
     # not passing it through.
-    if (xmax - xmin) < _pkg._DEGENERATE_BBOX_SPAN_DEG or (ymax - ymin) < _pkg._DEGENERATE_BBOX_SPAN_DEG:  # noqa: E501
+    if (xmax - xmin) < _pkg._DEGENERATE_BBOX_SPAN_DEG or (
+        ymax - ymin
+    ) < _pkg._DEGENERATE_BBOX_SPAN_DEG:  # noqa: E501
         return None
     return xmin, ymin, xmax, ymax
-
 
 
 def _rebuild_once_for_bbox_columns(path: Path) -> None:
@@ -659,11 +646,11 @@ def _rebuild_once_for_bbox_columns(path: Path) -> None:
         except (duckdb.Error, _pkg.overture.UpstreamUnavailable) as e:
             _pkg.logger.warning(
                 "divisions table rebuild for bbox columns failed, keeping the "
-                "existing table (bbox lookups stay unavailable): %s", e,
+                "existing table (bbox lookups stay unavailable): %s",
+                e,
             )
             return
     _pkg.logger.info("divisions table rebuilt with bbox columns in %.1fs", time.time() - t0)
-
 
 
 def _bundled_index_path(active_release: str) -> Path | None:
@@ -675,17 +662,20 @@ def _bundled_index_path(active_release: str) -> Path | None:
     the full table has ever been built.
     """
     try:
-        p = (resources.files("placeroot") / "data" / "geocode-index"
-             / active_release / "table.parquet")
+        p = (
+            resources.files("placeroot")
+            / "data"
+            / "geocode-index"
+            / active_release
+            / "table.parquet"
+        )
         return Path(str(p)) if p.is_file() else None
     except (OSError, TypeError):
         return None
 
 
-
 def _is_bundled_table(table_path: str | None) -> bool:
     return bool(table_path) and "geocode-index" in str(table_path)
-
 
 
 def _local_divisions_table() -> str | None:
@@ -755,14 +745,12 @@ def _local_divisions_table() -> str | None:
     except (duckdb.Error, _pkg.overture.UpstreamUnavailable) as e:
         _pkg.logger.warning(
             "local divisions table materialization failed, falling back to "
-            "direct upstream scans: %s", e,
+            "direct upstream scans: %s",
+            e,
         )
         return None
-    _pkg.logger.info(
-        "local divisions table materialized in %.1fs -> %s", time.time() - t0, path
-    )
+    _pkg.logger.info("local divisions table materialized in %.1fs -> %s", time.time() - t0, path)
     return str(path)
-
 
 
 def _region_population_lookup(local_table: str | None) -> dict[str, int]:
@@ -778,7 +766,6 @@ def _region_population_lookup(local_table: str | None) -> dict[str, int]:
         return _pkg._region_population_lookup_cached(local_table)
     except duckdb.Error:
         return {}
-
 
 
 @lru_cache(maxsize=8)

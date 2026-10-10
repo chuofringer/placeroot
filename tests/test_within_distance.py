@@ -66,7 +66,9 @@ def test_needs_lat_lon_or_where():
 
 def test_rejects_both_latlon_and_where():
     result = server.within_distance(
-        lat=CENTER_LAT, lon=CENTER_LON, where={"lat": CENTER_LAT, "lon": CENTER_LON},
+        lat=CENTER_LAT,
+        lon=CENTER_LON,
+        where={"lat": CENTER_LAT, "lon": CENTER_LON},
         max_distance_m=1000,
     )
     assert result["error"] == "bad_request"
@@ -98,16 +100,22 @@ def test_where_name_adds_resolved(monkeypatch):
     def fake_resolve(query):
         assert query == "Cluster Place 000"
         return {
-            "name": query, "lat": CENTER_LAT, "lon": CENTER_LON,
-            "id": "gers-cluster", "type": "place",
+            "name": query,
+            "lat": CENTER_LAT,
+            "lon": CENTER_LON,
+            "id": "gers-cluster",
+            "type": "place",
         }
 
     monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
     result = server.within_distance(where="Cluster Place 000", max_distance_m=1000)
     assert "error" not in result
     assert result["resolved"] == {
-        "name": "Cluster Place 000", "id": "gers-cluster",
-        "lat": CENTER_LAT, "lon": CENTER_LON, "matched_by": "name",
+        "name": "Cluster Place 000",
+        "id": "gers-cluster",
+        "lat": CENTER_LAT,
+        "lon": CENTER_LON,
+        "matched_by": "name",
     }
 
 

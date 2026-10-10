@@ -316,7 +316,7 @@ def infrastructure_at(
                 {nlon_expr} AS nlon,
                 {nlat_expr} AS nlat
             FROM {_from_source(bbox)}
-            WHERE {' AND '.join(filters)}
+            WHERE {" AND ".join(filters)}
             {_dedupe_clause(missing)}
         ),
         in_range AS (

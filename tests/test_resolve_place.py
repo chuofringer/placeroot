@@ -51,11 +51,18 @@ def test_fallback_anchor_prefers_the_prominent_division(monkeypatch):
     """The trailing-token anchor ranks candidates like geocode's main path:
     _rank_key orders by each row's own population, so the 8M-person
     namesake beats the 100-person one regardless of the region map."""
-    small = {"id": "d-small", "name": "Springfield", "subtype": "locality",
-             "country": "PG", "region": None, "lat": -5.0, "lon": 142.0,
-             "admin_context": [], "population": 100}
-    big = dict(small, id="d-big", country="JP", lat=35.0, lon=139.0,
-               population=8_000_000)
+    small = {
+        "id": "d-small",
+        "name": "Springfield",
+        "subtype": "locality",
+        "country": "PG",
+        "region": None,
+        "lat": -5.0,
+        "lon": 142.0,
+        "admin_context": [],
+        "population": 100,
+    }
+    big = dict(small, id="d-big", country="JP", lat=35.0, lon=139.0, population=8_000_000)
     monkeypatch.setattr(geocode, "_query_divisions", lambda *a, **k: [small, big])
     hit = geocode._fallback_anchor("Coffee Springfield", [], None, "unused")
     assert hit == (35.0, 139.0, "Coffee")
@@ -83,17 +90,28 @@ def test_merged_ordering_is_kind_agnostic_by_match_tier(monkeypatch):
     def fake_geocode(query, limit=5, lang=None, near=None):
         return [
             {
-                "name": "Example Town", "type": "locality", "lat": 1.0, "lon": 2.0,
-                "id": "div-prefix", "admin_context": ["Testland"], "rank_score": 0.9,
+                "name": "Example Town",
+                "type": "locality",
+                "lat": 1.0,
+                "lon": 2.0,
+                "id": "div-prefix",
+                "admin_context": ["Testland"],
+                "rank_score": 0.9,
             },
         ]
 
     def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10):
         return [
             {
-                "id": "place-exact", "name": "Example", "category": "cafe",
-                "basic_category": "cafe", "operating_status": "open",
-                "confidence": 0.5, "lat": 1.0, "lon": 2.0, "distance_m": 10,
+                "id": "place-exact",
+                "name": "Example",
+                "category": "cafe",
+                "basic_category": "cafe",
+                "operating_status": "open",
+                "confidence": 0.5,
+                "lat": 1.0,
+                "lon": 2.0,
+                "distance_m": 10,
             },
         ]
 
@@ -149,9 +167,15 @@ _FAR_LAT, _NEAR_LON = 40.736, -73.89965
 
 def _pinned_place(pid, name, lat, lon, confidence):
     return {
-        "id": pid, "name": name, "category": "place_of_worship",
-        "basic_category": "place_of_worship", "operating_status": "open",
-        "confidence": confidence, "lat": lat, "lon": lon, "distance_m": 0,
+        "id": pid,
+        "name": name,
+        "category": "place_of_worship",
+        "basic_category": "place_of_worship",
+        "operating_status": "open",
+        "confidence": confidence,
+        "lat": lat,
+        "lon": lon,
+        "distance_m": 0,
     }
 
 
@@ -165,8 +189,9 @@ def test_alias_pin_outranks_a_better_string_tier_four_km_away(monkeypatch):
     query, because prefix beats substring and tier sorts before distance.
     The alias coordinate is curated; the row sitting on it must win."""
     prefix_far = _pinned_place("parish", "Landmark Parish Church", _FAR_LAT, _PIN["lon"], 0.99)
-    substring_near = _pinned_place("cathedral", "Cathedral of the Landmark",
-        _PIN["lat"], _NEAR_LON, 0.5)
+    substring_near = _pinned_place(
+        "cathedral", "Cathedral of the Landmark", _PIN["lat"], _NEAR_LON, 0.5
+    )
 
     def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10):
         return [prefix_far, substring_near]
@@ -190,15 +215,23 @@ def test_plain_city_split_does_not_pin_anything(monkeypatch):
     """A trailing well-known city with no alias behind it yields a search
     pin, not a curated landmark coordinate — tier-first ordering stands."""
     prefix_far = _pinned_place("parish", "Landmark Parish Church", _FAR_LAT, _PIN["lon"], 0.99)
-    substring_near = _pinned_place("cathedral", "Cathedral of the Landmark",
-        _PIN["lat"], _NEAR_LON, 0.5)
+    substring_near = _pinned_place(
+        "cathedral", "Cathedral of the Landmark", _PIN["lat"], _NEAR_LON, 0.5
+    )
 
     def fake_geocode(query, limit=5, lang=None, **kw):
         if query == "Brooklyn":
-            return [{
-                "name": "Brooklyn", "type": "locality", "lat": _PIN["lat"], "lon": _PIN["lon"],
-                "id": "div-brooklyn", "admin_context": ["New York"], "rank_score": 0.9,
-            }]
+            return [
+                {
+                    "name": "Brooklyn",
+                    "type": "locality",
+                    "lat": _PIN["lat"],
+                    "lon": _PIN["lon"],
+                    "id": "div-brooklyn",
+                    "admin_context": ["New York"],
+                    "rank_score": 0.9,
+                }
+            ]
         return []
 
     def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10):
@@ -219,8 +252,9 @@ def test_alias_pin_with_nothing_inside_its_radius_leaves_ordering_alone(monkeypa
     and the merged tier -> distance -> prominence sort is untouched."""
     prefix_far = _pinned_place("parish", "Landmark Parish Church", _FAR_LAT, _PIN["lon"], 0.99)
     # ~2 km north of the pin: closer than the prefix row, still well outside 400 m.
-    substring_mid = _pinned_place("cathedral", "Cathedral of the Landmark",
-        40.718, _PIN["lon"], 0.5)
+    substring_mid = _pinned_place(
+        "cathedral", "Cathedral of the Landmark", 40.718, _PIN["lon"], 0.5
+    )
 
     def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10):
         return [prefix_far, substring_mid]
@@ -245,8 +279,9 @@ def test_every_bundled_alias_key_round_trips():
     from importlib import resources
 
     raw = json.loads(
-        (resources.files("placeroot") / "data" / "geocode-index" / "aliases.json")
-        .read_text(encoding="utf-8")
+        (resources.files("placeroot") / "data" / "geocode-index" / "aliases.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert raw
     for key, row in raw.items():
@@ -291,16 +326,15 @@ def test_alias_pin_scan_finds_the_landmark_the_name_scans_miss(monkeypatch):
             return [cathedral, bus_stop]
         return [prefix_far]
 
-    monkeypatch.setattr(
-        geocode, "_POI_ALIASES", {"landmark": _PIN, "cathedrale land-mark": _PIN}
-    )
+    monkeypatch.setattr(geocode, "_POI_ALIASES", {"landmark": _PIN, "cathedrale land-mark": _PIN})
     monkeypatch.setattr(geocode, "geocode", _no_divisions)
     monkeypatch.setattr(overture, "find_places", fake_find_places)
     geocode.clear_resolve_session()
 
     results = geocode.resolve_place("Landmark Brooklyn", limit=5)
     assert [(r["id"], r["match"]) for r in results] == [
-        ("cathedral", "exact"), ("parish", "prefix"),
+        ("cathedral", "exact"),
+        ("parish", "prefix"),
     ]
     assert (_PIN["lat"], _PIN["lon"], geocode._ALIAS_PIN_RADIUS_M, None) in calls
 
@@ -322,12 +356,19 @@ def test_no_pin_scan_without_an_alias(monkeypatch):
     geocode.resolve_place("Landmark", near_lat=_PIN["lat"], near_lon=_PIN["lon"], limit=5)
     assert calls and None not in calls
 
+
 # --- #476: a city pin bounds geocode's own search, not just its output -------
 
 _SG_LAT, _SG_LON = 1.2899, 103.8519
 _MARINA_CA = {
-    "id": "d-marina-ca", "name": "Marina", "subtype": "locality", "country": "US",
-    "region": "US-CA", "lat": 36.684402, "lon": -121.802185, "admin_context": [],
+    "id": "d-marina-ca",
+    "name": "Marina",
+    "subtype": "locality",
+    "country": "US",
+    "region": "US-CA",
+    "lat": 36.684402,
+    "lon": -121.802185,
+    "admin_context": [],
     "population": 22_000,
 }
 
@@ -415,7 +456,6 @@ def test_pinned_resolve_schedules_tiles_only_around_the_pin(geocode_cache, monke
     assert seen["speculative_calls"] == 0
 
 
-
 def test_no_pin_query_runs_the_division_pass_unconstrained(monkeypatch):
     """No city, no near hint: today's global behaviour, byte-for-byte — the
     division pass is called with the pre-#476 signature."""
@@ -427,6 +467,7 @@ def test_no_pin_query_runs_the_division_pass_unconstrained(monkeypatch):
     for kwargs in seen["division_kwargs"]:
         assert "near" not in kwargs, kwargs
     assert seen["speculative_calls"] >= 1
+
 
 def test_place_match_label_separates_containment_from_a_shared_word():
     """#475: a name that holds the caller's whole query is "contains"; a
@@ -465,33 +506,42 @@ def test_containing_name_outranks_shared_word_name_nearer_the_pin(monkeypatch):
     def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10):
         return [
             {
-                "id": "place-clinic", "name": "Freia Aesthetics | Marina Square",
-                "category": "beauty_salon", "basic_category": "beauty_salon",
-                "operating_status": "open", "confidence": 0.95,
-                "lat": pin_lat + 0.0090, "lon": pin_lon, "distance_m": 1000,
+                "id": "place-clinic",
+                "name": "Freia Aesthetics | Marina Square",
+                "category": "beauty_salon",
+                "basic_category": "beauty_salon",
+                "operating_status": "open",
+                "confidence": 0.95,
+                "lat": pin_lat + 0.0090,
+                "lon": pin_lon,
+                "distance_m": 1000,
             },
             {
-                "id": "place-hotel", "name": "Skypark#Marina Bay Sands Hotel,Singapore.",
-                "category": "hotel", "basic_category": "hotel",
-                "operating_status": "open", "confidence": 0.5,
-                "lat": pin_lat + 0.0099, "lon": pin_lon, "distance_m": 1100,
+                "id": "place-hotel",
+                "name": "Skypark#Marina Bay Sands Hotel,Singapore.",
+                "category": "hotel",
+                "basic_category": "hotel",
+                "operating_status": "open",
+                "confidence": 0.5,
+                "lat": pin_lat + 0.0099,
+                "lon": pin_lon,
+                "distance_m": 1100,
             },
         ]
 
     monkeypatch.setattr(overture, "find_places", fake_find_places)
 
-    results = geocode.resolve_place(
-        "Marina Bay Sands", near_lat=pin_lat, near_lon=pin_lon, limit=5
-    )
+    results = geocode.resolve_place("Marina Bay Sands", near_lat=pin_lat, near_lon=pin_lon, limit=5)
     assert [r["id"] for r in results] == ["place-hotel", "place-clinic"]
     assert results[0]["match"] == "contains"
     assert results[1]["match"] == "substring"
+
 
 # --- #469: a shared generic type word is not relatedness ------------------
 
 
 def test_gate_refuses_a_shared_type_word_alone():
-    """"Snow Peak Land Station" shares only "station" with "Shibuya Station":
+    """ "Snow Peak Land Station" shares only "station" with "Shibuya Station":
     that is the kind of thing asked for, not which one. Same for "Park Hotel
     Tokyo" against "Yoyogi Park"."""
     assert geocode._place_match_label("Snow Peak Land Station", "Shibuya Station") is None
@@ -503,7 +553,8 @@ def test_gate_accepts_a_shared_distinctive_word():
     assert geocode._place_match_label("Gare de Shibuya", "Shibuya Station") is not None
     # #22's own case: containment in either direction is untouched.
     assert geocode._place_match_label("Mañana Coffee", "Mañana coffee Austin") in (
-        "prefix", "substring",
+        "prefix",
+        "substring",
     )
     # A query that is nothing but a type word has no distinctive word to
     # insist on — plain containment still matches.
@@ -522,43 +573,67 @@ def test_type_word_categories_are_real_overture_slugs():
 
 def _tokyo_geocode(query, limit=5, lang=None, **kw):
     if query.strip().lower() == "tokyo":
-        return [{
-            "name": "Tokyo", "type": "locality", "lat": 35.68, "lon": 139.76,
-            "id": "div-tokyo", "admin_context": ["Japan"], "rank_score": 0.9,
-        }]
+        return [
+            {
+                "name": "Tokyo",
+                "type": "locality",
+                "lat": 35.68,
+                "lon": 139.76,
+                "id": "div-tokyo",
+                "admin_context": ["Japan"],
+                "rank_score": 0.9,
+            }
+        ]
     # geocode()'s own anchored fallback: businesses that merely carry the
     # type word, the rows that used to win.
     return [
         {
-            "name": "Snow Peak Land Station", "type": "place", "lat": 35.6796,
-            "lon": 139.7652, "id": "p-snow", "rank_score": 0.9,
-            "category": "sporting_goods_store", "admin_context": [],
+            "name": "Snow Peak Land Station",
+            "type": "place",
+            "lat": 35.6796,
+            "lon": 139.7652,
+            "id": "p-snow",
+            "rank_score": 0.9,
+            "category": "sporting_goods_store",
+            "admin_context": [],
         },
         {
-            "name": "Tokyo Station Beer Stand", "type": "place", "lat": 35.681,
-            "lon": 139.7659, "id": "p-beer", "rank_score": 0.8,
-            "category": "beer_bar", "admin_context": [],
+            "name": "Tokyo Station Beer Stand",
+            "type": "place",
+            "lat": 35.681,
+            "lon": 139.7659,
+            "id": "p-beer",
+            "rank_score": 0.8,
+            "category": "beer_bar",
+            "admin_context": [],
         },
     ]
 
 
 def _typed_place(id_, name, category, lat, lon, confidence=0.8):
     return {
-        "id": id_, "name": name, "category": category, "basic_category": category,
-        "operating_status": "open", "confidence": confidence, "lat": lat, "lon": lon,
+        "id": id_,
+        "name": name,
+        "category": category,
+        "basic_category": category,
+        "operating_status": "open",
+        "confidence": confidence,
+        "lat": lat,
+        "lon": lon,
         "distance_m": 100,
     }
 
 
 def test_type_word_query_resolves_by_category_on_the_distinctive_token(monkeypatch):
-    """"Shibuya Station Tokyo": one extra scan, filtered to the station
+    """ "Shibuya Station Tokyo": one extra scan, filtered to the station
     categories and to "Shibuya", and its row ranks first — graded exact,
     because the category answers the type word and the name answers the
     rest. The name-only businesses fall to the gate."""
     calls = []
 
-    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10,
-                         categories=None):
+    def fake_find_places(
+        lat, lon, radius_m=1000, category=None, name=None, limit=10, categories=None
+    ):
         calls.append({"categories": categories, "name": name, "radius_m": radius_m})
         if categories:
             return [
@@ -566,8 +641,9 @@ def test_type_word_query_resolves_by_category_on_the_distinctive_token(monkeypat
                 _typed_place("p-parking", "Shibuya Station Parking", "parking", 35.659, 139.702),
             ]
         return [
-            _typed_place("p-snow", "Snow Peak Land Station", "sporting_goods_store",
-                   35.6796, 139.7652, 0.9),
+            _typed_place(
+                "p-snow", "Snow Peak Land Station", "sporting_goods_store", 35.6796, 139.7652, 0.9
+            ),
             _typed_place("p-cheese", "Shibuya Cheese Stand", "cheese_shop", 35.66, 139.70),
         ]
 
@@ -594,15 +670,29 @@ def test_type_word_query_resolves_by_category_on_the_distinctive_token(monkeypat
 def test_type_scan_prefers_the_supported_row_over_the_lone_duplicate(monkeypatch):
     """Two rows say the station is at Shibuya; one, nearer the city pin and
     more confident, says it is 7 km east. Agreement wins."""
-    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10,
-                         categories=None):
+
+    def fake_find_places(
+        lat, lon, radius_m=1000, category=None, name=None, limit=10, categories=None
+    ):
         if categories:
             return [
-                _typed_place("p-lone", "Shibuya Station Tokyo. Japan", "train_station",
-                       35.6882, 139.7815, 0.99),
+                _typed_place(
+                    "p-lone",
+                    "Shibuya Station Tokyo. Japan",
+                    "train_station",
+                    35.6882,
+                    139.7815,
+                    0.99,
+                ),
                 _typed_place("p-gare", "Gare de Shibuya", "train_station", 35.6585, 139.7013, 0.84),
-                _typed_place("p-keio", "Inokashira Line Shibuya Sta.", "train_station",
-                       35.6581, 139.6984, 0.77),
+                _typed_place(
+                    "p-keio",
+                    "Inokashira Line Shibuya Sta.",
+                    "train_station",
+                    35.6581,
+                    139.6984,
+                    0.77,
+                ),
             ]
         return []
 
@@ -617,8 +707,9 @@ def test_type_scan_prefers_the_supported_row_over_the_lone_duplicate(monkeypatch
 def test_query_without_a_type_word_never_runs_the_category_scan(monkeypatch):
     calls = []
 
-    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10,
-                         categories=None):
+    def fake_find_places(
+        lat, lon, radius_m=1000, category=None, name=None, limit=10, categories=None
+    ):
         calls.append(categories)
         return [_typed_place("p-1", "Manana Coffee", "coffee_shop", 35.66, 139.70)]
 
@@ -634,12 +725,17 @@ def test_query_without_a_type_word_never_runs_the_category_scan(monkeypatch):
 def test_nothing_related_survives_the_gate_returns_empty(monkeypatch):
     """Only type-word businesses anywhere near — the answer is [], and the
     server turns that into need: location, never the nearest "...Station"."""
-    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10,
-                         categories=None):
+
+    def fake_find_places(
+        lat, lon, radius_m=1000, category=None, name=None, limit=10, categories=None
+    ):
         if categories:
             return []
-        return [_typed_place("p-snow", "Snow Peak Land Station", "sporting_goods_store",
-                       35.6796, 139.7652, 0.9)]
+        return [
+            _typed_place(
+                "p-snow", "Snow Peak Land Station", "sporting_goods_store", 35.6796, 139.7652, 0.9
+            )
+        ]
 
     monkeypatch.setattr(geocode, "geocode", _tokyo_geocode)
     monkeypatch.setattr(overture, "find_places", fake_find_places)
@@ -653,15 +749,19 @@ def test_nothing_related_survives_the_gate_returns_empty(monkeypatch):
 
 
 def test_gate_sets_the_split_off_city_word_aside():
-    """"Tokyo Station Beer Stand" shares "tokyo" with "Shibuya Station Tokyo"
+    """ "Tokyo Station Beer Stand" shares "tokyo" with "Shibuya Station Tokyo"
     — the word resolve_place split off as the city. Location context, not
     relatedness; containment of the whole name is still honoured."""
     ctx = frozenset({"tokyo"})
-    assert geocode._place_match_label("Tokyo Station Beer Stand", "Shibuya Station Tokyo") \
+    assert (
+        geocode._place_match_label("Tokyo Station Beer Stand", "Shibuya Station Tokyo")
         == "substring"
-    assert geocode._place_match_label("Tokyo Station Beer Stand", "Shibuya Station Tokyo", ctx) \
-        is None
+    )
+    assert (
+        geocode._place_match_label("Tokyo Station Beer Stand", "Shibuya Station Tokyo", ctx) is None
+    )
     assert geocode._place_match_label("Park Hotel Tokyo", "Park Hotel Tokyo", ctx) == "exact"
+
 
 # --- #464: a split-derived anchor is a guess, and a guess needs corroboration
 
@@ -692,20 +792,34 @@ def test_last_city_and_its_cache_hit_stay_with_the_session_that_pinned_it(monkey
     def fake_geocode(query, limit=5, lang=None, **kw):
         calls["geocode"].append(query)
         if query.lower() == "brooklyn":
-            return [{
-                "name": "Brooklyn", "type": "locality", "lat": CENTER_LAT, "lon": CENTER_LON,
-                "id": "div-brooklyn", "admin_context": ["United States", "New York"],
-                "rank_score": 0.9,
-            }]
+            return [
+                {
+                    "name": "Brooklyn",
+                    "type": "locality",
+                    "lat": CENTER_LAT,
+                    "lon": CENTER_LON,
+                    "id": "div-brooklyn",
+                    "admin_context": ["United States", "New York"],
+                    "rank_score": 0.9,
+                }
+            ]
         return []
 
     def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10, **kw):
         calls["find_places"].append((round(lat, 3), round(lon, 3)))
-        return [{
-            "id": "bk-tower", "name": "Observation Tower", "category": "monument",
-            "basic_category": "monument", "operating_status": "open",
-            "confidence": 0.7, "lat": CENTER_LAT, "lon": CENTER_LON, "distance_m": 5,
-        }]
+        return [
+            {
+                "id": "bk-tower",
+                "name": "Observation Tower",
+                "category": "monument",
+                "basic_category": "monument",
+                "operating_status": "open",
+                "confidence": 0.7,
+                "lat": CENTER_LAT,
+                "lon": CENTER_LON,
+                "distance_m": 5,
+            }
+        ]
 
     monkeypatch.setattr(geocode, "geocode", fake_geocode)
     monkeypatch.setattr(overture, "find_places", fake_find_places)
@@ -735,9 +849,15 @@ def test_last_city_and_its_cache_hit_stay_with_the_session_that_pinned_it(monkey
 
 def _division(name, lat, lon, **extra):
     row = {
-        "id": f"d-{name.lower().replace(' ', '-')}", "name": name, "subtype": "locality",
-        "country": "US", "region": "US-XX", "lat": lat, "lon": lon,
-        "admin_context": [], "population": 5000,
+        "id": f"d-{name.lower().replace(' ', '-')}",
+        "name": name,
+        "subtype": "locality",
+        "country": "US",
+        "region": "US-XX",
+        "lat": lat,
+        "lon": lon,
+        "admin_context": [],
+        "population": 5000,
     }
     row.update(extra)
     return row
@@ -745,9 +865,15 @@ def _division(name, lat, lon, **extra):
 
 def _place(name, lat, lon, **extra):
     row = {
-        "id": f"p-{name.lower().replace(' ', '-')}", "name": name, "category": "shopping_mall",
-        "basic_category": "shopping_mall", "operating_status": "open",
-        "confidence": 0.9, "lat": lat, "lon": lon, "distance_m": 10,
+        "id": f"p-{name.lower().replace(' ', '-')}",
+        "name": name,
+        "category": "shopping_mall",
+        "basic_category": "shopping_mall",
+        "operating_status": "open",
+        "confidence": 0.9,
+        "lat": lat,
+        "lon": lon,
+        "distance_m": 10,
     }
     row.update(extra)
     return row
@@ -756,6 +882,7 @@ def _place(name, lat, lon, **extra):
 def _divisions_by_candidate(mapping):
     def fake_query(candidate, *args, **kwargs):
         return [dict(r) for r in mapping.get(candidate, [])]
+
     return fake_query
 
 
@@ -768,9 +895,15 @@ def test_split_anchor_drops_a_place_that_only_shares_one_word(monkeypatch):
     question and must be dropped, leaving nothing (so the server asks for a
     location) rather than a fast wrong answer."""
     _no_session_state(monkeypatch)
-    monkeypatch.setattr(geocode, "_query_divisions", _divisions_by_candidate({
-        "of Westoria": [_division("Traditions of Westoria", 37.37, -77.49)],
-    }))
+    monkeypatch.setattr(
+        geocode,
+        "_query_divisions",
+        _divisions_by_candidate(
+            {
+                "of Westoria": [_division("Traditions of Westoria", 37.37, -77.49)],
+            }
+        ),
+    )
     seen = []
 
     def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10):
@@ -793,14 +926,31 @@ def test_split_anchor_rejects_geocode_fallback_rows_far_from_the_anchor(monkeypa
     anchor excuses a nearby place from repeating the anchor word — a place
     6,000 km away is excused from nothing."""
     _no_session_state(monkeypatch)
-    monkeypatch.setattr(geocode, "_query_divisions", _divisions_by_candidate({
-        "Westoria": [_division("Westoria", -11.35, -66.34)],  # exact, city-level: strong
-    }))
-    monkeypatch.setattr(geocode, "geocode", lambda query, limit=5, lang=None: [{
-        "id": "p-mercy", "type": "place", "name": "Mercy Mall of VA",
-        "lat": 37.398, "lon": -77.522, "rank_score": 0.9, "category": "shopping_mall",
-        "admin_context": [],
-    }])
+    monkeypatch.setattr(
+        geocode,
+        "_query_divisions",
+        _divisions_by_candidate(
+            {
+                "Westoria": [_division("Westoria", -11.35, -66.34)],  # exact, city-level: strong
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        geocode,
+        "geocode",
+        lambda query, limit=5, lang=None: [
+            {
+                "id": "p-mercy",
+                "type": "place",
+                "name": "Mercy Mall of VA",
+                "lat": 37.398,
+                "lon": -77.522,
+                "rank_score": 0.9,
+                "category": "shopping_mall",
+                "admin_context": [],
+            }
+        ],
+    )
     monkeypatch.setattr(overture, "find_places", lambda *a, **k: [])
     monkeypatch.setattr(geocode, "_query_places_fallback", lambda *a, **k: [])
 
@@ -811,9 +961,15 @@ def test_weak_trailing_match_with_a_majority_residual_is_no_anchor(monkeypatch):
     """#464 rule one: a trailing word that is merely a fragment of a longer
     division name the query never mentions, with most of the query left
     unexplained, is not a location word at all — the query is name-only."""
-    monkeypatch.setattr(geocode, "_query_divisions", _divisions_by_candidate({
-        "Westoria": [_division("Traditions of Westoria", 37.37, -77.49)],
-    }))
+    monkeypatch.setattr(
+        geocode,
+        "_query_divisions",
+        _divisions_by_candidate(
+            {
+                "Westoria": [_division("Traditions of Westoria", 37.37, -77.49)],
+            }
+        ),
+    )
     assert geocode._fallback_anchor("Mall of Westoria", [], None, None) is None
 
 
@@ -823,9 +979,15 @@ def test_trailing_fragment_of_a_city_name_the_query_contains_still_anchors(monke
     landed a word short. That anchor is as good as an exact one and its
     words stay exempt from the coverage rule (a beach in Rio is not named
     after Rio)."""
-    monkeypatch.setattr(geocode, "_query_divisions", _divisions_by_candidate({
-        "de Janeiro": [_division("Rio de Janeiro", -22.91, -43.21, population=6_000_000)],
-    }))
+    monkeypatch.setattr(
+        geocode,
+        "_query_divisions",
+        _divisions_by_candidate(
+            {
+                "de Janeiro": [_division("Rio de Janeiro", -22.91, -43.21, population=6_000_000)],
+            }
+        ),
+    )
     details = geocode._fallback_anchor_details("Copacabana Rio de Janeiro", [], None, None)
     assert details and details[0]["name_query"] == "Copacabana Rio"
     assert details[0]["strong"] is True
@@ -837,9 +999,15 @@ def test_name_only_query_gets_the_whole_query_prefix_pass(monkeypatch):
     query, keeping exact/prefix rows only, ranked exact before prefix. A
     row that merely shares a word never comes back from this pass."""
     _no_session_state(monkeypatch)
-    monkeypatch.setattr(geocode, "_query_divisions", _divisions_by_candidate({
-        "of Westoria": [_division("Traditions of Westoria", 37.37, -77.49)],
-    }))
+    monkeypatch.setattr(
+        geocode,
+        "_query_divisions",
+        _divisions_by_candidate(
+            {
+                "of Westoria": [_division("Traditions of Westoria", 37.37, -77.49)],
+            }
+        ),
+    )
     monkeypatch.setattr(overture, "find_places", lambda *a, **k: [])
     monkeypatch.setattr(geocode, "_skip_unanchored_places_scan", lambda: False)
     calls = []
@@ -847,12 +1015,30 @@ def test_name_only_query_gets_the_whole_query_prefix_pass(monkeypatch):
     def fake_scan(query, anchor=None, also=None):
         calls.append((query, anchor, also))
         return [
-            {"id": "p-mercy", "name": "Mercy Mall of VA", "lat": 37.398, "lon": -77.522,
-             "_confidence": 0.99, "_category": "charity_organization"},
-            {"id": "p-moa-food", "name": "Mall of Westoria Food Court", "lat": 44.855,
-             "lon": -93.242, "_confidence": 0.95, "_category": "food_court"},
-            {"id": "p-moa", "name": "Mall of Westoria", "lat": 44.8549, "lon": -93.2422,
-             "_confidence": 0.5, "_category": "shopping_mall"},
+            {
+                "id": "p-mercy",
+                "name": "Mercy Mall of VA",
+                "lat": 37.398,
+                "lon": -77.522,
+                "_confidence": 0.99,
+                "_category": "charity_organization",
+            },
+            {
+                "id": "p-moa-food",
+                "name": "Mall of Westoria Food Court",
+                "lat": 44.855,
+                "lon": -93.242,
+                "_confidence": 0.95,
+                "_category": "food_court",
+            },
+            {
+                "id": "p-moa",
+                "name": "Mall of Westoria",
+                "lat": 44.8549,
+                "lon": -93.2422,
+                "_confidence": 0.5,
+                "_category": "shopping_mall",
+            },
         ]
 
     monkeypatch.setattr(geocode, "_query_places_fallback", fake_scan)
@@ -860,7 +1046,8 @@ def test_name_only_query_gets_the_whole_query_prefix_pass(monkeypatch):
     results = geocode.resolve_place("Mall of Westoria", limit=5)
     assert calls == [("Mall of Westoria", None, None)]
     assert [(r["id"], r["match"]) for r in results] == [
-        ("p-moa", "exact"), ("p-moa-food", "prefix"),
+        ("p-moa", "exact"),
+        ("p-moa-food", "prefix"),
     ]
     assert results[0]["kind"] == "place"
     assert results[0]["category"] == "shopping_mall"
@@ -868,15 +1055,31 @@ def test_name_only_query_gets_the_whole_query_prefix_pass(monkeypatch):
 
 def test_name_only_pass_returns_nothing_rather_than_a_one_word_coincidence(monkeypatch):
     _no_session_state(monkeypatch)
-    monkeypatch.setattr(geocode, "_query_divisions", _divisions_by_candidate({
-        "of Westoria": [_division("Traditions of Westoria", 37.37, -77.49)],
-    }))
+    monkeypatch.setattr(
+        geocode,
+        "_query_divisions",
+        _divisions_by_candidate(
+            {
+                "of Westoria": [_division("Traditions of Westoria", 37.37, -77.49)],
+            }
+        ),
+    )
     monkeypatch.setattr(overture, "find_places", lambda *a, **k: [])
     monkeypatch.setattr(geocode, "_skip_unanchored_places_scan", lambda: False)
-    monkeypatch.setattr(geocode, "_query_places_fallback", lambda *a, **k: [
-        {"id": "p-mercy", "name": "Mercy Mall of VA", "lat": 37.398, "lon": -77.522,
-         "_confidence": 0.99, "_category": "charity_organization"},
-    ])
+    monkeypatch.setattr(
+        geocode,
+        "_query_places_fallback",
+        lambda *a, **k: [
+            {
+                "id": "p-mercy",
+                "name": "Mercy Mall of VA",
+                "lat": 37.398,
+                "lon": -77.522,
+                "_confidence": 0.99,
+                "_category": "charity_organization",
+            },
+        ],
+    )
     assert geocode.resolve_place("Mall of Westoria", limit=5) == []
 
 
@@ -885,9 +1088,15 @@ def test_name_only_pass_respects_the_remote_scan_gate(monkeypatch):
     the places theme. It does not run; the caller is asked for a location
     (server.py's need: "location") instead."""
     _no_session_state(monkeypatch)
-    monkeypatch.setattr(geocode, "_query_divisions", _divisions_by_candidate({
-        "of Westoria": [_division("Traditions of Westoria", 37.37, -77.49)],
-    }))
+    monkeypatch.setattr(
+        geocode,
+        "_query_divisions",
+        _divisions_by_candidate(
+            {
+                "of Westoria": [_division("Traditions of Westoria", 37.37, -77.49)],
+            }
+        ),
+    )
     monkeypatch.setattr(overture, "find_places", lambda *a, **k: [])
     monkeypatch.setattr(geocode, "_skip_unanchored_places_scan", lambda: True)
 
@@ -906,13 +1115,23 @@ def test_trailing_city_anchor_still_resolves_the_place(monkeypatch):
     place found there need not repeat the city's name — but a neighbour
     that shares only one word of the *place* name is still noise."""
     _no_session_state(monkeypatch)
-    monkeypatch.setattr(geocode, "_query_divisions", _divisions_by_candidate({
-        "San Jose": [_division("San Jose", 37.34, -121.89, population=1_000_000)],
-    }))
-    monkeypatch.setattr(overture, "find_places", lambda *a, **k: [
-        _place("Westfield Valley Fair", 37.325, -121.946),
-        _place("Westfield Oakridge", 37.253, -121.862),
-    ])
+    monkeypatch.setattr(
+        geocode,
+        "_query_divisions",
+        _divisions_by_candidate(
+            {
+                "San Jose": [_division("San Jose", 37.34, -121.89, population=1_000_000)],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        overture,
+        "find_places",
+        lambda *a, **k: [
+            _place("Westfield Valley Fair", 37.325, -121.946),
+            _place("Westfield Oakridge", 37.253, -121.862),
+        ],
+    )
     monkeypatch.setattr(geocode, "_query_places_fallback", lambda *a, **k: [])
 
     results = geocode.resolve_place("Westfield Valley Fair San Jose", limit=5)
@@ -931,18 +1150,26 @@ def test_leading_location_word_anchor_requires_the_place_to_carry_it(monkeypatch
     monkeypatch.setattr(geocode, "_local_alt_names_table", lambda t: None)
     # A fictional name: the real "Grand Central Terminal" now carries a
     # bundled alias pin (#329), which takes the city-hint path instead.
-    monkeypatch.setattr(geocode, "_query_divisions", _divisions_by_candidate({
-        "Westoria": [_division("Westoria", 55.1486, 61.3153, population=101_285)],
-    }))
-    monkeypatch.setattr(overture, "find_places", lambda *a, **k: [
-        _place("Grand Royal", 55.1087, 61.4224, category="restaurant"),
-        _place("Grand Westoria Terminal", 55.15, 61.32, category="train_station"),
-    ])
+    monkeypatch.setattr(
+        geocode,
+        "_query_divisions",
+        _divisions_by_candidate(
+            {
+                "Westoria": [_division("Westoria", 55.1486, 61.3153, population=101_285)],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        overture,
+        "find_places",
+        lambda *a, **k: [
+            _place("Grand Royal", 55.1087, 61.4224, category="restaurant"),
+            _place("Grand Westoria Terminal", 55.15, 61.32, category="train_station"),
+        ],
+    )
     monkeypatch.setattr(geocode, "_query_places_fallback", lambda *a, **k: [])
 
-    details = geocode._fallback_anchor_details(
-        "Grand Westoria Terminal", [], None, "local-table"
-    )
+    details = geocode._fallback_anchor_details("Grand Westoria Terminal", [], None, "local-table")
     assert details[0]["candidate"] == "Westoria" and details[0]["strong"] is False
     results = geocode.resolve_place("Grand Westoria Terminal", limit=5)
     assert [r["name"] for r in results] == ["Grand Westoria Terminal"]
@@ -951,7 +1178,13 @@ def test_leading_location_word_anchor_requires_the_place_to_carry_it(monkeypatch
 def test_stopword_residual_gate_is_untouched(monkeypatch):
     """#216: an anchor with nothing but stopwords left over still comes back
     with name_query None, so the caller skips the places half entirely."""
-    monkeypatch.setattr(geocode, "_query_divisions", _divisions_by_candidate({
-        "Met": [_division("Metropolis", 40.7, -73.9)],
-    }))
+    monkeypatch.setattr(
+        geocode,
+        "_query_divisions",
+        _divisions_by_candidate(
+            {
+                "Met": [_division("Metropolis", 40.7, -73.9)],
+            }
+        ),
+    )
     assert geocode._fallback_anchor("the Met", [], None, None) == (40.7, -73.9, None)

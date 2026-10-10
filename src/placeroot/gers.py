@@ -230,9 +230,7 @@ def _run_id_query(select_sql: str, from_source: str, params: dict, bbox_filter: 
         raise overture.UpstreamUnavailable(str(e)) from e
 
 
-def _lookup_row(
-    theme: str, select_sql: str, glob: str, id: str, bbox, from_source_fn=None
-):
+def _lookup_row(theme: str, select_sql: str, glob: str, id: str, bbox, from_source_fn=None):
     """Hint-narrowed id lookup, or the unbounded scan when there is no hint.
 
     The shared body of the divisions and buildings probes — the same shape
@@ -251,7 +249,8 @@ def _lookup_row(
         if row is None:
             logger.info(
                 "gers_lookup(%s): %s near-hint missed; not escalating to a full-theme scan",
-                id, theme,
+                id,
+                theme,
             )
         return row
     return _run_id_query(
@@ -279,9 +278,7 @@ def _probe_places(id: str, near_lat: float | None, near_lon: float | None) -> di
     beaches) recovered from the layer's own category map — a caller who
     follows the answer to theme=places would find no such row there.
     """
-    row = overture.place_details(
-        id=id, near_lat=near_lat, near_lon=near_lon, bound_to_hint=True
-    )
+    row = overture.place_details(id=id, near_lat=near_lat, near_lon=near_lon, bound_to_hint=True)
     if row is None:
         return None
     if row.get("source_theme") == "base":
@@ -294,14 +291,16 @@ def _probe_places(id: str, near_lat: float | None, near_lon: float | None) -> di
         "name": row.get("name"),
         "lat": row.get("lat"),
         "lon": row.get("lon"),
-        "summary": _compact({
-            "category": row.get("category"),
-            "basic_category": row.get("basic_category"),
-            "confidence": row.get("confidence"),
-            "operating_status": row.get("operating_status"),
-            "brand": row.get("brand"),
-            "trust_note": row.get("trust_note"),
-        }),
+        "summary": _compact(
+            {
+                "category": row.get("category"),
+                "basic_category": row.get("basic_category"),
+                "confidence": row.get("confidence"),
+                "operating_status": row.get("operating_status"),
+                "brand": row.get("brand"),
+                "trust_note": row.get("trust_note"),
+            }
+        ),
     }
 
 
@@ -388,12 +387,14 @@ def _probe_buildings(id: str, near_lat: float | None, near_lon: float | None) ->
         "name": None,
         "lat": lat,
         "lon": lon,
-        "summary": _compact({
-            "subtype": subtype,
-            "class": class_,
-            "height_m": height,
-            "num_floors": num_floors,
-        }),
+        "summary": _compact(
+            {
+                "subtype": subtype,
+                "class": class_,
+                "height_m": height,
+                "num_floors": num_floors,
+            }
+        ),
     }
 
 
@@ -591,9 +592,9 @@ def gers_lookup(
         try:
             db.ensure_spatial()
             spec_pool = ThreadPoolExecutor(max_workers=2)
-            spec_div = spec_pool.submit(_in_ctx(
-                _related_division, near_lat, near_lon, id, "places", db.new_connection()
-            ))
+            spec_div = spec_pool.submit(
+                _in_ctx(_related_division, near_lat, near_lon, id, "places", db.new_connection())
+            )
             spec_bld = spec_pool.submit(
                 _in_ctx(_related_building, near_lat, near_lon, db.new_connection())
             )
@@ -680,9 +681,9 @@ def gers_lookup(
             return lambda: ctx.run(fn, *args)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            div_f = pool.submit(_in_ctx(
-                _related_division, lat, lon, id, entity["theme"], db.new_connection()
-            ))
+            div_f = pool.submit(
+                _in_ctx(_related_division, lat, lon, id, entity["theme"], db.new_connection())
+            )
             bld_f = pool.submit(_in_ctx(_related_building, lat, lon, db.new_connection()))
             related = _merge_related(div_f.result(), bld_f.result())
     else:

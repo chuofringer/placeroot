@@ -31,141 +31,151 @@ PROFILES: dict[str, frozenset[str]] = {
     # note telling the agent to check the slug with search_categories. Under
     # a profile that dropped it, core's likeliest failure mode would end at
     # a hint pointing to a tool the agent cannot call.
-    "core": frozenset({
-        "find_places",
-        "geocode",
-        "reverse_geocode",
-        "place_details",
-        "resolve_place",
-        "search_categories",
-        "summarize_area",
-        "route",
-        # Composed of two tools core already carries (route + find_places),
-        # and its description names both — so this is the profile where
-        # those references resolve.
-        "places_along_route",
-        # Life-decision compose: one call over search + area + reach
-        # internals. In core so a default install can answer "should I
-        # live here" without loading the analysis profile.
-        "neighborhood_verdict",
-        # Same trust-shaped compose, over listing claims instead of a
-        # life-context checklist: search + routing internals grading
-        # confirmed/stretched/false/unverifiable. In core alongside
-        # neighborhood_verdict for the same reason.
-        "verify_claims",
-        # Optional first-session step: pre-cache a metro so the first
-        # real question is fast. Lives in core because that is the
-        # install-to-wow path (issue #314).
-        "warmup_city",
-        # Named-place compose: one hop for "walk from A to B" and
-        # "X near Y" so the agent cannot triple-geocode (#328).
-        "from_to",
-        "find_near",
-        # Single-hop point compose: where/surroundings/reach/notable in
-        # one call, the install-to-wow "orient me here" question (#362).
-        "ground_location",
-        # A pasted map link is an install-to-wow input: "meet here: <link>"
-        # answered without an API key (#461).
-        "resolve_map_url",
-    }),
+    "core": frozenset(
+        {
+            "find_places",
+            "geocode",
+            "reverse_geocode",
+            "place_details",
+            "resolve_place",
+            "search_categories",
+            "summarize_area",
+            "route",
+            # Composed of two tools core already carries (route + find_places),
+            # and its description names both — so this is the profile where
+            # those references resolve.
+            "places_along_route",
+            # Life-decision compose: one call over search + area + reach
+            # internals. In core so a default install can answer "should I
+            # live here" without loading the analysis profile.
+            "neighborhood_verdict",
+            # Same trust-shaped compose, over listing claims instead of a
+            # life-context checklist: search + routing internals grading
+            # confirmed/stretched/false/unverifiable. In core alongside
+            # neighborhood_verdict for the same reason.
+            "verify_claims",
+            # Optional first-session step: pre-cache a metro so the first
+            # real question is fast. Lives in core because that is the
+            # install-to-wow path (issue #314).
+            "warmup_city",
+            # Named-place compose: one hop for "walk from A to B" and
+            # "X near Y" so the agent cannot triple-geocode (#328).
+            "from_to",
+            "find_near",
+            # Single-hop point compose: where/surroundings/reach/notable in
+            # one call, the install-to-wow "orient me here" question (#362).
+            "ground_location",
+            # A pasted map link is an install-to-wow input: "meet here: <link>"
+            # answered without an API key (#461).
+            "resolve_map_url",
+        }
+    ),
     # Find/name/identify, including the batch siblings and the category
     # lookup that makes find_places' category filter usable.
-    "search": frozenset({
-        "find_places",
-        "place_details",
-        "geocode",
-        "geocode_batch",
-        "resolve_place",
-        "resolve_place_batch",
-        "reverse_geocode",
-        "reverse_geocode_batch",
-        # The address-level half of reverse lookup: reverse_geocode names a
-        # point, address_at lists the doorways around it.
-        "address_at",
-        # ...and its forward twin: an address string back to a coordinate,
-        # which geocode cannot answer at doorway granularity.
-        "geocode_address",
-        # ...and the intersection twin: where two named streets cross.
-        "geocode_intersection",
-        # A pasted Google/Apple/OSM link back to a coordinate and place.
-        "resolve_map_url",
-        "search_categories",
-        # Identify: any GERS id back to the entity it names.
-        "gers_lookup",
-        # Named "X near Y" compose over find_places + resolve.
-        "find_near",
-    }),
+    "search": frozenset(
+        {
+            "find_places",
+            "place_details",
+            "geocode",
+            "geocode_batch",
+            "resolve_place",
+            "resolve_place_batch",
+            "reverse_geocode",
+            "reverse_geocode_batch",
+            # The address-level half of reverse lookup: reverse_geocode names a
+            # point, address_at lists the doorways around it.
+            "address_at",
+            # ...and its forward twin: an address string back to a coordinate,
+            # which geocode cannot answer at doorway granularity.
+            "geocode_address",
+            # ...and the intersection twin: where two named streets cross.
+            "geocode_intersection",
+            # A pasted Google/Apple/OSM link back to a coordinate and place.
+            "resolve_map_url",
+            "search_categories",
+            # Identify: any GERS id back to the entity it names.
+            "gers_lookup",
+            # Named "X near Y" compose over find_places + resolve.
+            "find_near",
+        }
+    ),
     # Getting between points, and how far apart things are.
-    "routing": frozenset({
-        "route",
-        "isochrone",
-        "distance_matrix",
-        # Routed counterpart to distance_matrix, over the same street
-        # graph route() uses.
-        "travel_time_matrix",
-        "within_distance",
-        # Multi-stop ordering over the same street graph route() uses.
-        "optimize_route",
-        # Named-place compose over route().
-        "from_to",
-        # One-call walk/cycle/drive comparison over route(): the ends
-        # resolve once, each mode routes between the same coordinates.
-        "compare_modes",
-        # Ground elevation at a point (#358) — routing comfort ("is this
-        # walk hilly", "how high is the pass"), not a street-graph query,
-        # but the same "getting between points" family this profile is.
-        "elevation_at",
-        # "Where should we meet" over the same routed-time machinery as
-        # distance_matrix/route, ranked by fairness rather than distance.
-        "meeting_point",
-        # Snaps a GPS trace onto the same street graph route() builds, then
-        # stitches it into a routed itinerary — a routing question about an
-        # existing trace rather than two endpoints.
-        "map_match",
-    }),
+    "routing": frozenset(
+        {
+            "route",
+            "isochrone",
+            "distance_matrix",
+            # Routed counterpart to distance_matrix, over the same street
+            # graph route() uses.
+            "travel_time_matrix",
+            "within_distance",
+            # Multi-stop ordering over the same street graph route() uses.
+            "optimize_route",
+            # Named-place compose over route().
+            "from_to",
+            # One-call walk/cycle/drive comparison over route(): the ends
+            # resolve once, each mode routes between the same coordinates.
+            "compare_modes",
+            # Ground elevation at a point (#358) — routing comfort ("is this
+            # walk hilly", "how high is the pass"), not a street-graph query,
+            # but the same "getting between points" family this profile is.
+            "elevation_at",
+            # "Where should we meet" over the same routed-time machinery as
+            # distance_matrix/route, ranked by fairness rather than distance.
+            "meeting_point",
+            # Snaps a GPS trace onto the same street graph route() builds, then
+            # stitches it into a routed itinerary — a routing question about an
+            # existing trace rather than two endpoints.
+            "map_match",
+        }
+    ),
     # Characterizing an area rather than locating a thing in it.
-    "analysis": frozenset({
-        "summarize_area",
-        "summarize_buildings",
-        "compare_areas",
-        "buildings_at",
-        "land_use_at",
-        "infrastructure_at",
-        # Same characterize-a-point shape as infrastructure_at (it *is*
-        # infrastructure_at's query path, filtered to stop-like classes):
-        # is there transit near here, not a search for a named line or a
-        # named station.
-        "transit_stops_near",
-        # Hydrology is a characterize-the-surroundings question of the same
-        # shape as infrastructure_at ("is this parcel waterfront / how far
-        # to the nearest canal"), not a find-a-named-thing one, so it lands
-        # in analysis rather than search.
-        "water_near",
-        "admin_lookup",
-        # Same characterize-a-point shape as land_use_at/infrastructure_at:
-        # what timezone and local time apply here, not a search or a route.
-        "timezone_at",
-        # Same compose as core: a characterize-the-neighborhood question.
-        "neighborhood_verdict",
-        # Characterizes an area across two releases instead of one snapshot,
-        # but it's still "what's in/around this area" -- analysis, not search.
-        "changes_in_area",
-        # Same compose as core: a characterize-a-listing's-claims question.
-        "verify_claims",
-        # The inverse of every other tool in this profile: instead of
-        # characterizing a named area, finds candidate areas from anchors +
-        # budgets + requirements (#350). Composes routing.isochrone,
-        # divisions_in_polygon, and score_locality — an analysis question
-        # ("where should I look"), not a search-for-a-named-thing one.
-        "suggest_areas",
-    }),
+    "analysis": frozenset(
+        {
+            "summarize_area",
+            "summarize_buildings",
+            "compare_areas",
+            "buildings_at",
+            "land_use_at",
+            "infrastructure_at",
+            # Same characterize-a-point shape as infrastructure_at (it *is*
+            # infrastructure_at's query path, filtered to stop-like classes):
+            # is there transit near here, not a search for a named line or a
+            # named station.
+            "transit_stops_near",
+            # Hydrology is a characterize-the-surroundings question of the same
+            # shape as infrastructure_at ("is this parcel waterfront / how far
+            # to the nearest canal"), not a find-a-named-thing one, so it lands
+            # in analysis rather than search.
+            "water_near",
+            "admin_lookup",
+            # Same characterize-a-point shape as land_use_at/infrastructure_at:
+            # what timezone and local time apply here, not a search or a route.
+            "timezone_at",
+            # Same compose as core: a characterize-the-neighborhood question.
+            "neighborhood_verdict",
+            # Characterizes an area across two releases instead of one snapshot,
+            # but it's still "what's in/around this area" -- analysis, not search.
+            "changes_in_area",
+            # Same compose as core: a characterize-a-listing's-claims question.
+            "verify_claims",
+            # The inverse of every other tool in this profile: instead of
+            # characterizing a named area, finds candidate areas from anchors +
+            # budgets + requirements (#350). Composes routing.isochrone,
+            # divisions_in_polygon, and score_locality — an analysis question
+            # ("where should I look"), not a search-for-a-named-thing one.
+            "suggest_areas",
+        }
+    ),
     # Working on geometry the caller already has, and turning results into
     # something a human can look at.
-    "geometry": frozenset({
-        "simplify_geometry",
-        "render_map",
-        "geometry_op",
-    }),
+    "geometry": frozenset(
+        {
+            "simplify_geometry",
+            "render_map",
+            "geometry_op",
+        }
+    ),
 }
 
 # Registered under every profile. data_version is ~180 tokens of schema and

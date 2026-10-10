@@ -61,11 +61,20 @@ def _classify(ok: bool, detail: object) -> tuple[bool, str, str]:
 
 def _emit(seconds: float, ok: bool, detail: object, *, leg: str) -> None:
     ok, outcome, text = _classify(ok, detail)
-    print(json.dumps({
-        "id": entry["id"], "tool": entry["tool"], "q": entry["question"],
-        "leg": leg, "s": round(seconds, 1), "ok": bool(ok),
-        "outcome": outcome, "detail": text[:150],
-    }))
+    print(
+        json.dumps(
+            {
+                "id": entry["id"],
+                "tool": entry["tool"],
+                "q": entry["question"],
+                "leg": leg,
+                "s": round(seconds, 1),
+                "ok": bool(ok),
+                "outcome": outcome,
+                "detail": text[:150],
+            }
+        )
+    )
     sys.stdout.flush()
 
 
@@ -78,8 +87,7 @@ def _arm_watchdog(leg: str) -> int:
         time.sleep(budget_s)
         if mine != _watch_gen:
             return
-        _emit(budget_s, False, "TIMEOUT (still running at the watchdog budget)",
-              leg=leg)
+        _emit(budget_s, False, "TIMEOUT (still running at the watchdog budget)", leg=leg)
         os._exit(0)
 
     threading.Thread(target=_watchdog, daemon=True).start()

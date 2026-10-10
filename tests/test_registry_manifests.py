@@ -149,8 +149,7 @@ def test_npm_package_version_matches_pyproject():
 def test_npm_launcher_pins_uvx_to_its_own_version():
     source = NPM_INDEX.read_text(encoding="utf-8")
     assert re.search(r'require\(\s*["\']\./package\.json["\']\s*\)', source), (
-        "npm/index.js must read its version from ./package.json at runtime, "
-        "not hard-code it."
+        "npm/index.js must read its version from ./package.json at runtime, not hard-code it."
     )
     assert re.search(r"placeroot==\$\{version\}", source), (
         "npm/index.js must spawn `uvx placeroot==${version}` — an unpinned "

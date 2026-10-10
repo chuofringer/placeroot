@@ -24,7 +24,6 @@ def _resolve_us_state(token: str) -> tuple[str, str] | None:
     return None
 
 
-
 def _resolve_region_from_table(candidate: str, local_table: str) -> tuple[str, str] | None:
     """candidate (e.g. "Ontario") -> (name, region_code) if it exactly
     matches (case-insensitive) a region-subtype row's name in the local
@@ -38,15 +37,16 @@ def _resolve_region_from_table(candidate: str, local_table: str) -> tuple[str, s
     """
     try:
         with _pkg.overture._conn_lock:
-            row = _pkg.overture.conn().execute(
-                sql, {"name": _pkg.overture._like_escape(candidate)}
-            ).fetchone()
+            row = (
+                _pkg.overture.conn()
+                .execute(sql, {"name": _pkg.overture._like_escape(candidate)})
+                .fetchone()
+            )
     except duckdb.Error:
         return None
     if row is None:
         return None
     return row[0], row[1]
-
 
 
 def _suffix_split_candidates(query: str) -> list[tuple[str, str, bool]]:
@@ -66,24 +66,45 @@ def _suffix_split_candidates(query: str) -> list[tuple[str, str, bool]]:
     return candidates
 
 
-
 def _split_region_suffix(query: str) -> list[tuple[str, str]]:
     """(base, candidate_suffix) pairs to try — _suffix_split_candidates
     without the bare flag, for callers that only want the shapes."""
     return [(base, suffix) for base, suffix, _bare in _suffix_split_candidates(query)]
 
 
-
 # Words that only ever modify the word after them. A no-comma query whose
 # head is nothing but these is one name, not a name plus a qualifier:
 # "West Virginia" is a state, not West inside Virginia; "Hotel California"
 # is not a hotel in California; "New Jersey" is not New on Jersey.
-_BARE_QUALIFIER_HEAD_ADJECTIVES = frozenset({
-    "new", "old", "west", "east", "north", "south", "western", "eastern",
-    "northern", "southern", "upper", "lower", "great", "little", "port",
-    "saint", "st", "san", "santa", "fort", "ft", "mount", "mt", "lake", "hotel",
-})
-
+_BARE_QUALIFIER_HEAD_ADJECTIVES = frozenset(
+    {
+        "new",
+        "old",
+        "west",
+        "east",
+        "north",
+        "south",
+        "western",
+        "eastern",
+        "northern",
+        "southern",
+        "upper",
+        "lower",
+        "great",
+        "little",
+        "port",
+        "saint",
+        "st",
+        "san",
+        "santa",
+        "fort",
+        "ft",
+        "mount",
+        "mt",
+        "lake",
+        "hotel",
+    }
+)
 
 
 def _division_named_exactly(name: str, local_table: str | None) -> bool:
@@ -100,7 +121,6 @@ def _division_named_exactly(name: str, local_table: str | None) -> bool:
         return False
 
 
-
 @lru_cache(maxsize=512)
 def _division_named_exactly_cached(folded_name: str, local_table: str) -> bool:
     sql = f"""
@@ -109,11 +129,12 @@ def _division_named_exactly_cached(folded_name: str, local_table: str) -> bool:
         LIMIT 1
     """
     with _pkg.overture._conn_lock:
-        row = _pkg.overture.conn().execute(
-            sql, {"exact": _pkg.overture._like_escape(folded_name)}
-        ).fetchone()
+        row = (
+            _pkg.overture.conn()
+            .execute(sql, {"exact": _pkg.overture._like_escape(folded_name)})
+            .fetchone()
+        )
     return row is not None
-
 
 
 def _bare_suffix_split_allowed(base: str, query: str, local_table: str | None) -> bool:
@@ -138,7 +159,6 @@ def _bare_suffix_split_allowed(base: str, query: str, local_table: str | None) -
     return not _pkg._division_named_exactly(query, local_table)
 
 
-
 def _parse_region_suffix(query: str, local_table: str | None) -> tuple[str, str | None, str | None]:
     """query -> (base_query, region_code, region_name). region_code/name are
     both None if no trailing token looks like a region — the caller then
@@ -156,7 +176,6 @@ def _parse_region_suffix(query: str, local_table: str | None) -> tuple[str, str 
             name, code = resolved
             return base, code, name
     return query, None, None
-
 
 
 # --- #457: "City, Country" parsing ---------------------------------------
@@ -192,7 +211,6 @@ def _resolve_country_code(token: str) -> tuple[str, str] | None:
     return None
 
 
-
 def _resolve_country_from_table(
     candidate: str, local_table: str, alt_table: str | None = None
 ) -> tuple[str, str] | None:
@@ -210,9 +228,11 @@ def _resolve_country_from_table(
     """
     try:
         with _pkg.overture._conn_lock:
-            row = _pkg.overture.conn().execute(
-                sql, {"name": _pkg.overture._like_escape(candidate)}
-            ).fetchone()
+            row = (
+                _pkg.overture.conn()
+                .execute(sql, {"name": _pkg.overture._like_escape(candidate)})
+                .fetchone()
+            )
     except duckdb.Error:
         row = None
     if row is not None:
@@ -237,7 +257,6 @@ def _resolve_country_from_table(
     return (row[0], row[1]) if row is not None else None
 
 
-
 def _parse_country_suffix(
     query: str, local_table: str | None, alt_table: str | None = None
 ) -> tuple[str, str | None, str | None]:
@@ -254,7 +273,6 @@ def _parse_country_suffix(
             name, code = resolved
             return base, code, name
     return query, None, None
-
 
 
 def _unrecognized_comma_qualifier(query: str) -> tuple[str, str] | None:
@@ -281,7 +299,6 @@ def _unrecognized_comma_qualifier(query: str) -> tuple[str, str] | None:
     return base, suffix
 
 
-
 def _unrecognized_qualifier_note(qualifier: str, base: str) -> str:
     return (
         f"qualifier '{qualifier}' not recognized as a region or country; "
@@ -289,12 +306,8 @@ def _unrecognized_qualifier_note(qualifier: str, base: str) -> str:
     )
 
 
-
 def _country_degrade_note(base: str, country_code: str) -> str:
-    return (
-        f"no match for '{base}' in {country_code}; showing unconstrained matches for '{base}'"
-    )
-
+    return f"no match for '{base}' in {country_code}; showing unconstrained matches for '{base}'"
 
 
 def normalize_country(token: str) -> str:

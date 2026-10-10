@@ -53,8 +53,14 @@ DENSE_CLUSTER_N = 200
 UNCATEGORIZED_TAIL = 20  # last N of the dense cluster get basic_category = NULL
 
 CATEGORIES = [
-    "coffee_shop", "restaurant", "grocery_store", "bank",
-    "pharmacy", "bar", "bakery", "gym",
+    "coffee_shop",
+    "restaurant",
+    "grocery_store",
+    "bank",
+    "pharmacy",
+    "bar",
+    "bakery",
+    "gym",
 ]
 
 HIGH_LAT_CENTER = (78.0, 15.0)
@@ -89,8 +95,20 @@ def build_place_rows() -> list[tuple]:
     rows = []
 
     def add(
-        name, lat, lon, category, basic_category, status, confidence, alternates=None,
-        addresses=None, websites=None, phones=None, socials=None, brand=None, sources=None,
+        name,
+        lat,
+        lon,
+        category,
+        basic_category,
+        status,
+        confidence,
+        alternates=None,
+        addresses=None,
+        websites=None,
+        phones=None,
+        socials=None,
+        brand=None,
+        sources=None,
         common=None,
     ):
         # #410: `common` mirrors Overture's names.common on a places row —
@@ -100,21 +118,23 @@ def build_place_rows() -> list[tuple]:
         # lookup runs against it unchanged, the same convention
         # build_geocode_fixture.py's divisions `common` column already uses.
         index = len(rows)
-        rows.append((
-            gers_id(index),
-            {"xmin": lon, "ymin": lat, "xmax": lon, "ymax": lat},
-            {"primary": name, "common": common or {}},
-            {"primary": category, "alternates": alternates or []},
-            basic_category,
-            status,
-            confidence,
-            addresses or [],
-            websites or [],
-            phones or [],
-            socials or [],
-            brand,
-            sources or [],
-        ))
+        rows.append(
+            (
+                gers_id(index),
+                {"xmin": lon, "ymin": lat, "xmax": lon, "ymax": lat},
+                {"primary": name, "common": common or {}},
+                {"primary": category, "alternates": alternates or []},
+                basic_category,
+                status,
+                confidence,
+                addresses or [],
+                websites or [],
+                phones or [],
+                socials or [],
+                brand,
+                sources or [],
+            )
+        )
 
     # Dense urban tile: 200 points within 400m of CENTER, uniform over the disk.
     for i in range(DENSE_CLUSTER_N):
@@ -134,8 +154,11 @@ def build_place_rows() -> list[tuple]:
             details = {
                 "addresses": [
                     {
-                        "freeform": "123 Main St", "locality": "Metropolis",
-                        "region": "NY", "postcode": "10001", "country": "US",
+                        "freeform": "123 Main St",
+                        "locality": "Metropolis",
+                        "region": "NY",
+                        "postcode": "10001",
+                        "country": "US",
                     },
                 ],
                 "websites": ["https://bluebottleroastery.example"],
@@ -148,8 +171,11 @@ def build_place_rows() -> list[tuple]:
             details = {
                 "addresses": [
                     {
-                        "freeform": f"{n} Overflow Ave", "locality": "Metropolis",
-                        "region": "NY", "postcode": "10001", "country": "US",
+                        "freeform": f"{n} Overflow Ave",
+                        "locality": "Metropolis",
+                        "region": "NY",
+                        "postcode": "10001",
+                        "country": "US",
                     }
                     for n in range(8)
                 ],
@@ -158,10 +184,13 @@ def build_place_rows() -> list[tuple]:
             }
 
         add(
-            name, lat, lon,
+            name,
+            lat,
+            lon,
             category if not uncategorized else "exotic_niche",
             None if uncategorized else category,
-            status, confidence,
+            status,
+            confidence,
             **details,
         )
 
@@ -206,7 +235,13 @@ def build_place_rows() -> list[tuple]:
     # counts within a radius of those points (e.g. radius_m=100 at CENTER),
     # and a new row inside any of those windows would silently change them.
     add(
-        "Kaffeehaus Wien", 5.0, 100.0, "coffee_shop", "coffee_shop", "open", 0.8,
+        "Kaffeehaus Wien",
+        5.0,
+        100.0,
+        "coffee_shop",
+        "coffee_shop",
+        "open",
+        0.8,
         common={"en": "Vienna Coffee House", "fr": "Maison du Cafe Viennois"},
     )
 
@@ -266,31 +301,53 @@ def build_division_rows(con: duckdb.DuckDBPyConnection) -> list[tuple]:
         ("country", "GB", None, box_wkt(50.0, 55.0, -6.0, 2.0)),
     ]
     names = [
-        "Downtown", "Metropolis", "Franklin County", "Empire State", "United Testland",
-        "Arctica", "United Kingdom",
+        "Downtown",
+        "Metropolis",
+        "Franklin County",
+        "Empire State",
+        "United Testland",
+        "Arctica",
+        "United Kingdom",
     ]
     rows = []
     for i, ((subtype, country, region, wkt), name) in enumerate(zip(levels, names)):
         (wkb,) = con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()
         division_id = gers_id(10_000 + i)
         bbox = _wkt_bbox(wkt)
-        rows.append((
-            division_id, {"primary": name}, subtype, country, region, wkb, bbox, division_id,
-        ))
+        rows.append(
+            (
+                division_id,
+                {"primary": name},
+                subtype,
+                country,
+                region,
+                wkb,
+                bbox,
+                division_id,
+            )
+        )
     for division_id, name, country, (xmin, ymin, xmax, ymax) in GEOCODE_ANCHOR_AREAS:
         wkt = box_wkt(ymin, ymax, xmin, xmax)
         (wkb,) = con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()
-        rows.append((
-            f"{division_id}-area", {"primary": name}, "locality", country, None, wkb,
-            {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}, division_id,
-        ))
+        rows.append(
+            (
+                f"{division_id}-area",
+                {"primary": name},
+                "locality",
+                country,
+                None,
+                wkb,
+                {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax},
+                division_id,
+            )
+        )
     return rows
 
 
 def _wkt_bbox(wkt: str) -> dict:
     """The bbox struct for one of box_wkt's rectangles, read back off its own
     corner list so the two can never disagree."""
-    coords = wkt[len("POLYGON(("):-2].split(", ")
+    coords = wkt[len("POLYGON((") : -2].split(", ")
     pairs = [tuple(float(v) for v in c.split()) for c in coords]
     lons = [p[0] for p in pairs]
     lats = [p[1] for p in pairs]
@@ -306,10 +363,13 @@ def _wkt_bbox(wkt: str) -> dict:
 # hand-guessed one was 0.002 degrees short of — so the fixture's anchor step
 # is the same size as the real one, not a convenient rounding of it.
 GEOCODE_ANCHOR_AREAS = (
-    ("gers-div-san-francisco", "San Francisco", "US",
-     (-122.5150, 37.7080, -122.3570, 37.8120)),
-    ("gers-div-mountain-view", "Mountain View", "US",
-     (-122.11756896972656, 37.35421371459961, -122.0449447631836, 37.4710693359375)),
+    ("gers-div-san-francisco", "San Francisco", "US", (-122.5150, 37.7080, -122.3570, 37.8120)),
+    (
+        "gers-div-mountain-view",
+        "Mountain View",
+        "US",
+        (-122.11756896972656, 37.35421371459961, -122.0449447631836, 37.4710693359375),
+    ),
     ("gers-div-berlin", "Berlin", "DE", (13.10, 52.35, 13.75, 52.65)),
     # A resolvable extent in a country the addresses theme does not carry at
     # all, so geocode_address has a case where the anchor step *succeeds* and
@@ -366,7 +426,10 @@ BUILDING_WIDTHS_M = [6.0, 9.0, 12.0, 15.0, 18.0]
 BUILDING_DEPTHS_M = [8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0]
 BUILDING_SUBTYPES = ["residential", "commercial", "industrial", None]
 BUILDING_CLASS_BY_SUBTYPE = {
-    "residential": "house", "commercial": "retail", "industrial": "warehouse", None: None,
+    "residential": "house",
+    "commercial": "retail",
+    "industrial": "warehouse",
+    None: None,
 }
 # height/num_floors set for roughly a third of rows (idx % 3 == 0) — sparse,
 # matching real Overture coverage; the other two thirds are None so
@@ -411,9 +474,17 @@ def build_building_rows(con: duckdb.DuckDBPyConnection) -> list[tuple]:
             wkt = box_wkt(base_lat, lat_max, base_lon, lon_max)
             (wkb,) = con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()
             bbox = {"xmin": base_lon, "ymin": base_lat, "xmax": lon_max, "ymax": lat_max}
-            rows.append((
-                gers_id(20_000 + idx), wkb, bbox, subtype, cls, height, num_floors,
-            ))
+            rows.append(
+                (
+                    gers_id(20_000 + idx),
+                    wkb,
+                    bbox,
+                    subtype,
+                    cls,
+                    height,
+                    num_floors,
+                )
+            )
             idx += 1
     return rows
 
@@ -460,9 +531,7 @@ def build_places(con: duckdb.DuckDBPyConnection) -> None:
             sources STRUCT(dataset VARCHAR, record_id VARCHAR)[]
         )
     """)
-    con.executemany(
-        "INSERT INTO places VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
-    )
+    con.executemany("INSERT INTO places VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
     con.execute(f"COPY places TO '{PLACES_FIXTURE_PATH}' (FORMAT PARQUET)")
     print(f"wrote {len(rows)} rows to {PLACES_FIXTURE_PATH}")

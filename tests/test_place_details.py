@@ -30,8 +30,11 @@ def test_resolve_by_id():
     assert result["brand"] == "Blue Bottle Coffee"
     assert result["addresses"] == [
         {
-            "freeform": "123 Main St", "locality": "Metropolis",
-            "region": "NY", "postcode": "10001", "country": "US",
+            "freeform": "123 Main St",
+            "locality": "Metropolis",
+            "region": "NY",
+            "postcode": "10001",
+            "country": "US",
         },
     ]
     assert result["websites"] == ["https://bluebottleroastery.example"]
@@ -56,7 +59,8 @@ def test_resolve_by_name_and_point_nearest_wins():
     )
     assert result is not None
     nearby_ids = {
-        r["id"] for r in overture.find_places(
+        r["id"]
+        for r in overture.find_places(
             CENTER_LAT, CENTER_LON, radius_m=50, name="Cluster Place", limit=25
         )
     }
@@ -171,9 +175,7 @@ def test_id_hint_constrained_lookup_finds_place_outside_cache(cached_id_lookup, 
 
     # A correct hint should still resolve it via the bbox-constrained
     # upstream path (not a full scan).
-    result = overture.place_details(
-        id=arctic["id"], near_lat=arctic["lat"], near_lon=arctic["lon"]
-    )
+    result = overture.place_details(id=arctic["id"], near_lat=arctic["lat"], near_lon=arctic["lon"])
     assert result is not None
     assert result["name"] == "Arctic Place 0"
 
@@ -186,9 +188,7 @@ def test_wrong_hint_falls_back_to_full_scan_and_still_finds_it(cached_id_lookup)
     """A hint that misses (wrong location) must not make the lookup fail —
     it falls back to the full-dataset scan, same as no hint at all."""
     arctic = _arctic_place_0()
-    result = overture.place_details(
-        id=arctic["id"], near_lat=CENTER_LAT, near_lon=CENTER_LON
-    )
+    result = overture.place_details(id=arctic["id"], near_lat=CENTER_LAT, near_lon=CENTER_LON)
     assert result is not None
     assert result["name"] == "Arctic Place 0"
 
@@ -202,9 +202,10 @@ def test_bare_id_lookup_unchanged_with_cache_enabled(cached_id_lookup):
 
 
 def test_not_found_by_id_with_hint_returns_none(cached_id_lookup):
-    assert overture.place_details(
-        id="does-not-exist", near_lat=CENTER_LAT, near_lon=CENTER_LON
-    ) is None
+    assert (
+        overture.place_details(id="does-not-exist", near_lat=CENTER_LAT, near_lon=CENTER_LON)
+        is None
+    )
 
 
 def test_server_not_found_shape_unchanged_with_hint(cached_id_lookup):

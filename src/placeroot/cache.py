@@ -191,6 +191,7 @@ def tile_deg_for(theme: str) -> float:
     """Tile edge length in degrees for theme (see HEAVY_THEME_TILE_DEG)."""
     return HEAVY_THEME_TILE_DEG.get(theme, TILE_DEG)
 
+
 # Ceiling on how many 1-degree tiles a single query may fan out into. Each
 # missing tile in a query costs one background thread + one upstream COPY
 # (or, under PLACEROOT_CACHE_SYNC, one sequential COPY), so an oversized
@@ -360,7 +361,8 @@ def tiles_for_bbox(
         # consecutive tx values.
         logger.warning(
             "bbox projects to ~%d tiles; truncating enumeration at %d",
-            x_span * y_span, MAX_TILES_PER_QUERY + 1,
+            x_span * y_span,
+            MAX_TILES_PER_QUERY + 1,
         )
         prefix = itertools.islice(
             ((wrap_x(tx), ty) for tx in range(x0, x1 + 1) for ty in range(y0, y1 + 1)),
@@ -641,7 +643,9 @@ def cached_tile_paths(release: str, theme: str, upstream_glob: str) -> list[Path
 
 
 def cached_tile_paths_for_bbox(
-    release: str, theme: str, upstream_glob: str,
+    release: str,
+    theme: str,
+    upstream_glob: str,
     bbox: tuple[float, float, float, float],
 ) -> list[Path]:
     """Tiles already on disk that intersect bbox — nothing materialized.
@@ -662,7 +666,6 @@ def cached_tile_paths_for_bbox(
         return []
     found, _missing = _claim_existing_tiles(release, theme, fingerprint, tiles)
     return sorted(found)
-
 
 
 # --- #142: protecting in-flight tiles from eviction ------------------------
@@ -787,9 +790,7 @@ def division_polygons_dir() -> Path:
 
 
 def division_polygons_max_bytes() -> float:
-    mb = float(
-        os.environ.get("PLACEROOT_CACHE_DIVISIONS_MAX_MB", DEFAULT_DIVISION_POLYGONS_MAX_MB)
-    )
+    mb = float(os.environ.get("PLACEROOT_CACHE_DIVISIONS_MAX_MB", DEFAULT_DIVISION_POLYGONS_MAX_MB))
     return mb * 1024 * 1024
 
 
@@ -865,7 +866,8 @@ def _evict_class(kind: str, cap: float, *, rescan: bool) -> None:
             "cache still %d bytes over cap after eviction: %d in-flight tile(s) "
             "were skipped to avoid evicting them mid-query; they become "
             "evictable once their claims expire",
-            total - cap, skipped,
+            total - cap,
+            skipped,
         )
 
 
@@ -1007,7 +1009,8 @@ def local_paths_for_query(
         logger.warning(
             "query bbox touches %d tiles (> MAX_TILES_PER_QUERY=%d); skipping the "
             "tile cache and scanning upstream directly for this query",
-            len(tiles), MAX_TILES_PER_QUERY,
+            len(tiles),
+            MAX_TILES_PER_QUERY,
         )
         return None
 
@@ -1072,7 +1075,8 @@ def local_paths_for_query(
             f"Fetching map data for this area ({len(missing)} {theme} "
             f"tile(s)) — the first query over a new area is slow; results "
             "are cached, repeat queries answer in milliseconds",
-            0, len(missing),
+            0,
+            len(missing),
             eta_s=remaining,
         )
         # Two fetches in flight, mirroring the background semaphore's
@@ -1095,7 +1099,8 @@ def local_paths_for_query(
                 f"Fetching map data for this area ({theme} tile {n} of "
                 f"{len(missing)}) — results are cached, repeat queries "
                 "answer in milliseconds",
-                n, len(missing),
+                n,
+                len(missing),
                 eta_s=left if n < len(missing) else None,
             )
             claim_paths(held)  # refresh mid-flight so no claim expires
@@ -1132,7 +1137,8 @@ def local_paths_for_query(
             cached.extend(fetched)
         progress.report(
             f"Map data for this area cached ({theme}) — running the query",
-            len(missing), len(missing),
+            len(missing),
+            len(missing),
         )
         paths = [str(p) for p in cached]
         # Fresh TTL on the way out so the caller has the full window to read
@@ -1210,8 +1216,13 @@ def source_sql(
             paths = cached_tile_paths_for_bbox(active_release, theme, upstream_glob, bbox)
         else:
             paths = local_paths_for_query(
-                None, active_release, theme, bbox, upstream_glob,
-                db.new_connection, schedule_missing=schedule_missing,
+                None,
+                active_release,
+                theme,
+                bbox,
+                upstream_glob,
+                db.new_connection,
+                schedule_missing=schedule_missing,
             )
         if paths:
             joined = ", ".join(db._sql_str(str(p)) for p in paths)
@@ -1283,14 +1294,17 @@ def prewarm_bbox(
             "fetched": 0,
         }
     local_paths_for_query(
-        con, release, theme, bbox, upstream_glob, new_connection,
+        con,
+        release,
+        theme,
+        bbox,
+        upstream_glob,
+        new_connection,
         force_sync=True,
     )
     # Recount: force_sync may have capped a heavy theme, so the bbox
     # can still have missing tiles even after the inline COPYs.
-    cached_now, still_missing = _claim_existing_tiles(
-        release, theme, fingerprint, tiles
-    )
+    cached_now, still_missing = _claim_existing_tiles(release, theme, fingerprint, tiles)
     return {
         "theme": theme,
         "status": "warmed" if not still_missing else "partial",

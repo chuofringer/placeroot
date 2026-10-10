@@ -14,9 +14,7 @@ REPO_ROOT = Path(__file__).parent.parent
 
 # scripts/ isn't a package; load bump_pin.py by path, same as
 # test_bump_version.py does for its sibling script.
-_spec = importlib.util.spec_from_file_location(
-    "bump_pin", REPO_ROOT / "scripts" / "bump_pin.py"
-)
+_spec = importlib.util.spec_from_file_location("bump_pin", REPO_ROOT / "scripts" / "bump_pin.py")
 bump_pin = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(bump_pin)
 
@@ -51,7 +49,7 @@ def test_bump_rewrites_only_the_pin_line():
 def test_bump_only_touches_the_pinned_release_assignment():
     """A release string appearing elsewhere in the file (a comment, say) is
     left alone — the regex is anchored to the PINNED_RELEASE assignment."""
-    text = RELEASE_PY_SAMPLE + '\n# fallback used since 2026-07-22.0\n'
+    text = RELEASE_PY_SAMPLE + "\n# fallback used since 2026-07-22.0\n"
     new_text = bump_pin.bump_pinned_release(text, "2026-08-19.0")
     assert 'PINNED_RELEASE = "2026-08-19.0"' in new_text
     assert "# fallback used since 2026-07-22.0" in new_text

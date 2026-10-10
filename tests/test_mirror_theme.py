@@ -53,7 +53,9 @@ def source_dir(tmp_path):
 def test_list_source_files_finds_every_parquet_file_with_its_size(source_dir):
     files = mirror_theme.list_source_files(str(source_dir), RELEASE, THEME, TYPE_)
     assert {f.key for f in files} == {
-        "part-0000.parquet", "part-0001.parquet", "part-0002.parquet",
+        "part-0000.parquet",
+        "part-0001.parquet",
+        "part-0002.parquet",
     }
     for f in files:
         on_disk = Path(source_dir) / RELEASE / f"theme={THEME}" / f"type={TYPE_}" / f.key
@@ -85,9 +87,7 @@ def test_dry_run_reports_every_file_and_total_bytes(source_dir, capsys):
 
 
 def test_main_dry_run_needs_no_target(source_dir, capsys):
-    rc = mirror_theme.main(
-        ["--release", RELEASE, "--source", str(source_dir), "--dry-run"]
-    )
+    rc = mirror_theme.main(["--release", RELEASE, "--source", str(source_dir), "--dry-run"])
     assert rc == 0
     assert "part-0000.parquet" in capsys.readouterr().out
 
@@ -110,7 +110,9 @@ def test_mirror_copies_every_source_file_and_preserves_row_counts(source_dir, tm
     target_root = Path(mirror_theme.theme_root(str(target), RELEASE, THEME, TYPE_))
     con = duckdb.connect()
     for name, expected_rows in [
-        ("part-0000.parquet", 10), ("part-0001.parquet", 5), ("part-0002.parquet", 0),
+        ("part-0000.parquet", 10),
+        ("part-0001.parquet", 5),
+        ("part-0002.parquet", 0),
     ]:
         p = target_root / name
         assert p.exists()
@@ -145,13 +147,9 @@ def test_resume_only_copies_the_file_added_since_the_first_run(tmp_path, caplog)
     mirror_theme.main(["--release", RELEASE, "--source", str(source), "--target", str(target)])
 
     # Add a second source file after the first mirror run completed.
-    _write_parquet(
-        source / RELEASE / f"theme={THEME}" / f"type={TYPE_}" / "part-0001.parquet", 5
-    )
+    _write_parquet(source / RELEASE / f"theme={THEME}" / f"type={TYPE_}" / "part-0001.parquet", 5)
     caplog.set_level(logging.INFO, logger="mirror_theme")
-    rc = mirror_theme.main(
-        ["--release", RELEASE, "--source", str(source), "--target", str(target)]
-    )
+    rc = mirror_theme.main(["--release", RELEASE, "--source", str(source), "--target", str(target)])
     assert rc == 0
     assert "1 copied, 1 skipped" in caplog.text
 
@@ -265,9 +263,10 @@ def test_newest_release_of_empty_list_is_none():
 
 
 def test_releases_to_prune_keeps_only_the_newest():
-    assert mirror_theme.releases_to_prune(
-        ["2026-05-21.0", "2026-06-22.0", "2026-07-22.0"]
-    ) == ["2026-05-21.0", "2026-06-22.0"]
+    assert mirror_theme.releases_to_prune(["2026-05-21.0", "2026-06-22.0", "2026-07-22.0"]) == [
+        "2026-05-21.0",
+        "2026-06-22.0",
+    ]
 
 
 def test_releases_to_prune_of_a_single_release_is_empty():

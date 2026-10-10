@@ -22,7 +22,12 @@ from placeroot import budget
 METERS_PER_DEGREE_LAT = 111_320.0
 
 SUPPORTED_TYPES = {
-    "Point", "MultiPoint", "LineString", "MultiLineString", "Polygon", "MultiPolygon",
+    "Point",
+    "MultiPoint",
+    "LineString",
+    "MultiLineString",
+    "Polygon",
+    "MultiPolygon",
 }
 
 # Points/degenerate lines pass through unsimplified; there's nothing to drop.
@@ -162,9 +167,7 @@ def _simplify_line(
     if is_ring and n >= 4 and len(kept) < 4:
         kept_set = set(kept)
         candidates = [i for i in range(1, n - 1) if i not in kept_set]
-        candidates.sort(
-            key=lambda i: (-_perp_dist_m(points_m[i], points_m[0], points_m[n - 1]), i)
-        )
+        candidates.sort(key=lambda i: (-_perp_dist_m(points_m[i], points_m[0], points_m[n - 1]), i))
         for i in candidates:
             if len(kept_set) >= 4:
                 break
@@ -331,8 +334,10 @@ def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
     geom0, orig0, kept0, dev0 = build(0.0)
     if fits(geom0):
         return {
-            "geometry": geom0, "max_deviation_m": dev0,
-            "original_points": orig0, "kept_points": kept0,
+            "geometry": geom0,
+            "max_deviation_m": dev0,
+            "original_points": orig0,
+            "kept_points": kept0,
         }
 
     # Expand epsilon until the result fits, then binary-search down to the

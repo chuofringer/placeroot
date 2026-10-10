@@ -123,9 +123,7 @@ def _offline_env() -> dict:
     return env
 
 
-async def _call(
-    session: ClientSession, log: StepLog, label: str, tool: str, args: dict
-) -> dict:
+async def _call(session: ClientSession, log: StepLog, label: str, tool: str, args: dict) -> dict:
     result = await session.call_tool(tool, args)
     if result.is_error:
         text = "".join(c.text for c in result.content if hasattr(c, "text"))
@@ -250,8 +248,11 @@ async def run(offline: bool) -> tuple[StepLog, list[dict], list[dict], str]:
                 )
                 admin_names.append(res)
 
-    return log, summaries, competition, _recommend(
-        candidates, summaries, competition, anchors, admin_names
+    return (
+        log,
+        summaries,
+        competition,
+        _recommend(candidates, summaries, competition, anchors, admin_names),
     )
 
 
@@ -295,9 +296,8 @@ def _recommend(candidates, summaries, competition, anchors, admin_names) -> str:
             f"{s['total_places']} total places nearby."
         )
     tied = sum(1 for s in scored if s["n_competitors"] == best["n_competitors"]) > 1
-    competitors_clause = (
-        f"{best['n_competitors']} coffee_shop competitors within {RADIUS_M}m"
-        + (" (tied with other candidates)" if tied else " (fewest among candidates)")
+    competitors_clause = f"{best['n_competitors']} coffee_shop competitors within {RADIUS_M}m" + (
+        " (tied with other candidates)" if tied else " (fewest among candidates)"
     )
     lines.append(
         f"\n**Recommended: {best['label']}** — grocery anchor in reach, "

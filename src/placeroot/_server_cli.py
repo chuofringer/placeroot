@@ -121,12 +121,9 @@ def _prewarm_region(lat: float, lon: float, radius_m: float) -> dict:
     if statuses <= {"already_warm"}:
         status = "already_warm"
         note = (
-            "This area is already cached. Later place searches over it "
-            f"should be fast. {coverage}"
+            f"This area is already cached. Later place searches over it should be fast. {coverage}"
         )
-    elif "partial" in statuses and not (
-        statuses & {"upstream_unavailable", "too_large"}
-    ):
+    elif "partial" in statuses and not (statuses & {"upstream_unavailable", "too_large"}):
         status = "partial"
         note = (
             "Some tiles for this area are cached; a heavy theme stopped "
@@ -152,9 +149,7 @@ def _prewarm_region(lat: float, lon: float, radius_m: float) -> dict:
         note = "The radius covers too many tiles; try a smaller radius_m."
     else:
         status = "failed"
-        note = (
-            "Warmup could not cache this area; the next query will scan upstream."
-        )
+        note = "Warmup could not cache this area; the next query will scan upstream."
     return {
         "lat": lat,
         "lon": lon,
@@ -341,7 +336,9 @@ def main() -> None:
                 "authentication — every tool is exposed to anyone who can reach "
                 "%s:%s. Put a reverse proxy / auth layer in front of it before "
                 "using this beyond a trusted local network.",
-                args.host, args.host, args.port,
+                args.host,
+                args.host,
+                args.port,
             )
         _server().mcp.run(transport="streamable-http", host=args.host, port=args.port)
     else:

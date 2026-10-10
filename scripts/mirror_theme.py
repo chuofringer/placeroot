@@ -458,9 +458,7 @@ def cmd_verify(
                 f"{key}: source size changed since mirror ({entry['source_size']} -> {src.size})"
             )
 
-        target_url = (
-            f"{target_root}/{key}" if is_s3(target_root) else str(Path(target_root) / key)
-        )
+        target_url = f"{target_root}/{key}" if is_s3(target_root) else str(Path(target_root) / key)
         if not is_s3(target_root):
             p = Path(target_url)
             if not p.exists():
@@ -519,9 +517,7 @@ def cmd_check_current(mirrored: list[str], upstream_release: str) -> int:
         )
         return 1
     if _release_sort_key(newest_mirrored) >= _release_sort_key(upstream_release):
-        logger.info(
-            "mirror is current: holds %s (upstream: %s)", newest_mirrored, upstream_release
-        )
+        logger.info("mirror is current: holds %s (upstream: %s)", newest_mirrored, upstream_release)
         return 0
     logger.error(
         "mirror is behind: mirror holds %s, upstream is at %s", newest_mirrored, upstream_release
@@ -555,7 +551,9 @@ def cmd_prune_releases(
     newest = newest_release(mirrored)
     logger.info(
         "keeping %s; %d release(s) eligible for pruning: %s",
-        newest, len(to_prune), ", ".join(to_prune),
+        newest,
+        len(to_prune),
+        ", ".join(to_prune),
     )
 
     if is_s3(target):
@@ -566,7 +564,10 @@ def cmd_prune_releases(
                 "%s: would delete %d file(s) under %s — DuckDB can't delete S3 "
                 "objects, so this script never does either; remove it with your "
                 "own tooling, e.g. `aws s3 rm --recursive %s`",
-                release, n_files, release_root, release_root,
+                release,
+                n_files,
+                release_root,
+                release_root,
             )
         if yes:
             logger.error(
@@ -582,7 +583,9 @@ def cmd_prune_releases(
         if not yes:
             logger.info(
                 "%s: would delete %s (%d file(s)) — pass --yes to delete",
-                release, release_root, n_files,
+                release,
+                release_root,
+                n_files,
             )
             continue
         if release_root.exists():
@@ -603,55 +606,66 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument(
-        "--release", default=None,
+        "--release",
+        default=None,
         help="Overture release (default: resolved — env override, discovery, or the pin)",
     )
     p.add_argument("--theme", default="places")
     p.add_argument("--type", dest="type_", default="place")
     p.add_argument(
-        "--source", default=DEFAULT_SOURCE_BASE,
+        "--source",
+        default=DEFAULT_SOURCE_BASE,
         help=f"Base to mirror FROM (default: {DEFAULT_SOURCE_BASE}). A local directory also works.",
     )
     p.add_argument(
-        "--target", default=None,
+        "--target",
+        default=None,
         help="Base to mirror TO: a local directory, or an s3://bucket/prefix URL",
     )
     p.add_argument(
-        "--verify", action="store_true",
+        "--verify",
+        action="store_true",
         help="Check an existing mirror against its manifest instead of copying",
     )
     p.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="List source files and total size; copies nothing, needs no --target",
     )
     p.add_argument(
-        "--check-current", action="store_true",
+        "--check-current",
+        action="store_true",
         help="Report whether --target holds the newest upstream release (#219); "
         "exits non-zero if behind. Doesn't touch --source or copy anything.",
     )
     p.add_argument(
-        "--prune-releases", action="store_true",
+        "--prune-releases",
+        action="store_true",
         help="Delete releases under --target older than the newest one it holds "
         "(#219). Dry run by default (prints what WOULD be deleted); pass --yes to "
         "actually delete. S3 targets are listed but never deleted in-process — "
         "see docs/MIRROR.md.",
     )
     p.add_argument(
-        "--yes", action="store_true",
+        "--yes",
+        action="store_true",
         help="Actually perform the deletion for --prune-releases (default: dry run)",
     )
     p.add_argument(
-        "--manifest", default=None,
+        "--manifest",
+        default=None,
         help="Manifest path (default: <target>/.mirror_manifest.json, or a "
         "~/.cache/placeroot path keyed by target for S3)",
     )
     p.add_argument(
-        "--s3-endpoint", default=os.environ.get("PLACEROOT_S3_ENDPOINT"),
+        "--s3-endpoint",
+        default=os.environ.get("PLACEROOT_S3_ENDPOINT"),
         help="Custom S3-compatible endpoint for the TARGET (R2/minio/...); "
         "also settable via PLACEROOT_S3_ENDPOINT",
     )
     p.add_argument(
-        "--s3-region", default=os.environ.get("PLACEROOT_S3_REGION", DEFAULT_SOURCE_REGION),
+        "--s3-region",
+        default=os.environ.get("PLACEROOT_S3_REGION", DEFAULT_SOURCE_REGION),
         help="Region for the TARGET connection",
     )
     p.add_argument("--log-level", default="INFO")

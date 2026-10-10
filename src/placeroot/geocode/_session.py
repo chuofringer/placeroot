@@ -86,10 +86,8 @@ _last_good_by_session: OrderedDict[str, tuple[str | None, tuple[float, float] | 
 _POI_ALIASES: dict[str, dict] | None = None
 
 
-
 def _fold_query_key(s: str) -> str:
     return " ".join(_pkg._normalize_for_match(s).split())
-
 
 
 def _poi_aliases() -> dict[str, dict]:
@@ -105,7 +103,6 @@ def _poi_aliases() -> dict[str, dict]:
     return _pkg._POI_ALIASES
 
 
-
 def _lookup_poi_alias(query: str) -> dict | None:
     row = _poi_aliases().get(_pkg._fold_query_key(query))
     if not row:
@@ -114,7 +111,6 @@ def _lookup_poi_alias(query: str) -> dict | None:
         return {"city": row["city"], "lat": float(row["lat"]), "lon": float(row["lon"])}
     except (KeyError, TypeError, ValueError):
         return None
-
 
 
 def _alias_names_for(query: str) -> list[str]:
@@ -138,10 +134,8 @@ def _alias_names_for(query: str) -> list[str]:
     return names
 
 
-
 def _canonical_city(token: str) -> str | None:
     return _WELL_KNOWN_CITIES.get(_pkg._fold_query_key(token))
-
 
 
 def _extract_city_hint(query: str) -> tuple[str, str | None, tuple[float, float] | None]:
@@ -177,7 +171,6 @@ def _extract_city_hint(query: str) -> tuple[str, str | None, tuple[float, float]
     return query, None, None
 
 
-
 def _query_is_poi_shaped(query: str) -> bool:
     """Whether `query` names a thing rather than a city — last-city applies."""
     if _pkg._lookup_poi_alias(query):
@@ -196,7 +189,6 @@ def _query_is_poi_shaped(query: str) -> bool:
     return False
 
 
-
 def _alias_anchor(query: str) -> tuple[float, float, str | None] | None:
     """(lat, lon, name_query) from a POI alias, or None."""
     place_q, _city, coords = _pkg._extract_city_hint(query)
@@ -204,7 +196,6 @@ def _alias_anchor(query: str) -> tuple[float, float, str | None] | None:
         return None
     name_query = None if _pkg._nothing_but_generic(place_q) else place_q
     return (coords[0], coords[1], name_query)
-
 
 
 def _well_known_city_near(row: dict, query: str) -> int:
@@ -215,10 +206,13 @@ def _well_known_city_near(row: dict, query: str) -> int:
     return 0 if geo.haversine_m(pin[0], pin[1], row["lat"], row["lon"]) <= 80_000 else 1
 
 
-
 def _resolve_cache_key(
-    query: str, city: str | None, near_lat: float | None, near_lon: float | None,
-    lang: str | None = None, country: str | None = None,
+    query: str,
+    city: str | None,
+    near_lat: float | None,
+    near_lon: float | None,
+    lang: str | None = None,
+    country: str | None = None,
 ) -> tuple:
     near = (
         (round(near_lat, 3), round(near_lon, 3))
@@ -229,15 +223,21 @@ def _resolve_cache_key(
     # a cache entry another lang (or no lang at all) already populated.
     # #457: country too, for the same reason.
     return (
-        _pkg._fold_query_key(query), _pkg._fold_query_key(city) if city else "", *near,
-        lang or "", country or "",
+        _pkg._fold_query_key(query),
+        _pkg._fold_query_key(city) if city else "",
+        *near,
+        lang or "",
+        country or "",
     )
 
 
-
 def _resolve_cache_get(
-    query: str, city: str | None, near_lat: float | None, near_lon: float | None,
-    lang: str | None = None, country: str | None = None,
+    query: str,
+    city: str | None,
+    near_lat: float | None,
+    near_lon: float | None,
+    lang: str | None = None,
+    country: str | None = None,
 ) -> list[dict] | None:
     """The full ranked candidate list cached for this key, or None.
 
@@ -252,7 +252,6 @@ def _resolve_cache_get(
             return None
         _pkg._resolve_lru.move_to_end(key)
         return [dict(r) for r in rows]
-
 
 
 def _resolve_cache_put(
@@ -273,7 +272,6 @@ def _resolve_cache_put(
             _pkg._resolve_lru.popitem(last=False)
 
 
-
 def _last_good() -> tuple[str | None, tuple[float, float] | None]:
     """The (city, coords) the current session last pinned; (None, None) if none."""
     sid = session.session_id()
@@ -283,7 +281,6 @@ def _last_good() -> tuple[str | None, tuple[float, float] | None]:
             return None, None
         _pkg._last_good_by_session.move_to_end(sid)
         return state
-
 
 
 def _remember_last_city(city: str | None, top: dict) -> None:
@@ -309,7 +306,6 @@ def _remember_last_city(city: str | None, top: dict) -> None:
         _pkg._last_good_by_session.move_to_end(sid)
         while len(_pkg._last_good_by_session) > _pkg._LAST_GOOD_SESSIONS_MAX:
             _pkg._last_good_by_session.popitem(last=False)
-
 
 
 def clear_resolve_session(*, clear_all: bool = False) -> None:

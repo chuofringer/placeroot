@@ -42,7 +42,14 @@ THEME = "divisions"
 # name/subtype/division_id (#446): a dataset without them still answers,
 # just without those two fields on each chain row.
 REQUIRED_COLUMNS = [
-    "id", "names", "subtype", "geometry", "bbox", "division_id", "country", "region",
+    "id",
+    "names",
+    "subtype",
+    "geometry",
+    "bbox",
+    "division_id",
+    "country",
+    "region",
 ]
 ESSENTIAL_COLUMNS = {"geometry"}
 
@@ -210,18 +217,14 @@ def _validate_rings(coordinates) -> None:
         raise ValueError("polygon_geojson coordinates must be a list of rings")
     for ring in coordinates:
         if not isinstance(ring, (list, tuple)) or not ring:
-            raise ValueError(
-                "polygon_geojson rings must be non-empty lists of [lon, lat] pairs"
-            )
+            raise ValueError("polygon_geojson rings must be non-empty lists of [lon, lat] pairs")
         for pt in ring:
             if (
                 not isinstance(pt, (list, tuple))
                 or len(pt) < 2
                 or not all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in pt[:2])
             ):
-                raise ValueError(
-                    "polygon_geojson ring vertices must be [lon, lat] numeric pairs"
-                )
+                raise ValueError("polygon_geojson ring vertices must be [lon, lat] numeric pairs")
 
 
 def divisions_in_polygon(

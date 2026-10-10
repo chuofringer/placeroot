@@ -192,9 +192,7 @@ def test_surroundings_counts_reconcile_after_truncation(monkeypatch):
     counts = [6, 5, 4, 3, 3, 2, 2]
     summary = {
         "total_places": 30,
-        "top_categories": [
-            {"category": f"cat_{i}", "count": n} for i, n in enumerate(counts)
-        ],
+        "top_categories": [{"category": f"cat_{i}", "count": n} for i, n in enumerate(counts)],
         "other_categories_count": 2,
         "uncategorized_count": 3,
     }
@@ -207,9 +205,7 @@ def test_surroundings_counts_reconcile_after_truncation(monkeypatch):
     assert surroundings["other_categories_count"] == 2 + 2 + 2
     assert surroundings["uncategorized_count"] == 3
     assert (
-        shown
-        + surroundings["other_categories_count"]
-        + surroundings["uncategorized_count"]
+        shown + surroundings["other_categories_count"] + surroundings["uncategorized_count"]
         == surroundings["total_places"]
     )
 
@@ -290,8 +286,11 @@ def test_where_name_adds_resolved(monkeypatch):
     def fake_resolve(query):
         assert query == "Cluster Place 000"
         return {
-            "name": query, "lat": CENTER_LAT, "lon": CENTER_LON,
-            "id": "gers-cluster", "type": "place",
+            "name": query,
+            "lat": CENTER_LAT,
+            "lon": CENTER_LON,
+            "id": "gers-cluster",
+            "type": "place",
         }
 
     monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
@@ -299,8 +298,11 @@ def test_where_name_adds_resolved(monkeypatch):
     result = server.ground_location(where="Cluster Place 000", minutes=15, mode="walk")
     assert "error" not in result
     assert result["resolved"] == {
-        "name": "Cluster Place 000", "id": "gers-cluster",
-        "lat": CENTER_LAT, "lon": CENTER_LON, "matched_by": "name",
+        "name": "Cluster Place 000",
+        "id": "gers-cluster",
+        "lat": CENTER_LAT,
+        "lon": CENTER_LON,
+        "matched_by": "name",
     }
 
 

@@ -93,7 +93,7 @@ class BumpError(RuntimeError):
 def read_pyproject_version(text: str) -> str:
     match = _PYPROJECT_VERSION_RE.search(text)
     if not match:
-        raise BumpError("pyproject.toml: no `version = \"X.Y.Z\"` line found")
+        raise BumpError('pyproject.toml: no `version = "X.Y.Z"` line found')
     return match.group(2)
 
 

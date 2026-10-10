@@ -54,7 +54,7 @@ def test_a_raising_reporter_never_fails_the_query_path():
 def test_repeat_messages_are_throttled_but_new_phases_are_not(captured, monkeypatch):
     progress.report("same phase", 1, 10)
     progress.report("same phase", 2, 10)  # inside MIN_INTERVAL_S: dropped
-    progress.report("new phase")          # different message: immediate
+    progress.report("new phase")  # different message: immediate
     assert [e[0] for e in captured] == ["same phase", "new phase"]
 
 
@@ -68,7 +68,11 @@ def test_sync_materialization_reports_per_tile(captured, tmp_path, monkeypatch):
     con = duckdb.connect()
     bbox = (CENTER_LON - 0.01, CENTER_LAT - 0.01, CENTER_LON + 0.01, CENTER_LAT + 0.01)
     paths = cache.local_paths_for_query(
-        con, release.resolve_release(), "places", bbox, overture._upstream_glob(),
+        con,
+        release.resolve_release(),
+        "places",
+        bbox,
+        overture._upstream_glob(),
         duckdb.connect,
     )
     assert paths  # materialized from the fixture
@@ -88,7 +92,11 @@ def test_async_fallback_reports_the_direct_scan(captured, tmp_path, monkeypatch)
     con = duckdb.connect()
     bbox = (CENTER_LON - 0.01, CENTER_LAT - 0.01, CENTER_LON + 0.01, CENTER_LAT + 0.01)
     paths = cache.local_paths_for_query(
-        con, release.resolve_release(), "places", bbox, overture._upstream_glob(),
+        con,
+        release.resolve_release(),
+        "places",
+        bbox,
+        overture._upstream_glob(),
         duckdb.connect,
     )
     assert paths is None  # caller falls back to a direct scan
@@ -127,9 +135,7 @@ def test_background_fetches_respect_the_concurrency_bound(tmp_path, monkeypatch)
 
     monkeypatch.setattr(cache, "ensure_tile", fake_ensure)
     for i in range(total):
-        cache._materialize_in_background(
-            "r", "places", (i, i), "glob", "fp", lambda: None
-        )
+        cache._materialize_in_background("r", "places", (i, i), "glob", "fp", lambda: None)
     assert done.wait(timeout=10), "background fetches never completed"
     assert max(peak) <= cache._background_fetch_concurrency()
 
@@ -150,8 +156,9 @@ class _FakeSession:
     def __init__(self):
         self.sent = []
 
-    async def send_progress_notification(self, token, prog, total=None,
-                                         message=None, related_request_id=None):
+    async def send_progress_notification(
+        self, token, prog, total=None, message=None, related_request_id=None
+    ):
         self.sent.append((token, prog, total, message))
 
 
@@ -253,7 +260,8 @@ def test_an_is_error_result_is_left_alone():
 
 
 def test_trace_middleware_names_the_tool_and_resets_even_when_the_call_raises(
-    monkeypatch, caplog,
+    monkeypatch,
+    caplog,
 ):
     monkeypatch.setenv("PLACEROOT_TRACE", "1")
 
@@ -341,7 +349,11 @@ def test_sync_materialization_messages_carry_an_eta(captured, tmp_path, monkeypa
     con = duckdb.connect()
     bbox = (CENTER_LON - 0.01, CENTER_LAT - 0.01, CENTER_LON + 0.01, CENTER_LAT + 0.01)
     cache.local_paths_for_query(
-        con, release.resolve_release(), "places", bbox, overture._upstream_glob(),
+        con,
+        release.resolve_release(),
+        "places",
+        bbox,
+        overture._upstream_glob(),
         duckdb.connect,
     )
     messages = [m for m, _, _ in captured]

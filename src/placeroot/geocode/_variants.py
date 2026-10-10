@@ -13,9 +13,12 @@ _pkg = _sys.modules["placeroot.geocode"]
 # expansion and vice versa, so a query in either convention finds a
 # canonical name written in the other.
 _ABBR_VARIANTS: dict[str, list[str]] = {
-    "st": ["Saint"], "saint": ["St.", "St"],
-    "ft": ["Fort"], "fort": ["Ft.", "Ft"],
-    "mt": ["Mount"], "mount": ["Mt.", "Mt"],
+    "st": ["Saint"],
+    "saint": ["St.", "St"],
+    "ft": ["Fort"],
+    "fort": ["Ft.", "Ft"],
+    "mt": ["Mount"],
+    "mount": ["Mt.", "Mt"],
 }
 
 
@@ -23,12 +26,15 @@ _ABBR_VARIANTS: dict[str, list[str]] = {
 # "S" elsewhere in a multi-word query is too ambiguous (initials, a street
 # suffix, ...) to safely expand.
 _CARDINAL_VARIANTS: dict[str, list[str]] = {
-    "n": ["North"], "north": ["N.", "N"],
-    "s": ["South"], "south": ["S.", "S"],
-    "e": ["East"], "east": ["E.", "E"],
-    "w": ["West"], "west": ["W.", "W"],
+    "n": ["North"],
+    "north": ["N.", "N"],
+    "s": ["South"],
+    "south": ["S.", "S"],
+    "e": ["East"],
+    "east": ["E.", "E"],
+    "w": ["West"],
+    "west": ["W.", "W"],
 }
-
 
 
 # #225: USPS street-suffix abbreviations, the same bidirectional shape as
@@ -44,15 +50,24 @@ _CARDINAL_VARIANTS: dict[str, list[str]] = {
 # transformation at all — "Hauptstraße" is one token in both the query and
 # the data (verified against the live release), which is why this map is US-only.
 _STREET_SUFFIX_VARIANTS: dict[str, list[str]] = {
-    "street": ["St"], "st": ["Street"],
-    "avenue": ["Ave"], "ave": ["Avenue"],
-    "parkway": ["Pkwy"], "pkwy": ["Parkway"],
-    "boulevard": ["Blvd"], "blvd": ["Boulevard"],
-    "road": ["Rd"], "rd": ["Road"],
-    "drive": ["Dr"], "dr": ["Drive"],
-    "lane": ["Ln"], "ln": ["Lane"],
-    "court": ["Ct"], "ct": ["Court"],
-    "place": ["Pl"], "pl": ["Place"],
+    "street": ["St"],
+    "st": ["Street"],
+    "avenue": ["Ave"],
+    "ave": ["Avenue"],
+    "parkway": ["Pkwy"],
+    "pkwy": ["Parkway"],
+    "boulevard": ["Blvd"],
+    "blvd": ["Boulevard"],
+    "road": ["Rd"],
+    "rd": ["Road"],
+    "drive": ["Dr"],
+    "dr": ["Drive"],
+    "lane": ["Ln"],
+    "ln": ["Lane"],
+    "court": ["Ct"],
+    "ct": ["Court"],
+    "place": ["Pl"],
+    "pl": ["Place"],
 }
 
 
@@ -63,12 +78,15 @@ _STREET_SUFFIX_VARIANTS: dict[str, list[str]] = {
 # whose expansion is only safe on a leading token, while a quadrant is
 # unambiguous wherever it appears in a street field.
 _STREET_QUADRANT_VARIANTS: dict[str, list[str]] = {
-    "nw": ["Northwest"], "northwest": ["NW"],
-    "ne": ["Northeast"], "northeast": ["NE"],
-    "sw": ["Southwest"], "southwest": ["SW"],
-    "se": ["Southeast"], "southeast": ["SE"],
+    "nw": ["Northwest"],
+    "northwest": ["NW"],
+    "ne": ["Northeast"],
+    "northeast": ["NE"],
+    "sw": ["Southwest"],
+    "southwest": ["SW"],
+    "se": ["Southeast"],
+    "southeast": ["SE"],
 }
-
 
 
 def _token_variants(token: str, leading: bool, street: bool = False) -> list[str]:
@@ -96,7 +114,6 @@ def _token_variants(token: str, leading: bool, street: bool = False) -> list[str
     return variants
 
 
-
 # "5th" / "22ND" — a number wearing an English ordinal suffix.
 _ORDINAL_RE = re.compile(r"^(\d+)(st|nd|rd|th)$")
 
@@ -107,13 +124,19 @@ _ORDINAL_RE = re.compile(r"^(\d+)(st|nd|rd|th)$")
 # token are not themselves re-expanded, so "fifth" must produce "5" here
 # rather than relying on a second fold of "5th").
 _WORD_ORDINALS: dict[str, list[str]] = {
-    "first": ["1st", "1"], "second": ["2nd", "2"], "third": ["3rd", "3"],
-    "fourth": ["4th", "4"], "fifth": ["5th", "5"], "sixth": ["6th", "6"],
-    "seventh": ["7th", "7"], "eighth": ["8th", "8"], "ninth": ["9th", "9"],
-    "tenth": ["10th", "10"], "eleventh": ["11th", "11"],
+    "first": ["1st", "1"],
+    "second": ["2nd", "2"],
+    "third": ["3rd", "3"],
+    "fourth": ["4th", "4"],
+    "fifth": ["5th", "5"],
+    "sixth": ["6th", "6"],
+    "seventh": ["7th", "7"],
+    "eighth": ["8th", "8"],
+    "ninth": ["9th", "9"],
+    "tenth": ["10th", "10"],
+    "eleventh": ["11th", "11"],
     "twelfth": ["12th", "12"],
 }
-
 
 
 def _ordinal_suffix(n: int) -> str:
@@ -122,9 +145,8 @@ def _ordinal_suffix(n: int) -> str:
     return {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
 
 
-
 def _ordinal_variants(key: str) -> list[str]:
-    """"5th" -> ["5"], "5" -> ["5th"], "fifth" -> ["5th", "5"], else [].
+    """ "5th" -> ["5"], "5" -> ["5th"], "fifth" -> ["5th", "5"], else [].
     key is lowercased."""
     m = _ORDINAL_RE.match(key)
     if m:
@@ -132,7 +154,6 @@ def _ordinal_variants(key: str) -> list[str]:
     if key.isdigit():
         return [key + _ordinal_suffix(int(key))]
     return list(_WORD_ORDINALS.get(key, []))
-
 
 
 def _abbreviation_variant_queries(query: str) -> list[str]:
@@ -155,7 +176,6 @@ def _abbreviation_variant_queries(query: str) -> list[str]:
             seen.add(vl)
             out.append(v)
     return out
-
 
 
 def _match_tier_order_sql(name_expr: str) -> str:

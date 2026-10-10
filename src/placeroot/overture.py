@@ -54,8 +54,19 @@ THEME = "places"
 # fields (addresses/websites/phones/socials/brand/sources, issue #9) degrade
 # the same way: missing means that field comes back None/empty, not a failure.
 REQUIRED_COLUMNS = [
-    "names", "taxonomy", "basic_category", "operating_status", "confidence", "bbox",
-    "id", "addresses", "websites", "phones", "socials", "brand", "sources",
+    "names",
+    "taxonomy",
+    "basic_category",
+    "operating_status",
+    "confidence",
+    "bbox",
+    "id",
+    "addresses",
+    "websites",
+    "phones",
+    "socials",
+    "brand",
+    "sources",
 ]
 ESSENTIAL_COLUMNS = {"bbox"}
 
@@ -268,7 +279,6 @@ _probe_schema = db.probe_schema
 _configure = db._configure
 
 
-
 # Themes the startup pre-warm walks, in the order a session is likely to
 # need them. places first (the headline tools), then the two heavy themes
 # whose cold footer pass is the largest (buildings 512 files measured
@@ -346,7 +356,9 @@ def _check_schema(
 
 
 def _with_recreation(
-    source: str, bbox: tuple[float, float, float, float] | None, theme: str = THEME,
+    source: str,
+    bbox: tuple[float, float, float, float] | None,
+    theme: str = THEME,
     schedule_missing: bool = True,
 ) -> tuple[str, bool]:
     """`source`, unioned with the recreation layer unless it is switched off.
@@ -773,8 +785,18 @@ def _find_places_name_fallback(
         round({_DISTANCE_EXPR}, 0) AS distance_m
     """
     cols = [
-        "id", "name", "category", "basic_category", "operating_status",
-        "confidence", "brand", "has_website", "has_phone", "lat", "lon", "distance_m",
+        "id",
+        "name",
+        "category",
+        "basic_category",
+        "operating_status",
+        "confidence",
+        "brand",
+        "has_website",
+        "has_phone",
+        "lat",
+        "lon",
+        "distance_m",
     ]
 
     # --- tier 2: names.common alternate spellings ---------------------
@@ -804,7 +826,7 @@ def _find_places_name_fallback(
         {with_clause}
         SELECT {select_cols}, _alt_spelling AS matched_alt
         FROM {from_clause}, UNNEST(list_distinct(map_values(names.common))) AS _u(_alt_spelling)
-        WHERE {' AND '.join(dedup_filters)}
+        WHERE {" AND ".join(dedup_filters)}
           AND {_fold_poi_name_sql("_alt_spelling")} = $_folded_name
         QUALIFY row_number() OVER (PARTITION BY {exprs["id"]} ORDER BY _alt_spelling) = 1
         ORDER BY distance_m
@@ -889,7 +911,7 @@ def _find_places_name_fallback(
     # its spelling scored a shade closer.
     fuzzy_sql = f"""
         {pool_with_clause}
-        SELECT {', '.join(cols)}, similarity
+        SELECT {", ".join(cols)}, similarity
         FROM _pool
         ORDER BY distance_m, similarity DESC
         LIMIT {limit}
@@ -1082,8 +1104,7 @@ def _place_select_exprs(missing: set[str]) -> dict[str, str]:
         "confidence": "NULL" if "confidence" in missing else "round(confidence, 2)",
         "brand": "NULL" if "brand" in missing else "brand.names.primary",
         "has_website": (
-            "FALSE" if "websites" in missing
-            else "(websites IS NOT NULL AND len(websites) > 0)"
+            "FALSE" if "websites" in missing else "(websites IS NOT NULL AND len(websites) > 0)"
         ),
         "has_phone": (
             "FALSE" if "phones" in missing else "(phones IS NOT NULL AND len(phones) > 0)"
@@ -1208,12 +1229,8 @@ def find_places(
         base_filters.extend(_place_categories_multi_filter(missing, categories, params))
     else:
         base_filters.extend(_place_category_name_filters(missing, category, None, params))
-    base_filters.extend(
-        _place_attribute_filters(missing, min_confidence, operating_status, params)
-    )
-    base_filters.extend(
-        _place_presence_filters(missing, brand, has_website, has_phone, params)
-    )
+    base_filters.extend(_place_attribute_filters(missing, min_confidence, operating_status, params))
+    base_filters.extend(_place_presence_filters(missing, brand, has_website, has_phone, params))
     name_filters = _place_category_name_filters(missing, None, name, params)
     filters = base_filters + name_filters
 
@@ -1236,7 +1253,7 @@ def find_places(
             round(bbox.xmin, 6)                 AS lon,
             round({_DISTANCE_EXPR}, 0)          AS distance_m
         FROM {from_clause}
-        WHERE {' AND '.join(filters)}
+        WHERE {" AND ".join(filters)}
         ORDER BY distance_m, id
         LIMIT {limit}
         OFFSET {offset}
@@ -1252,8 +1269,18 @@ def find_places(
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     cols = [
-        "id", "name", "category", "basic_category", "operating_status",
-        "confidence", "brand", "has_website", "has_phone", "lat", "lon", "distance_m",
+        "id",
+        "name",
+        "category",
+        "basic_category",
+        "operating_status",
+        "confidence",
+        "brand",
+        "has_website",
+        "has_phone",
+        "lat",
+        "lon",
+        "distance_m",
     ]
     results = [dict(zip(cols, r)) for r in rows]
     if not results and name and allow_name_fallback and "names" not in missing and offset == 0:
@@ -1267,7 +1294,13 @@ def find_places(
         # own results, not that tier 1 found nothing at all — falling back
         # there would silently restart the search from a different tier).
         results = _find_places_name_fallback(
-            from_source, base_filters, params, has_recreation, exprs, name, limit,
+            from_source,
+            base_filters,
+            params,
+            has_recreation,
+            exprs,
+            name,
+            limit,
             fuzzy=fuzzy_fallback,
         )
     for d in results:
@@ -1325,7 +1358,7 @@ def find_places_for_categories(
             round(bbox.xmin, 6)                 AS lon,
             round({_DISTANCE_EXPR}, 0)          AS distance_m
         FROM {from_clause}
-        WHERE {' AND '.join(filters)}
+        WHERE {" AND ".join(filters)}
         ORDER BY distance_m
         LIMIT {limit}
     """
@@ -1338,8 +1371,18 @@ def find_places_for_categories(
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     cols = [
-        "id", "name", "category", "basic_category", "operating_status",
-        "confidence", "brand", "has_website", "has_phone", "lat", "lon", "distance_m",
+        "id",
+        "name",
+        "category",
+        "basic_category",
+        "operating_status",
+        "confidence",
+        "brand",
+        "has_website",
+        "has_phone",
+        "lat",
+        "lon",
+        "distance_m",
     ]
     results = [dict(zip(cols, r)) for r in rows]
     for d in results:
@@ -1437,7 +1480,7 @@ def find_places_in_bbox(
             round(bbox.ymin, 6)                 AS lat,
             round(bbox.xmin, 6)                 AS lon
         FROM {from_clause}
-        WHERE {' AND '.join(filters)}
+        WHERE {" AND ".join(filters)}
         ORDER BY {order_by}
         LIMIT {limit}
     """
@@ -1447,8 +1490,17 @@ def find_places_in_bbox(
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     cols = [
-        "id", "name", "category", "basic_category", "operating_status",
-        "confidence", "brand", "has_website", "has_phone", "lat", "lon",
+        "id",
+        "name",
+        "category",
+        "basic_category",
+        "operating_status",
+        "confidence",
+        "brand",
+        "has_website",
+        "has_phone",
+        "lat",
+        "lon",
     ]
     results = [dict(zip(cols, r)) for r in rows]
     for d in results:
@@ -1761,8 +1813,10 @@ def find_places_in_division(
     )
     contains_filter = "ST_Contains(ST_GeomFromWKB($geom_wkb), ST_Point(bbox.xmin, bbox.ymin))"
     params = {
-        "div_xmin": div_xmin, "div_xmax": div_xmax,
-        "div_ymin": div_ymin, "div_ymax": div_ymax,
+        "div_xmin": div_xmin,
+        "div_xmax": div_xmax,
+        "div_ymin": div_ymin,
+        "div_ymax": div_ymax,
         "geom_wkb": geom_wkb,
     }
     bbox = (div_xmin, div_ymin, div_xmax, div_ymax)
@@ -1776,12 +1830,8 @@ def find_places_in_division(
         filters.extend(_place_category_name_filters(missing, None, name, params))
     else:
         filters.extend(_place_category_name_filters(missing, category, name, params))
-    filters.extend(
-        _place_attribute_filters(missing, min_confidence, operating_status, params)
-    )
-    filters.extend(
-        _place_presence_filters(missing, brand, has_website, has_phone, params)
-    )
+    filters.extend(_place_attribute_filters(missing, min_confidence, operating_status, params))
+    filters.extend(_place_presence_filters(missing, brand, has_website, has_phone, params))
 
     exprs = _place_select_exprs(missing)
     with_clause, from_clause, filters = _dedup_rows_sql(from_source, filters, has_recreation)
@@ -1801,7 +1851,7 @@ def find_places_in_division(
             round(bbox.ymin, 6)                 AS lat,
             round(bbox.xmin, 6)                 AS lon
         FROM {from_clause}
-        WHERE {' AND '.join(filters)}
+        WHERE {" AND ".join(filters)}
         ORDER BY name, id
         LIMIT {limit}
         OFFSET {offset}
@@ -1812,8 +1862,17 @@ def find_places_in_division(
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     cols = [
-        "id", "name", "category", "basic_category", "operating_status",
-        "confidence", "brand", "has_website", "has_phone", "lat", "lon",
+        "id",
+        "name",
+        "category",
+        "basic_category",
+        "operating_status",
+        "confidence",
+        "brand",
+        "has_website",
+        "has_phone",
+        "lat",
+        "lon",
     ]
     results = [dict(zip(cols, r)) for r in rows]
     for d in results:
@@ -1879,12 +1938,8 @@ def find_places_grouped_by_category(
     filters.extend(_name_filter(missing, has_recreation))
     filters.extend(_place_categories_multi_filter(missing, categories, params))
     filters.extend(_place_category_name_filters(missing, None, name, params))
-    filters.extend(
-        _place_attribute_filters(missing, min_confidence, operating_status, params)
-    )
-    filters.extend(
-        _place_presence_filters(missing, brand, has_website, has_phone, params)
-    )
+    filters.extend(_place_attribute_filters(missing, min_confidence, operating_status, params))
+    filters.extend(_place_presence_filters(missing, brand, has_website, has_phone, params))
 
     exprs = _place_select_exprs(missing)
     with_clause, from_clause, filters = _dedup_rows_sql(from_source, filters, has_recreation)
@@ -1910,7 +1965,7 @@ def find_places_grouped_by_category(
                     ORDER BY {_DISTANCE_EXPR}, {exprs["id"]}
                 )                                    AS rn
             FROM {from_clause}
-            WHERE {' AND '.join(filters)}
+            WHERE {" AND ".join(filters)}
         ) _ranked
         WHERE rn <= {per_category_limit}
         ORDER BY category, distance_m, id
@@ -1924,8 +1979,19 @@ def find_places_grouped_by_category(
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     cols = [
-        "id", "name", "category", "basic_category", "operating_status",
-        "confidence", "brand", "has_website", "has_phone", "lat", "lon", "distance_m", "rn",
+        "id",
+        "name",
+        "category",
+        "basic_category",
+        "operating_status",
+        "confidence",
+        "brand",
+        "has_website",
+        "has_phone",
+        "lat",
+        "lon",
+        "distance_m",
+        "rn",
     ]
     grouped: dict[str, list[dict]] = {}
     for r in rows:
@@ -1974,8 +2040,10 @@ def find_places_in_division_grouped_by_category(
     )
     contains_filter = "ST_Contains(ST_GeomFromWKB($geom_wkb), ST_Point(bbox.xmin, bbox.ymin))"
     params = {
-        "div_xmin": div_xmin, "div_xmax": div_xmax,
-        "div_ymin": div_ymin, "div_ymax": div_ymax,
+        "div_xmin": div_xmin,
+        "div_xmax": div_xmax,
+        "div_ymin": div_ymin,
+        "div_ymax": div_ymax,
         "geom_wkb": geom_wkb,
     }
     bbox = (div_xmin, div_ymin, div_xmax, div_ymax)
@@ -1986,12 +2054,8 @@ def find_places_in_division_grouped_by_category(
     filters.extend(_name_filter(missing, has_recreation))
     filters.extend(_place_categories_multi_filter(missing, categories, params))
     filters.extend(_place_category_name_filters(missing, None, name, params))
-    filters.extend(
-        _place_attribute_filters(missing, min_confidence, operating_status, params)
-    )
-    filters.extend(
-        _place_presence_filters(missing, brand, has_website, has_phone, params)
-    )
+    filters.extend(_place_attribute_filters(missing, min_confidence, operating_status, params))
+    filters.extend(_place_presence_filters(missing, brand, has_website, has_phone, params))
 
     exprs = _place_select_exprs(missing)
     with_clause, from_clause, filters = _dedup_rows_sql(from_source, filters, has_recreation)
@@ -2016,7 +2080,7 @@ def find_places_in_division_grouped_by_category(
                     ORDER BY {exprs["name"]}, {exprs["id"]}
                 )                                    AS rn
             FROM {from_clause}
-            WHERE {' AND '.join(filters)}
+            WHERE {" AND ".join(filters)}
         ) _ranked
         WHERE rn <= {per_category_limit}
         ORDER BY category, name, id
@@ -2027,8 +2091,18 @@ def find_places_in_division_grouped_by_category(
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     cols = [
-        "id", "name", "category", "basic_category", "operating_status",
-        "confidence", "brand", "has_website", "has_phone", "lat", "lon", "rn",
+        "id",
+        "name",
+        "category",
+        "basic_category",
+        "operating_status",
+        "confidence",
+        "brand",
+        "has_website",
+        "has_phone",
+        "lat",
+        "lon",
+        "rn",
     ]
     grouped: dict[str, list[dict]] = {}
     for r in rows:
@@ -2124,15 +2198,20 @@ _PLACE_DETAIL_COLUMNS = [
     ("socials", "socials", "socials"),
     ("sources", "sources", "sources"),
 ]
-_PLACE_DETAIL_RESULT_COLS = (
-    [alias for _, _, alias in _PLACE_DETAIL_COLUMNS]
-    + ["lat", "lon", recreation.MARKER_COLUMN]
-)
+_PLACE_DETAIL_RESULT_COLS = [alias for _, _, alias in _PLACE_DETAIL_COLUMNS] + [
+    "lat",
+    "lon",
+    recreation.MARKER_COLUMN,
+]
 
 
 def _place_details_sql(
-    from_source: str, filters: list[str], order_by: str, missing: set[str],
-    has_recreation: bool = False, with_clause: str = "",
+    from_source: str,
+    filters: list[str],
+    order_by: str,
+    missing: set[str],
+    has_recreation: bool = False,
+    with_clause: str = "",
     lang: str | None = None,
 ) -> str:
     """The shared place_details SELECT, sourced from from_source.
@@ -2155,7 +2234,7 @@ def _place_details_sql(
     alt-name fallback.
     """
     select_list = ",\n            ".join(
-        f'{"NULL" if col in missing else expr} AS {alias}'
+        f"{'NULL' if col in missing else expr} AS {alias}"
         for col, expr, alias in _PLACE_DETAIL_COLUMNS
     )
     marker_expr = recreation.MARKER_COLUMN if has_recreation else "FALSE"
@@ -2174,11 +2253,16 @@ def _place_details_sql(
     """
 
 
-def _run_place_details_query(from_source: str, filters: list[str], order_by: str,
-                              params: dict, missing: set[str],
-                              has_recreation: bool = False,
-                              with_clause: str = "",
-                              lang: str | None = None) -> tuple[tuple | None, str | None]:
+def _run_place_details_query(
+    from_source: str,
+    filters: list[str],
+    order_by: str,
+    params: dict,
+    missing: set[str],
+    has_recreation: bool = False,
+    with_clause: str = "",
+    lang: str | None = None,
+) -> tuple[tuple | None, str | None]:
     """Runs the place_details SELECT, returning (row, lang_variant).
 
     #410: lang_variant is the requested-language name.common variant for
@@ -2192,8 +2276,9 @@ def _run_place_details_query(from_source: str, filters: list[str], order_by: str
     without a second query — that emptiness is real, not a schema miss.
     """
     if lang is not None:
-        lang_sql = _place_details_sql(from_source, filters, order_by, missing,
-                                       has_recreation, with_clause, lang=lang)
+        lang_sql = _place_details_sql(
+            from_source, filters, order_by, missing, has_recreation, with_clause, lang=lang
+        )
         try:
             with db.read_conn() as rc:
                 row = rc.execute(lang_sql, {**params, "lang": lang}).fetchone()
@@ -2203,8 +2288,7 @@ def _run_place_details_query(from_source: str, filters: list[str], order_by: str
             if row is None:
                 return None, None
             return row[:-1], row[-1]
-    sql = _place_details_sql(from_source, filters, order_by, missing,
-                             has_recreation, with_clause)
+    sql = _place_details_sql(from_source, filters, order_by, missing, has_recreation, with_clause)
     try:
         with db.read_conn() as rc:
             return rc.execute(sql, params).fetchone(), None
@@ -2212,10 +2296,15 @@ def _run_place_details_query(from_source: str, filters: list[str], order_by: str
         raise UpstreamUnavailable(str(e)) from e
 
 
-def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None,
-                          upstream: str, missing: set[str],
-                          bound_to_hint: bool = False,
-                          lang: str | None = None) -> tuple[tuple | None, str | None]:
+def _place_details_by_id(
+    id: str,
+    near_lat: float | None,
+    near_lon: float | None,
+    upstream: str,
+    missing: set[str],
+    bound_to_hint: bool = False,
+    lang: str | None = None,
+) -> tuple[tuple | None, str | None]:
     """Resolve a GERS id, cheapest source first (issue #41).
 
     1. Whatever tiles the local cache already has on disk — no upstream
@@ -2249,7 +2338,13 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
             joined = ", ".join(db._sql_str(str(p)) for p in tile_paths)
             source, active = _with_recreation(f"read_parquet([{joined}])", None)
             row, lang_variant = _run_place_details_query(
-                source, ["id = $id"], "1", {"id": id}, missing, active, lang=lang,
+                source,
+                ["id = $id"],
+                "1",
+                {"id": id},
+                missing,
+                active,
+                lang=lang,
             )
             if row is not None:
                 return row, lang_variant
@@ -2259,26 +2354,35 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
         bbox_filter, bbox_params = _bbox_filter_sql(xmin, ymin, xmax, ymax)
         params = {"id": id, **bbox_params}
         from_source, active = _places_source((xmin, ymin, xmax, ymax))
-        row, lang_variant = _run_place_details_query(from_source, ["id = $id", bbox_filter], "1",
-                                       params, missing, active, lang=lang)
+        row, lang_variant = _run_place_details_query(
+            from_source, ["id = $id", bbox_filter], "1", params, missing, active, lang=lang
+        )
         if row is not None:
             return row, lang_variant
         if bound_to_hint:
             logger.info(
                 "place_details(id=%s): near-hint missed and the lookup is hint-bounded; "
-                "not falling back to a full-dataset scan", id,
+                "not falling back to a full-dataset scan",
+                id,
             )
             return None, None
 
     logger.warning(
         "place_details(id=%s) fell back to a full-dataset scan (no cache hit, "
-        "no near_lat/near_lon hint given, or the hint missed) — issue #41", id,
+        "no near_lat/near_lon hint given, or the hint missed) — issue #41",
+        id,
     )
     source, active = _with_recreation(
         f"read_parquet({db._sql_str(upstream)}, hive_partitioning=1)", None
     )
     return _run_place_details_query(
-        source, ["id = $id"], "1", {"id": id}, missing, active, lang=lang,
+        source,
+        ["id = $id"],
+        "1",
+        {"id": id},
+        missing,
+        active,
+        lang=lang,
     )
 
 
@@ -2334,12 +2438,16 @@ def place_details(
 
     if id:
         row, lang_variant = _place_details_by_id(
-            id, near_lat, near_lon, upstream, missing, bound_to_hint, lang=lang,
+            id,
+            near_lat,
+            near_lon,
+            upstream,
+            missing,
+            bound_to_hint,
+            lang=lang,
         )
     else:
-        bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(
-            lat, lon, radius_m
-        )
+        bbox_filter, distance_filter, params, bbox, _radius_m = area_geometry(lat, lon, radius_m)
         filters = [bbox_filter, distance_filter]
         if "names" not in missing:
             filters.append("names.primary ILIKE $name ESCAPE '\\'")
@@ -2349,8 +2457,16 @@ def place_details(
         # both themes, details should come from the richer places row, not
         # from whichever polygon centroid happened to sit closer.
         with_clause, from_clause, filters = _dedup_rows_sql(from_source, filters, has_recreation)
-        row, lang_variant = _run_place_details_query(from_clause, filters, _DISTANCE_EXPR, params,
-                                       missing, has_recreation, with_clause, lang=lang)
+        row, lang_variant = _run_place_details_query(
+            from_clause,
+            filters,
+            _DISTANCE_EXPR,
+            params,
+            missing,
+            has_recreation,
+            with_clause,
+            lang=lang,
+        )
 
     if row is None:
         return None
@@ -2409,7 +2525,12 @@ def within_distance(
     # tiers must not leak in — "is there a Startbucks within 200m" answered
     # from a Starbucks row would be a silent claim about a different name.
     rows = find_places(
-        lat, lon, search_radius_m, category=category, name=name, limit=1,
+        lat,
+        lon,
+        search_radius_m,
+        category=category,
+        name=name,
+        limit=1,
         allow_name_fallback=False,
     )
     if not rows:
@@ -2525,12 +2646,13 @@ def _build_verdict(
     every place in the radius as if it matched (issue #354).
     """
     n = len(areas)
-    count_categories = list(dict.fromkeys(
-        p["category"] for p in priorities if p["category"] != DENSITY_PRIORITY_CATEGORY
-    ))
+    count_categories = list(
+        dict.fromkeys(
+            p["category"] for p in priorities if p["category"] != DENSITY_PRIORITY_CATEGORY
+        )
+    )
     counts_per_area = [
-        _count_places_by_category(lat, lon, radius_m, count_categories)
-        for lat, lon in areas
+        _count_places_by_category(lat, lon, radius_m, count_categories) for lat, lon in areas
     ]
     if any(counts is None for counts in counts_per_area):
         return {
@@ -2622,23 +2744,27 @@ def compare_areas(
     per_area = []
     for (lat, lon), s in zip(areas, summaries):
         counts = {row["category"]: row["count"] for row in s["top_categories"]}
-        per_area.append({
-            "center": {"lat": lat, "lon": lon},
-            "total_places": s["total_places"],
-            "density_per_km2": round(s["total_places"] / area_km2, 2) if area_km2 else 0,
-            "category_counts": {c: counts.get(c, 0) for c in top_categories},
-        })
+        per_area.append(
+            {
+                "center": {"lat": lat, "lon": lon},
+                "total_places": s["total_places"],
+                "density_per_km2": round(s["total_places"] / area_km2, 2) if area_km2 else 0,
+                "category_counts": {c: counts.get(c, 0) for c in top_categories},
+            }
+        )
 
     differentiators = []
     for c in top_categories:
         values = [a["category_counts"][c] for a in per_area]
         lo, hi = min(values), max(values)
-        differentiators.append({
-            "category": c,
-            "min_count": lo,
-            "max_count": hi,
-            "relative_difference": round((hi - lo) / hi, 2) if hi else 0,
-        })
+        differentiators.append(
+            {
+                "category": c,
+                "min_count": lo,
+                "max_count": hi,
+                "relative_difference": round((hi - lo) / hi, 2) if hi else 0,
+            }
+        )
     differentiators.sort(key=lambda d: d["relative_difference"], reverse=True)
 
     result = {

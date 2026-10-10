@@ -22,14 +22,17 @@ def _looks_like_street(half: str, *, strict: bool) -> bool:
         return True
     for tok in tokens:
         key = tok.strip(".").lower()
-        if key in _pkg._STREET_TYPE_WORDS or _pkg._ORDINAL_RE.match(key) or key in _pkg._WORD_ORDINALS:  # noqa: E501
+        if (
+            key in _pkg._STREET_TYPE_WORDS
+            or _pkg._ORDINAL_RE.match(key)
+            or key in _pkg._WORD_ORDINALS
+        ):  # noqa: E501
             return True
     return False
 
 
-
 def _split_intersection(street: str) -> tuple[str, str] | None:
-    """"5th Ave & 42nd St" -> ("5th Ave", "42nd St"); a plain street -> None.
+    """ "5th Ave & 42nd St" -> ("5th Ave", "42nd St"); a plain street -> None.
 
     Exactly two halves, each street-looking (see _looks_like_street); any
     other shape — three pieces, an empty side, a half that is only a number
@@ -47,7 +50,6 @@ def _split_intersection(street: str) -> tuple[str, str] | None:
             return parts[0], parts[1]
         return None
     return None
-
 
 
 # --- #448: geocode_intersection --------------------------------------------
@@ -74,22 +76,33 @@ INTERSECTION_MIN_RADIUS_M = 1000.0
 # up Main St, Main Ave and Main Street North the way geocode_address's
 # ILIKE prefix deliberately does over address rows: there a wide match is
 # a longer list to pick from, here it is a wrong coordinate.
-_STREET_DIRECTIONAL_SUFFIXES: frozenset[str] = frozenset({
-    "n", "s", "e", "w", "ne", "nw", "se", "sw",
-    "north", "south", "east", "west",
-    "northeast", "northwest", "southeast", "southwest",
-})
-
+_STREET_DIRECTIONAL_SUFFIXES: frozenset[str] = frozenset(
+    {
+        "n",
+        "s",
+        "e",
+        "w",
+        "ne",
+        "nw",
+        "se",
+        "sw",
+        "north",
+        "south",
+        "east",
+        "west",
+        "northeast",
+        "northwest",
+        "southeast",
+        "southwest",
+    }
+)
 
 
 def _query_has_directional(variants: set[str]) -> bool:
     """Did the caller's street carry a directional token ("East 42nd St",
     "Main St N")? _street_variants only respells the tokens the query has,
     so a directional in any variant means one in the query."""
-    return any(
-        tok in _STREET_DIRECTIONAL_SUFFIXES for v in variants for tok in v.split()
-    )
-
+    return any(tok in _STREET_DIRECTIONAL_SUFFIXES for v in variants for tok in v.split())
 
 
 def _matches_street(edge_name: str | None, variants: set[str]) -> bool:
@@ -115,7 +128,7 @@ def _matches_street(edge_name: str | None, variants: set[str]) -> bool:
         return True
     for v in variants:
         if len(enl) > len(v) and enl.startswith(v) and enl[len(v)] == " ":
-            rest = enl[len(v) + 1:].split()
+            rest = enl[len(v) + 1 :].split()
             if all(tok in _STREET_DIRECTIONAL_SUFFIXES for tok in rest):
                 return True
     tokens = enl.split()
@@ -128,13 +141,12 @@ def _matches_street(edge_name: str | None, variants: set[str]) -> bool:
     return False
 
 
-
 def geocode_intersection(
     street_a: str = "",
     street_b: str = "",
     city: str = "",
 ) -> dict:
-    """"5th Avenue", "Main Street", "Portland" -> coordinate where they cross.
+    """ "5th Avenue", "Main Street", "Portland" -> coordinate where they cross.
 
     Locates where two named streets intersect within a resolved city anchor.
 
@@ -186,7 +198,7 @@ def geocode_intersection(
         return {
             "results": [],
             "note": (
-                f"no first street provided to cross with \"{street_b}\". Pass two street "
+                f'no first street provided to cross with "{street_b}". Pass two street '
                 "names and a city to find their intersection."
             ),
         }
@@ -194,7 +206,7 @@ def geocode_intersection(
         return {
             "results": [],
             "note": (
-                f"no second street provided to cross with \"{street_a}\". Pass two street "
+                f'no second street provided to cross with "{street_a}". Pass two street '
                 "names and a city to find their intersection."
             ),
         }
@@ -210,7 +222,7 @@ def geocode_intersection(
         return {
             "results": [],
             "note": (
-                f"\"{street_a}\" and \"{street_b}\" refer to the same street. "
+                f'"{street_a}" and "{street_b}" refer to the same street. '
                 "Pass two different street names to find their intersection."
             ),
         }
@@ -236,9 +248,7 @@ def geocode_intersection(
         for lat in (min_lat, max_lat)
         for lon in (min_lon, max_lon)
     )
-    radius_m = max(
-        min(max_corner_dist, routing.WALK_MAX_RADIUS_M), INTERSECTION_MIN_RADIUS_M
-    )
+    radius_m = max(min(max_corner_dist, routing.WALK_MAX_RADIUS_M), INTERSECTION_MIN_RADIUS_M)
 
     graph = routing._get_or_build_graph(
         center_lat,
@@ -308,12 +318,14 @@ def geocode_intersection(
         # the graph itself already bounds how far out a node can be.
         if dist_m > radius_m + INTERSECTION_CLUSTER_M:
             continue
-        crossings.append({
-            "lat": nlat,
-            "lon": nlon,
-            "streets": [matched_pair[0], matched_pair[1]],
-            "_dist": dist_m,
-        })
+        crossings.append(
+            {
+                "lat": nlat,
+                "lon": nlon,
+                "streets": [matched_pair[0], matched_pair[1]],
+                "_dist": dist_m,
+            }
+        )
 
     crossings.sort(key=lambda c: c["_dist"])
     clustered: list[dict] = []
@@ -326,10 +338,7 @@ def geocode_intersection(
             if len(clustered) >= _pkg.INTERSECTION_MAX_LIMIT:
                 break
 
-    results = [
-        {k: v for k, v in c.items() if k != "_dist"}
-        for c in clustered
-    ]
+    results = [{k: v for k, v in c.items() if k != "_dist"} for c in clustered]
 
     payload: dict = {
         "results": results,
@@ -347,17 +356,15 @@ def geocode_intersection(
         # A street absent from a graph that stopped at its segment cap is a
         # fact about the extraction, not the city; say "the extracted part"
         # rather than asserting the negative about the map.
-        where = (
-            f"the extracted part of {anchor['name']}" if graph.truncated else anchor["name"]
-        )
+        where = f"the extracted part of {anchor['name']}" if graph.truncated else anchor["name"]
         if not found_a and not found_b:
-            notes.append(f"neither \"{street_a}\" nor \"{street_b}\" resolved in {where}")
+            notes.append(f'neither "{street_a}" nor "{street_b}" resolved in {where}')
         elif not found_a:
-            notes.append(f"\"{street_a}\" did not resolve in {where}")
+            notes.append(f'"{street_a}" did not resolve in {where}')
         elif not found_b:
-            notes.append(f"\"{street_b}\" did not resolve in {where}")
+            notes.append(f'"{street_b}" did not resolve in {where}')
         else:
-            notes.append(f"\"{street_a}\" and \"{street_b}\" do not intersect in {where}")
+            notes.append(f'"{street_a}" and "{street_b}" do not intersect in {where}')
         if max_corner_dist > routing.WALK_MAX_RADIUS_M:
             notes.append(
                 f"(the search covered only the {routing.WALK_MAX_RADIUS_M / 1000.0:.1f} km "

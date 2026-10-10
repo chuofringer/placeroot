@@ -99,7 +99,10 @@ def test_server_find_places_note_on_fuzzy_hit():
     # project it away, roadmap §4.5) — the top-level "note" already
     # surfaces the fuzzy match for every tier.
     payload = server.find_places(
-        lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000, name="Blue Botle Roastery",
+        lat=CENTER_LAT,
+        lon=CENTER_LON,
+        radius_m=1000,
+        name="Blue Botle Roastery",
         detail="full",
     )
     assert payload["results"]
@@ -333,10 +336,13 @@ def test_fuzzy_fallback_returns_nearest_first(tmp_path):
     find_places' nearest-first contract. Similarity gates admission;
     distance orders. Both fixture names clear the threshold for the query,
     the farther one with the higher similarity — the nearer must win."""
-    fixture = _build_named_places_fixture(tmp_path, [
-        ("near", "Blue Bottle Roasters", CENTER_LAT, CENTER_LON),
-        ("far", "Blue Bottle Roastery", CENTER_LAT + 0.005, CENTER_LON),
-    ])
+    fixture = _build_named_places_fixture(
+        tmp_path,
+        [
+            ("near", "Blue Bottle Roasters", CENTER_LAT, CENTER_LON),
+            ("far", "Blue Bottle Roastery", CENTER_LAT + 0.005, CENTER_LON),
+        ],
+    )
     overture.set_data_path(str(fixture))
     try:
         results = overture.find_places(
@@ -357,16 +363,12 @@ def test_within_distance_does_not_leak_the_fuzzy_fallback():
     claim about a differently-named place. The fixture's "Blue Bottle
     Roastery" is well within range and fuzzy-close to the query; it must
     still not be counted."""
-    result = overture.within_distance(
-        CENTER_LAT, CENTER_LON, 1000, name="Blue Botle Roastery"
-    )
+    result = overture.within_distance(CENTER_LAT, CENTER_LON, 1000, name="Blue Botle Roastery")
     assert result["within"] is False
     assert result["nearest"] is None
     assert result["distance_m"] is None
     # The literal spelling still works exactly as before.
-    hit = overture.within_distance(
-        CENTER_LAT, CENTER_LON, 1000, name="Blue Bottle Roastery"
-    )
+    hit = overture.within_distance(CENTER_LAT, CENTER_LON, 1000, name="Blue Bottle Roastery")
     assert hit["within"] is True
 
 
@@ -376,9 +378,7 @@ def test_resolve_place_gates_one_token_fuzzy_coincidence(tmp_path):
     used to be trusted as an answer to the whole three-token query "Kings
     Barbershop Springfield". A token-matched fallback row must cover the
     query's other distinctive words too, or be dropped."""
-    fixture = _build_named_places_fixture(
-        tmp_path, [("king1", "King", CENTER_LAT, CENTER_LON)]
-    )
+    fixture = _build_named_places_fixture(tmp_path, [("king1", "King", CENTER_LAT, CENTER_LON)])
     overture.set_data_path(str(fixture))
     try:
         results = geocode.resolve_place(
@@ -394,6 +394,7 @@ def test_resolve_place_note_reflects_post_budget_rows(monkeypatch):
     could name a row apply_budget then dropped from the answer. With every
     result budgeted away, no note may survive to describe a row the caller
     never sees."""
+
     def drop_everything(payload, key):
         payload = dict(payload)
         payload[key] = []

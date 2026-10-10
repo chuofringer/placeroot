@@ -43,11 +43,14 @@ def _nearest_address(lat: float, lon: float) -> dict | None:
             return None
         if row:
             return {
-                "street": row[0], "number": row[1], "postcode": row[2],
-                "lat": round(row[3], 6), "lon": round(row[4], 6), "distance_m": row[5],
+                "street": row[0],
+                "number": row[1],
+                "postcode": row[2],
+                "lat": round(row[3], 6),
+                "lon": round(row[4], 6),
+                "distance_m": row[5],
             }
     return None
-
 
 
 def _nearest_division(lat: float, lon: float, country: str | None = None) -> dict | None:
@@ -106,7 +109,6 @@ def _nearest_division(lat: float, lon: float, country: str | None = None) -> dic
                 result["region"] = row[4]
             return result
     return None
-
 
 
 def reverse_geocode(lat: float, lon: float) -> dict:

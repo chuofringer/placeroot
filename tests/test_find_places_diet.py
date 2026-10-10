@@ -20,9 +20,7 @@ _IDS_KEYS = {"id", "distance_m"}
 
 def test_compact_is_the_default_detail():
     default = server.find_places(CENTER_LAT, CENTER_LON, radius_m=500, limit=5)
-    explicit = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=500, limit=5, detail="compact"
-    )
+    explicit = server.find_places(CENTER_LAT, CENTER_LON, radius_m=500, limit=5, detail="compact")
     assert default["results"] == explicit["results"]
     assert default["results"]
     for row in default["results"]:
@@ -85,7 +83,9 @@ def test_single_category_full_detail_matches_pre_diet_shape():
 
 def test_categories_over_five_is_bad_request():
     result = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=500,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=500,
         categories=["a", "b", "c", "d", "e", "f"],
     )
     assert result["error"] == "bad_request"
@@ -93,7 +93,11 @@ def test_categories_over_five_is_bad_request():
 
 def test_category_and_categories_together_is_bad_request():
     result = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=500, category="coffee_shop", categories=["bank"],
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=500,
+        category="coffee_shop",
+        categories=["bank"],
     )
     assert result["error"] == "bad_request"
 
@@ -104,8 +108,12 @@ def test_multi_category_merged_equals_union_of_single_category_queries():
     # this is a pure "is it the same rows, nearest-first" check, not a
     # pagination one (that's covered separately below).
     merged = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=200,
-        categories=["coffee_shop", "bank"], limit=25, detail="ids",
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=200,
+        categories=["coffee_shop", "bank"],
+        limit=25,
+        detail="ids",
     )
     assert "error" not in merged
     assert "truncated" not in merged
@@ -123,7 +131,9 @@ def test_multi_category_merged_equals_union_of_single_category_queries():
 
 def test_multi_category_hint_fires_only_when_every_slug_misses():
     result = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=50,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=50,
         categories=["definitely_not_a_category_xyz", "also_not_one_abc"],
     )
     assert result["results"] == []
@@ -151,16 +161,25 @@ def test_group_by_category_requires_categories():
 
 def test_group_by_category_with_cursor_is_bad_request():
     result = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=500,
-        categories=["coffee_shop"], group_by_category=True, cursor="anything",
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=500,
+        categories=["coffee_shop"],
+        group_by_category=True,
+        cursor="anything",
     )
     assert result["error"] == "bad_request"
 
 
 def test_group_by_category_shapes_and_per_category_limit():
     result = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000,
-        categories=["coffee_shop", "bank"], group_by_category=True, limit=3, detail="full",
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        categories=["coffee_shop", "bank"],
+        group_by_category=True,
+        limit=3,
+        detail="full",
     )
     assert "error" not in result
     assert set(result["results"]) <= {"coffee_shop", "bank"}
@@ -175,8 +194,12 @@ def test_group_by_category_shapes_and_per_category_limit():
 
 def test_group_by_category_never_emits_a_cursor_even_when_capped():
     result = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000,
-        categories=["coffee_shop"], group_by_category=True, limit=1,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        categories=["coffee_shop"],
+        group_by_category=True,
+        limit=1,
     )
     assert "error" not in result
     assert "cursor" not in result
@@ -184,8 +207,12 @@ def test_group_by_category_never_emits_a_cursor_even_when_capped():
 
 def test_group_by_category_compact_detail():
     result = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000,
-        categories=["coffee_shop", "bank"], group_by_category=True, limit=2,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        categories=["coffee_shop", "bank"],
+        group_by_category=True,
+        limit=2,
     )
     assert "error" not in result
     assert result.get("trust_legend") == honesty.TRUST_LEGEND
@@ -199,13 +226,22 @@ def test_group_by_category_compact_detail():
 
 def test_cursor_continues_correctly_across_a_detail_change():
     first = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, category="coffee_shop", limit=5,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        category="coffee_shop",
+        limit=5,
         detail="compact",
     )
     assert first.get("cursor")
     second = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, category="coffee_shop", limit=5,
-        cursor=first["cursor"], detail="full",
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        category="coffee_shop",
+        limit=5,
+        cursor=first["cursor"],
+        detail="full",
     )
     assert "error" not in second
     assert second["results"]
@@ -218,13 +254,20 @@ def test_cursor_continues_correctly_across_a_detail_change():
 
 def test_cursor_with_changed_categories_is_bad_cursor():
     first = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000,
-        categories=["coffee_shop", "bank"], limit=3,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        categories=["coffee_shop", "bank"],
+        limit=3,
     )
     assert first.get("cursor")
     result = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000,
-        categories=["coffee_shop"], limit=3, cursor=first["cursor"],
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        categories=["coffee_shop"],
+        limit=3,
+        cursor=first["cursor"],
     )
     assert result["error"] == "bad_cursor"
 
@@ -233,13 +276,20 @@ def test_cursor_with_same_categories_reordered_still_works():
     """categories is sorted before hashing into the cursor's query identity,
     so a re-issued list in a different order is still the same query."""
     first = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000,
-        categories=["coffee_shop", "bank"], limit=3,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        categories=["coffee_shop", "bank"],
+        limit=3,
     )
     assert first.get("cursor")
     result = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000,
-        categories=["bank", "coffee_shop"], limit=3, cursor=first["cursor"],
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        categories=["bank", "coffee_shop"],
+        limit=3,
+        cursor=first["cursor"],
     )
     assert "error" not in result
     assert result["results"]

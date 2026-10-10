@@ -81,9 +81,7 @@ class Timeline:
         still belongs to the round it is sequential with, not to the one
         before it — thread wake-up jitter is milliseconds, the fakes 200 ms.
         """
-        spans = sorted(
-            (s, e) for name, _, s, e in self.events if names is None or name in names
-        )
+        spans = sorted((s, e) for name, _, s, e in self.events if names is None or name in names)
         groups, cur_end = 0, None
         for s, e in spans:
             if cur_end is None or s >= cur_end - _JITTER_S:
@@ -106,8 +104,9 @@ class Timeline:
 def timeline(monkeypatch):
     tl = Timeline()
 
-    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10,
-                         categories=None, **kw):
+    def fake_find_places(
+        lat, lon, radius_m=1000, category=None, name=None, limit=10, categories=None, **kw
+    ):
         args = (name, tuple(categories or ()), kw.get("fuzzy_fallback", True))
         if categories:
             value = _place_match(name, [GARE_DE_SHIBUYA, YOYOGI])
@@ -125,9 +124,16 @@ def timeline(monkeypatch):
         return tl.run("_query_places_fallback", args, [])
 
     def fake_gers(text):
-        return tl.run("gers_lookup", (text,), {
-            "id": text, "name": "Yoyogi Park", "lat": 35.6717, "lon": 139.6949,
-        })
+        return tl.run(
+            "gers_lookup",
+            (text,),
+            {
+                "id": text,
+                "name": "Yoyogi Park",
+                "lat": 35.6717,
+                "lon": 139.6949,
+            },
+        )
 
     @contextlib.contextmanager
     def no_private_cursor():
@@ -148,31 +154,47 @@ def timeline(monkeypatch):
 
 
 # resolve_place("Shibuya Station Tokyo") alone: BEFORE and AFTER (unchanged).
-SHIBUYA_PLACE_CALLS = sorted([
-    ("_query_divisions", ("Tokyo", False)),
-    ("_query_divisions", ("Shibuya Station", False)),
-    ("_query_divisions", ("Shibuya Station", True)),
-    ("_query_places_fallback", ("Shibuya Station", 35.69, "Shibuya Station", True)),
-    ("find_places", ("Shibuya Station", (), True)),
-    ("find_places", ("Shibuya", ("train_station", "metro_station",
-                                 "light_rail_and_subway_stations"), False)),
-])
+SHIBUYA_PLACE_CALLS = sorted(
+    [
+        ("_query_divisions", ("Tokyo", False)),
+        ("_query_divisions", ("Shibuya Station", False)),
+        ("_query_divisions", ("Shibuya Station", True)),
+        ("_query_places_fallback", ("Shibuya Station", 35.69, "Shibuya Station", True)),
+        ("find_places", ("Shibuya Station", (), True)),
+        (
+            "find_places",
+            (
+                "Shibuya",
+                ("train_station", "metro_station", "light_rail_and_subway_stations"),
+                False,
+            ),
+        ),
+    ]
+)
 
 # resolve_named_place("Shibuya Station Tokyo"): BEFORE and AFTER (unchanged).
-SHIBUYA_NAMED_CALLS = sorted([
-    ("_query_divisions", ("Shibuya Station Tokyo", False)),
-    ("_query_divisions", ("Shibuya Station Tokyo", True)),
-    ("_query_divisions", ("Station Tokyo", False)),
-    ("_query_divisions", ("Tokyo", False)),
-    ("_query_places_fallback", ("Shibuya Station", 35.69, "Shibuya Station Tokyo", False)),
-    ("_query_divisions", ("Tokyo", False)),
-    ("_query_divisions", ("Shibuya Station", False)),
-    ("_query_divisions", ("Shibuya Station", True)),
-    ("_query_places_fallback", ("Shibuya Station", 35.69, "Shibuya Station", True)),
-    ("find_places", ("Shibuya Station", (), True)),
-    ("find_places", ("Shibuya", ("train_station", "metro_station",
-                                 "light_rail_and_subway_stations"), False)),
-])
+SHIBUYA_NAMED_CALLS = sorted(
+    [
+        ("_query_divisions", ("Shibuya Station Tokyo", False)),
+        ("_query_divisions", ("Shibuya Station Tokyo", True)),
+        ("_query_divisions", ("Station Tokyo", False)),
+        ("_query_divisions", ("Tokyo", False)),
+        ("_query_places_fallback", ("Shibuya Station", 35.69, "Shibuya Station Tokyo", False)),
+        ("_query_divisions", ("Tokyo", False)),
+        ("_query_divisions", ("Shibuya Station", False)),
+        ("_query_divisions", ("Shibuya Station", True)),
+        ("_query_places_fallback", ("Shibuya Station", 35.69, "Shibuya Station", True)),
+        ("find_places", ("Shibuya Station", (), True)),
+        (
+            "find_places",
+            (
+                "Shibuya",
+                ("train_station", "metro_station", "light_rail_and_subway_stations"),
+                False,
+            ),
+        ),
+    ]
+)
 
 
 def test_single_resolve_place_critical_path_is_unchanged(timeline):

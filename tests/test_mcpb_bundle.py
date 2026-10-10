@@ -122,6 +122,5 @@ def test_install_page_links_the_built_bundle():
     assert '"placeroot.mcpb"' in page, "install page no longer links placeroot.mcpb"
     gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert "site/placeroot.mcpb" in gitignore, (
-        "site/placeroot.mcpb must stay gitignored — it is built at deploy time, "
-        "never committed"
+        "site/placeroot.mcpb must stay gitignored — it is built at deploy time, never committed"
     )

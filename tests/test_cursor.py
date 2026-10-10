@@ -35,7 +35,11 @@ def test_truncated_answer_carries_a_decodable_cursor():
 def test_replaying_cursor_returns_next_rows_no_overlap_stable_order():
     first = server.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, category=_CATEGORY, limit=5)
     second = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, category=_CATEGORY, limit=5,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        category=_CATEGORY,
+        limit=5,
         cursor=first["cursor"],
     )
     assert "error" not in second
@@ -53,7 +57,11 @@ def test_replaying_cursor_returns_next_rows_no_overlap_stable_order():
         if "cursor" not in page:
             break
         page = server.find_places(
-            CENTER_LAT, CENTER_LON, radius_m=1000, category=_CATEGORY, limit=5,
+            CENTER_LAT,
+            CENTER_LON,
+            radius_m=1000,
+            category=_CATEGORY,
+            limit=5,
             cursor=page["cursor"],
         )
         assert "error" not in page
@@ -68,12 +76,20 @@ def test_final_page_carries_no_cursor():
     page = server.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, category=_CATEGORY, limit=5)
     for _ in range(3):
         page = server.find_places(
-            CENTER_LAT, CENTER_LON, radius_m=1000, category=_CATEGORY, limit=5,
+            CENTER_LAT,
+            CENTER_LON,
+            radius_m=1000,
+            category=_CATEGORY,
+            limit=5,
             cursor=page["cursor"],
         )
     # This is the 5th and final page.
     last = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, category=_CATEGORY, limit=5,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        category=_CATEGORY,
+        limit=5,
         cursor=page["cursor"],
     )
     assert len(last["results"]) == 3
@@ -83,7 +99,11 @@ def test_final_page_carries_no_cursor():
 
 def test_garbage_cursor_is_bad_cursor():
     result = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, category=_CATEGORY, limit=5,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        category=_CATEGORY,
+        limit=5,
         cursor="not-a-valid-cursor!!",
     )
     assert result["error"] == "bad_cursor"
@@ -92,7 +112,11 @@ def test_garbage_cursor_is_bad_cursor():
 def test_garbage_cursor_variants():
     for garbage in ["", "===", "eyJub3QiOiJhIGN1cnNvciJ9", "12345", "{}"]:
         result = server.find_places(
-            CENTER_LAT, CENTER_LON, radius_m=1000, category=_CATEGORY, limit=5,
+            CENTER_LAT,
+            CENTER_LON,
+            radius_m=1000,
+            category=_CATEGORY,
+            limit=5,
             cursor=garbage,
         )
         assert result.get("error") == "bad_cursor", garbage
@@ -102,7 +126,11 @@ def test_cursor_with_changed_params_is_bad_cursor_with_reissue_hint():
     first = server.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, category=_CATEGORY, limit=5)
     # Different category -> different query -> the cursor must not apply.
     result = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, category="bank", limit=5,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        category="bank",
+        limit=5,
         cursor=first["cursor"],
     )
     assert result["error"] == "bad_cursor"
@@ -111,7 +139,11 @@ def test_cursor_with_changed_params_is_bad_cursor_with_reissue_hint():
 
     # Different radius_m -> also a different query.
     result2 = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=2000, category=_CATEGORY, limit=5,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=2000,
+        category=_CATEGORY,
+        limit=5,
         cursor=first["cursor"],
     )
     assert result2["error"] == "bad_cursor"
@@ -122,17 +154,30 @@ def test_cursor_from_a_different_release_is_served_with_honesty_note():
     decoded = cursor_mod.decode_cursor(first["cursor"])
     stale = cursor_mod.encode_cursor(
         {
-            "lat": float(CENTER_LAT), "lon": float(CENTER_LON), "radius_m": 1000.0,
-            "category": _CATEGORY, "name": None, "categories": None,
-            "min_confidence": None, "operating_status": None, "brand": None,
-            "has_website": None, "has_phone": None,
-            "division_id": None, "area": None, "within": None,
+            "lat": float(CENTER_LAT),
+            "lon": float(CENTER_LON),
+            "radius_m": 1000.0,
+            "category": _CATEGORY,
+            "name": None,
+            "categories": None,
+            "min_confidence": None,
+            "operating_status": None,
+            "brand": None,
+            "has_website": None,
+            "has_phone": None,
+            "division_id": None,
+            "area": None,
+            "within": None,
         },
         "2020-01-01.0",
         decoded["o"],
     )
     result = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, category=_CATEGORY, limit=5,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        category=_CATEGORY,
+        limit=5,
         cursor=stale,
     )
     assert "error" not in result
@@ -299,25 +344,41 @@ def test_find_places_limit_zero_is_clamped_to_one_and_the_cursor_advances(monkey
     offset/limit exactly as overture.find_places does."""
     pool = [
         {
-            "id": f"p{i}", "name": f"Cafe {i}", "category": _CATEGORY,
-            "basic_category": _CATEGORY, "operating_status": "open",
-            "confidence": 0.9, "lat": CENTER_LAT, "lon": CENTER_LON, "distance_m": i,
+            "id": f"p{i}",
+            "name": f"Cafe {i}",
+            "category": _CATEGORY,
+            "basic_category": _CATEGORY,
+            "operating_status": "open",
+            "confidence": 0.9,
+            "lat": CENTER_LAT,
+            "lon": CENTER_LON,
+            "distance_m": i,
         }
         for i in range(5)
     ]
     seen_limits: list[int] = []
 
-    def fake_find_places(lat, lon, radius_m, category, name, min_confidence,
-                         operating_status, brand, has_website, has_phone, limit,
-                         offset=0, **kwargs):
+    def fake_find_places(
+        lat,
+        lon,
+        radius_m,
+        category,
+        name,
+        min_confidence,
+        operating_status,
+        brand,
+        has_website,
+        has_phone,
+        limit,
+        offset=0,
+        **kwargs,
+    ):
         seen_limits.append(limit)
-        return pool[offset:offset + limit]
+        return pool[offset : offset + limit]
 
     monkeypatch.setattr(overture, "find_places", fake_find_places)
 
-    first = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, category=_CATEGORY, limit=0
-    )
+    first = server.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, category=_CATEGORY, limit=0)
     assert "error" not in first
     assert seen_limits == [2]  # effective limit 1, plus the lookahead row
     assert [r["id"] for r in first["results"]] == ["p0"]
@@ -325,7 +386,11 @@ def test_find_places_limit_zero_is_clamped_to_one_and_the_cursor_advances(monkey
     assert cursor_mod.decode_cursor(first["cursor"])["o"] == 1
 
     second = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, category=_CATEGORY, limit=0,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        category=_CATEGORY,
+        limit=0,
         cursor=first["cursor"],
     )
     assert "error" not in second

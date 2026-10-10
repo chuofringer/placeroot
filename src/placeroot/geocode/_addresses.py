@@ -56,12 +56,35 @@ _HOUSE_NUMBER_RE = re.compile(r"^\d+[A-Za-z]?$")
 # the number searches for a street called "Route". Note this costs nothing
 # for a real doorway on one of them, because the *leading*-number rule fires
 # first: "1234 Highway 101" still splits to ("1234", "Highway 101").
-_LEADING_STREET_TYPES = frozenset({
-    "calle", "avenida", "avda", "av", "carrera", "cra", "calzada", "camino",
-    "paseo", "diagonal", "transversal", "autopista", "rua", "rue", "via",
-    "viale", "corso", "strada", "vicolo", "travessa",
-    "route", "highway", "hwy", "interstate", "us",
-})
+_LEADING_STREET_TYPES = frozenset(
+    {
+        "calle",
+        "avenida",
+        "avda",
+        "av",
+        "carrera",
+        "cra",
+        "calzada",
+        "camino",
+        "paseo",
+        "diagonal",
+        "transversal",
+        "autopista",
+        "rua",
+        "rue",
+        "via",
+        "viale",
+        "corso",
+        "strada",
+        "vicolo",
+        "travessa",
+        "route",
+        "highway",
+        "hwy",
+        "interstate",
+        "us",
+    }
+)
 
 
 # The same rule for the numbered-route names whose type word is two tokens
@@ -69,18 +92,39 @@ _LEADING_STREET_TYPES = frozenset({
 # token alone — "county", "state", "historic" — is far too ordinary to put in
 # _LEADING_STREET_TYPES: it would swallow the house number of a real address
 # on a street called "State St".
-_LEADING_STREET_TYPE_PAIRS = frozenset({
-    "county road", "county route", "county highway", "state route",
-    "state road", "state highway", "historic route", "old highway",
-    "farm road", "ranch road",
-})
+_LEADING_STREET_TYPE_PAIRS = frozenset(
+    {
+        "county road",
+        "county route",
+        "county highway",
+        "state route",
+        "state road",
+        "state highway",
+        "historic route",
+        "old highway",
+        "farm road",
+        "ranch road",
+    }
+)
 
 
 # Lowercase particles that make a leading integer part of the street's name
 # rather than a house number: "8 de Octubre", "4 de Julio", "1º de Mayo".
-_STREET_NAME_PARTICLES = frozenset({
-    "de", "del", "di", "du", "des", "da", "do", "la", "le", "el", "of",
-})
+_STREET_NAME_PARTICLES = frozenset(
+    {
+        "de",
+        "del",
+        "di",
+        "du",
+        "des",
+        "da",
+        "do",
+        "la",
+        "le",
+        "el",
+        "of",
+    }
+)
 
 
 # Columns the address scan reads before grouping. postal_city is read but
@@ -120,7 +164,6 @@ _AREA_BBOX_CACHE: dict[tuple[str, str], tuple[float, float, float, float] | None
 _MAX_ANCHOR_SPAN_DEG = 3.0
 
 
-
 def _street_variants(street: str) -> list[str]:
     """Street name -> the spellings to match against Overture's `street`.
 
@@ -137,17 +180,17 @@ def _street_variants(street: str) -> list[str]:
     tokens = street.split()
     if not tokens:
         return []
-    choices = [[tok, *_pkg._token_variants(tok, leading=(i == 0), street=True)]
-               for i, tok in enumerate(tokens)]
+    choices = [
+        [tok, *_pkg._token_variants(tok, leading=(i == 0), street=True)]
+        for i, tok in enumerate(tokens)
+    ]
     if len(tokens) == 1:
         # A lone token becomes the whole prefix pattern (street ILIKE
         # '<variant>%'), and a bare-digit variant of "5th" would be
         # ILIKE '5%' — every street starting with a 5. Ordinal folds only
         # widen a single-token street toward more specific forms, never
         # toward a bare digit the original didn't have.
-        choices[0] = [
-            o for o in choices[0] if not (o.isdigit() and not tokens[0].isdigit())
-        ]
+        choices[0] = [o for o in choices[0] if not (o.isdigit() and not tokens[0].isdigit())]
     out: list[str] = []
     seen: set[str] = set()
     combos: list[list[str]] = [[]]
@@ -156,19 +199,18 @@ def _street_variants(street: str) -> list[str]:
         if len(combos) > _pkg._STREET_VARIANT_CAP:
             # Truncate the frontier rather than the finished list, so the cap
             # cannot drop the original spelling (always the first branch).
-            combos = combos[:_pkg._STREET_VARIANT_CAP]
+            combos = combos[: _pkg._STREET_VARIANT_CAP]
     for combo in combos:
         candidate = " ".join(combo)
         key = candidate.lower()
         if key not in seen:
             seen.add(key)
             out.append(candidate)
-    return out[:_pkg._STREET_VARIANT_CAP]
-
+    return out[: _pkg._STREET_VARIANT_CAP]
 
 
 def _split_house_number(text: str) -> tuple[str | None, str]:
-    """"1600 Amphitheatre Pkwy" -> ("1600", "Amphitheatre Pkwy");
+    """ "1600 Amphitheatre Pkwy" -> ("1600", "Amphitheatre Pkwy");
     "Hauptstraße 5" -> ("5", "Hauptstraße"); "Market Street" -> (None, ...).
 
     Leading or trailing only, and never when it is the *whole* string — a
@@ -206,7 +248,6 @@ def _split_house_number(text: str) -> tuple[str | None, str]:
     return None, text.strip()
 
 
-
 def _opens_with_street_type(tokens: list[str]) -> bool:
     """Does this street start with a street-type word that numbers what
     follows it — "Calle 8", "Route 66", "County Road 12"? See
@@ -214,7 +255,6 @@ def _opens_with_street_type(tokens: list[str]) -> bool:
     if tokens[0].lower() in _LEADING_STREET_TYPES:
         return True
     return " ".join(t.lower() for t in tokens[:2]) in _LEADING_STREET_TYPE_PAIRS
-
 
 
 def _parse_address_query(query: str) -> tuple[str | None, str, str | None]:
@@ -237,7 +277,6 @@ def _parse_address_query(query: str) -> tuple[str | None, str, str | None]:
     city = ", ".join(p for p in parts[1:] if p) or None
     number, street = _pkg._split_house_number(parts[0])
     return number, street, city
-
 
 
 def _division_area_bbox(division_id: str) -> tuple[float, float, float, float] | None:
@@ -289,8 +328,9 @@ def _division_area_bbox(division_id: str) -> tuple[float, float, float, float] |
             row = _pkg.overture.conn().execute(sql, {"id": division_id}).fetchone()
     except duckdb.Error as e:
         _pkg.logger.warning(
-            "division_area extent lookup failed for %s (not cached, so the next "
-            "call retries): %s", division_id, e,
+            "division_area extent lookup failed for %s (not cached, so the next call retries): %s",
+            division_id,
+            e,
         )
         return None
     result: tuple[float, float, float, float] | None = None
@@ -302,7 +342,6 @@ def _division_area_bbox(division_id: str) -> tuple[float, float, float, float] |
             result = (xmin, ymin, xmax, ymax)
     _pkg._AREA_BBOX_CACHE[key] = result
     return result
-
 
 
 def _warm_division_area_bboxes(division_ids: list[str]) -> None:
@@ -336,9 +375,11 @@ def _warm_division_area_bboxes(division_ids: list[str]) -> None:
     """
     try:
         with _pkg.overture._conn_lock:
-            rows = _pkg.overture.conn().execute(
-                sql, {str(i): v for i, v in enumerate(wanted, start=1)}
-            ).fetchall()
+            rows = (
+                _pkg.overture.conn()
+                .execute(sql, {str(i): v for i, v in enumerate(wanted, start=1)})
+                .fetchall()
+            )
     except duckdb.Error as e:
         _pkg.logger.warning("batched division_area extent lookup failed: %s", e)
         return
@@ -353,7 +394,6 @@ def _warm_division_area_bboxes(division_ids: list[str]) -> None:
             found[division_id] = (xmin, ymin, xmax, ymax)
     for division_id in wanted:
         _pkg._AREA_BBOX_CACHE[(release_id, division_id)] = found.get(division_id)
-
 
 
 def _anchor_bbox(anchor_id: str | None, local_table: str | None):
@@ -372,23 +412,18 @@ def _anchor_bbox(anchor_id: str | None, local_table: str | None):
     return _pkg._division_bbox(local_table, anchor_id) or _pkg._division_area_bbox(anchor_id)
 
 
-
 def _anchor_too_broad(bbox: tuple[float, float, float, float]) -> bool:
     """Is this extent bigger than any city, i.e. too big to scan addresses
     inside? See _MAX_ANCHOR_SPAN_DEG."""
     xmin, ymin, xmax, ymax = bbox
-    return (
-        (xmax - xmin) > _MAX_ANCHOR_SPAN_DEG or (ymax - ymin) > _MAX_ANCHOR_SPAN_DEG
-    )
-
+    return (xmax - xmin) > _MAX_ANCHOR_SPAN_DEG or (ymax - ymin) > _MAX_ANCHOR_SPAN_DEG
 
 
 def _bbox_span_label(bbox: tuple[float, float, float, float]) -> str:
-    """"13.1° x 10.7°" — an extent's size, for a note that has to say why it
+    """ "13.1° x 10.7°" — an extent's size, for a note that has to say why it
     was refused."""
     xmin, ymin, xmax, ymax = bbox
     return f"{xmax - xmin:.1f}° x {ymax - ymin:.1f}°"
-
 
 
 def _scan_addresses_in_bbox(
@@ -447,8 +482,7 @@ def _scan_addresses_in_bbox(
     glob = _pkg.addresses._upstream_glob()
     missing = set(_pkg.addresses._check_schema(glob))
     columns = ", ".join(_pkg.addresses._column_expr(c, missing) for c in _ADDRESS_SELECT_COLUMNS)
-    params: dict = {"lat": lat, "lon": lon, "xmin": xmin, "ymin": ymin,
-                    "xmax": xmax, "ymax": ymax}
+    params: dict = {"lat": lat, "lon": lon, "xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}
     street_sql = []
     for i, pattern in enumerate(street_patterns):
         # Prefix, not equality (#229): US street names carry a trailing
@@ -513,7 +547,6 @@ def _scan_addresses_in_bbox(
     return rows, int(rows[0][-2]), int(rows[0][-1]), number_filtered
 
 
-
 # The leading integer run of a house number: "12" from "12-14", "5" from
 # "5A", nothing from "Lot 4" or a bare letter. This is the *only* numeric
 # comparison the nearest-number fallback makes -- Overture's `number` is a
@@ -534,14 +567,12 @@ _LEADING_INT_RE = re.compile(r"^(\d+)")
 _ADDRESS_NEIGHBOR_FETCH_LIMIT = 20
 
 
-
 def _parse_leading_int(number: str | None) -> int | None:
-    """"12" -> 12, "12-14" -> 12, "5A" -> 5, "Lot 4" -> None, None -> None."""
+    """ "12" -> 12, "12-14" -> 12, "5A" -> 5, "Lot 4" -> None, None -> None."""
     if not number:
         return None
     m = _LEADING_INT_RE.match(number.strip())
     return int(m.group(1)) if m else None
-
 
 
 def _scan_street_neighbors_in_bbox(
@@ -573,7 +604,12 @@ def _scan_street_neighbors_in_bbox(
     missing = set(_pkg.addresses._check_schema(glob))
     columns = ", ".join(_pkg.addresses._column_expr(c, missing) for c in _ADDRESS_SELECT_COLUMNS)
     params: dict = {
-        "lat": lat, "lon": lon, "xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax,
+        "lat": lat,
+        "lon": lon,
+        "xmin": xmin,
+        "ymin": ymin,
+        "xmax": xmax,
+        "ymax": ymax,
         "target": float(target),
     }
     street_sql = []
@@ -631,10 +667,7 @@ def _scan_street_neighbors_in_bbox(
     return rows
 
 
-
-def _bracket_numbers(
-    rows: list[tuple], target: int, limit: int
-) -> tuple[list[tuple], bool]:
+def _bracket_numbers(rows: list[tuple], target: int, limit: int) -> tuple[list[tuple], bool]:
     """The neighbor rows to answer a number-miss with, and whether they
     bracket the target (one below, one above) or sit only on one side.
 
@@ -686,11 +719,10 @@ def _bracket_numbers(
     return [p[1] for p in chosen], bracketed
 
 
-
 def _address_nearest_number_note(
     number: str, street: str, chosen: list[tuple], bracketed: bool
 ) -> str:
-    """"no address point for 32 W 26th St; nearest known numbers on that
+    """ "no address point for 32 W 26th St; nearest known numbers on that
     street: 30, 36 -- the true doorway may lie between them." -- honest about
     what is and isn't known: no coordinate is offered for the missing number
     (there is nothing to interpolate from but a straight line between two
@@ -711,7 +743,6 @@ def _address_nearest_number_note(
         f"no address point for {number} {street}; nearest known numbers on that "
         f"street: {names} -- {tail}."
     )
-
 
 
 def _address_row(row: tuple) -> dict:
@@ -739,7 +770,6 @@ def _address_row(row: tuple) -> dict:
     if unit_count and unit_count > 1:
         out["unit_count"] = int(unit_count)
     return out
-
 
 
 def _address_empty_note(
@@ -777,9 +807,9 @@ def _address_empty_note(
             f"named landmark on the street instead."
         )
     return (
-        f"no address point in this city matches \"{street}\" (abbreviated and "
+        f'no address point in this city matches "{street}" (abbreviated and '
         f"spelled-out spellings were both tried, and the match is a prefix one, so a "
-        f"quadrant or directional suffix in the data -- \"AVE NW\" -- would have been "
+        f'quadrant or directional suffix in the data -- "AVE NW" -- would have been '
         f"found too). Coverage inside a covered country "
         f"is partial -- the addresses theme is alpha and carries {covered} countries "
         f"-- so this may be a gap in the data rather than a missing street. Check "
@@ -788,27 +818,25 @@ def _address_empty_note(
     )
 
 
-
 _ADDRESS_NO_ANCHOR_NOTE = (
     "no city to search in, so no scan was run. A street name alone has no extent to "
     "bound a search by, and scanning Overture's 474M address points unbounded is not "
     "an answer anyone gets back. Give the city after a comma -- "
-    "\"Market Street, San Francisco\" -- or pass the `city` parameter."
+    '"Market Street, San Francisco" -- or pass the `city` parameter.'
 )
 
 
 _INTERSECTION_NO_ANCHOR_NOTE = (
     "no city to search in. Pass `city` to locate the intersection within a "
-    "specific city or town (e.g. \"5th Avenue\", \"Main Street\", \"Portland\")."
+    'specific city or town (e.g. "5th Avenue", "Main Street", "Portland").'
 )
 
 
 _ADDRESS_NO_STREET_NOTE = (
     "no street to search for. Pass a street name, either as the part before the "
-    "comma (\"1600 Amphitheatre Parkway, Mountain View\") or as the `street` "
+    'comma ("1600 Amphitheatre Parkway, Mountain View") or as the `street` '
     "parameter."
 )
-
 
 
 def _address_unresolved_anchor_note(
@@ -819,26 +847,26 @@ def _address_unresolved_anchor_note(
 ) -> str:
     if anchor is None:
         return (
-            f"\"{city}\" did not resolve to any place, so there was no extent to "
+            f'"{city}" did not resolve to any place, so there was no extent to '
             f"bound an address scan by and none was run. Check the spelling, or try "
-            f"geocode(\"{city}\") to see what the name does match."
+            f'geocode("{city}") to see what the name does match.'
         )
     if too_broad is not None:
         # A different failure from "no extent", and it must not borrow that
         # wording: this place has a boundary, it is simply a state-sized one
         # (see _MAX_ANCHOR_SPAN_DEG).
         note = (
-            f"\"{city}\" resolved to {anchor['name']}{_pkg._country_suffix(anchor)}, whose "
+            f'"{city}" resolved to {anchor["name"]}{_pkg._country_suffix(anchor)}, whose '
             f"boundary spans {_bbox_span_label(too_broad)} -- far larger than a city, "
             f"so no scan was run. An address search inside a box that size is a sweep "
             f"of Overture's 474M address points that takes minutes and comes back with "
             f"the same street name from every town in it. Name the city or town you "
             f"mean, and pass the region after it if the name is ambiguous "
-            f"(\"Springfield, IL\")."
+            f'("Springfield, IL").'
         )
     else:
         note = (
-            f"\"{city}\" resolved to {anchor['name']}{_pkg._country_suffix(anchor)}, but Overture "
+            f'"{city}" resolved to {anchor["name"]}{_pkg._country_suffix(anchor)}, but Overture '
             f"carries no boundary extent for it -- only a point -- so there is no city-sized "
             f"box to scan addresses inside, and guessing one would return confidently wrong "
             f"doorways. Try a larger containing place (the city rather than the "
@@ -854,7 +882,6 @@ def _address_unresolved_anchor_note(
     return note
 
 
-
 def _intersection_unresolved_anchor_note(
     city: str,
     anchor: dict | None,
@@ -863,20 +890,20 @@ def _intersection_unresolved_anchor_note(
 ) -> str:
     if anchor is None:
         return (
-            f"\"{city}\" did not resolve to any place, so there was no city to "
+            f'"{city}" did not resolve to any place, so there was no city to '
             f"search intersections within. Check the spelling, or try "
-            f"geocode(\"{city}\") to see what the name does match."
+            f'geocode("{city}") to see what the name does match.'
         )
     if too_broad is not None:
         note = (
-            f"\"{city}\" resolved to {anchor['name']}{_pkg._country_suffix(anchor)}, whose "
+            f'"{city}" resolved to {anchor["name"]}{_pkg._country_suffix(anchor)}, whose '
             f"boundary spans {_bbox_span_label(too_broad)} -- far larger than a city. "
             f"Name the city or town you mean, and pass the region after it if the "
-            f"name is ambiguous (\"Springfield, IL\")."
+            f'name is ambiguous ("Springfield, IL").'
         )
     else:
         note = (
-            f"\"{city}\" resolved to {anchor['name']}{_pkg._country_suffix(anchor)}, but Overture "
+            f'"{city}" resolved to {anchor["name"]}{_pkg._country_suffix(anchor)}, but Overture '
             f"carries no boundary extent for it -- only a point. Try a larger "
             f"containing place (the city rather than the neighborhood)."
         )
@@ -889,9 +916,8 @@ def _intersection_unresolved_anchor_note(
     return note
 
 
-
 def _country_suffix(row: dict, *, with_type: bool = False) -> str:
-    """" (United Kingdom, GB)" — whatever of the two a row actually carries.
+    """ " (United Kingdom, GB)" — whatever of the two a row actually carries.
 
     `with_type` (#465) is for the one place two rows of the *same name and
     country* are named side by side — the runner-up note below — and spells
@@ -918,7 +944,6 @@ def _country_suffix(row: dict, *, with_type: bool = False) -> str:
     return f" ({', '.join(parts)})" if parts else ""
 
 
-
 def _same_country(a: dict, b: dict) -> bool:
     """Are two geocode candidates in the same country?
 
@@ -943,7 +968,6 @@ def _same_country(a: dict, b: dict) -> bool:
     return False
 
 
-
 @dataclass
 class _ResolvedAnchor:
     anchor: dict | None
@@ -952,7 +976,6 @@ class _ResolvedAnchor:
     top: dict | None
     rejected: list[dict]
     too_broad: tuple[float, float, float, float] | None
-
 
 
 def _resolve_city_anchor(
@@ -968,7 +991,8 @@ def _resolve_city_anchor(
     """
     local_table = _pkg._local_divisions_table()
     candidates = [
-        r for r in _pkg.geocode_detailed(city, limit=3, include_country=True)["results"]
+        r
+        for r in _pkg.geocode_detailed(city, limit=3, include_country=True)["results"]
         if r.get("id")
     ]
     top = candidates[0] if candidates else None
@@ -999,7 +1023,7 @@ def _resolve_city_anchor(
             # note names the same label twice.
             same_name = top["name"] == anchor["name"]
             notes.append(
-                f"\"{city}\" resolved to {top['name']}"
+                f'"{city}" resolved to {top["name"]}'
                 f"{_pkg._country_suffix(top, with_type=same_name)}, "
                 f"{top_reason}, so the {action_label} ran inside "
                 f"{anchor['name']}{_pkg._country_suffix(anchor, with_type=same_name)} -- "
@@ -1015,7 +1039,6 @@ def _resolve_city_anchor(
         rejected=rejected,
         too_broad=too_broad,
     )
-
 
 
 # --- #465: "A & B, City" is an intersection, not a street ------------------
@@ -1036,14 +1059,41 @@ _INTERSECTION_WORD_SPLIT_RE = re.compile(r"\s+(?:and|at)\s+", re.IGNORECASE)
 _STREET_TYPE_WORDS: frozenset[str] = (
     frozenset(_STREET_SUFFIX_VARIANTS)
     | _LEADING_STREET_TYPES
-    | frozenset({
-        "way", "terrace", "ter", "circle", "cir", "square", "sq", "trail", "trl",
-        "alley", "aly", "expressway", "expy", "freeway", "fwy", "turnpike",
-        "tpke", "plaza", "plz", "broadway", "crescent", "cres", "loop", "path",
-        "row", "walk", "esplanade", "promenade", "quay", "embankment",
-    })
+    | frozenset(
+        {
+            "way",
+            "terrace",
+            "ter",
+            "circle",
+            "cir",
+            "square",
+            "sq",
+            "trail",
+            "trl",
+            "alley",
+            "aly",
+            "expressway",
+            "expy",
+            "freeway",
+            "fwy",
+            "turnpike",
+            "tpke",
+            "plaza",
+            "plz",
+            "broadway",
+            "crescent",
+            "cres",
+            "loop",
+            "path",
+            "row",
+            "walk",
+            "esplanade",
+            "promenade",
+            "quay",
+            "embankment",
+        }
+    )
 )
-
 
 
 def geocode_address(
@@ -1053,7 +1103,7 @@ def geocode_address(
     street: str | None = None,
     city: str | None = None,
 ) -> dict:
-    """"Market Street, San Francisco" -> the address points on that street.
+    """ "Market Street, San Francisco" -> the address points on that street.
 
     #465: a street half written as a crossing — "5th Ave & 42nd St", "5th
     Ave and 42nd St", "5th Ave at 42nd St", "5th Ave / 42nd St" — with no
@@ -1193,9 +1243,7 @@ def geocode_address(
             if chosen:
                 rows = chosen
                 match = "nearest_number"
-                neighbor_note = _address_nearest_number_note(
-                    number, street, chosen, bracketed
-                )
+                neighbor_note = _address_nearest_number_note(number, street, chosen, bracketed)
     payload: dict = {
         "results": [_address_row(r) for r in rows],
         # country/admin_context always, never conditionally: the anchor is
@@ -1216,8 +1264,8 @@ def geocode_address(
         # different question than the one they asked.
         notes.append(
             f"this dataset carries no `number` column, so the house number "
-            f"\"{number}\" could not be matched -- these are the doorways on "
-            f"\"{street}\", not that one address."
+            f'"{number}" could not be matched -- these are the doorways on '
+            f'"{street}", not that one address.'
         )
         match = "street"
     if not rows:
@@ -1228,7 +1276,7 @@ def geocode_address(
         payload["distinct_in_range"] = distinct_in_range
         notes.append(
             f"showing the {len(rows)} nearest of {distinct_in_range} distinct "
-            f"addresses matching \"{street}\" in {anchor['name']} (deduplicated from "
+            f'addresses matching "{street}" in {anchor["name"]} (deduplicated from '
             f"{matched_rows} raw address points). Add a house number to land on one "
             f"doorway."
         )

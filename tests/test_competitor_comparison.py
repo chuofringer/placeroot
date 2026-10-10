@@ -278,9 +278,7 @@ def test_committed_doc_matches_a_fresh_run():
     """
     text = competitor_comparison.DOC_PATH.read_text()
     start = text.index(competitor_comparison.GENERATED_BEGIN)
-    end = text.index(competitor_comparison.GENERATED_END) + len(
-        competitor_comparison.GENERATED_END
-    )
+    end = text.index(competitor_comparison.GENERATED_END) + len(competitor_comparison.GENERATED_END)
     assert text[start:end] == competitor_comparison.render_generated_section(), (
         "docs/benchmarks-vs.md is stale — "
         "rerun `uv run python benchmarks/competitor_comparison.py --write`"

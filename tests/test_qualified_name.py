@@ -31,8 +31,13 @@ TO_LAT, TO_LON = fx.node_latlon(2, 5)
 
 def _row(name, lat, lon, *, id_, type_="locality", context=(), rank=1.0, matched_by=None):
     row = {
-        "name": name, "lat": lat, "lon": lon, "id": id_, "type": type_,
-        "admin_context": list(context), "rank_score": rank,
+        "name": name,
+        "lat": lat,
+        "lon": lon,
+        "id": id_,
+        "type": type_,
+        "admin_context": list(context),
+        "rank_score": rank,
     }
     if matched_by:
         row["matched_by"] = matched_by
@@ -77,13 +82,16 @@ def test_nothing_inside_a_resolved_qualifier_is_an_honest_not_found():
 
 
 def test_ambiguity_inside_the_qualifier_still_raises_with_candidates(monkeypatch):
-    _patch_geocode(monkeypatch, {
-        "Brooklyn": [_row("Brooklyn", 40.70, -73.90, id_="anchor")],
-        "Elm Park": [
-            _row("Elm Park", 40.71, -73.91, id_="a", context=("Brooklyn",)),
-            _row("Elm Park", 40.72, -73.92, id_="b", context=("Brooklyn",)),
-        ],
-    })
+    _patch_geocode(
+        monkeypatch,
+        {
+            "Brooklyn": [_row("Brooklyn", 40.70, -73.90, id_="anchor")],
+            "Elm Park": [
+                _row("Elm Park", 40.71, -73.91, id_="a", context=("Brooklyn",)),
+                _row("Elm Park", 40.72, -73.92, id_="b", context=("Brooklyn",)),
+            ],
+        },
+    )
     with pytest.raises(errors.AmbiguousPlace) as excinfo:
         geocode.resolve_named_place("Elm Park, Brooklyn")
     assert {c["id"] for c in excinfo.value.candidates} == {"a", "b"}
@@ -93,21 +101,34 @@ def test_anchored_place_search_answers_when_no_division_matches(monkeypatch):
     # The "Le Marais, Paris" shape: the neighborhood exists in the places
     # theme, not the divisions one, so the anchored places search is the
     # answer rather than a consolation prize.
-    _patch_geocode(monkeypatch, {
-        "Paris": [_row("Paris", 48.8566, 2.3522, id_="anchor-paris")],
-        "Le Marais": [],
-    })
+    _patch_geocode(
+        monkeypatch,
+        {
+            "Paris": [_row("Paris", 48.8566, 2.3522, id_="anchor-paris")],
+            "Le Marais": [],
+        },
+    )
     monkeypatch.setattr(
-        geocode, "resolve_place",
+        geocode,
+        "resolve_place",
         lambda query, near_lat=None, near_lon=None, limit=None, city=None, lang=None: [
-            {"id": "p1", "kind": "place", "name": "Le Marais Paris",
-             "lat": 48.8598, "lon": 2.3517, "match": "prefix"},
+            {
+                "id": "p1",
+                "kind": "place",
+                "name": "Le Marais Paris",
+                "lat": 48.8598,
+                "lon": 2.3517,
+                "match": "prefix",
+            },
         ],
     )
     resolved = geocode.resolve_named_place("Le Marais, Paris")
     assert resolved == {
-        "name": "Le Marais Paris", "lat": 48.8598, "lon": 2.3517,
-        "id": "p1", "type": "place",
+        "name": "Le Marais Paris",
+        "lat": 48.8598,
+        "lon": 2.3517,
+        "id": "p1",
+        "type": "place",
     }
 
 
@@ -122,16 +143,21 @@ def test_typo_tier_never_fuzzes_across_the_comma(monkeypatch):
     # qualifier resolves, so no ranking or filtering decision stands
     # between the caller and the wrong answer — it is unreachable.
     seen = []
-    _patch_geocode(monkeypatch, {
-        "Le Marais, Paris": [
-            _row("Le Mauvais Pas", 46.63, 4.03, id_="mp1", matched_by="fuzzy"),
-            _row("Le Mauvais Pas", 47.71, 1.27, id_="mp2", matched_by="fuzzy"),
-        ],
-        "Paris": [_row("Paris", 48.8566, 2.3522, id_="anchor-paris")],
-        "Le Marais": [],
-    }, seen=seen)
+    _patch_geocode(
+        monkeypatch,
+        {
+            "Le Marais, Paris": [
+                _row("Le Mauvais Pas", 46.63, 4.03, id_="mp1", matched_by="fuzzy"),
+                _row("Le Mauvais Pas", 47.71, 1.27, id_="mp2", matched_by="fuzzy"),
+            ],
+            "Paris": [_row("Paris", 48.8566, 2.3522, id_="anchor-paris")],
+            "Le Marais": [],
+        },
+        seen=seen,
+    )
     monkeypatch.setattr(
-        geocode, "resolve_place",
+        geocode,
+        "resolve_place",
         lambda query, near_lat=None, near_lon=None, limit=None, city=None, lang=None: [],
     )
     with pytest.raises(errors.AnchoredNotFound):
@@ -145,14 +171,18 @@ def test_a_division_inside_the_anchor_beats_a_nearer_one_outside_it(monkeypatch)
     # city-scale radius, and administratively nowhere near. Answering with
     # it is the same wrong answer in a nearer village, so admin containment
     # decides for any row that carries a chain.
-    _patch_geocode(monkeypatch, {
-        "Paris": [_row("Paris", 48.8566, 2.3522, id_="anchor-paris")],
-        "Le Marais": [
-            _row("Le Marais", 48.576, 2.100, id_="essonne", context=("France", "Essonne")),
-        ],
-    })
+    _patch_geocode(
+        monkeypatch,
+        {
+            "Paris": [_row("Paris", 48.8566, 2.3522, id_="anchor-paris")],
+            "Le Marais": [
+                _row("Le Marais", 48.576, 2.100, id_="essonne", context=("France", "Essonne")),
+            ],
+        },
+    )
     monkeypatch.setattr(
-        geocode, "resolve_place",
+        geocode,
+        "resolve_place",
         lambda query, near_lat=None, near_lon=None, limit=None, city=None, lang=None: [],
     )
     with pytest.raises(errors.AnchoredNotFound):
@@ -162,10 +192,13 @@ def test_a_division_inside_the_anchor_beats_a_nearer_one_outside_it(monkeypatch)
 def test_a_qualifier_only_anchors_on_an_exact_name(monkeypatch):
     # geocode ranks a city above a country, and "France" is a prefix of
     # Franceville: anchoring on it would bound a Paris query on Gabon.
-    _patch_geocode(monkeypatch, {
-        "Paris, France": [_row("Paris", 48.8566, 2.3522, id_="paris", context=("France",))],
-        "France": [_row("Franceville", -1.63, 13.58, id_="franceville")],
-    })
+    _patch_geocode(
+        monkeypatch,
+        {
+            "Paris, France": [_row("Paris", 48.8566, 2.3522, id_="paris", context=("France",))],
+            "France": [_row("Franceville", -1.63, 13.58, id_="franceville")],
+        },
+    )
     resolved = geocode.resolve_named_place("Paris, France")
     assert resolved["id"] == "paris"
     assert "France" in resolved["note"]
@@ -192,7 +225,8 @@ def test_region_suffix_form_stays_on_geocodes_own_path(monkeypatch):
     calls = []
     real_anchor = geocode._resolve_qualifier_anchor
     monkeypatch.setattr(
-        geocode, "_resolve_qualifier_anchor",
+        geocode,
+        "_resolve_qualifier_anchor",
         lambda text: calls.append(text) or real_anchor(text),
     )
     assert geocode.resolve_named_place("Hilltop, Illinois")["id"] == ILLINOIS_LOC_ID
@@ -206,10 +240,13 @@ def test_region_suffix_form_stays_on_geocodes_own_path(monkeypatch):
 
 
 def test_a_qualifier_that_resolves_to_nothing_degrades_with_a_note(monkeypatch):
-    _patch_geocode(monkeypatch, {
-        "Elm Park, Atlantis": [_row("Elm Park", 40.71, -73.91, id_="elm")],
-        "Atlantis": [],
-    })
+    _patch_geocode(
+        monkeypatch,
+        {
+            "Elm Park, Atlantis": [_row("Elm Park", 40.71, -73.91, id_="elm")],
+            "Atlantis": [],
+        },
+    )
     resolved = geocode.resolve_named_place("Elm Park, Atlantis")
     assert resolved["id"] == "elm"
     assert resolved["note"] == (
@@ -238,15 +275,27 @@ def test_find_near_reports_the_qualifier_it_searched():
 
 
 def test_from_to_resolves_a_qualified_end(monkeypatch):
-    _patch_geocode(monkeypatch, {
-        "Brooklyn": [_row("Brooklyn", FROM_LAT, FROM_LON, id_="anchor-brooklyn")],
-        "Hilltop": [
-            _row("Hilltop", 39.6, -89.2, id_=ILLINOIS_LOC_ID, context=("Illinois",), rank=1.2),
-            _row("Hilltop", FROM_LAT, FROM_LON, id_=BROOKLYN_NBHD_ID,
-                 type_="neighborhood", context=("Brooklyn",), rank=1.0),
-        ],
-        "Yoyogi Park": [_row("Yoyogi Park", TO_LAT, TO_LON, id_="gers-b", type_="neighborhood")],
-    })
+    _patch_geocode(
+        monkeypatch,
+        {
+            "Brooklyn": [_row("Brooklyn", FROM_LAT, FROM_LON, id_="anchor-brooklyn")],
+            "Hilltop": [
+                _row("Hilltop", 39.6, -89.2, id_=ILLINOIS_LOC_ID, context=("Illinois",), rank=1.2),
+                _row(
+                    "Hilltop",
+                    FROM_LAT,
+                    FROM_LON,
+                    id_=BROOKLYN_NBHD_ID,
+                    type_="neighborhood",
+                    context=("Brooklyn",),
+                    rank=1.0,
+                ),
+            ],
+            "Yoyogi Park": [
+                _row("Yoyogi Park", TO_LAT, TO_LON, id_="gers-b", type_="neighborhood")
+            ],
+        },
+    )
     result = server.from_to("Hilltop, Brooklyn", "Yoyogi Park", mode="walk", confirm=True)
     assert "error" not in result
     assert result["from"]["id"] == BROOKLYN_NBHD_ID
@@ -254,32 +303,50 @@ def test_from_to_resolves_a_qualified_end(monkeypatch):
 
 
 def test_optimize_route_resolves_a_qualified_stop(monkeypatch):
-    _patch_geocode(monkeypatch, {
-        "Brooklyn": [_row("Brooklyn", TO_LAT, TO_LON, id_="anchor-brooklyn")],
-        "Hilltop": [
-            _row("Hilltop", 39.6, -89.2, id_=ILLINOIS_LOC_ID, context=("Illinois",), rank=1.2),
-            _row("Hilltop", TO_LAT, TO_LON, id_=BROOKLYN_NBHD_ID,
-                 type_="neighborhood", context=("Brooklyn",), rank=1.0),
-        ],
-    })
+    _patch_geocode(
+        monkeypatch,
+        {
+            "Brooklyn": [_row("Brooklyn", TO_LAT, TO_LON, id_="anchor-brooklyn")],
+            "Hilltop": [
+                _row("Hilltop", 39.6, -89.2, id_=ILLINOIS_LOC_ID, context=("Illinois",), rank=1.2),
+                _row(
+                    "Hilltop",
+                    TO_LAT,
+                    TO_LON,
+                    id_=BROOKLYN_NBHD_ID,
+                    type_="neighborhood",
+                    context=("Brooklyn",),
+                    rank=1.0,
+                ),
+            ],
+        },
+    )
     result = server.optimize_route(
-        [{"lat": FROM_LAT, "lon": FROM_LON}, "Hilltop, Brooklyn"], mode="walk",
+        [{"lat": FROM_LAT, "lon": FROM_LON}, "Hilltop, Brooklyn"],
+        mode="walk",
         confirm=True,
     )
     assert "error" not in result
     assert result["resolved"] == [
         {
-            "stop": 1, "name": "Hilltop", "id": BROOKLYN_NBHD_ID,
-            "lat": TO_LAT, "lon": TO_LON, "matched_by": "name",
+            "stop": 1,
+            "name": "Hilltop",
+            "id": BROOKLYN_NBHD_ID,
+            "lat": TO_LAT,
+            "lon": TO_LON,
+            "matched_by": "name",
         },
     ]
 
 
 def test_a_failed_qualifier_note_reaches_the_locationref_echo(monkeypatch):
-    _patch_geocode(monkeypatch, {
-        "Hilltop, Atlantis": [_row("Hilltop", TO_LAT, TO_LON, id_=BROOKLYN_NBHD_ID)],
-        "Atlantis": [],
-    })
+    _patch_geocode(
+        monkeypatch,
+        {
+            "Hilltop, Atlantis": [_row("Hilltop", TO_LAT, TO_LON, id_=BROOKLYN_NBHD_ID)],
+            "Atlantis": [],
+        },
+    )
     item, err = server._resolve_location_ref("Hilltop, Atlantis")
     assert err is None
     assert "Atlantis" in item["note"]

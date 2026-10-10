@@ -129,8 +129,12 @@ def scan(name: str, *, bounded: bool, source: str | None = None, **detail):
         yield
     finally:
         record(
-            "scan", name, time.perf_counter() - started,
-            bounded=bounded, source=_short_source(source), **detail,
+            "scan",
+            name,
+            time.perf_counter() - started,
+            bounded=bounded,
+            source=_short_source(source),
+            **detail,
         )
 
 

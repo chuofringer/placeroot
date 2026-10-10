@@ -168,9 +168,7 @@ def probe_bbox_metrics(
     # neither redirect these probes nor raise UpstreamUnavailable out of
     # them (which would abort the run and discard findings already
     # collected by the other checks).
-    places_glob = (
-        f"{overture.DEFAULT_UPSTREAM_BASE}/{release_name}/theme=places/type=place/*"
-    )
+    places_glob = f"{overture.DEFAULT_UPSTREAM_BASE}/{release_name}/theme=places/type=place/*"
     addresses_glob = (
         f"{overture.DEFAULT_UPSTREAM_BASE}/{release_name}/theme=addresses/type=address/*"
     )
@@ -270,9 +268,7 @@ def compare_bbox_metrics(
     return rows
 
 
-def render_coverage_report(
-    rows: list[dict], pinned_release: str, newest_release: str
-) -> list[str]:
+def render_coverage_report(rows: list[dict], pinned_release: str, newest_release: str) -> list[str]:
     """Markdown finding lines for the flagged (regression=True) rows in
     `rows`, or [] if none. Pure — takes compare_bbox_metrics()'s output, not
     a connection, so it's fully covered by offline tests with synthetic
@@ -313,7 +309,7 @@ def main() -> int:
     elif newest != release.PINNED_RELEASE:
         findings.append(
             f"- **Pinned fallback is stale**: `PINNED_RELEASE = "
-            f"\"{release.PINNED_RELEASE}\"` but upstream's newest release is "
+            f'"{release.PINNED_RELEASE}"` but upstream\'s newest release is '
             f"`{newest}`. Bump it with `uv run python scripts/bump_pin.py "
             f"{newest}` — see docs/PIN.md for the full runbook (what else "
             f"moves, and what deliberately doesn't)."
@@ -393,8 +389,7 @@ def main() -> int:
         return 1
     suffix = f" (coverage gate skipped: {coverage_note})" if coverage_note else ""
     print(
-        f"canary clean: pin {release.PINNED_RELEASE} is newest ({target}); "
-        f"all schemas hold{suffix}"
+        f"canary clean: pin {release.PINNED_RELEASE} is newest ({target}); all schemas hold{suffix}"
     )
     return 0
 

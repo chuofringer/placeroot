@@ -129,13 +129,9 @@ def test_data_version_resource_tracks_every_resolution_source(
     if expected_source != "artifact-pinned":
         # Every other case is about the resolution source itself; keep the
         # artifact rule out of the way by making its release stale.
-        monkeypatch.setattr(
-            release, "bundled_artifact_release", lambda: "2000-01-01.0"
-        )
+        monkeypatch.setattr(release, "bundled_artifact_release", lambda: "2000-01-01.0")
     else:
-        monkeypatch.setattr(
-            release, "bundled_artifact_release", lambda: release.PINNED_RELEASE
-        )
+        monkeypatch.setattr(release, "bundled_artifact_release", lambda: release.PINNED_RELEASE)
     if env:
         monkeypatch.setenv("PLACEROOT_OVERTURE_RELEASE", env)
     monkeypatch.setattr(release, "_discover", lambda: discovered)
@@ -325,9 +321,7 @@ def _all_prose() -> dict[str, str]:
 def test_every_tool_reference_in_every_resource_is_a_registered_tool():
     """A renamed or deleted tool must not survive as prose in a resource."""
     registered = {t.name for t in asyncio.run(_server().list_tools())}
-    referenced = {
-        name for text in _all_prose().values() for name in _TOOL_REF.findall(text)
-    }
+    referenced = {name for text in _all_prose().values() for name in _TOOL_REF.findall(text)}
     assert referenced, "no resource prose names any tool at all"
     dangling = sorted(referenced - registered)
     assert not dangling, (

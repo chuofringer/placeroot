@@ -39,10 +39,15 @@ NEAR_B_NAME = "Cluster Place 041"
 def _box_polygon(latmin, lonmin, latmax, lonmax):
     return {
         "type": "Polygon",
-        "coordinates": [[
-            [lonmin, latmin], [lonmax, latmin],
-            [lonmax, latmax], [lonmin, latmax], [lonmin, latmin],
-        ]],
+        "coordinates": [
+            [
+                [lonmin, latmin],
+                [lonmax, latmin],
+                [lonmax, latmax],
+                [lonmin, latmax],
+                [lonmin, latmin],
+            ]
+        ],
     }
 
 
@@ -84,8 +89,11 @@ def test_within_filters_to_the_shed_and_notes_it(monkeypatch):
     assert len(baseline["results"]) > 2  # plenty of fixture places in the plain radius
 
     result = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000,
-        within={"minutes": 15, "mode": "walk"}, limit=25,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        within={"minutes": 15, "mode": "walk"},
+        limit=25,
     )
     assert "error" not in result
     names = {r["name"] for r in result["results"]}
@@ -109,8 +117,11 @@ def test_within_of_as_gers_id_adds_resolved_echo(monkeypatch):
     monkeypatch.setattr(routing, "isochrone", fake)
 
     result = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000,
-        within={"minutes": 10, "of": NEAR_A_ID}, limit=25,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        within={"minutes": 10, "of": NEAR_A_ID},
+        limit=25,
     )
     assert "error" not in result
     assert result["resolved"]["id"] == NEAR_A_ID
@@ -122,16 +133,12 @@ def test_within_of_as_gers_id_adds_resolved_echo(monkeypatch):
 
 def test_within_bad_minutes_is_bad_request():
     for bad in (0, -5, 61, "nope"):
-        result = server.find_places(
-            CENTER_LAT, CENTER_LON, within={"minutes": bad}
-        )
+        result = server.find_places(CENTER_LAT, CENTER_LON, within={"minutes": bad})
         assert result["error"] == "bad_request"
 
 
 def test_within_unknown_key_is_bad_request():
-    result = server.find_places(
-        CENTER_LAT, CENTER_LON, within={"minutes": 10, "bogus": 1}
-    )
+    result = server.find_places(CENTER_LAT, CENTER_LON, within={"minutes": 10, "bogus": 1})
     assert result == {
         "error": "bad_request",
         "detail": "within has unrecognized keys: ['bogus']; accepted: minutes, mode, of",
@@ -139,9 +146,7 @@ def test_within_unknown_key_is_bad_request():
 
 
 def test_within_bad_mode_is_unsupported_mode():
-    result = server.find_places(
-        CENTER_LAT, CENTER_LON, within={"minutes": 10, "mode": "teleport"}
-    )
+    result = server.find_places(CENTER_LAT, CENTER_LON, within={"minutes": 10, "mode": "teleport"})
     assert result["error"] == "unsupported_mode"
     assert "supported" in result
 
@@ -162,9 +167,7 @@ def test_within_area_mode_without_of_is_bad_request():
 
 def test_within_cold_graph_without_confirm_is_needs_confirm(monkeypatch):
     monkeypatch.setattr(routing, "isochrone_graph_is_cached", lambda *a, **k: False)
-    result = server.find_places(
-        CENTER_LAT, CENTER_LON, within={"minutes": 10}
-    )
+    result = server.find_places(CENTER_LAT, CENTER_LON, within={"minutes": 10})
     assert result["error"] == "needs_confirm"
     assert "eta" in result
 
@@ -173,9 +176,7 @@ def test_within_confirm_true_proceeds_on_cold_graph(monkeypatch):
     monkeypatch.setattr(routing, "isochrone_graph_is_cached", lambda *a, **k: False)
     fake, _calls = _fake_isochrone(BOX_POLYGON)
     monkeypatch.setattr(routing, "isochrone", fake)
-    result = server.find_places(
-        CENTER_LAT, CENTER_LON, within={"minutes": 10}, confirm=True
-    )
+    result = server.find_places(CENTER_LAT, CENTER_LON, within={"minutes": 10}, confirm=True)
     assert "error" not in result
     names = {r["name"] for r in result["results"]}
     assert names == {NEAR_A_NAME, NEAR_B_NAME}
@@ -185,7 +186,9 @@ def test_within_grouped_by_category_composes(monkeypatch):
     fake, _calls = _fake_isochrone(WIDE_BOX_POLYGON)
     monkeypatch.setattr(routing, "isochrone", fake)
     result = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
         categories=["shop", "bakery", "grocery", "restaurant", "cafe"],
         group_by_category=True,
         within={"minutes": 20},
@@ -206,7 +209,11 @@ def test_within_cursor_round_trip_reruns_the_same_shed(monkeypatch):
     monkeypatch.setattr(routing, "isochrone", fake)
 
     page1 = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, within={"minutes": 20}, limit=3,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        within={"minutes": 20},
+        limit=3,
     )
     assert page1.get("truncated") is True
     assert "cursor" in page1
@@ -214,7 +221,11 @@ def test_within_cursor_round_trip_reruns_the_same_shed(monkeypatch):
     assert len(page1_ids) == 3
 
     page2 = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, within={"minutes": 20}, limit=3,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        within={"minutes": 20},
+        limit=3,
         cursor=page1["cursor"],
     )
     assert "error" not in page2
@@ -232,12 +243,20 @@ def test_within_in_params_key_changed_minutes_breaks_cursor(monkeypatch):
     monkeypatch.setattr(routing, "isochrone", fake)
 
     page1 = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, within={"minutes": 20}, limit=3,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        within={"minutes": 20},
+        limit=3,
     )
     assert "cursor" in page1
 
     replay = server.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, within={"minutes": 21}, limit=3,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        within={"minutes": 21},
+        limit=3,
         cursor=page1["cursor"],
     )
     assert replay["error"] == "bad_cursor"
@@ -258,16 +277,15 @@ def test_within_composes_with_division_id(monkeypatch, polygon_fixtures):  # noq
     names = {r["name"] for r in result["results"]}
     assert names == {"Inside Place", "Inside Coffee"}
     assert "Inside Bank" not in names  # inside the division, outside the small shed
-    assert calls == [
-        {"lat": INSIDE_LAT, "lon": INSIDE_LON, "minutes": 10.0, "mode": "walk"}
-    ]
+    assert calls == [{"lat": INSIDE_LAT, "lon": INSIDE_LON, "minutes": 10.0, "mode": "walk"}]
 
 
 def test_within_of_dict_gives_no_resolved_echo(monkeypatch):
     fake, _calls = _fake_isochrone(BOX_POLYGON)
     monkeypatch.setattr(routing, "isochrone", fake)
     result = server.find_places(
-        CENTER_LAT, CENTER_LON,
+        CENTER_LAT,
+        CENTER_LON,
         within={"minutes": 10, "of": {"lat": CENTER_LAT, "lon": CENTER_LON}},
     )
     assert "error" not in result

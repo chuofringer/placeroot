@@ -313,7 +313,7 @@ def test_external_ref_regex_catches_css_unquoted_form_and_fetch():
     # XML namespaces and in-page refs must not trip it.
     assert not _EXTERNAL_REF_RE.search('xmlns="http://www.w3.org/2000/svg"')
     assert not _EXTERNAL_REF_RE.search('<a href="#stops">')
-    assert not _EXTERNAL_REF_RE.search("var SVGNS = \"http://www.w3.org/2000/svg\";")
+    assert not _EXTERNAL_REF_RE.search('var SVGNS = "http://www.w3.org/2000/svg";')
 
 
 def test_compose_summary_compare_areas_without_total_places():

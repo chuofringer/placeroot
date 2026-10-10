@@ -52,7 +52,8 @@ def build_one(
 ) -> tuple[dict[str, list[float]], list[str]]:
     glob = f"{UPSTREAM_BASE}/{release}/theme={theme}/type={type_}/*"
     columns = [
-        r[0] for r in con.execute(
+        r[0]
+        for r in con.execute(
             f"DESCRIBE SELECT * FROM read_parquet('{glob}', hive_partitioning=1) LIMIT 0"
         ).fetchall()
     ]
@@ -90,8 +91,10 @@ def build_one(
             # inward, and a feature in that sliver at a file edge would be
             # wrongly pruned. The recorded extent must be a superset.
             files[file] = [
-                math.floor(xmin * 1e5) / 1e5, math.floor(ymin * 1e5) / 1e5,
-                math.ceil(xmax * 1e5) / 1e5, math.ceil(ymax * 1e5) / 1e5,
+                math.floor(xmin * 1e5) / 1e5,
+                math.floor(ymin * 1e5) / 1e5,
+                math.ceil(xmax * 1e5) / 1e5,
+                math.ceil(ymax * 1e5) / 1e5,
             ]
     return files, columns
 
@@ -112,13 +115,22 @@ def main() -> int:
     for theme, type_ in THEME_TYPES:
         files, columns = build_one(con, release, theme, type_)
         out = out_dir / f"{theme}__{type_}.json"
-        out.write_text(json.dumps(
-            {"release": release, "theme": theme, "type": type_,
-             "columns": columns, "files": files},
-            separators=(",", ":"),
-        ))
-        print(f"{theme}/{type_}: {len(files)} files, {len(columns)} columns "
-              f"-> {out.relative_to(ROOT)}")
+        out.write_text(
+            json.dumps(
+                {
+                    "release": release,
+                    "theme": theme,
+                    "type": type_,
+                    "columns": columns,
+                    "files": files,
+                },
+                separators=(",", ":"),
+            )
+        )
+        print(
+            f"{theme}/{type_}: {len(files)} files, {len(columns)} columns "
+            f"-> {out.relative_to(ROOT)}"
+        )
     return 0
 
 

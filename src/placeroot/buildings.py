@@ -164,12 +164,16 @@ def _bbox_filter(lat: float, lon: float, radius_m: float) -> tuple[str, dict]:
     radius_m = geo.clamp_radius_m(radius_m)
     xmin, ymin, xmax, ymax = geo.bbox_around(lat, lon, radius_m)
     bbox_filter = (
-        "bbox.xmax >= $xmin AND bbox.xmin <= $xmax"
-        " AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
+        "bbox.xmax >= $xmin AND bbox.xmin <= $xmax AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
     )
     params = {
-        "xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax,
-        "lat": lat, "lon": lon, "radius_m": radius_m,
+        "xmin": xmin,
+        "ymin": ymin,
+        "xmax": xmax,
+        "ymax": ymax,
+        "lat": lat,
+        "lon": lon,
+        "radius_m": radius_m,
     }
     return bbox_filter, params
 
@@ -279,8 +283,7 @@ def summarize_buildings(
 
     n = len(rows)
     areas_m2 = [
-        m2 for (_, _, _, _, area_deg2) in rows
-        if (m2 := _area_m2(area_deg2, lat)) is not None
+        m2 for (_, _, _, _, area_deg2) in rows if (m2 := _area_m2(area_deg2, lat)) is not None
     ]
     heights = [h for (_, _, h, _, _) in rows if h is not None]
     floors = [f for (_, _, _, f, _) in rows if f is not None]

@@ -55,8 +55,16 @@ def _wkb(con: duckdb.DuckDBPyConnection, wkt: str) -> bytes:
 
 
 def _place_row(
-    id_, name, lon, lat, category="shop", basic_category="shop",
-    operating_status="open", confidence=0.9, brand=None, websites=None,
+    id_,
+    name,
+    lon,
+    lat,
+    category="shop",
+    basic_category="shop",
+    operating_status="open",
+    confidence=0.9,
+    brand=None,
+    websites=None,
 ):
     return (
         id_,
@@ -83,12 +91,27 @@ def polygon_fixtures(tmp_path):
     con.execute("INSTALL spatial; LOAD spatial;")
 
     division_rows = [
-        ("area-notch-1", {"primary": "Notch Division"}, "neighborhood",
-         _wkb(con, NOTCH_WKT), DIV_NOTCH),
-        ("area-multi-1", {"primary": "Multi Division (land)"}, "locality",
-         _wkb(con, SQUARE_A_WKT), DIV_MULTI),
-        ("area-multi-2", {"primary": "Multi Division (maritime)"}, "locality",
-         _wkb(con, SQUARE_B_WKT), DIV_MULTI),
+        (
+            "area-notch-1",
+            {"primary": "Notch Division"},
+            "neighborhood",
+            _wkb(con, NOTCH_WKT),
+            DIV_NOTCH,
+        ),
+        (
+            "area-multi-1",
+            {"primary": "Multi Division (land)"},
+            "locality",
+            _wkb(con, SQUARE_A_WKT),
+            DIV_MULTI,
+        ),
+        (
+            "area-multi-2",
+            {"primary": "Multi Division (maritime)"},
+            "locality",
+            _wkb(con, SQUARE_B_WKT),
+            DIV_MULTI,
+        ),
     ]
     con.execute("""
         CREATE TABLE division_areas (
@@ -107,15 +130,35 @@ def polygon_fixtures(tmp_path):
         _place_row("place-inside", "Inside Place", INSIDE_LON, INSIDE_LAT),
         _place_row("place-notch", "Notch Place", NOTCH_LON, NOTCH_LAT),
         _place_row("place-far", "Outside Bbox Place", FAR_LON, FAR_LAT),
-        _place_row("place-coffee", "Inside Coffee", COFFEE_LON, COFFEE_LAT,
-                    category="coffee_shop", basic_category="coffee_shop"),
-        _place_row("place-bank", "Inside Bank", BANK_LON, BANK_LAT,
-                    category="bank", basic_category="bank"),
-        _place_row("place-chain", "Chain Bakery", 3.0, 7.0,
-                    category="bakery", basic_category="bakery",
-                    brand="Blue Bottle Coffee", websites=["https://example.com"]),
-        _place_row("place-faint", "Faint Place", FAINT_LON, FAINT_LAT,
-                    operating_status="closed_permanently", confidence=0.2),
+        _place_row(
+            "place-coffee",
+            "Inside Coffee",
+            COFFEE_LON,
+            COFFEE_LAT,
+            category="coffee_shop",
+            basic_category="coffee_shop",
+        ),
+        _place_row(
+            "place-bank", "Inside Bank", BANK_LON, BANK_LAT, category="bank", basic_category="bank"
+        ),
+        _place_row(
+            "place-chain",
+            "Chain Bakery",
+            3.0,
+            7.0,
+            category="bakery",
+            basic_category="bakery",
+            brand="Blue Bottle Coffee",
+            websites=["https://example.com"],
+        ),
+        _place_row(
+            "place-faint",
+            "Faint Place",
+            FAINT_LON,
+            FAINT_LAT,
+            operating_status="closed_permanently",
+            confidence=0.2,
+        ),
         _place_row("place-multi-a", "Multi A", MULTI_A_LON, MULTI_A_LAT),
         _place_row("place-multi-b", "Multi B", MULTI_B_LON, MULTI_B_LAT),
     ]
@@ -139,9 +182,7 @@ def polygon_fixtures(tmp_path):
             sources STRUCT(dataset VARCHAR, record_id VARCHAR)[]
         )
     """)
-    con.executemany(
-        "INSERT INTO places VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", place_rows
-    )
+    con.executemany("INSERT INTO places VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", place_rows)
     places_path = tmp_path / "places.parquet"
     con.execute(f"COPY places TO '{places_path}' (FORMAT PARQUET)")
 
@@ -409,16 +450,14 @@ def test_resolve_geometry_persists_to_disk_and_reloads_without_rescan(
     second = overture._resolve_division_geometry(DIV_MULTI)
 
     assert second is not None
-    assert second[0] == first[0]      # WKB identical -> union preserved
-    assert second[1:] == first[1:]    # bbox identical
+    assert second[0] == first[0]  # WKB identical -> union preserved
+    assert second[1:] == first[1:]  # bbox identical
     # (End-to-end union across both variants is covered by
     # test_multi_row_division_unions_both_polygon_variants; the identical WKB
     # above proves the disk round-trip can't shrink that union.)
 
 
-def test_disk_cache_writes_nothing_when_cache_disabled(
-    polygon_fixtures, tmp_path, monkeypatch
-):
+def test_disk_cache_writes_nothing_when_cache_disabled(polygon_fixtures, tmp_path, monkeypatch):
     """With PLACEROOT_CACHE=off (conftest's default), resolving must not create
     the on-disk polygon dir."""
     cache_dir = tmp_path / "pcache"
@@ -431,9 +470,7 @@ def test_disk_cache_writes_nothing_when_cache_disabled(
     assert not (cache_dir / "division_polygons").exists()
 
 
-def test_corrupt_disk_cache_falls_back_to_rescan(
-    polygon_fixtures, tmp_path, monkeypatch
-):
+def test_corrupt_disk_cache_falls_back_to_rescan(polygon_fixtures, tmp_path, monkeypatch):
     """A truncated/garbage cache file must not be trusted or crash — the
     resolve falls back to the real scan and still returns the right polygon."""
     monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "pcache"))

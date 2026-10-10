@@ -26,7 +26,6 @@ _AREA_RANK_EPSILON = 1e-6
 _AREA_MAX_CANDIDATES = 5
 
 
-
 def resolve_area(area: str) -> dict | None:
     """Free-text area name -> the single division to constrain a search to.
 
@@ -53,7 +52,8 @@ def resolve_area(area: str) -> dict | None:
     # they're dropped here rather than surfacing as a confusing downstream
     # error (id is only ever absent from a degraded dataset).
     divisions = [
-        r for r in _pkg.geocode(area, limit=_pkg._RESOLVE_OVERFETCH)
+        r
+        for r in _pkg.geocode(area, limit=_pkg._RESOLVE_OVERFETCH)
         if r["type"] != "place" and r["id"]
     ]
     if not divisions:
@@ -65,7 +65,8 @@ def resolve_area(area: str) -> dict | None:
     # inside the city you asked for) is not ambiguity, so compare names too.
     top_name = _pkg._normalize_for_match(top["name"])
     tied = [
-        d for d in divisions
+        d
+        for d in divisions
         if _pkg._normalize_for_match(d["name"]) == top_name
         and abs(d["rank_score"] - top["rank_score"]) < _AREA_RANK_EPSILON
     ]
@@ -76,7 +77,6 @@ def resolve_area(area: str) -> dict | None:
     return _area_candidate(top)
 
 
-
 def _area_candidate(row: dict) -> dict:
     """A division row, projected to just what an area choice needs."""
     return {
@@ -84,7 +84,6 @@ def _area_candidate(row: dict) -> dict:
         "name": row["name"],
         "admin_context": row["admin_context"],
     }
-
 
 
 def resolve_named_place(query: str) -> dict | None:
@@ -120,8 +119,10 @@ def resolve_named_place(query: str) -> dict | None:
             return _resolve_inside_anchor(query, head, anchor)
 
     rows = [
-        r for r in _pkg.geocode(query, limit=_pkg._RESOLVE_OVERFETCH)
-        if r.get("lat") is not None and r.get("lon") is not None
+        r
+        for r in _pkg.geocode(query, limit=_pkg._RESOLVE_OVERFETCH)
+        if r.get("lat") is not None
+        and r.get("lon") is not None
         # #431: a fuzzy row that only ever proved itself against part of
         # what the caller typed is not an answer. See the block below.
         and not _pkg._fuzzy_row_is_too_weak(query, r)
@@ -143,7 +144,6 @@ def resolve_named_place(query: str) -> dict | None:
         # if it had been.
         hit["note"] = f"{qualifier!r} did not resolve as a place or region; searched the full text"
     return hit
-
 
 
 # --- #431: the typo tier refuses a match it only half earned ----------------
@@ -216,7 +216,6 @@ def resolve_named_place(query: str) -> dict | None:
 _FUZZY_WHOLE_QUERY_FLOOR = 0.96
 
 
-
 def _fuzzy_row_is_too_weak(query: str, row: dict) -> bool:
     """Whether `row` is a fuzzy match that never accounted for all of `query`."""
     if row.get("matched_by") != "fuzzy":
@@ -237,12 +236,10 @@ def _fuzzy_row_is_too_weak(query: str, row: dict) -> bool:
     return whole < _pkg._FUZZY_WHOLE_QUERY_FLOOR
 
 
-
 def _row_lies_in_region(row: dict, region_name: str) -> bool:
     """Whether `row`'s admin chain names the region a suffix was parsed as."""
     folded = _pkg._normalize_for_match(region_name)
     return any(_pkg._normalize_for_match(ctx) == folded for ctx in (row.get("admin_context") or []))
-
 
 
 def _fuzzy_name_covers_tokens(name: str, tokens: list[str]) -> bool:
@@ -261,11 +258,13 @@ def _fuzzy_name_covers_tokens(name: str, tokens: list[str]) -> bool:
         folded_tok = _pkg._normalize_for_match(tok)
         if not folded_tok or folded_tok in folded_name:
             continue
-        if any(_pkg._jaro_winkler(word, folded_tok) >= _pkg._FUZZY_SIMILARITY_THRESHOLD for word in words):  # noqa: E501
+        if any(
+            _pkg._jaro_winkler(word, folded_tok) >= _pkg._FUZZY_SIMILARITY_THRESHOLD
+            for word in words
+        ):  # noqa: E501
             continue
         return False
     return True
-
 
 
 # --- #429: the places leg of an unqualified name ----------------------------
@@ -326,7 +325,6 @@ def _has_extra_place_context(query: str) -> bool:
     return bool(last_city) and _pkg._query_is_poi_shaped(query)
 
 
-
 def _resolve_place_leg(query: str) -> dict | None:
     """resolve_place's top place candidate for `query`, or None.
 
@@ -344,7 +342,9 @@ def _resolve_place_leg(query: str) -> dict | None:
     try:
         hits = _pkg.resolve_place(query, limit=_pkg._RESOLVE_OVERFETCH)
     except _pkg.overture.SchemaDegraded as e:
-        _pkg.logger.info("resolve_named_place: places leg unavailable (%s); using geocode's rows", e)  # noqa: E501
+        _pkg.logger.info(
+            "resolve_named_place: places leg unavailable (%s); using geocode's rows", e
+        )  # noqa: E501
         return None
     for hit in hits:
         if hit.get("kind") == "place":
@@ -356,7 +356,6 @@ def _resolve_place_leg(query: str) -> dict | None:
                 "type": "place",
             }
     return None
-
 
 
 # --- #427: comma-qualified names ("Le Marais, Paris") -----------------------
@@ -414,20 +413,19 @@ def _split_qualifier(query: str) -> tuple[str | None, str | None]:
     return head, tail
 
 
-
 def _pick_named_place(query: str, rows: list[dict]) -> dict:
     """The winner among ranked candidates, or AmbiguousPlace on a same-name tie."""
     top = rows[0]
     top_name = _pkg._normalize_for_match(top["name"])
     tied = [
-        r for r in rows
+        r
+        for r in rows
         if _pkg._normalize_for_match(r["name"]) == top_name
         and abs(r.get("rank_score", 0) - top.get("rank_score", 0)) < _AREA_RANK_EPSILON
     ]
     if len(tied) > 1:
         raise AmbiguousPlace(query, [_named_candidate(r) for r in tied[:_AREA_MAX_CANDIDATES]])
     return _named_candidate(top)
-
 
 
 def _resolve_qualifier_anchor(text: str) -> dict | None:
@@ -449,7 +447,8 @@ def _resolve_qualifier_anchor(text: str) -> dict | None:
     for candidate in _qualifier_texts(text):
         folded = _pkg._normalize_for_match(candidate)
         hits = [
-            h for h in _pkg.geocode(candidate, limit=_pkg._ANCHOR_LOOKUP_LIMIT)
+            h
+            for h in _pkg.geocode(candidate, limit=_pkg._ANCHOR_LOOKUP_LIMIT)
             if h.get("type") != "place"
             and h.get("lat") is not None
             and h.get("lon") is not None
@@ -466,12 +465,10 @@ def _resolve_qualifier_anchor(text: str) -> dict | None:
     return None
 
 
-
 def _names_qualifier(row: dict, folded: str) -> bool:
     """Whether `row` is named exactly `folded`, canonically or through a #214 alternate."""
     names = {_pkg._normalize_for_match(n) for n in (row.get("name"), row.get("matched_name")) if n}
     return folded in names
-
 
 
 def _qualifier_texts(text: str):
@@ -479,7 +476,6 @@ def _qualifier_texts(text: str):
     last = text.rsplit(",", 1)[-1].strip()
     if last and last != text:
         yield last
-
 
 
 def _inside_anchor(row: dict, anchor: dict) -> bool:
@@ -500,11 +496,11 @@ def _inside_anchor(row: dict, anchor: dict) -> bool:
     return distance_m <= _pkg._CITY_HINT_RADIUS_M
 
 
-
 def _resolve_inside_anchor(query: str, head: str, anchor: dict) -> dict:
     """The full tier ladder on `head` alone, bounded by a resolved anchor."""
     rows = [
-        r for r in _pkg.geocode(head, limit=_pkg._ANCHORED_OVERFETCH)
+        r
+        for r in _pkg.geocode(head, limit=_pkg._ANCHORED_OVERFETCH)
         if r.get("lat") is not None and r.get("lon") is not None and _inside_anchor(r, anchor)
     ]
     if rows:
@@ -528,7 +524,6 @@ def _resolve_inside_anchor(query: str, head: str, anchor: dict) -> dict:
         "id": top["id"],
         "type": "place",
     }
-
 
 
 def _named_candidate(row: dict) -> dict:

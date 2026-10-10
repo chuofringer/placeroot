@@ -326,9 +326,7 @@ def test_fallback_surfaces_per_pair_truncation(monkeypatch):
         "route",
         lambda *a, **k: {"duration_s": 60.0, "distance_m": 100.0, "truncated": True},
     )
-    result = routing.travel_time_matrix(
-        [fx.node_latlon(2, 2)], [fx.node_latlon(5, 5)], mode="walk"
-    )
+    result = routing.travel_time_matrix([fx.node_latlon(2, 2)], [fx.node_latlon(5, 5)], mode="walk")
     assert result["truncated"] is True
     assert "size cap" in result["note"]
 
@@ -399,8 +397,11 @@ def test_named_origin_adds_resolved_origins_only(monkeypatch):
     def fake_resolve(query):
         assert query == "Grid Corner"
         return {
-            "name": query, "lat": origin_lat, "lon": origin_lon,
-            "id": "gers-grid-corner", "type": "place",
+            "name": query,
+            "lat": origin_lat,
+            "lon": origin_lon,
+            "id": "gers-grid-corner",
+            "type": "place",
         }
 
     monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
@@ -410,8 +411,12 @@ def test_named_origin_adds_resolved_origins_only(monkeypatch):
     assert "error" not in result
     assert result["resolved"]["origins"] == [
         {
-            "index": 0, "name": "Grid Corner", "id": "gers-grid-corner",
-            "lat": origin_lat, "lon": origin_lon, "matched_by": "name",
+            "index": 0,
+            "name": "Grid Corner",
+            "id": "gers-grid-corner",
+            "lat": origin_lat,
+            "lon": origin_lon,
+            "matched_by": "name",
         }
     ]
     assert "destinations" not in result["resolved"]
@@ -432,13 +437,12 @@ def test_ambiguous_origin_name_is_an_indexed_error(monkeypatch):
 
 def test_over_cap_checked_before_resolution(monkeypatch):
     """The 5-point cap fails before any name resolution is attempted."""
+
     def boom(query):
         raise AssertionError("resolve_named_place must not be called past the cap")
 
     monkeypatch.setattr(geocode, "resolve_named_place", boom)
     origins = ["Somewhere"] * 6
-    result = server.travel_time_matrix(
-        origins=origins, destinations=[{"lat": 0.0, "lon": 0.0}]
-    )
+    result = server.travel_time_matrix(origins=origins, destinations=[{"lat": 0.0, "lon": 0.0}])
     assert result["error"] == "bad_request"
     assert "elements" not in result

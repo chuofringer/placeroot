@@ -166,12 +166,20 @@ def test_drive_graph_bound_is_converted_from_meters_at_the_floor_speed(monkeypat
     def snapped(index, node):
         lat, lon = graph.coords[node]
         return map_match.SnappedPoint(
-            index=index, lat=lat, lon=lon, matched=True, edge=(node, node), fraction=0.0,
-            snapped_lat=lat, snapped_lon=lon, distance_m=1.0,
+            index=index,
+            lat=lat,
+            lon=lon,
+            matched=True,
+            edge=(node, node),
+            fraction=0.0,
+            snapped_lat=lat,
+            snapped_lon=lon,
+            distance_m=1.0,
         )
 
     monkeypatch.setattr(
-        map_match, "_snap_trace_with_graph",
+        map_match,
+        "_snap_trace_with_graph",
         lambda points, mode: (graph, [snapped(0, ids[0]), snapped(1, ids[1])]),
     )
     monkeypatch.setattr(map_match, "_anchor_node", lambda sp: sp.edge[0])

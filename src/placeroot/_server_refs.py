@@ -34,8 +34,7 @@ from placeroot._server_errors import (
 # carries resolve_place and geocode, so naming them here holds for the
 # common case; a narrower PLACEROOT_TOOLS selection may not register one.
 _NAME_NOT_FOUND_TRY = (
-    "resolve_place with near_lat/near_lon or city to disambiguate; "
-    "or geocode for street addresses"
+    "resolve_place with near_lat/near_lon or city to disambiguate; or geocode for street addresses"
 )
 
 
@@ -139,7 +138,7 @@ _GERS_ID_RE = re.compile(r"^[0-9a-f]{32}$", re.IGNORECASE)
 _LOCATION_REF_BAD_REQUEST = {
     "error": "bad_request",
     "detail": (
-        "location must be one of: {\"lat\": ..., \"lon\": ...} with numeric lat/lon in "
+        'location must be one of: {"lat": ..., "lon": ...} with numeric lat/lon in '
         "range, a GERS id string (32 hex characters), or a non-empty free-text place name"
     ),
 }
@@ -187,7 +186,7 @@ def _resolve_location_ref(ref) -> tuple[dict | None, dict | None]:
                     ),
                     "try": (
                         "resolve_place or geocode to find the right id; "
-                        "or pass a {\"lat\", \"lon\"} location instead"
+                        'or pass a {"lat", "lon"} location instead'
                     ),
                 }
             return {
@@ -307,8 +306,12 @@ def _resolve_matrix_side(points: list, param_name: str) -> tuple[list[dict] | No
     return _resolve_location_refs(points, param_name)
 
 
-def _matrix_resolved_echo(origins: list, resolved_origins: list[dict],
-                           destinations: list, resolved_destinations: list[dict]) -> dict | None:
+def _matrix_resolved_echo(
+    origins: list,
+    resolved_origins: list[dict],
+    destinations: list,
+    resolved_destinations: list[dict],
+) -> dict | None:
     """The {"origins": [...], "destinations": [...]} resolved echo, string items only."""
     echo = {}
     o_echo = [
@@ -395,23 +398,33 @@ def _resolve_route_ends(from_, to) -> tuple[dict | None, dict | None, dict | Non
     implementation rather than two that can drift.
     """
     if isinstance(from_, str) and not from_.strip():
-        return None, None, {
-            "error": "bad_request",
-            "detail": "from must be a non-empty place name",
-            "field": "from",
-        }
+        return (
+            None,
+            None,
+            {
+                "error": "bad_request",
+                "detail": "from must be a non-empty place name",
+                "field": "from",
+            },
+        )
     if isinstance(to, str) and not to.strip():
-        return None, None, {
-            "error": "bad_request",
-            "detail": "to must be a non-empty place name",
-            "field": "to",
-        }
+        return (
+            None,
+            None,
+            {
+                "error": "bad_request",
+                "detail": "to must be a non-empty place name",
+                "field": "to",
+            },
+        )
     # Both ends still plain names (not GERS ids): the original, byte-
     # identical path — same parallel _resolve_pair call, same
     # ambiguous_place/not_found shape as before this feature existed.
     if (
-        isinstance(from_, str) and isinstance(to, str)
-        and not _GERS_ID_RE.match(from_.strip()) and not _GERS_ID_RE.match(to.strip())
+        isinstance(from_, str)
+        and isinstance(to, str)
+        and not _GERS_ID_RE.match(from_.strip())
+        and not _GERS_ID_RE.match(to.strip())
     ):
         origin, dest = _resolve_pair(from_, to)
         if "error" in origin:
@@ -425,9 +438,7 @@ def _resolve_route_ends(from_, to) -> tuple[dict | None, dict | None, dict | Non
         (origin, origin_error), (dest, dest_error) = _resolve_ref_pair(from_, to)
     else:
         origin, origin_error = _resolve_location_ref(from_)
-        dest, dest_error = (
-            (None, None) if origin_error is not None else _resolve_location_ref(to)
-        )
+        dest, dest_error = (None, None) if origin_error is not None else _resolve_location_ref(to)
     if origin_error is not None:
         return None, None, {**origin_error, "field": "from"}
     if dest_error is not None:

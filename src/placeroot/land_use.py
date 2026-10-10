@@ -185,8 +185,12 @@ def _from_source(bbox: tuple[float, float, float, float], type_: str) -> str:
 def _bundled_grid_path() -> Path | None:
     """The wheel-bundled land-cover grid for the active release, or None."""
     try:
-        p = (resources.files("placeroot") / "data" / "land-cover-grid"
-             / f"{release.resolve_release()}.parquet")
+        p = (
+            resources.files("placeroot")
+            / "data"
+            / "land-cover-grid"
+            / f"{release.resolve_release()}.parquet"
+        )
         return Path(str(p)) if p.is_file() else None
     except (OSError, TypeError):
         return None
@@ -208,10 +212,14 @@ def _grid_land_cover(lat: float, lon: float) -> dict | None:
         return None
     gx, gy = math.floor(lon / GRID_DEG), math.floor(lat / GRID_DEG)
     try:
-        row = db.new_connection().execute(
-            f"SELECT subtype FROM read_parquet('{grid}') WHERE gx = ? AND gy = ?",
-            [gx, gy],
-        ).fetchone()
+        row = (
+            db.new_connection()
+            .execute(
+                f"SELECT subtype FROM read_parquet('{grid}') WHERE gx = ? AND gy = ?",
+                [gx, gy],
+            )
+            .fetchone()
+        )
     except duckdb.Error as e:
         logger.warning("bundled land-cover grid read failed (using exact path): %s", e)
         return None
@@ -228,16 +236,23 @@ def _land_cover_tiles_warm(lat: float, lon: float) -> bool:
         return False
     bbox = geo.bbox_around(lat, lon, POINT_QUERY_RADIUS_M)
     try:
-        return bool(cache.cached_tile_paths_for_bbox(
-            release.resolve_release(), _cache_theme(TYPE_LAND_COVER),
-            _upstream_glob(TYPE_LAND_COVER), bbox,
-        ))
+        return bool(
+            cache.cached_tile_paths_for_bbox(
+                release.resolve_release(),
+                _cache_theme(TYPE_LAND_COVER),
+                _upstream_glob(TYPE_LAND_COVER),
+                bbox,
+            )
+        )
     except duckdb.Error:
         return False
 
 
 def _classify(
-    lat: float, lon: float, type_: str, include_name: bool,
+    lat: float,
+    lon: float,
+    type_: str,
+    include_name: bool,
     con=None,
 ) -> tuple[dict | None, bool]:
     """Smallest-area polygon of type_ containing (lat, lon), and whether it was ambiguous.
@@ -262,8 +277,7 @@ def _classify(
     # without it this is an ST_Contains scan over every polygon of this type
     # on Earth (divisions.py measured that at 10+ minutes live).
     bbox_prefilter = (
-        "bbox.xmin <= $lon AND bbox.xmax >= $lon"
-        " AND bbox.ymin <= $lat AND bbox.ymax >= $lat"
+        "bbox.xmin <= $lon AND bbox.xmax >= $lon AND bbox.ymin <= $lat AND bbox.ymax >= $lat"
     )
     # No ORDER BY area in the SQL, deliberately: a TopN on a sort key
     # computed from geometry forces the parquet scan to produce geometry
@@ -284,8 +298,7 @@ def _classify(
     # (recreation._projection's recipe). With no id column there is
     # nothing to key on and no dedupe.
     dedupe = (
-        "" if "id" in missing
-        else "QUALIFY id IS NULL OR row_number() OVER (PARTITION BY id) = 1"
+        "" if "id" in missing else "QUALIFY id IS NULL OR row_number() OVER (PARTITION BY id) = 1"
     )
     sql = f"""
         SELECT
@@ -370,20 +383,17 @@ def land_use_at(lat: float, lon: float) -> dict:
             # a repeat query from "approximate" to exact polygons.
             try:
                 cache.source_sql(
-                    _cache_theme(TYPE_LAND_COVER), _upstream_glob(TYPE_LAND_COVER),
+                    _cache_theme(TYPE_LAND_COVER),
+                    _upstream_glob(TYPE_LAND_COVER),
                     geo.bbox_around(lat, lon, POINT_QUERY_RADIUS_M),
                 )
             except duckdb.Error:
                 pass  # scheduling is an optimization; the grid already answered
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        lu_f = pool.submit(
-            _classify, lat, lon, TYPE_LAND_USE, True, db.new_connection()
-        )
+        lu_f = pool.submit(_classify, lat, lon, TYPE_LAND_USE, True, db.new_connection())
         if grid_cover is None:
-            lc_f = pool.submit(
-                _classify, lat, lon, TYPE_LAND_COVER, False, db.new_connection()
-            )
+            lc_f = pool.submit(_classify, lat, lon, TYPE_LAND_COVER, False, db.new_connection())
         land_use, lu_ambiguous = lu_f.result()
         if grid_cover is None:
             land_cover, lc_ambiguous = lc_f.result()

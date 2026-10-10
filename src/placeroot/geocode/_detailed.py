@@ -10,7 +10,10 @@ _pkg = _sys.modules["placeroot.geocode"]
 
 
 def geocode(
-    query: str, limit: int = DEFAULT_LIMIT, lang: str | None = None, country: str | None = None,
+    query: str,
+    limit: int = DEFAULT_LIMIT,
+    lang: str | None = None,
+    country: str | None = None,
     near: NearConstraint | None = None,
 ) -> list[dict]:
     """Free-text place name -> ranked candidates. See geocode_detailed.
@@ -20,9 +23,10 @@ def geocode(
     return _pkg.geocode_detailed(query, limit, lang=lang, country=country, near=near)["results"]
 
 
-
 def geocode_batch(
-    queries: list[str], limit_per_query: int = 3, country: str | None = None,
+    queries: list[str],
+    limit_per_query: int = 3,
+    country: str | None = None,
 ) -> list[dict]:
     """Geocode many names against ONE opened local divisions table (#329).
 
@@ -46,32 +50,40 @@ def geocode_batch(
     rows = []
     for query in queries:
         hits = _pkg.geocode_detailed(
-            query, limit_per_query, local_table=local_table, alt_table=alt_table,
+            query,
+            limit_per_query,
+            local_table=local_table,
+            alt_table=alt_table,
             country=country,
         )["results"]
         if not hits:
-            rows.append({
-                "query": query,
-                "error": "not_found",
-                "detail": f"no match for {query!r}",
-            })
+            rows.append(
+                {
+                    "query": query,
+                    "error": "not_found",
+                    "detail": f"no match for {query!r}",
+                }
+            )
             continue
         top = hits[0]
-        rows.append({
-            "query": query,
-            "name": top["name"],
-            "type": top["type"],
-            "lat": top["lat"],
-            "lon": top["lon"],
-            "id": top["id"],
-            "rank_score": top["rank_score"],
-        })
+        rows.append(
+            {
+                "query": query,
+                "name": top["name"],
+                "type": top["type"],
+                "lat": top["lat"],
+                "lon": top["lon"],
+                "id": top["id"],
+                "rank_score": top["rank_score"],
+            }
+        )
     return rows
 
 
-
 def geocode_detailed(
-    query: str, limit: int = DEFAULT_LIMIT, include_country: bool = False,
+    query: str,
+    limit: int = DEFAULT_LIMIT,
+    include_country: bool = False,
     *,
     local_table: str | None = None,
     alt_table: str | None = None,
@@ -272,8 +284,12 @@ def geocode_detailed(
         {"country_code": normalized_country} if normalized_country is not None else {}
     )
     divisions = _pkg._query_divisions(
-        search_query, region_code, local_table, alt_table=alt_table,
-        country_code=country_code, **near_kw,
+        search_query,
+        region_code,
+        local_table,
+        alt_table=alt_table,
+        country_code=country_code,
+        **near_kw,
     )
     if region_code and not divisions:
         # #46: recognized a region suffix, but nothing in this dataset
@@ -284,8 +300,12 @@ def geocode_detailed(
         country_code = normalized_country
         search_query = query
         divisions = _pkg._query_divisions(
-            search_query, None, local_table, alt_table=alt_table,
-            **explicit_country_kw, **near_kw,
+            search_query,
+            None,
+            local_table,
+            alt_table=alt_table,
+            **explicit_country_kw,
+            **near_kw,
         )
     elif country_code and not divisions and country_code_from_suffix:
         # #457: same idea, but degrading to the BASE name (not the whole
@@ -414,8 +434,12 @@ def geocode_detailed(
         # names, correctly returns nothing for those.
         rows = (
             _pkg._query_divisions(
-                stripped_query, region_code, local_table,
-                fold_diacritics=True, country_code=country_code, **near_kw,
+                stripped_query,
+                region_code,
+                local_table,
+                fold_diacritics=True,
+                country_code=country_code,
+                **near_kw,
             )
             if stripped_query
             else []
@@ -482,10 +506,14 @@ def geocode_detailed(
         # gets its chance first, same as when a split derives one.
         and near is None
         and _pkg._fallback_anchor(
-            search_query, [], region_code, local_table,
+            search_query,
+            [],
+            region_code,
+            local_table,
             alt_table=_pkg._local_alt_names_table(local_table),
             region_population=_pkg._region_population_lookup(local_table),
-        ) is None
+        )
+        is None
     ):
         # The stage-0 bundled index carries only populous divisions; a
         # long-tail name (an unpopulated hamlet) must not read as "no such
@@ -497,7 +525,9 @@ def geocode_detailed(
         # zero-row divisions scan ran ahead of it — and the same upstream
         # scan runs after it instead, only if nothing at all was found
         # (see the empty-candidates recall retry below).
-        divisions = _pkg._query_divisions(search_query, region_code, None, country_code=country_code)  # noqa: E501
+        divisions = _pkg._query_divisions(
+            search_query, region_code, None, country_code=country_code
+        )  # noqa: E501
         _bundled_recall_pending = False
 
     region_population = _pkg._region_population_lookup(local_table)
@@ -527,8 +557,10 @@ def geocode_detailed(
     alias_hit = _pkg._alias_anchor(search_query)
     if alias_hit is not None:
         alat, alon, _aname = alias_hit
+
         def _near_alias(d):
             return geo.haversine_m(alat, alon, d["lat"], d["lon"]) <= _pkg._CITY_HINT_RADIUS_M
+
         divisions = [d for d in divisions if _near_alias(d)]
         # #215 stands the places fallback down once *any* fuzzy row exists.
         # A far namesake that only survived as a typo correction (Colosseo
@@ -564,7 +596,11 @@ def geocode_detailed(
             anchor_options = [(near[0], near[1], search_query)]
         else:
             anchor_options = _pkg._fallback_anchor_candidates(
-                search_query, divisions, region_code, local_table, alt_table=alt_table,
+                search_query,
+                divisions,
+                region_code,
+                local_table,
+                alt_table=alt_table,
                 region_population=region_population,
             )
         # #329: a famous landmark with no derivable city still has an
@@ -573,10 +609,7 @@ def geocode_detailed(
         # "Tower"/"Center" division).
         if alias_hit is not None:
             pin = (round(alias_hit[0], 3), round(alias_hit[1], 3))
-            rest = [
-                a for a in anchor_options
-                if (round(a[0], 3), round(a[1], 3)) != pin
-            ]
+            rest = [a for a in anchor_options if (round(a[0], 3), round(a[1], 3)) != pin]
             anchor_options = [alias_hit] + rest
         anchor_hit = anchor_options[0] if anchor_options else None
         anchor, name_query = (
@@ -616,7 +649,9 @@ def geocode_detailed(
             # hand is not a guess and schedules as before.
             speculative = divisions == [] and alias_hit is None and near is None
             places = _pkg._query_places_fallback(
-                name_query, anchor=anchor, also=search_query,
+                name_query,
+                anchor=anchor,
+                also=search_query,
                 schedule_tiles=not speculative,
             )
             if not places and len(anchor_options) > 1:
@@ -631,7 +666,9 @@ def geocode_detailed(
                 alternates = [(a[0], a[1]) for a in anchor_options[1:] if (a[0], a[1]) != anchor]
                 if alternates:
                     places, winner = _pkg._query_places_multi_anchor(
-                        name_query, alternates, also=search_query,
+                        name_query,
+                        alternates,
+                        also=search_query,
                     )
                     if places and winner is not None:
                         anchor = winner
@@ -719,7 +756,9 @@ def geocode_detailed(
     if lang:
         page = candidates[:limit]
         division_ids = [r["id"] for r in page if r.get("id") and r.get("_category") is None]
-        lang_variants = _pkg._lang_variants_for(_pkg._local_lang_names_table(local_table), division_ids, lang)  # noqa: E501
+        lang_variants = _pkg._lang_variants_for(
+            _pkg._local_lang_names_table(local_table), division_ids, lang
+        )  # noqa: E501
 
     out = []
     for row in candidates[:limit]:
@@ -730,7 +769,9 @@ def geocode_detailed(
             "lon": row["lon"],
             "id": row["id"],
             "admin_context": row["admin_context"],
-            "rank_score": _pkg._rank_score(row, search_query) if "_confidence" not in row else round(  # noqa: E501
+            "rank_score": _pkg._rank_score(row, search_query)
+            if "_confidence" not in row
+            else round(  # noqa: E501
                 0.4 + row["_confidence"] * 0.3, 3
             ),
         }
@@ -789,11 +830,7 @@ def geocode_detailed(
         # produced candidates, the skipped places half isn't what the caller
         # is missing.
         result["note"] = note
-    if (
-        _home_biased_winner_id is not None
-        and out
-        and out[0]["id"] == _home_biased_winner_id
-    ):
+    if _home_biased_winner_id is not None and out and out[0]["id"] == _home_biased_winner_id:
         # #406: only fires when the home-biased division is still the
         # actual top result after everything else (places fallback, limit
         # trim) has had its say — never when the bias was overridden by a
@@ -803,7 +840,6 @@ def geocode_detailed(
         disclosure = home_region.disclosure_note(home)
         result["note"] = f"{result['note']} {disclosure}" if result.get("note") else disclosure
     return result
-
 
 
 # --- #22: GERS id resolution -----------------------------------------------
@@ -835,11 +871,11 @@ _REMOTE_GLOB_SCHEMES = ("s3://", "http://", "https://", "gcs://", "gs://", "az:/
 _STOPWORD_RESIDUAL_NOTE = (
     "no division matched this query as a whole, and once its trailing location "
     "word is set aside as an anchor nothing distinctive is left to search place "
-    "names for (only common words like \"the\" or \"of\", or generic type words like "
-    "\"Station\" or \"Park\"), so the places half of "
+    'names for (only common words like "the" or "of", or generic type words like '
+    '"Station" or "Park"), so the places half of '
     "the search was skipped -- matching those against every place name is minutes "
     "of scanning for results that would be unrelated anyway. Spell the name out "
-    "(\"the Metropolitan Museum of Art\" rather than \"the Met\"), or use "
+    '("the Metropolitan Museum of Art" rather than "the Met"), or use '
     "find_places with lat/lon to search a known area."
 )
 
@@ -848,6 +884,6 @@ _UNANCHORED_NAME_SEARCH_NOTE = (
     "no division matched, and this query carries no location context to bound a "
     "place-name search by, so the places half of the search was skipped (it would "
     "scan the entire global places dataset -- minutes, not seconds). Add a location "
-    "to the query (\"Blue Bottle Roastery, Oakland\"), or use find_places with "
+    'to the query ("Blue Bottle Roastery, Oakland"), or use find_places with '
     "lat/lon (or resolve_place with near_lat/near_lon) to search a known area."
 )

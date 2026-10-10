@@ -50,8 +50,15 @@ def _run_route(
     """routing.route, with a 2x-ETA cap on a confirmed cold graph build."""
     if not cap_confirm_build:
         return routing.route(
-            from_lat, from_lon, to_lat, to_lon, mode=mode, include_path=include_path,
-            include_elevation=include_elevation, prefer=prefer, avoid=avoid,
+            from_lat,
+            from_lon,
+            to_lat,
+            to_lon,
+            mode=mode,
+            include_path=include_path,
+            include_elevation=include_elevation,
+            prefer=prefer,
+            avoid=avoid,
         )
     limit_s = _confirm_graph_cap_s()
     # Install a log list before copy so worker report() appends are visible
@@ -63,9 +70,15 @@ def _run_route(
         fut = pool.submit(
             ctx.run,
             routing.route,
-            from_lat, from_lon, to_lat, to_lon,
-            mode=mode, include_path=include_path,
-            include_elevation=include_elevation, prefer=prefer, avoid=avoid,
+            from_lat,
+            from_lon,
+            to_lat,
+            to_lon,
+            mode=mode,
+            include_path=include_path,
+            include_elevation=include_elevation,
+            prefer=prefer,
+            avoid=avoid,
         )
         try:
             return fut.result(timeout=limit_s)

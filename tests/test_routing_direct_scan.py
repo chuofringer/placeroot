@@ -43,9 +43,11 @@ def offline(tmp_path, monkeypatch):
 
     def probe(glob: str):
         if glob not in probed:
-            desc = duckdb.connect().execute(
-                f"SELECT * FROM read_parquet({db._sql_str(glob)}) LIMIT 0"
-            ).description
+            desc = (
+                duckdb.connect()
+                .execute(f"SELECT * FROM read_parquet({db._sql_str(glob)}) LIMIT 0")
+                .description
+            )
             probed[glob] = frozenset(c[0] for c in desc)
         return probed[glob]
 
@@ -100,17 +102,13 @@ def test_heavy_theme_tiles_on_disk_are_read_locally(offline, monkeypatch):
     assert path.exists()
 
     scheduled = []
-    monkeypatch.setattr(
-        cache, "_materialize_in_background", lambda *a, **k: scheduled.append(a)
-    )
+    monkeypatch.setattr(cache, "_materialize_in_background", lambda *a, **k: scheduled.append(a))
     source = cache.source_sql(THEME, glob, ONE_TILE_BBOX)
     assert source == f"read_parquet([{db._sql_str(str(path))}])"
     assert scheduled == [], "a fully cached box must not schedule any fetch"
 
 
-def test_heavy_theme_missing_tiles_scan_upstream_and_warm_in_background(
-    offline, monkeypatch
-):
+def test_heavy_theme_missing_tiles_scan_upstream_and_warm_in_background(offline, monkeypatch):
     """Default: no inline COPY. The query reads upstream directly (the
     bbox WHERE of the caller does row-group pruning) and every missing
     tile is scheduled on the background fetch path exactly once."""
@@ -119,14 +117,10 @@ def test_heavy_theme_missing_tiles_scan_upstream_and_warm_in_background(
     monkeypatch.setattr(
         cache,
         "_materialize_in_background",
-        lambda rel_, theme_, tile_, glob_, fp_, factory: scheduled.append(
-            (theme_, tile_, factory)
-        ),
+        lambda rel_, theme_, tile_, glob_, fp_, factory: scheduled.append((theme_, tile_, factory)),
     )
     copies = []
-    monkeypatch.setattr(
-        cache, "ensure_tile", _recording_ensure_tile(copies, threading.Lock())
-    )
+    monkeypatch.setattr(cache, "ensure_tile", _recording_ensure_tile(copies, threading.Lock()))
 
     source = cache.source_sql(THEME, glob, ONE_TILE_BBOX)
 
@@ -152,9 +146,7 @@ def test_env_switch_restores_inline_copy_off_the_lock(offline, monkeypatch, env_
     monkeypatch.setenv(env_var, "1")
     glob = str(FIXTURE_PATH)
     scheduled = []
-    monkeypatch.setattr(
-        cache, "_materialize_in_background", lambda *a, **k: scheduled.append(a)
-    )
+    monkeypatch.setattr(cache, "_materialize_in_background", lambda *a, **k: scheduled.append(a))
     copies = []
     monkeypatch.setattr(
         cache,
@@ -255,9 +247,7 @@ def test_wide_heavy_query_still_scans_directly(offline, monkeypatch):
     overflow was always a direct scan plus background warm."""
     monkeypatch.setenv("PLACEROOT_INLINE_TILE_COPY", "1")
     scheduled = []
-    monkeypatch.setattr(
-        cache, "_materialize_in_background", lambda *a, **k: scheduled.append(a)
-    )
+    monkeypatch.setattr(cache, "_materialize_in_background", lambda *a, **k: scheduled.append(a))
     copies = []
     monkeypatch.setattr(cache, "ensure_tile", _recording_ensure_tile(copies, threading.Lock()))
     wide = (-74.5, 40.1, -74.0, 40.6)  # 5 x 5 tiles at 0.125°, under MAX_TILES_PER_QUERY
@@ -310,8 +300,7 @@ def test_build_graph_sql_pushes_bbox_down_on_physical_struct_columns(monkeypatch
     params = captured["params"]
     xmin, ymin, xmax, ymax = routing._bbox_around(35.658, 139.7016, 2300.0)
     assert (
-        "bbox.xmax >= $xmin AND bbox.xmin <= $xmax"
-        " AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
+        "bbox.xmax >= $xmin AND bbox.xmin <= $xmax AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
     ) in sql
     assert params["xmin"] == xmin and params["xmax"] == xmax
     assert params["ymin"] == ymin and params["ymax"] == ymax

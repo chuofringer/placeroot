@@ -57,9 +57,7 @@ def park_adjacent(tmp_path):
 
 
 def test_park_adjacent_scores_higher_than_commercial_on_parks(park_adjacent):
-    park_side = area_score.score_locality(
-        ["parks"], lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000
-    )
+    park_side = area_score.score_locality(["parks"], lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000)
     commercial_side = area_score.score_locality(
         ["parks"], lat=ARCTIC_LAT, lon=ARCTIC_LON, radius_m=1000
     )
@@ -80,12 +78,8 @@ def test_commercial_locality_scores_higher_on_gyms(park_adjacent):
     # The NYC cluster has 22 gyms untouched by the park mutation (only its
     # bank rows were turned into parks); the Arctic cluster has none at
     # all — the inverse comparison to the parks test above.
-    gym_side = area_score.score_locality(
-        ["gyms"], lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000
-    )
-    no_gym_side = area_score.score_locality(
-        ["gyms"], lat=ARCTIC_LAT, lon=ARCTIC_LON, radius_m=1000
-    )
+    gym_side = area_score.score_locality(["gyms"], lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000)
+    no_gym_side = area_score.score_locality(["gyms"], lat=ARCTIC_LAT, lon=ARCTIC_LON, radius_m=1000)
     assert gym_side["requirements"][0]["count"] == 22
     assert no_gym_side["requirements"][0]["count"] == 0
     assert gym_side["requirements"][0]["score"] > no_gym_side["requirements"][0]["score"]
@@ -109,9 +103,7 @@ def test_park_never_counts_parking(park_adjacent, tmp_path):
     )
     overture.set_data_path(str(mutated))
     try:
-        result = area_score.score_locality(
-            ["parks"], lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000
-        )
+        result = area_score.score_locality(["parks"], lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000)
         assert result["requirements"][0]["count"] == 0
     finally:
         overture.set_data_path(_park_adjacent_fixture(tmp_path))
@@ -120,7 +112,9 @@ def test_park_never_counts_parking(park_adjacent, tmp_path):
 def test_subjective_requirement_is_flagged_not_scored(park_adjacent):
     result = area_score.score_locality(
         ["quiet streets", "safe neighborhood", "good schools"],
-        lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000,
+        lat=CENTER_LAT,
+        lon=CENTER_LON,
+        radius_m=1000,
     )
     for row in result["requirements"]:
         assert row["measurable"] is False
@@ -154,25 +148,19 @@ def test_plural_requirement_resolves_to_the_correct_singular_slug(park_adjacent)
     # (mountain_bike_parks) before it matches plain "park" — the module
     # must prefer the higher-confidence singular candidate.
     assert categories.search_categories("parks", limit=1)[0]["slug"] != "park"
-    result = area_score.score_locality(
-        ["parks"], lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000
-    )
+    result = area_score.score_locality(["parks"], lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000)
     assert result["requirements"][0]["category"] == "park"
 
 
 def test_nearest_distance_reported_when_matches_exist(park_adjacent):
-    result = area_score.score_locality(
-        ["parks"], lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000
-    )
+    result = area_score.score_locality(["parks"], lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000)
     row = result["requirements"][0]
     assert row["nearest_distance_m"] is not None
     assert row["nearest_distance_m"] >= 0
 
 
 def test_division_id_resolves_locality_centroid(park_adjacent):
-    result = area_score.score_locality(
-        ["parks"], division_id=DOWNTOWN_DIVISION_ID, radius_m=1000
-    )
+    result = area_score.score_locality(["parks"], division_id=DOWNTOWN_DIVISION_ID, radius_m=1000)
     assert result["locality"]["division_id"] == DOWNTOWN_DIVISION_ID
     assert result["locality"]["lat"] == pytest.approx(CENTER_LAT, abs=0.01)
     assert result["locality"]["lon"] == pytest.approx(CENTER_LON, abs=0.01)
@@ -182,7 +170,8 @@ def test_division_id_resolves_locality_centroid(park_adjacent):
 def test_division_id_not_found_raises(park_adjacent):
     with pytest.raises(area_score.LocalityNotFound):
         area_score.score_locality(
-            ["parks"], division_id="0" * 32,
+            ["parks"],
+            division_id="0" * 32,
         )
 
 
@@ -237,9 +226,7 @@ def test_degraded_category_columns_flag_measurable_false_not_zero(tmp_path):
     )
     overture.set_data_path(str(out))
     try:
-        result = area_score.score_locality(
-            ["parks"], lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000
-        )
+        result = area_score.score_locality(["parks"], lat=CENTER_LAT, lon=CENTER_LON, radius_m=1000)
         row = result["requirements"][0]
         assert row["measurable"] is False
         assert "degraded" in row["note"]
@@ -267,8 +254,10 @@ def test_gers_lookup_hint_narrows_division_lookup(park_adjacent, monkeypatch):
 
     monkeypatch.setattr(gers, "gers_lookup", spy)
     area_score.score_locality(
-        ["parks"], division_id=DOWNTOWN_DIVISION_ID,
-        near_lat=CENTER_LAT, near_lon=CENTER_LON,
+        ["parks"],
+        division_id=DOWNTOWN_DIVISION_ID,
+        near_lat=CENTER_LAT,
+        near_lon=CENTER_LON,
     )
     assert seen["near_lat"] == CENTER_LAT
     assert seen["near_lon"] == CENTER_LON

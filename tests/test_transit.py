@@ -341,9 +341,14 @@ def straddling_platform(tmp_path, monkeypatch):
     """)
     build.execute(
         "INSERT INTO infrastructure VALUES (?, ?, ?, ?, ?, ?)",
-        ["transit-straddle", [-74.0, 40.65],
-         {"xmin": -74.001, "ymin": 40.649, "xmax": -73.999, "ymax": 40.651},
-         "transit", "platform", {"primary": "Edge Platform"}],
+        [
+            "transit-straddle",
+            [-74.0, 40.65],
+            {"xmin": -74.001, "ymin": 40.649, "xmax": -73.999, "ymax": 40.651},
+            "transit",
+            "platform",
+            {"primary": "Edge Platform"},
+        ],
     )
     build.execute(f"COPY infrastructure TO '{src}' (FORMAT PARQUET)")
     build.close()
@@ -353,8 +358,7 @@ def straddling_platform(tmp_path, monkeypatch):
     ty = int(40.65 // deg)
     tiles = [(round(-74.0 / deg) - 1, ty), (round(-74.0 / deg), ty)]
     fingerprint = cache.resolve_fingerprint("2026-07-22.0", theme, str(src))
-    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint)
-             for t in tiles]
+    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint) for t in tiles]
     for p in paths:
         (n,) = con.execute(
             f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) "

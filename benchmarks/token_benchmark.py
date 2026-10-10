@@ -155,8 +155,7 @@ def _raw_admin_polygons(lat: float, lon: float) -> list[dict]:
     name_expr = "NULL" if "names" in missing else "names.primary"
     subtype_expr = "NULL" if "subtype" in missing else "subtype"
     bbox_prefilter = (
-        "bbox.xmin <= $lon AND bbox.xmax >= $lon"
-        " AND bbox.ymin <= $lat AND bbox.ymax >= $lat AND "
+        "bbox.xmin <= $lon AND bbox.xmax >= $lon AND bbox.ymin <= $lat AND bbox.ymax >= $lat AND "
         if "bbox" not in missing
         else ""
     )
@@ -376,23 +375,31 @@ def _area_comparison_task(
 AREA_COMPARISON_TASKS = [
     _area_comparison_task(
         "manhattan_vs_rural_upstate_ny",
-        "Midtown Manhattan", (40.7549, -73.9840),
-        "rural upstate NY", (42.6526, -74.9481),
+        "Midtown Manhattan",
+        (40.7549, -73.9840),
+        "rural upstate NY",
+        (42.6526, -74.9481),
     ),
     _area_comparison_task(
         "chicago_loop_vs_rural_il",
-        "Chicago Loop", (41.8827, -87.6233),
-        "rural downstate IL", (39.0997, -89.4085),
+        "Chicago Loop",
+        (41.8827, -87.6233),
+        "rural downstate IL",
+        (39.0997, -89.4085),
     ),
     _area_comparison_task(
         "sf_union_sq_vs_sierra_backcountry",
-        "SF Union Square", (37.7879, -122.4075),
-        "Sierra Nevada backcountry", (37.8651, -119.5383),
+        "SF Union Square",
+        (37.7879, -122.4075),
+        "Sierra Nevada backcountry",
+        (37.8651, -119.5383),
     ),
     _area_comparison_task(
         "austin_6th_st_vs_hill_country",
-        "Austin 6th Street", (30.2669, -97.7428),
-        "Texas Hill Country", (30.2500, -98.8700),
+        "Austin 6th Street",
+        (30.2669, -97.7428),
+        "Texas Hill Country",
+        (30.2500, -98.8700),
     ),
 ]
 

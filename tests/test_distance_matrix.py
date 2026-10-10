@@ -65,8 +65,7 @@ def test_distance_matrix_over_cap_both():
     assert result["error"] == "bad_request"
     assert "elements" not in result
     assert result["detail"] == (
-        "origins and destinations each accept at most 10 points, "
-        "got 12 origins and 15 destinations"
+        "origins and destinations each accept at most 10 points, got 12 origins and 15 destinations"
     )
 
 
@@ -112,8 +111,11 @@ def test_mixed_named_origin_and_destination(monkeypatch):
     def fake_resolve(query):
         assert query == "Austin Office"
         return {
-            "name": query, "lat": 30.2672, "lon": -97.7431,
-            "id": "gers-austin", "type": "place",
+            "name": query,
+            "lat": 30.2672,
+            "lon": -97.7431,
+            "id": "gers-austin",
+            "type": "place",
         }
 
     monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
@@ -123,8 +125,12 @@ def test_mixed_named_origin_and_destination(monkeypatch):
     assert "error" not in result
     assert result["resolved"]["origins"] == [
         {
-            "index": 0, "name": "Austin Office", "id": "gers-austin",
-            "lat": 30.2672, "lon": -97.7431, "matched_by": "name",
+            "index": 0,
+            "name": "Austin Office",
+            "id": "gers-austin",
+            "lat": 30.2672,
+            "lon": -97.7431,
+            "matched_by": "name",
         }
     ]
     assert "destinations" not in result["resolved"]
@@ -145,13 +151,12 @@ def test_ambiguous_destination_name_is_an_indexed_error(monkeypatch):
 
 def test_over_cap_checked_before_resolution(monkeypatch):
     """The 10-point cap fails before any name resolution is attempted."""
+
     def boom(query):
         raise AssertionError("resolve_named_place must not be called past the cap")
 
     monkeypatch.setattr(geocode, "resolve_named_place", boom)
     origins = ["Somewhere"] * 11
-    result = server.distance_matrix(
-        origins=origins, destinations=[{"lat": 0.0, "lon": 0.0}]
-    )
+    result = server.distance_matrix(origins=origins, destinations=[{"lat": 0.0, "lon": 0.0}])
     assert result["error"] == "bad_request"
     assert "elements" not in result

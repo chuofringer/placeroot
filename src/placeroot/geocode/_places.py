@@ -22,11 +22,9 @@ def _unbounded_name_search_enabled() -> bool:
     return value not in ("", "0", "false", "off")
 
 
-
 def _is_remote(glob: str) -> bool:
     """Whether reading `glob` means going over the network."""
     return glob.lower().startswith(_pkg._REMOTE_GLOB_SCHEMES)
-
 
 
 def _skip_unanchored_places_scan() -> bool:
@@ -140,7 +138,6 @@ _TYPE_WORD_CATEGORIES: dict[str, tuple[str, ...]] = {
 _TYPE_SCAN_SUPPORT_RADIUS_M = 1_000
 
 
-
 def _match_label(row: dict, query: str) -> str:
     """A geocode() result row -> how it matched `query`.
 
@@ -154,7 +151,6 @@ def _match_label(row: dict, query: str) -> str:
     if row.get("matched_by") == "fuzzy":
         return "fuzzy"
     return _MATCH_TIER_LABELS[_pkg._match_tier(row["name"], query)]
-
 
 
 def _division_match_label(row: dict, query: str, search_query: str) -> str:
@@ -184,14 +180,12 @@ def _division_match_label(row: dict, query: str, search_query: str) -> str:
     return label
 
 
-
 # resolve_place runs one find_places per significant token, each taking the
 # shared DuckDB connection lock — so an unbounded token count from a huge
 # query string is a lock-contention DoS against the whole server, not just a
 # slow response. A real place reference ("the Whole Foods on South Lamar,
 # Austin") is a handful of words; cap the fan-out well above that.
 _MAX_RESOLVE_TOKENS = 12
-
 
 
 def _nothing_but_stopwords(text: str) -> bool:
@@ -207,7 +201,6 @@ def _nothing_but_stopwords(text: str) -> bool:
     names). Those are distinctive enough to search on; "the" is not.
     """
     return not any(w.lower() not in _STOPWORDS for w in re.findall(r"[\w'-]+", text))
-
 
 
 def _nothing_but_generic(text: str) -> bool:
@@ -240,7 +233,6 @@ def _nothing_but_generic(text: str) -> bool:
     )
 
 
-
 def _significant_tokens(query: str) -> list[str]:
     """query -> its meaningful words: >=3 chars, not a stopword, in order of
     appearance, capped at _MAX_RESOLVE_TOKENS. Falls back to the whole query
@@ -249,8 +241,7 @@ def _significant_tokens(query: str) -> list[str]:
     """
     tokens = [t for t in re.findall(r"[\w'-]+", query) if len(t) >= 3]
     significant = [t for t in tokens if t.lower() not in _STOPWORDS]
-    return (significant or tokens or [query])[:_pkg._MAX_RESOLVE_TOKENS]
-
+    return (significant or tokens or [query])[: _pkg._MAX_RESOLVE_TOKENS]
 
 
 def _is_word_prefix(prefix: str, text: str) -> bool:
@@ -260,7 +251,6 @@ def _is_word_prefix(prefix: str, text: str) -> bool:
     if not prefix or not text.startswith(prefix):
         return False
     return len(text) == len(prefix) or not text[len(prefix)].isalnum()
-
 
 
 def _place_match_label(
@@ -327,13 +317,13 @@ def _place_match_label(
     n_tokens = set(_pkg._significant_tokens(n))
     q_tokens = set(_pkg._significant_tokens(q))
     q_distinctive = {
-        t for t in q_tokens
+        t
+        for t in q_tokens
         if t.strip(".,") not in _pkg._GENERIC_PLACE_WORDS and t not in context_words
     }
     if n_tokens & (q_distinctive or q_tokens):
         return "substring"
     return None
-
 
 
 def _type_word_slugs(search_query: str) -> tuple[str, ...]:
@@ -344,7 +334,6 @@ def _type_word_slugs(search_query: str) -> tuple[str, ...]:
     if not tokens:
         return ()
     return _pkg._TYPE_WORD_CATEGORIES.get(tokens[-1].lower().strip(".,"), ())
-
 
 
 # perf: how many of resolve_place's bounded places scans run side by side.
@@ -363,7 +352,6 @@ _PLACE_SCAN_WORKERS = 4
 _CONFIDENT_PLACE_LABEL = "exact"
 
 
-
 def _find_places_kwargs(**extra) -> dict:
     """The keywords in `extra` that the installed overture.find_places
     accepts. The suite's test doubles answer to the six-parameter pre-#373
@@ -377,7 +365,6 @@ def _find_places_kwargs(**extra) -> dict:
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         return dict(extra)
     return {k: v for k, v in extra.items() if k in params}
-
 
 
 def _run_place_scans(jobs: list[Callable[[], list[dict]]]) -> list[list[dict]]:
@@ -407,16 +394,11 @@ def _run_place_scans(jobs: list[Callable[[], list[dict]]]) -> list[list[dict]]:
             return job()
 
     with ThreadPoolExecutor(max_workers=min(_PLACE_SCAN_WORKERS, len(jobs))) as pool:
-        futures = [
-            pool.submit(contextvars.copy_context().run, _isolated, job) for job in jobs
-        ]
+        futures = [pool.submit(contextvars.copy_context().run, _isolated, job) for job in jobs]
         return [f.result() for f in futures]
 
 
-
-def _type_scan_rows(
-    lat: float, lon: float, slugs: tuple[str, ...], token: str
-) -> list[dict]:
+def _type_scan_rows(lat: float, lon: float, slugs: tuple[str, ...], token: str) -> list[dict]:
     """#469: one bounded find_places scan for rows OF the query's kind whose
     name carries its distinctive word — "Shibuya" within train_station.
 
@@ -432,8 +414,12 @@ def _type_scan_rows(
     # match of it is not the answer, so the fuzzy tier is off (see
     # find_places' fuzzy_fallback); the alt-name tier still runs.
     rows = _pkg.overture.find_places(
-        lat, lon, radius_m=_pkg._RESOLVE_PLACE_RADIUS_M,
-        categories=list(slugs), name=token, limit=_pkg._RESOLVE_OVERFETCH,
+        lat,
+        lon,
+        radius_m=_pkg._RESOLVE_PLACE_RADIUS_M,
+        categories=list(slugs),
+        name=token,
+        limit=_pkg._RESOLVE_OVERFETCH,
         **_pkg._find_places_kwargs(fuzzy_fallback=False),
     )
     kept = []
@@ -448,9 +434,10 @@ def _type_scan_rows(
     return kept
 
 
-
 def _best_place_label(
-    name: str, query: str, alternates: list[str],
+    name: str,
+    query: str,
+    alternates: list[str],
     context_words: frozenset[str] = frozenset(),
 ) -> str | None:
     """The strongest label `name` earns against `query` or any of `alternates`.
@@ -475,7 +462,6 @@ def _best_place_label(
         ):
             best = label
     return best
-
 
 
 def _jaro_winkler(a: str, b: str) -> float:
@@ -515,9 +501,7 @@ def _jaro_winkler(a: str, b: str) -> float:
             if a[i] != b[j]:
                 transpositions += 1
             j += 1
-    jaro = (
-        matches / la + matches / lb + (matches - transpositions / 2) / matches
-    ) / 3
+    jaro = (matches / la + matches / lb + (matches - transpositions / 2) / matches) / 3
     if jaro <= 0.7:
         return jaro
     prefix = 0
@@ -526,7 +510,6 @@ def _jaro_winkler(a: str, b: str) -> float:
             break
         prefix += 1
     return jaro + prefix * 0.1 * (1 - jaro)
-
 
 
 def _fuzzy_place_covers_query(name: str, tokens: list[str]) -> bool:
@@ -558,7 +541,6 @@ def _fuzzy_place_covers_query(name: str, tokens: list[str]) -> bool:
     return True
 
 
-
 # #344: subtypes a `city` hint is allowed to resolve to without falling
 # back to the top (population-ranked) hit. Deliberately narrower than
 # _SUBTYPE_WEIGHT's full ladder — a hint named "city" should not silently
@@ -581,7 +563,6 @@ _ANCHOR_LOOKUP_LIMIT = 10
 # routinely past the first ten. The rows are already ranked and in memory
 # by then, so a deeper page costs a slice, not a scan.
 _ANCHORED_OVERFETCH = 50
-
 
 
 def _pick_city_hint_row(hits: list[dict]) -> dict:

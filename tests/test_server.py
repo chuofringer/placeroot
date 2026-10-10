@@ -279,6 +279,7 @@ def test_warm_metadata_async_returns_without_waiting_for_the_probe(monkeypatch):
     time.sleep(0.3)  # let the background thread finish before the test exits
     assert started == [True]
 
+
 def test_warm_divisions_async_returns_without_waiting_for_the_build(monkeypatch):
     """Issue #93: the divisions-table warm must be fire-and-forget, same as
     _warm_metadata_async — main() shouldn't stall startup waiting on the
@@ -345,7 +346,6 @@ def test_render_map_tool_handles_summarize_area_output(tmp_path, monkeypatch):
     summary = server.summarize_area(CENTER_LAT, CENTER_LON, radius_m=1000)
     result = server.render_map(summary, title="Area")
     assert result["features_rendered"] == 1  # one marker at the area center
-
 
 
 def test_release_attribution_reaches_instructions():

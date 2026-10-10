@@ -78,9 +78,7 @@ def test_compare_areas_tie_has_no_winner_class_but_still_emits_map():
     result = server.compare_areas(
         AREAS,
         radius_m=1000,
-        priorities=[
-            {"label": "bogus", "category": "totally_bogus_category_xyz", "prefer": "more"}
-        ],
+        priorities=[{"label": "bogus", "category": "totally_bogus_category_xyz", "prefer": "more"}],
     )
     assert result["verdict"]["winner_idx"] is None
     map_payload = result["map"]
@@ -93,9 +91,7 @@ def test_compare_areas_tie_has_no_winner_class_but_still_emits_map():
 
 
 def test_meeting_point_emits_map_payload(meeting_places):  # noqa: F811
-    result = server.meeting_point(
-        _origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True
-    )
+    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True)
     assert result["candidates"]
     assert "map" in result
     map_payload = result["map"]
@@ -138,12 +134,12 @@ def test_compare_areas_map_feeds_render_map_directly(tmp_path, monkeypatch):
 
 
 def test_meeting_point_map_feeds_render_map_directly(
-    meeting_places, tmp_path, monkeypatch  # noqa: F811
+    meeting_places,  # noqa: F811
+    tmp_path,
+    monkeypatch,
 ):
     monkeypatch.setenv("PLACEROOT_ARTIFACT_DIR", str(tmp_path))
-    result = server.meeting_point(
-        _origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True
-    )
+    result = server.meeting_point(_origins((*ORIGIN_A, "walk"), (*ORIGIN_B, "walk")), confirm=True)
 
     rendered = server.render_map(**result["map"], title="Meet", inline=True)
     assert rendered["skipped_features"] == 0

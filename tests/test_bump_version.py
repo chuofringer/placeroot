@@ -89,8 +89,7 @@ def test_site_bump_leaves_non_version_numbers_alone():
 def test_chip_renders_tool_names_in_the_tool_style():
     body = bump_version.render_chip_body(["route", "land_use_at"], None)
     assert body == (
-        '<span style="color:#8fbf96">route</span> · '
-        '<span style="color:#8fbf96">land_use_at</span>'
+        '<span style="color:#8fbf96">route</span> · <span style="color:#8fbf96">land_use_at</span>'
     )
 
 

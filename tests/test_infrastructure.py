@@ -41,9 +41,7 @@ _AIRPORT_LON_MIN = CENTER_LON - 0.01
 _AIRPORT_LON_MAX = CENTER_LON + 0.01
 
 _TOWER_WKT = f"POINT({_TOWER_LON} {_TOWER_LAT})"
-_BRIDGE_WKT = (
-    f"LINESTRING({_BRIDGE_LON_MIN} {_BRIDGE_LAT}, {_BRIDGE_LON_MAX} {_BRIDGE_LAT})"
-)
+_BRIDGE_WKT = f"LINESTRING({_BRIDGE_LON_MIN} {_BRIDGE_LAT}, {_BRIDGE_LON_MAX} {_BRIDGE_LAT})"
 _AIRPORT_WKT = (
     f"POLYGON(({_AIRPORT_LON_MIN} {_AIRPORT_LAT_MIN}, "
     f"{_AIRPORT_LON_MIN} {_AIRPORT_LAT_MAX}, "
@@ -82,7 +80,8 @@ def _build_infrastructure_fixture(path, include_class=True, features=_FEATURES) 
         """).fetchone()
         bbox = {"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax}
         values = (
-            [id_, wkb, bbox, subtype, class_, {"primary": name}] if include_class
+            [id_, wkb, bbox, subtype, class_, {"primary": name}]
+            if include_class
             else [id_, wkb, bbox, subtype, {"primary": name}]
         )
         placeholders = ", ".join(["?"] * len(values))
@@ -153,9 +152,7 @@ def test_high_latitude_nearest_point_is_measured_on_the_ground(tmp_path):
     )
     infrastructure.set_data_path(str(path))
     try:
-        rows, _, in_range_count = infrastructure.infrastructure_at(
-            lat0, lon0, radius_m=3000
-        )
+        rows, _, in_range_count = infrastructure.infrastructure_at(lat0, lon0, radius_m=3000)
         assert [r["name"] for r in rows] == ["Arctic Bridge"]
         assert in_range_count == 1
         assert rows[0]["distance_m"] == pytest.approx(2518.5, rel=0.01)
@@ -268,7 +265,7 @@ def test_cache_theme_is_a_portable_path_component():
     # component; ':' (the original separator) is illegal on Windows.
     theme = infrastructure._cache_theme()
     assert theme == "base_infrastructure"
-    assert not any(c in theme for c in ':\\/'), theme
+    assert not any(c in theme for c in ":\\/"), theme
 
 
 # --- server wiring ----------------------------------------------------------
@@ -280,7 +277,9 @@ def test_server_infrastructure_at_happy_path(infrastructure_fixture):
     assert result["center"] == {"lat": CENTER_LAT, "lon": CENTER_LON}
     assert result["radius_m"] == infrastructure.DEFAULT_RADIUS_M
     assert [r["name"] for r in result["results"]] == [
-        "Test Tower", "Test Bridge", "Test Airport",
+        "Test Tower",
+        "Test Bridge",
+        "Test Airport",
     ]
 
 
@@ -355,9 +354,7 @@ def furniture_fixture(tmp_path):
 def test_oversized_limit_is_clamped_to_max_rows(furniture_fixture):
     """The response-size cap holds even for a direct caller asking for
     everything; the window-function total still reports the full set."""
-    rows, _, total_in_range = infrastructure.infrastructure_at(
-        CENTER_LAT, CENTER_LON, limit=10_000
-    )
+    rows, _, total_in_range = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON, limit=10_000)
     assert len(rows) == infrastructure.MAX_ROWS
     assert total_in_range == _LAMP_COUNT + 1
 
@@ -378,9 +375,7 @@ def test_subtype_filter_surfaces_the_landmark_the_lamps_were_hiding(furniture_fi
 
 
 def test_class_filter_matches_the_class_column(furniture_fixture):
-    rows, _, _ = infrastructure.infrastructure_at(
-        CENTER_LAT, CENTER_LON, infra_class="viaduct"
-    )
+    rows, _, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON, infra_class="viaduct")
     assert [r["name"] for r in rows] == ["Hidden Bridge"]
 
 
@@ -433,13 +428,9 @@ def test_filter_underscore_is_literal_not_a_wildcard(tmp_path):
     _build_infrastructure_fixture(path, features=_UNDERSCORE_FEATURES)
     infrastructure.set_data_path(str(path))
     try:
-        rows, _, _ = infrastructure.infrastructure_at(
-            CENTER_LAT, CENTER_LON, subtype="foo_bar"
-        )
+        rows, _, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON, subtype="foo_bar")
         assert [r["name"] for r in rows] == ["Literal Underscore"]
-        rows, _, _ = infrastructure.infrastructure_at(
-            CENTER_LAT, CENTER_LON, infra_class="foo_bar"
-        )
+        rows, _, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON, infra_class="foo_bar")
         assert [r["name"] for r in rows] == ["Literal Underscore"]
     finally:
         infrastructure.set_data_path(None)
@@ -470,11 +461,12 @@ def test_prefilter_ring_features_are_not_dropped(tmp_path):
     _build_infrastructure_fixture(path, features=_RING_FEATURES)
     infrastructure.set_data_path(str(path))
     try:
-        rows, _, _ = infrastructure.infrastructure_at(
-            CENTER_LAT, CENTER_LON, radius_m=500
-        )
+        rows, _, _ = infrastructure.infrastructure_at(CENTER_LAT, CENTER_LON, radius_m=500)
         assert [r["name"] for r in rows] == [
-            "Ring Tower 499.5", "Ring Tower 499.7", "Ring Tower 499.9", "Ring Tower 500.0",
+            "Ring Tower 499.5",
+            "Ring Tower 499.7",
+            "Ring Tower 499.9",
+            "Ring Tower 500.0",
         ]
         for row in rows:
             assert row["distance_m"] == pytest.approx(float(row["name"].split()[-1]), abs=0.2)
@@ -511,10 +503,20 @@ def _bbox_of(lat_min, lat_max, lon_min, lon_max):
 
 # A bridge deck crossing the tile edge at lon=-74, and a tower wholly
 # inside the eastern tile.
-_EDGE_BRIDGE = ("infra-straddle", _bbox_of(40.649, 40.651, -74.01, -73.99),
-                "bridge", "bridge", "Edge Bridge")
-_INSIDE_TOWER = ("infra-inside", _bbox_of(40.65, 40.65, -73.995, -73.995),
-                 "communication", "communication_tower", "Inside Tower")
+_EDGE_BRIDGE = (
+    "infra-straddle",
+    _bbox_of(40.649, 40.651, -74.01, -73.99),
+    "bridge",
+    "bridge",
+    "Edge Bridge",
+)
+_INSIDE_TOWER = (
+    "infra-inside",
+    _bbox_of(40.65, 40.65, -73.995, -73.995),
+    "communication",
+    "communication_tower",
+    "Inside Tower",
+)
 
 
 def _write_centre_geometry_fixture(path, rows) -> None:
@@ -559,12 +561,10 @@ def straddling_infrastructure(tmp_path, monkeypatch):
     ty = int(40.65 // deg)
     tiles = [(round(-74.0 / deg) - 1, ty), (round(-74.0 / deg), ty)]
     fingerprint = cache.resolve_fingerprint("2026-07-22.0", theme, str(src))
-    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint)
-             for t in tiles]
+    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint) for t in tiles]
     for p in paths:
         (n,) = con.execute(
-            f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) "
-            "WHERE id = 'infra-straddle'"
+            f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) WHERE id = 'infra-straddle'"
         ).fetchone()
         assert n == 1
     source = f"read_parquet([{', '.join(db._sql_str(str(p)) for p in paths)}])"
@@ -596,9 +596,7 @@ def test_total_is_deduped_even_when_the_limit_clips(straddling_infrastructure):
     assert total_in_range == 2
 
 
-def test_no_id_column_means_no_dedupe_in_infrastructure(
-    straddling_infrastructure, monkeypatch
-):
+def test_no_id_column_means_no_dedupe_in_infrastructure(straddling_infrastructure, monkeypatch):
     """Without id there is nothing to key on (a NULL partition would
     collapse every row into one), so no QUALIFY is emitted and the
     duplicate shows — the harness really does see both copies."""

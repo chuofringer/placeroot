@@ -190,8 +190,10 @@ def test_from_to_parallel_resolves_keep_progress(monkeypatch):
 
 def test_from_to_with_coordinate_dicts():
     result = server.from_to(
-        {"lat": FROM_LAT, "lon": FROM_LON}, {"lat": TO_LAT, "lon": TO_LON},
-        mode="walk", confirm=True,
+        {"lat": FROM_LAT, "lon": FROM_LON},
+        {"lat": TO_LAT, "lon": TO_LON},
+        mode="walk",
+        confirm=True,
     )
     assert "error" not in result
     assert result["distance_m"] > 0
@@ -213,8 +215,14 @@ def test_from_to_with_gers_ids(monkeypatch):
             lat, lon = TO_LAT, TO_LON
             name = "Dest GERS"
         return {
-            "id": id_, "theme": "places", "type": "place", "name": name,
-            "lat": lat, "lon": lon, "summary": {}, "related": {},
+            "id": id_,
+            "theme": "places",
+            "type": "place",
+            "name": name,
+            "lat": lat,
+            "lon": lon,
+            "summary": {},
+            "related": {},
         }
 
     monkeypatch.setattr(server.gers, "gers_lookup", fake_lookup)

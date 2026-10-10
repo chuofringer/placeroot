@@ -123,9 +123,14 @@ def test_session_middleware_binds_for_the_handler(anyio_backend="asyncio"):
 
 def test_session_middleware_wraps_the_other_placeroot_middleware():
     chain = server.mcp._lowlevel_server.middleware
-    order = [chain.index(m) for m in (
-        server._session_middleware, server._progress_middleware, server._trace_middleware,
-    )]
+    order = [
+        chain.index(m)
+        for m in (
+            server._session_middleware,
+            server._progress_middleware,
+            server._trace_middleware,
+        )
+    ]
     assert order == sorted(order), "chain composes outermost-first; session must bind first"
 
 

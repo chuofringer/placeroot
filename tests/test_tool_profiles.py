@@ -43,7 +43,7 @@ def test_all_wins_over_other_entries():
 
 
 def test_all_does_not_excuse_an_unknown_name():
-    """"all,typo" must fail like "typo", not silently load everything."""
+    """ "all,typo" must fail like "typo", not silently load everything."""
     with pytest.raises(tool_profiles.InvalidToolSelection) as excinfo:
         server.build_server("all,typo")
     assert "typo" in str(excinfo.value)
@@ -140,7 +140,11 @@ def test_env_var_drives_the_selection(monkeypatch):
     monkeypatch.setenv("PLACEROOT_TOOLS", "geometry")
     registered = {t.name for t in asyncio.run(server.build_server().list_tools())}
     assert registered == {
-        "simplify_geometry", "render_map", "geometry_op", "data_version", "preferences",
+        "simplify_geometry",
+        "render_map",
+        "geometry_op",
+        "data_version",
+        "preferences",
     }
 
 
@@ -170,9 +174,7 @@ def test_a_typo_inside_a_profile_definition_fails_at_build(monkeypatch):
     typo just dropped that tool from the profile with nothing to notice —
     unlike a typo in the env var, which fails loudly.
     """
-    monkeypatch.setitem(
-        tool_profiles.PROFILES, "core", frozenset({"find_places", "find_playces"})
-    )
+    monkeypatch.setitem(tool_profiles.PROFILES, "core", frozenset({"find_places", "find_playces"}))
     with pytest.raises(tool_profiles.InvalidProfileDefinition) as excinfo:
         server.build_server("core")
     assert "find_playces" in str(excinfo.value)
@@ -189,9 +191,7 @@ def test_build_server_logs_the_active_selection(caplog):
     with caplog.at_level(logging.INFO, logger="placeroot.server"):
         server.build_server("core")
     assert "PLACEROOT_TOOLS=core" in caplog.text
-    registered = len(tool_profiles.PROFILES["core"]) + len(
-        tool_profiles.ALWAYS_INCLUDED
-    )
+    registered = len(tool_profiles.PROFILES["core"]) + len(tool_profiles.ALWAYS_INCLUDED)
     assert f"registered {registered} of" in caplog.text
 
 

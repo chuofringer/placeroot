@@ -121,12 +121,15 @@ def _resolve_home_point(text: str) -> dict | None:
         return None
     except Exception:  # noqa: BLE001 - a bad home config must never break the server
         logger.warning(
-            "home_region: unexpected error resolving %s", HOME_ENV_VAR, exc_info=True,
+            "home_region: unexpected error resolving %s",
+            HOME_ENV_VAR,
+            exc_info=True,
         )
         return None
     if not hits:
         logger.warning(
-            "home_region: %s did not resolve to any place; bias disabled", HOME_ENV_VAR,
+            "home_region: %s did not resolve to any place; bias disabled",
+            HOME_ENV_VAR,
         )
         return None
     top = hits[0]
@@ -178,9 +181,7 @@ def in_home_region(lat: float | None, lon: float | None) -> bool:
 
 def disclosure_note(home: dict) -> str:
     """The one-line note attached when the bias changed an answer's top result."""
-    return (
-        f"{DISCLOSURE_PREFIX} ({home['name']}); pass a city/near hint to override"
-    )
+    return f"{DISCLOSURE_PREFIX} ({home['name']}); pass a city/near hint to override"
 
 
 def kick_home_autowarm() -> None:

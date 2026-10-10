@@ -28,8 +28,8 @@ _EXPECTED_TOTAL_AREA_M2 = sum(_EXPECTED_AREAS_M2)
 _EXPECTED_MEAN_AREA_M2 = _EXPECTED_TOTAL_AREA_M2 / _N
 _EXPECTED_HEIGHT_KNOWN = sum(1 for i in range(_N) if i % _HEIGHT_STRIDE == 0)
 _EXPECTED_SUBTYPE_COUNTS = {
-    s: sum(1 for i in range(_N) if _SUBTYPE_CYCLE[i % 4] == s) for s in ["residential",
-    "commercial", "industrial"]
+    s: sum(1 for i in range(_N) if _SUBTYPE_CYCLE[i % 4] == s)
+    for s in ["residential", "commercial", "industrial"]
 }
 
 # A radius comfortably covering the whole 8x10 grid (pitch 25m, so corner-to-
@@ -38,6 +38,7 @@ FULL_GRID_RADIUS_M = 300
 
 
 # --- summarize_buildings -----------------------------------------------
+
 
 def test_radius_m_reports_the_effective_clamped_radius():
     # #136 (buildings sibling of #131): _bbox_filter clamps radius_m to
@@ -86,6 +87,7 @@ def test_small_radius_returns_a_strict_subset():
 
 # --- buildings_at --------------------------------------------------------
 
+
 def test_results_are_nearest_first():
     rows = buildings.buildings_at(CENTER_LAT, CENTER_LON, radius_m=FULL_GRID_RADIUS_M, limit=25)
     distances = [r["distance_m"] for r in rows]
@@ -95,9 +97,7 @@ def test_results_are_nearest_first():
 def test_limit_is_respected_and_capped_at_max_rows():
     rows = buildings.buildings_at(CENTER_LAT, CENTER_LON, radius_m=FULL_GRID_RADIUS_M, limit=3)
     assert len(rows) == 3
-    rows = buildings.buildings_at(
-        CENTER_LAT, CENTER_LON, radius_m=FULL_GRID_RADIUS_M, limit=10_000
-    )
+    rows = buildings.buildings_at(CENTER_LAT, CENTER_LON, radius_m=FULL_GRID_RADIUS_M, limit=10_000)
     assert len(rows) <= buildings.MAX_ROWS
 
 
@@ -106,8 +106,13 @@ def test_row_shape_has_no_geometry_by_default():
     for r in rows:
         assert "geometry" not in r
         assert set(r) == {
-            "id", "subtype", "class", "footprint_area_m2", "height_m",
-            "num_floors", "distance_m",
+            "id",
+            "subtype",
+            "class",
+            "footprint_area_m2",
+            "height_m",
+            "num_floors",
+            "distance_m",
         }
 
 
@@ -129,6 +134,7 @@ def test_include_geometry_returns_simplified_geojson_under_per_row_cap():
 
 
 # --- degraded columns ------------------------------------------------------
+
 
 def test_height_missing_entirely_is_omitted_not_zero(tmp_path):
     out = tmp_path / "no_height.parquet"
@@ -167,6 +173,7 @@ def test_missing_geometry_raises_schema_degraded(tmp_path):
 
 # --- structured errors (upstream) -------------------------------------
 
+
 def test_upstream_unavailable_raises(tmp_path):
     buildings.set_data_path(str(tmp_path / "does-not-exist" / "*.parquet"))
     try:
@@ -179,6 +186,7 @@ def test_upstream_unavailable_raises(tmp_path):
 
 
 # --- budget ---------------------------------------------------------------
+
 
 def test_buildings_at_server_tool_applies_budget(monkeypatch):
     monkeypatch.setenv("PLACEROOT_TOKEN_BUDGET", "80")
@@ -207,6 +215,7 @@ def test_server_tools_return_structured_error_on_bad_path(tmp_path):
 
 
 # --- live (opt-in) ---------------------------------------------------------
+
 
 @pytest.mark.live
 def test_summarize_buildings_against_real_overture_data():
@@ -298,12 +307,10 @@ def straddling_buildings(tmp_path, monkeypatch):
     ty = int(40.65 // deg)
     tiles = [(round(-74.0 / deg) - 1, ty), (round(-74.0 / deg), ty)]
     fingerprint = cache.resolve_fingerprint("2026-07-22.0", theme, str(src))
-    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint)
-             for t in tiles]
+    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint) for t in tiles]
     for p in paths:
         (n,) = con.execute(
-            f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) "
-            "WHERE id = 'bld-straddle'"
+            f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) WHERE id = 'bld-straddle'"
         ).fetchone()
         assert n == 1
     source = f"read_parquet([{', '.join(db._sql_str(str(p)) for p in paths)}])"

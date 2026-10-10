@@ -41,24 +41,28 @@ logger = logging.getLogger(__name__)
 # City or equivalent locality. Country/region/county centroids are too
 # coarse for an 8 km prewarm. A POI, street, address, or postcode is not
 # a metro resolve.
-CITY_SCALE_TYPES = frozenset({
-    "locality",
-    "localadmin",
-    "neighborhood",
-    "macrohood",
-    "borough",
-})
+CITY_SCALE_TYPES = frozenset(
+    {
+        "locality",
+        "localadmin",
+        "neighborhood",
+        "macrohood",
+        "borough",
+    }
+)
 
-_NOT_CITY_TYPES = frozenset({
-    "place",
-    "postcode",
-    "address",
-    "street",
-    "country",
-    "region",
-    "county",
-    "dependency",
-})
+_NOT_CITY_TYPES = frozenset(
+    {
+        "place",
+        "postcode",
+        "address",
+        "street",
+        "country",
+        "region",
+        "county",
+        "dependency",
+    }
+)
 
 # ~28 km cells: Shibuya and central Tokyo share a cell; Austin and Dallas
 # do not. Used for in-flight + disk-marker dedup so the same metro is not
@@ -221,7 +225,12 @@ def _run_autowarm(lat: float, lon: float, key: tuple[int, int]) -> None:
             )
             return
         routing._get_or_build_graph(
-            lat, lon, radius, "walk", None, want_shapes=True,
+            lat,
+            lon,
+            radius,
+            "walk",
+            None,
+            want_shapes=True,
         )
     except Exception as e:  # noqa: BLE001 - background warm must not surface
         logger.warning("autowarm: background warm failed for %s: %s", key, e)

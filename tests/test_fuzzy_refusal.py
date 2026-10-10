@@ -64,8 +64,13 @@ def test_the_gare_du_nord_shape_is_refused_offline(monkeypatch):
     covers "Gare" and "du" and says nothing about "Nord"; against the whole
     string it scores 0.883, well under the floor."""
     row = {
-        "name": "Garen Du", "lat": 48.463711, "lon": -3.48781, "id": "garen-du",
-        "type": "locality", "rank_score": 0.34, "matched_by": "fuzzy",
+        "name": "Garen Du",
+        "lat": 48.463711,
+        "lon": -3.48781,
+        "id": "garen-du",
+        "type": "locality",
+        "rank_score": 0.34,
+        "matched_by": "fuzzy",
         "admin_context": ["France", "Bretagne", "Côtes-d'Armor"],
     }
     monkeypatch.setattr(geocode, "geocode", lambda query, limit=None, lang=None, near=None: [row])

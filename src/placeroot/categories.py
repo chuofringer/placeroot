@@ -206,9 +206,7 @@ def _lexical_index() -> tuple[list[tuple[dict, set[str], set[str]]], dict[str, i
     global _LEX_INDEX, _LEX_DF
     if _LEX_INDEX is None or _LEX_DF is None:
         rows = _load_categories()
-        _LEX_INDEX = [
-            (row, _row_word_set(row), set(_tokenize(row["slug"]))) for row in rows
-        ]
+        _LEX_INDEX = [(row, _row_word_set(row), set(_tokenize(row["slug"]))) for row in rows]
         df: dict[str, int] = {}
         for _, words, _ in _LEX_INDEX:
             for word in words:
@@ -432,7 +430,8 @@ def _embedding_matches(
 
     by_slug = {row["slug"]: row for row in rows}
     candidates = [
-        (slug, sim) for slug, sim in sims
+        (slug, sim)
+        for slug, sim in sims
         if slug not in exclude and sim >= _EMBED_SIM_FLOOR and slug in by_slug
     ]
     candidates.sort(key=lambda t: -t[1])

@@ -65,16 +65,22 @@ def test_free_text_name_resolves_via_resolve_named_place(monkeypatch):
     def fake_resolve(query):
         assert query == "Cluster Place 000"
         return {
-            "name": query, "lat": CENTER_LAT, "lon": CENTER_LON,
-            "id": "gers-cluster", "type": "place",
+            "name": query,
+            "lat": CENTER_LAT,
+            "lon": CENTER_LON,
+            "id": "gers-cluster",
+            "type": "place",
         }
 
     monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
     item, err = server._resolve_location_ref("Cluster Place 000")
     assert err is None
     assert item == {
-        "id": "gers-cluster", "name": "Cluster Place 000",
-        "lat": CENTER_LAT, "lon": CENTER_LON, "matched_by": "name",
+        "id": "gers-cluster",
+        "name": "Cluster Place 000",
+        "lat": CENTER_LAT,
+        "lon": CENTER_LON,
+        "matched_by": "name",
     }
 
 
@@ -130,8 +136,11 @@ def test_garbage_refs_are_bad_request(ref):
 def test_list_resolves_mixed_coords_and_names_in_order(monkeypatch):
     def fake_resolve(query):
         return {
-            "name": query, "lat": CENTER_LAT + 0.001, "lon": CENTER_LON,
-            "id": "gers-y", "type": "place",
+            "name": query,
+            "lat": CENTER_LAT + 0.001,
+            "lon": CENTER_LON,
+            "id": "gers-y",
+            "type": "place",
         }
 
     monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)

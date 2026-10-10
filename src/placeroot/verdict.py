@@ -393,9 +393,7 @@ def _verdict_sentence(
         else ""
     )
     empty = (
-        "Mapped places look sparse here. "
-        if total_places is not None and total_places == 0
-        else ""
+        "Mapped places look sparse here. " if total_places is not None and total_places == 0 else ""
     )
 
     def _bits(rows: list[dict], n: int = 3) -> str:

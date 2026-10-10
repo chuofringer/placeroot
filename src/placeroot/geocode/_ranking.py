@@ -48,10 +48,12 @@ _MAX_ANCHOR_TOKENS = 6
 # airport" then found nothing, 7.7s later. Distinct from
 # _GENERIC_PLACE_WORDS: those say what a place is, these are the first half
 # of its name, and both are useless as an anchor on their own.
-_NAME_PREFIX_WORDS = frozenset("""
+_NAME_PREFIX_WORDS = frozenset(
+    """
     big cape east el fort grand la las little los lower monte mount new north
     old port saint san santa santo sao são sierra south st ste upper villa west
-""".split())
+""".split()
+)
 
 
 # How much population a specific division (a city) must carry, relative to the
@@ -95,7 +97,8 @@ _NAMESAKE_LOCALITY_SHARE = _ANCHOR_SPECIFIC_SHARE
 # not as an anchor, and not as evidence that "Snow Peak Land Station" has
 # anything to do with "Shibuya Station". "hall" and "shrine" were added for
 # that use and are refused as anchors under the same reasoning.
-_GENERIC_PLACE_WORDS = frozenset("""
+_GENERIC_PLACE_WORDS = frozenset(
+    """
     academy airport aquarium arena avenue basilica bay beach boulevard bridge dam falls
     building campus castle cathedral centre center chapel church cinema clinic
     club college crossing dock field fountain garden gardens gate gym hall harbor
@@ -104,7 +107,8 @@ _GENERIC_PLACE_WORDS = frozenset("""
     plaza port preschool quay resort restaurant road school shrine square stadium
     station store street studio synagogue temple terminal theater theatre
     tower university wharf zoo
-""".split())
+""".split()
+)
 
 
 # Subdirectory (under cache.cache_dir()/<release>/) for the #43 materialized
@@ -166,19 +170,57 @@ _SUBTYPE_WEIGHT = {
 # recognize (non-US regions, spelled-out names not listed here) fall back
 # to _resolve_region_from_table.
 US_STATES = {
-    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
-    "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
-    "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho",
-    "IL": "Illinois", "IN": "Indiana", "IA": "Iowa", "KS": "Kansas",
-    "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
-    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi",
-    "MO": "Missouri", "MT": "Montana", "NE": "Nebraska", "NV": "Nevada",
-    "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
-    "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma",
-    "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
-    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
-    "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia",
-    "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
+    "AL": "Alabama",
+    "AK": "Alaska",
+    "AZ": "Arizona",
+    "AR": "Arkansas",
+    "CA": "California",
+    "CO": "Colorado",
+    "CT": "Connecticut",
+    "DE": "Delaware",
+    "FL": "Florida",
+    "GA": "Georgia",
+    "HI": "Hawaii",
+    "ID": "Idaho",
+    "IL": "Illinois",
+    "IN": "Indiana",
+    "IA": "Iowa",
+    "KS": "Kansas",
+    "KY": "Kentucky",
+    "LA": "Louisiana",
+    "ME": "Maine",
+    "MD": "Maryland",
+    "MA": "Massachusetts",
+    "MI": "Michigan",
+    "MN": "Minnesota",
+    "MS": "Mississippi",
+    "MO": "Missouri",
+    "MT": "Montana",
+    "NE": "Nebraska",
+    "NV": "Nevada",
+    "NH": "New Hampshire",
+    "NJ": "New Jersey",
+    "NM": "New Mexico",
+    "NY": "New York",
+    "NC": "North Carolina",
+    "ND": "North Dakota",
+    "OH": "Ohio",
+    "OK": "Oklahoma",
+    "OR": "Oregon",
+    "PA": "Pennsylvania",
+    "RI": "Rhode Island",
+    "SC": "South Carolina",
+    "SD": "South Dakota",
+    "TN": "Tennessee",
+    "TX": "Texas",
+    "UT": "Utah",
+    "VT": "Vermont",
+    "VA": "Virginia",
+    "WA": "Washington",
+    "WV": "West Virginia",
+    "WI": "Wisconsin",
+    "WY": "Wyoming",
+    "DC": "District of Columbia",
 }
 
 _US_STATES_BY_NAME = {name.lower(): abbr for abbr, name in US_STATES.items()}
@@ -190,101 +232,254 @@ _US_STATES_BY_NAME = {name.lower(): abbr for abbr, name in US_STATES.items()}
 # a country-suffix hit, and the paired alpha-3 is recognized too
 # (COUNTRIES_BY_ALPHA3 below is derived from this, not maintained by hand).
 COUNTRIES = {
-    "AF": ("Afghanistan", "AFG"), "AX": ("Aland Islands", "ALA"), "AL": ("Albania", "ALB"),
-    "DZ": ("Algeria", "DZA"), "AS": ("American Samoa", "ASM"), "AD": ("Andorra", "AND"),
-    "AO": ("Angola", "AGO"), "AI": ("Anguilla", "AIA"), "AQ": ("Antarctica", "ATA"),
-    "AG": ("Antigua and Barbuda", "ATG"), "AR": ("Argentina", "ARG"), "AM": ("Armenia", "ARM"),
-    "AW": ("Aruba", "ABW"), "AU": ("Australia", "AUS"), "AT": ("Austria", "AUT"),
-    "AZ": ("Azerbaijan", "AZE"), "BS": ("Bahamas", "BHS"), "BH": ("Bahrain", "BHR"),
-    "BD": ("Bangladesh", "BGD"), "BB": ("Barbados", "BRB"), "BY": ("Belarus", "BLR"),
-    "BE": ("Belgium", "BEL"), "BZ": ("Belize", "BLZ"), "BJ": ("Benin", "BEN"),
-    "BM": ("Bermuda", "BMU"), "BT": ("Bhutan", "BTN"), "BO": ("Bolivia", "BOL"),
-    "BQ": ("Bonaire, Sint Eustatius and Saba", "BES"), "BA": ("Bosnia and Herzegovina", "BIH"),
-    "BW": ("Botswana", "BWA"), "BV": ("Bouvet Island", "BVT"), "BR": ("Brazil", "BRA"),
-    "IO": ("British Indian Ocean Territory", "IOT"), "BN": ("Brunei Darussalam", "BRN"),
-    "BG": ("Bulgaria", "BGR"), "BF": ("Burkina Faso", "BFA"), "BI": ("Burundi", "BDI"),
-    "CV": ("Cabo Verde", "CPV"), "KH": ("Cambodia", "KHM"), "CM": ("Cameroon", "CMR"),
-    "CA": ("Canada", "CAN"), "KY": ("Cayman Islands", "CYM"),
-    "CF": ("Central African Republic", "CAF"), "TD": ("Chad", "TCD"), "CL": ("Chile", "CHL"),
-    "CN": ("China", "CHN"), "CX": ("Christmas Island", "CXR"),
-    "CC": ("Cocos (Keeling) Islands", "CCK"), "CO": ("Colombia", "COL"),
-    "KM": ("Comoros", "COM"), "CG": ("Congo", "COG"),
-    "CD": ("Congo, Democratic Republic of the", "COD"), "CK": ("Cook Islands", "COK"),
-    "CR": ("Costa Rica", "CRI"), "CI": ("Cote d'Ivoire", "CIV"), "HR": ("Croatia", "HRV"),
-    "CU": ("Cuba", "CUB"), "CW": ("Curacao", "CUW"), "CY": ("Cyprus", "CYP"),
-    "CZ": ("Czechia", "CZE"), "DK": ("Denmark", "DNK"), "DJ": ("Djibouti", "DJI"),
-    "DM": ("Dominica", "DMA"), "DO": ("Dominican Republic", "DOM"), "EC": ("Ecuador", "ECU"),
-    "EG": ("Egypt", "EGY"), "SV": ("El Salvador", "SLV"), "GQ": ("Equatorial Guinea", "GNQ"),
-    "ER": ("Eritrea", "ERI"), "EE": ("Estonia", "EST"), "SZ": ("Eswatini", "SWZ"),
-    "ET": ("Ethiopia", "ETH"), "FK": ("Falkland Islands (Malvinas)", "FLK"),
-    "FO": ("Faroe Islands", "FRO"), "FJ": ("Fiji", "FJI"), "FI": ("Finland", "FIN"),
-    "FR": ("France", "FRA"), "GF": ("French Guiana", "GUF"), "PF": ("French Polynesia", "PYF"),
-    "TF": ("French Southern Territories", "ATF"), "GA": ("Gabon", "GAB"),
-    "GM": ("Gambia", "GMB"), "GE": ("Georgia", "GEO"), "DE": ("Germany", "DEU"),
-    "GH": ("Ghana", "GHA"), "GI": ("Gibraltar", "GIB"), "GR": ("Greece", "GRC"),
-    "GL": ("Greenland", "GRL"), "GD": ("Grenada", "GRD"), "GP": ("Guadeloupe", "GLP"),
-    "GU": ("Guam", "GUM"), "GT": ("Guatemala", "GTM"), "GG": ("Guernsey", "GGY"),
-    "GN": ("Guinea", "GIN"), "GW": ("Guinea-Bissau", "GNB"), "GY": ("Guyana", "GUY"),
-    "HT": ("Haiti", "HTI"), "HM": ("Heard Island and McDonald Islands", "HMD"),
-    "VA": ("Holy See", "VAT"), "HN": ("Honduras", "HND"), "HK": ("Hong Kong", "HKG"),
-    "HU": ("Hungary", "HUN"), "IS": ("Iceland", "ISL"), "IN": ("India", "IND"),
-    "ID": ("Indonesia", "IDN"), "IR": ("Iran", "IRN"), "IQ": ("Iraq", "IRQ"),
-    "IE": ("Ireland", "IRL"), "IM": ("Isle of Man", "IMN"), "IL": ("Israel", "ISR"),
-    "IT": ("Italy", "ITA"), "JM": ("Jamaica", "JAM"), "JP": ("Japan", "JPN"),
-    "JE": ("Jersey", "JEY"), "JO": ("Jordan", "JOR"), "KZ": ("Kazakhstan", "KAZ"),
-    "KE": ("Kenya", "KEN"), "KI": ("Kiribati", "KIR"),
+    "AF": ("Afghanistan", "AFG"),
+    "AX": ("Aland Islands", "ALA"),
+    "AL": ("Albania", "ALB"),
+    "DZ": ("Algeria", "DZA"),
+    "AS": ("American Samoa", "ASM"),
+    "AD": ("Andorra", "AND"),
+    "AO": ("Angola", "AGO"),
+    "AI": ("Anguilla", "AIA"),
+    "AQ": ("Antarctica", "ATA"),
+    "AG": ("Antigua and Barbuda", "ATG"),
+    "AR": ("Argentina", "ARG"),
+    "AM": ("Armenia", "ARM"),
+    "AW": ("Aruba", "ABW"),
+    "AU": ("Australia", "AUS"),
+    "AT": ("Austria", "AUT"),
+    "AZ": ("Azerbaijan", "AZE"),
+    "BS": ("Bahamas", "BHS"),
+    "BH": ("Bahrain", "BHR"),
+    "BD": ("Bangladesh", "BGD"),
+    "BB": ("Barbados", "BRB"),
+    "BY": ("Belarus", "BLR"),
+    "BE": ("Belgium", "BEL"),
+    "BZ": ("Belize", "BLZ"),
+    "BJ": ("Benin", "BEN"),
+    "BM": ("Bermuda", "BMU"),
+    "BT": ("Bhutan", "BTN"),
+    "BO": ("Bolivia", "BOL"),
+    "BQ": ("Bonaire, Sint Eustatius and Saba", "BES"),
+    "BA": ("Bosnia and Herzegovina", "BIH"),
+    "BW": ("Botswana", "BWA"),
+    "BV": ("Bouvet Island", "BVT"),
+    "BR": ("Brazil", "BRA"),
+    "IO": ("British Indian Ocean Territory", "IOT"),
+    "BN": ("Brunei Darussalam", "BRN"),
+    "BG": ("Bulgaria", "BGR"),
+    "BF": ("Burkina Faso", "BFA"),
+    "BI": ("Burundi", "BDI"),
+    "CV": ("Cabo Verde", "CPV"),
+    "KH": ("Cambodia", "KHM"),
+    "CM": ("Cameroon", "CMR"),
+    "CA": ("Canada", "CAN"),
+    "KY": ("Cayman Islands", "CYM"),
+    "CF": ("Central African Republic", "CAF"),
+    "TD": ("Chad", "TCD"),
+    "CL": ("Chile", "CHL"),
+    "CN": ("China", "CHN"),
+    "CX": ("Christmas Island", "CXR"),
+    "CC": ("Cocos (Keeling) Islands", "CCK"),
+    "CO": ("Colombia", "COL"),
+    "KM": ("Comoros", "COM"),
+    "CG": ("Congo", "COG"),
+    "CD": ("Congo, Democratic Republic of the", "COD"),
+    "CK": ("Cook Islands", "COK"),
+    "CR": ("Costa Rica", "CRI"),
+    "CI": ("Cote d'Ivoire", "CIV"),
+    "HR": ("Croatia", "HRV"),
+    "CU": ("Cuba", "CUB"),
+    "CW": ("Curacao", "CUW"),
+    "CY": ("Cyprus", "CYP"),
+    "CZ": ("Czechia", "CZE"),
+    "DK": ("Denmark", "DNK"),
+    "DJ": ("Djibouti", "DJI"),
+    "DM": ("Dominica", "DMA"),
+    "DO": ("Dominican Republic", "DOM"),
+    "EC": ("Ecuador", "ECU"),
+    "EG": ("Egypt", "EGY"),
+    "SV": ("El Salvador", "SLV"),
+    "GQ": ("Equatorial Guinea", "GNQ"),
+    "ER": ("Eritrea", "ERI"),
+    "EE": ("Estonia", "EST"),
+    "SZ": ("Eswatini", "SWZ"),
+    "ET": ("Ethiopia", "ETH"),
+    "FK": ("Falkland Islands (Malvinas)", "FLK"),
+    "FO": ("Faroe Islands", "FRO"),
+    "FJ": ("Fiji", "FJI"),
+    "FI": ("Finland", "FIN"),
+    "FR": ("France", "FRA"),
+    "GF": ("French Guiana", "GUF"),
+    "PF": ("French Polynesia", "PYF"),
+    "TF": ("French Southern Territories", "ATF"),
+    "GA": ("Gabon", "GAB"),
+    "GM": ("Gambia", "GMB"),
+    "GE": ("Georgia", "GEO"),
+    "DE": ("Germany", "DEU"),
+    "GH": ("Ghana", "GHA"),
+    "GI": ("Gibraltar", "GIB"),
+    "GR": ("Greece", "GRC"),
+    "GL": ("Greenland", "GRL"),
+    "GD": ("Grenada", "GRD"),
+    "GP": ("Guadeloupe", "GLP"),
+    "GU": ("Guam", "GUM"),
+    "GT": ("Guatemala", "GTM"),
+    "GG": ("Guernsey", "GGY"),
+    "GN": ("Guinea", "GIN"),
+    "GW": ("Guinea-Bissau", "GNB"),
+    "GY": ("Guyana", "GUY"),
+    "HT": ("Haiti", "HTI"),
+    "HM": ("Heard Island and McDonald Islands", "HMD"),
+    "VA": ("Holy See", "VAT"),
+    "HN": ("Honduras", "HND"),
+    "HK": ("Hong Kong", "HKG"),
+    "HU": ("Hungary", "HUN"),
+    "IS": ("Iceland", "ISL"),
+    "IN": ("India", "IND"),
+    "ID": ("Indonesia", "IDN"),
+    "IR": ("Iran", "IRN"),
+    "IQ": ("Iraq", "IRQ"),
+    "IE": ("Ireland", "IRL"),
+    "IM": ("Isle of Man", "IMN"),
+    "IL": ("Israel", "ISR"),
+    "IT": ("Italy", "ITA"),
+    "JM": ("Jamaica", "JAM"),
+    "JP": ("Japan", "JPN"),
+    "JE": ("Jersey", "JEY"),
+    "JO": ("Jordan", "JOR"),
+    "KZ": ("Kazakhstan", "KAZ"),
+    "KE": ("Kenya", "KEN"),
+    "KI": ("Kiribati", "KIR"),
     "KP": ("Korea, Democratic People's Republic of", "PRK"),
-    "KR": ("Korea, Republic of", "KOR"), "KW": ("Kuwait", "KWT"), "KG": ("Kyrgyzstan", "KGZ"),
-    "LA": ("Lao People's Democratic Republic", "LAO"), "LV": ("Latvia", "LVA"),
-    "LB": ("Lebanon", "LBN"), "LS": ("Lesotho", "LSO"), "LR": ("Liberia", "LBR"),
-    "LY": ("Libya", "LBY"), "LI": ("Liechtenstein", "LIE"), "LT": ("Lithuania", "LTU"),
-    "LU": ("Luxembourg", "LUX"), "MO": ("Macao", "MAC"), "MG": ("Madagascar", "MDG"),
-    "MW": ("Malawi", "MWI"), "MY": ("Malaysia", "MYS"), "MV": ("Maldives", "MDV"),
-    "ML": ("Mali", "MLI"), "MT": ("Malta", "MLT"), "MH": ("Marshall Islands", "MHL"),
-    "MQ": ("Martinique", "MTQ"), "MR": ("Mauritania", "MRT"), "MU": ("Mauritius", "MUS"),
-    "YT": ("Mayotte", "MYT"), "MX": ("Mexico", "MEX"), "FM": ("Micronesia", "FSM"),
-    "MD": ("Moldova", "MDA"), "MC": ("Monaco", "MCO"), "MN": ("Mongolia", "MNG"),
-    "ME": ("Montenegro", "MNE"), "MS": ("Montserrat", "MSR"), "MA": ("Morocco", "MAR"),
-    "MZ": ("Mozambique", "MOZ"), "MM": ("Myanmar", "MMR"), "NA": ("Namibia", "NAM"),
-    "NR": ("Nauru", "NRU"), "NP": ("Nepal", "NPL"), "NL": ("Netherlands", "NLD"),
-    "NC": ("New Caledonia", "NCL"), "NZ": ("New Zealand", "NZL"), "NI": ("Nicaragua", "NIC"),
-    "NE": ("Niger", "NER"), "NG": ("Nigeria", "NGA"), "NU": ("Niue", "NIU"),
-    "NF": ("Norfolk Island", "NFK"), "MK": ("North Macedonia", "MKD"),
-    "MP": ("Northern Mariana Islands", "MNP"), "NO": ("Norway", "NOR"), "OM": ("Oman", "OMN"),
-    "PK": ("Pakistan", "PAK"), "PW": ("Palau", "PLW"), "PS": ("Palestine, State of", "PSE"),
-    "PA": ("Panama", "PAN"), "PG": ("Papua New Guinea", "PNG"), "PY": ("Paraguay", "PRY"),
-    "PE": ("Peru", "PER"), "PH": ("Philippines", "PHL"), "PN": ("Pitcairn", "PCN"),
-    "PL": ("Poland", "POL"), "PT": ("Portugal", "PRT"), "PR": ("Puerto Rico", "PRI"),
-    "QA": ("Qatar", "QAT"), "RE": ("Reunion", "REU"), "RO": ("Romania", "ROU"),
-    "RU": ("Russian Federation", "RUS"), "RW": ("Rwanda", "RWA"),
+    "KR": ("Korea, Republic of", "KOR"),
+    "KW": ("Kuwait", "KWT"),
+    "KG": ("Kyrgyzstan", "KGZ"),
+    "LA": ("Lao People's Democratic Republic", "LAO"),
+    "LV": ("Latvia", "LVA"),
+    "LB": ("Lebanon", "LBN"),
+    "LS": ("Lesotho", "LSO"),
+    "LR": ("Liberia", "LBR"),
+    "LY": ("Libya", "LBY"),
+    "LI": ("Liechtenstein", "LIE"),
+    "LT": ("Lithuania", "LTU"),
+    "LU": ("Luxembourg", "LUX"),
+    "MO": ("Macao", "MAC"),
+    "MG": ("Madagascar", "MDG"),
+    "MW": ("Malawi", "MWI"),
+    "MY": ("Malaysia", "MYS"),
+    "MV": ("Maldives", "MDV"),
+    "ML": ("Mali", "MLI"),
+    "MT": ("Malta", "MLT"),
+    "MH": ("Marshall Islands", "MHL"),
+    "MQ": ("Martinique", "MTQ"),
+    "MR": ("Mauritania", "MRT"),
+    "MU": ("Mauritius", "MUS"),
+    "YT": ("Mayotte", "MYT"),
+    "MX": ("Mexico", "MEX"),
+    "FM": ("Micronesia", "FSM"),
+    "MD": ("Moldova", "MDA"),
+    "MC": ("Monaco", "MCO"),
+    "MN": ("Mongolia", "MNG"),
+    "ME": ("Montenegro", "MNE"),
+    "MS": ("Montserrat", "MSR"),
+    "MA": ("Morocco", "MAR"),
+    "MZ": ("Mozambique", "MOZ"),
+    "MM": ("Myanmar", "MMR"),
+    "NA": ("Namibia", "NAM"),
+    "NR": ("Nauru", "NRU"),
+    "NP": ("Nepal", "NPL"),
+    "NL": ("Netherlands", "NLD"),
+    "NC": ("New Caledonia", "NCL"),
+    "NZ": ("New Zealand", "NZL"),
+    "NI": ("Nicaragua", "NIC"),
+    "NE": ("Niger", "NER"),
+    "NG": ("Nigeria", "NGA"),
+    "NU": ("Niue", "NIU"),
+    "NF": ("Norfolk Island", "NFK"),
+    "MK": ("North Macedonia", "MKD"),
+    "MP": ("Northern Mariana Islands", "MNP"),
+    "NO": ("Norway", "NOR"),
+    "OM": ("Oman", "OMN"),
+    "PK": ("Pakistan", "PAK"),
+    "PW": ("Palau", "PLW"),
+    "PS": ("Palestine, State of", "PSE"),
+    "PA": ("Panama", "PAN"),
+    "PG": ("Papua New Guinea", "PNG"),
+    "PY": ("Paraguay", "PRY"),
+    "PE": ("Peru", "PER"),
+    "PH": ("Philippines", "PHL"),
+    "PN": ("Pitcairn", "PCN"),
+    "PL": ("Poland", "POL"),
+    "PT": ("Portugal", "PRT"),
+    "PR": ("Puerto Rico", "PRI"),
+    "QA": ("Qatar", "QAT"),
+    "RE": ("Reunion", "REU"),
+    "RO": ("Romania", "ROU"),
+    "RU": ("Russian Federation", "RUS"),
+    "RW": ("Rwanda", "RWA"),
     "BL": ("Saint Barthelemy", "BLM"),
     "SH": ("Saint Helena, Ascension and Tristan da Cunha", "SHN"),
-    "KN": ("Saint Kitts and Nevis", "KNA"), "LC": ("Saint Lucia", "LCA"),
-    "MF": ("Saint Martin (French part)", "MAF"), "PM": ("Saint Pierre and Miquelon", "SPM"),
-    "VC": ("Saint Vincent and the Grenadines", "VCT"), "WS": ("Samoa", "WSM"),
-    "SM": ("San Marino", "SMR"), "ST": ("Sao Tome and Principe", "STP"),
-    "SA": ("Saudi Arabia", "SAU"), "SN": ("Senegal", "SEN"), "RS": ("Serbia", "SRB"),
-    "SC": ("Seychelles", "SYC"), "SL": ("Sierra Leone", "SLE"), "SG": ("Singapore", "SGP"),
-    "SX": ("Sint Maarten (Dutch part)", "SXM"), "SK": ("Slovakia", "SVK"),
-    "SI": ("Slovenia", "SVN"), "SB": ("Solomon Islands", "SLB"), "SO": ("Somalia", "SOM"),
+    "KN": ("Saint Kitts and Nevis", "KNA"),
+    "LC": ("Saint Lucia", "LCA"),
+    "MF": ("Saint Martin (French part)", "MAF"),
+    "PM": ("Saint Pierre and Miquelon", "SPM"),
+    "VC": ("Saint Vincent and the Grenadines", "VCT"),
+    "WS": ("Samoa", "WSM"),
+    "SM": ("San Marino", "SMR"),
+    "ST": ("Sao Tome and Principe", "STP"),
+    "SA": ("Saudi Arabia", "SAU"),
+    "SN": ("Senegal", "SEN"),
+    "RS": ("Serbia", "SRB"),
+    "SC": ("Seychelles", "SYC"),
+    "SL": ("Sierra Leone", "SLE"),
+    "SG": ("Singapore", "SGP"),
+    "SX": ("Sint Maarten (Dutch part)", "SXM"),
+    "SK": ("Slovakia", "SVK"),
+    "SI": ("Slovenia", "SVN"),
+    "SB": ("Solomon Islands", "SLB"),
+    "SO": ("Somalia", "SOM"),
     "ZA": ("South Africa", "ZAF"),
     "GS": ("South Georgia and the South Sandwich Islands", "SGS"),
-    "SS": ("South Sudan", "SSD"), "ES": ("Spain", "ESP"), "LK": ("Sri Lanka", "LKA"),
-    "SD": ("Sudan", "SDN"), "SR": ("Suriname", "SUR"), "SJ": ("Svalbard and Jan Mayen", "SJM"),
-    "SE": ("Sweden", "SWE"), "CH": ("Switzerland", "CHE"),
-    "SY": ("Syrian Arab Republic", "SYR"), "TW": ("Taiwan", "TWN"),
-    "TJ": ("Tajikistan", "TJK"), "TZ": ("Tanzania, United Republic of", "TZA"),
-    "TH": ("Thailand", "THA"), "TL": ("Timor-Leste", "TLS"), "TG": ("Togo", "TGO"),
-    "TK": ("Tokelau", "TKL"), "TO": ("Tonga", "TON"), "TT": ("Trinidad and Tobago", "TTO"),
-    "TN": ("Tunisia", "TUN"), "TR": ("Turkiye", "TUR"), "TM": ("Turkmenistan", "TKM"),
-    "TC": ("Turks and Caicos Islands", "TCA"), "TV": ("Tuvalu", "TUV"),
-    "UG": ("Uganda", "UGA"), "UA": ("Ukraine", "UKR"), "AE": ("United Arab Emirates", "ARE"),
-    "GB": ("United Kingdom", "GBR"), "US": ("United States", "USA"),
-    "UM": ("United States Minor Outlying Islands", "UMI"), "UY": ("Uruguay", "URY"),
-    "UZ": ("Uzbekistan", "UZB"), "VU": ("Vanuatu", "VUT"), "VE": ("Venezuela", "VEN"),
-    "VN": ("Viet Nam", "VNM"), "VG": ("Virgin Islands (British)", "VGB"),
-    "VI": ("Virgin Islands (U.S.)", "VIR"), "WF": ("Wallis and Futuna", "WLF"),
-    "EH": ("Western Sahara", "ESH"), "YE": ("Yemen", "YEM"), "ZM": ("Zambia", "ZMB"),
+    "SS": ("South Sudan", "SSD"),
+    "ES": ("Spain", "ESP"),
+    "LK": ("Sri Lanka", "LKA"),
+    "SD": ("Sudan", "SDN"),
+    "SR": ("Suriname", "SUR"),
+    "SJ": ("Svalbard and Jan Mayen", "SJM"),
+    "SE": ("Sweden", "SWE"),
+    "CH": ("Switzerland", "CHE"),
+    "SY": ("Syrian Arab Republic", "SYR"),
+    "TW": ("Taiwan", "TWN"),
+    "TJ": ("Tajikistan", "TJK"),
+    "TZ": ("Tanzania, United Republic of", "TZA"),
+    "TH": ("Thailand", "THA"),
+    "TL": ("Timor-Leste", "TLS"),
+    "TG": ("Togo", "TGO"),
+    "TK": ("Tokelau", "TKL"),
+    "TO": ("Tonga", "TON"),
+    "TT": ("Trinidad and Tobago", "TTO"),
+    "TN": ("Tunisia", "TUN"),
+    "TR": ("Turkiye", "TUR"),
+    "TM": ("Turkmenistan", "TKM"),
+    "TC": ("Turks and Caicos Islands", "TCA"),
+    "TV": ("Tuvalu", "TUV"),
+    "UG": ("Uganda", "UGA"),
+    "UA": ("Ukraine", "UKR"),
+    "AE": ("United Arab Emirates", "ARE"),
+    "GB": ("United Kingdom", "GBR"),
+    "US": ("United States", "USA"),
+    "UM": ("United States Minor Outlying Islands", "UMI"),
+    "UY": ("Uruguay", "URY"),
+    "UZ": ("Uzbekistan", "UZB"),
+    "VU": ("Vanuatu", "VUT"),
+    "VE": ("Venezuela", "VEN"),
+    "VN": ("Viet Nam", "VNM"),
+    "VG": ("Virgin Islands (British)", "VGB"),
+    "VI": ("Virgin Islands (U.S.)", "VIR"),
+    "WF": ("Wallis and Futuna", "WLF"),
+    "EH": ("Western Sahara", "ESH"),
+    "YE": ("Yemen", "YEM"),
+    "ZM": ("Zambia", "ZMB"),
     "ZW": ("Zimbabwe", "ZWE"),
 }
 
@@ -308,7 +503,6 @@ _COUNTRY_ALIASES = {
 }
 
 
-
 def _strip_diacritics(s: str) -> str:
     """NFD-normalize and drop combining marks (#53) — "São Paulo" -> "Sao Paulo".
 
@@ -318,10 +512,8 @@ def _strip_diacritics(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", s) if not unicodedata.combining(c))
 
 
-
 def _normalize_for_match(s: str) -> str:
     return _strip_diacritics(s).lower()
-
 
 
 # #214: Latin letters that carry no combining mark of their own, so neither
@@ -352,7 +544,6 @@ _UNFOLDED_LETTERS = {
 }
 
 
-
 def _fold_alt_name(s: str) -> str:
     """Python side of the #214 alternate-name fold: lowercase, accents
     stripped, then _UNFOLDED_LETTERS applied. Must stay byte-identical to
@@ -365,7 +556,6 @@ def _fold_alt_name(s: str) -> str:
     return folded
 
 
-
 def _fold_alt_name_sql(expr: str) -> str:
     """SQL twin of _fold_alt_name over `expr`. Used once per alternate at
     materialization time so the query-time comparison is a plain ILIKE on a
@@ -376,9 +566,7 @@ def _fold_alt_name_sql(expr: str) -> str:
     return sql
 
 
-
 _TIER_PUNCT_RE = re.compile(r"[^\w\s]+")
-
 
 
 def _fold_for_tier(s: str) -> str:
@@ -392,11 +580,8 @@ def _fold_for_tier(s: str) -> str:
     and the #215 fuzzy threshold was calibrated against it; this one is
     only ever compared Python-to-Python, so it can fold harder.
     """
-    stripped = "".join(
-        c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c)
-    )
+    stripped = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
     return " ".join(_TIER_PUNCT_RE.sub(" ", stripped.casefold()).split())
-
 
 
 def _match_tier(name: str, query: str) -> int:
@@ -421,7 +606,6 @@ def _match_tier(name: str, query: str) -> int:
     return 1
 
 
-
 def _effective_tier(row: dict, query: str) -> int:
     """Match tier for `row`, using its stored `_tier` (#53) when present.
 
@@ -435,7 +619,6 @@ def _effective_tier(row: dict, query: str) -> int:
     """
     stored = row.get("_tier")
     return stored if stored is not None else _pkg._match_tier(row["name"], query)
-
 
 
 # #221: match tiers split into two groups for ranking. Exact (3) and prefix
@@ -452,7 +635,6 @@ _STRONG_TIER = 2
 # passes down — the same exact-or-prefix line _STRONG_TIER draws for the
 # abbreviation retries, applied to the diacritic-folded pass as well.
 _CONFIDENT_TIER = _STRONG_TIER
-
 
 
 def _home_bias_flag(row: dict, *, active: bool = True) -> int:
@@ -474,14 +656,12 @@ def _home_bias_flag(row: dict, *, active: bool = True) -> int:
     return 0 if home_region.in_home_region(row.get("lat"), row.get("lon")) else 1
 
 
-
 # #463: private row tag set by _flag_namesake_localities, read by _rank_key:
 # the population of the region/country the tagged locality is the namesake
 # of, which the locality ranks *as if* it carried. Rides along on the row
 # dict like `_variant`/`_fuzzy`; never serialized — geocode() builds each
 # returned entry field by field.
 _NAMESAKE_LOCALITY_KEY = "_namesake_locality"
-
 
 
 def _flag_namesake_localities(rows: list[dict], query: str) -> None:
@@ -542,7 +722,6 @@ def _flag_namesake_localities(rows: list[dict], query: str) -> None:
                 row[_NAMESAKE_LOCALITY_KEY] = max(
                     row.get(_NAMESAKE_LOCALITY_KEY) or 0, broad["population"]
                 )
-
 
 
 def _rank_key(row: dict, query: str, region_population: dict[str, int], *, home_bias: bool = True):
@@ -664,7 +843,6 @@ def _rank_key(row: dict, query: str, region_population: dict[str, int], *, home_
     )
 
 
-
 # #406: bounded home-region bonus on rank_score's ~0-1 scale. Sized between
 # the two existing bonuses on this scale: below population_bonus's 0.05
 # ceiling (a home candidate's displayed score still reads as less decisive
@@ -674,7 +852,6 @@ def _rank_key(row: dict, query: str, region_population: dict[str, int], *, home_
 # _home_bias_flag occupies in _rank_key: after tier/well-known-city, ahead
 # of population.
 _HOME_BIAS_SCORE_BONUS = 0.03
-
 
 
 def _rank_score(row: dict, query: str) -> float:
@@ -702,7 +879,6 @@ def _rank_score(row: dict, query: str) -> float:
     return round(score, 3)
 
 
-
 def _admin_context(hierarchies, self_name: str | None = None) -> list[str]:
     """Containing-chain names from the first hierarchy path, self excluded.
 
@@ -725,7 +901,6 @@ def _admin_context(hierarchies, self_name: str | None = None) -> list[str]:
         return names
     except (TypeError, KeyError, AttributeError):
         return []
-
 
 
 def _admin_chain_context(chain: list[str] | None, self_name: str | None = None) -> list[str]:

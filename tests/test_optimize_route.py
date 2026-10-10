@@ -118,8 +118,15 @@ def test_order_always_starts_at_start_index():
 def test_result_carries_no_geometry():
     result = routing.optimize_route(LINE_STOPS, mode="walk")
     assert set(result) <= {
-        "order", "legs", "total_distance_m", "total_duration_s", "mode", "roundtrip",
-        "truncated", "note", "estimated",
+        "order",
+        "legs",
+        "total_distance_m",
+        "total_duration_s",
+        "mode",
+        "roundtrip",
+        "truncated",
+        "note",
+        "estimated",
     }
     for leg in result["legs"]:
         assert set(leg) <= {"from_idx", "to_idx", "distance_m", "duration_s", "estimated"}
@@ -156,9 +163,7 @@ def test_one_graph_extraction_covers_every_stop(monkeypatch):
 
 
 def test_extraction_circle_contains_every_stop():
-    center_lat, center_lon, radius_m = routing._stops_extraction_geometry(
-        SQUARE_STOPS, "walk"
-    )
+    center_lat, center_lon, radius_m = routing._stops_extraction_geometry(SQUARE_STOPS, "walk")
     for lat, lon in SQUARE_STOPS:
         assert routing._haversine_m(center_lat, center_lon, lat, lon) <= radius_m
 
@@ -187,8 +192,7 @@ def test_solve_tsp_matches_brute_force_on_random_asymmetric_matrices(n, roundtri
     cost[j][i] — drive one-ways make the real matrix directed."""
     rng = random.Random(f"{n}-{roundtrip}")
     for _ in range(20):
-        cost = [[0.0 if i == j else rng.uniform(1.0, 100.0) for j in range(n)]
-                for i in range(n)]
+        cost = [[0.0 if i == j else rng.uniform(1.0, 100.0) for j in range(n)] for i in range(n)]
         start_index = rng.randrange(n)
         order = routing.solve_tsp(cost, start_index=start_index, roundtrip=roundtrip)
         total = sum(cost[a][b] for a, b in zip(order, order[1:]))
@@ -237,9 +241,7 @@ def test_cost_matrix_is_directed_for_a_one_way_graph():
     graph.add_edge("c", "a", 100.0, 100.0)
 
     points = [coords["a"], coords["b"], coords["c"]]
-    time_m, dist_m, estimated = routing._cost_matrices(
-        graph, ["a", "b", "c"], points, "walk"
-    )
+    time_m, dist_m, estimated = routing._cost_matrices(graph, ["a", "b", "c"], points, "walk")
     assert not estimated
     assert dist_m[0][1] == pytest.approx(100.0)  # straight down the one-way
     assert dist_m[1][0] == pytest.approx(200.0)  # b -> c -> a, the long way round
@@ -267,10 +269,7 @@ def test_unroutable_pair_is_estimated_and_flagged_not_a_crash():
         assert leg["distance_m"] > 0
         assert leg["duration_s"] > 0
     # Legs that stay on one bank are real routes, not estimates.
-    same_bank = [
-        leg for leg in result["legs"]
-        if {leg["from_idx"], leg["to_idx"]} == {0, 2}
-    ]
+    same_bank = [leg for leg in result["legs"] if {leg["from_idx"], leg["to_idx"]} == {0, 2}]
     assert same_bank and all("estimated" not in leg for leg in same_bank)
 
 
@@ -447,9 +446,7 @@ def test_route_too_long_reports_the_derived_per_mode_cap():
     far = [(0.0, 0.0), (0.0, 0.2)]  # ~22km apart, past walk's 7.5km cap
     result = server.optimize_route(_as_dicts(far), mode="walk")
     assert result["error"] == "route_too_long"
-    assert result["max_distance_m"] == pytest.approx(
-        routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"]
-    )
+    assert result["max_distance_m"] == pytest.approx(routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"])
 
 
 # --- extraction geometry -------------------------------------------------
@@ -463,10 +460,7 @@ def test_route_too_long_reports_the_derived_per_mode_cap():
 def _extraction_margins(stops, mode):
     """Slack, in meters, between each stop and the extraction circle's edge."""
     center_lat, center_lon, radius_m = routing._stops_extraction_geometry(stops, mode)
-    return [
-        radius_m - routing._haversine_m(center_lat, center_lon, lat, lon)
-        for lat, lon in stops
-    ]
+    return [radius_m - routing._haversine_m(center_lat, center_lon, lat, lon) for lat, lon in stops]
 
 
 def test_equilateral_stop_triple_stays_inside_the_extraction_circle():
@@ -482,10 +476,7 @@ def test_equilateral_stop_triple_stays_inside_the_extraction_circle():
     circumcenter, not the diametral midpoint.)
     """
     stops = [(37.730000, -122.460000), (37.730000, -122.386173), (37.780567, -122.423086)]
-    sides = [
-        routing._haversine_m(*a, *b)
-        for a, b in itertools.combinations(stops, 2)
-    ]
+    sides = [routing._haversine_m(*a, *b) for a, b in itertools.combinations(stops, 2)]
     assert min(sides) == pytest.approx(max(sides), rel=1e-3)  # equilateral
     assert max(sides) < routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"]  # inside the cap
 
@@ -588,15 +579,11 @@ def test_a_triple_spanning_just_under_the_advertised_cap_is_accepted():
     exceeds the pair-derived one.
     """
     stops = _isoceles_triple(7500.0, 70.0)
-    span_m = max(
-        routing._haversine_m(*a, *b) for a, b in itertools.combinations(stops, 2)
-    )
+    span_m = max(routing._haversine_m(*a, *b) for a, b in itertools.combinations(stops, 2))
     assert span_m < routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"]  # inside the cap
 
     center_lat, center_lon, radius_m = routing._stops_extraction_geometry(stops, "walk")
-    enclosing_m = max(
-        routing._haversine_m(center_lat, center_lon, lat, lon) for lat, lon in stops
-    )
+    enclosing_m = max(routing._haversine_m(center_lat, center_lon, lat, lon) for lat, lon in stops)
     assert enclosing_m > routing.ROUTE_MAX_ENCLOSING_RADIUS_M["walk"]  # the old reject
     assert min(_extraction_margins(stops, "walk")) >= routing.SNAP_RADIUS_M
     # Needs the widened n >= 3 extraction bound, and stays inside it.
@@ -645,13 +632,8 @@ def test_a_near_cap_equilateral_triple_at_high_latitude_is_accepted():
     latitude-aware cap in _stops_radius_cap_m accepts it.
     """
     circumradius_m = 55_093.5
-    stops = [
-        _geodesic_destination(82.0, 20.0, 60.0 + 120.0 * k, circumradius_m)
-        for k in range(3)
-    ]
-    span_m = max(
-        routing._haversine_m(*a, *b) for a, b in itertools.combinations(stops, 2)
-    )
+    stops = [_geodesic_destination(82.0, 20.0, 60.0 + 120.0 * k, circumradius_m) for k in range(3)]
+    span_m = max(routing._haversine_m(*a, *b) for a, b in itertools.combinations(stops, 2))
     assert span_m < routing.ROUTE_MAX_STRAIGHT_LINE_M["drive"]  # inside the cap
 
     # The distortion really does overshoot the old constant cap: this is the
@@ -684,9 +666,7 @@ def test_a_stop_set_over_the_span_cap_is_still_rejected_honestly():
     stops = _isoceles_triple(routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"] * 1.2, 70.0)
     with pytest.raises(routing.RouteTooLong) as excinfo:
         routing._stops_extraction_geometry(stops, "walk")
-    span_m = max(
-        routing._haversine_m(*a, *b) for a, b in itertools.combinations(stops, 2)
-    )
+    span_m = max(routing._haversine_m(*a, *b) for a, b in itertools.combinations(stops, 2))
     assert excinfo.value.distance_m == pytest.approx(span_m, rel=1e-9)
 
 
@@ -794,15 +774,24 @@ def test_mixed_stops_resolve_names_and_gers_ids(monkeypatch):
     def fake_resolve(query):
         assert query == "Coffee Place"
         return {
-            "name": "Coffee Place", "lat": name_lat, "lon": name_lon,
-            "id": "gers-coffee", "type": "place",
+            "name": "Coffee Place",
+            "lat": name_lat,
+            "lon": name_lon,
+            "id": "gers-coffee",
+            "type": "place",
         }
 
     def fake_lookup(id_, near_lat=None, near_lon=None):
         assert id_ == fake_id
         return {
-            "id": fake_id, "theme": "places", "type": "place", "name": "GERS Place",
-            "lat": id_lat, "lon": id_lon, "summary": {}, "related": {},
+            "id": fake_id,
+            "theme": "places",
+            "type": "place",
+            "name": "GERS Place",
+            "lat": id_lat,
+            "lon": id_lon,
+            "summary": {},
+            "related": {},
         }
 
     monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
@@ -814,12 +803,20 @@ def test_mixed_stops_resolve_names_and_gers_ids(monkeypatch):
     assert "error" not in result
     assert result["resolved"] == [
         {
-            "stop": 1, "name": "Coffee Place", "id": "gers-coffee",
-            "lat": name_lat, "lon": name_lon, "matched_by": "name",
+            "stop": 1,
+            "name": "Coffee Place",
+            "id": "gers-coffee",
+            "lat": name_lat,
+            "lon": name_lon,
+            "matched_by": "name",
         },
         {
-            "stop": 2, "name": "GERS Place", "id": fake_id,
-            "lat": id_lat, "lon": id_lon, "matched_by": "gers_id",
+            "stop": 2,
+            "name": "GERS Place",
+            "id": fake_id,
+            "lat": id_lat,
+            "lon": id_lon,
+            "matched_by": "gers_id",
         },
     ]
 

@@ -95,9 +95,7 @@ def _write_places(tmp_path, rows, filename="corridor_places.parquet"):
             sources STRUCT(dataset VARCHAR, record_id VARCHAR)[]
         )
     """)
-    con.executemany(
-        "INSERT INTO places VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
-    )
+    con.executemany("INSERT INTO places VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
     places_path = tmp_path / filename
     con.execute(f"COPY places TO '{places_path}' (FORMAT PARQUET)")
     overture.set_data_path(str(places_path))
@@ -106,14 +104,22 @@ def _write_places(tmp_path, rows, filename="corridor_places.parquet"):
 @pytest.fixture
 def corridor_places(tmp_path):
     """Point the places theme at a fixture built around the routing grid."""
-    _write_places(tmp_path, [
-        _place_row("p-start", "Start Deli", *NEAR_START_LATLON),
-        _place_row("p-mid", "Midway Coffee", *MID_LATLON,
-                   category="coffee_shop", basic_category="coffee_shop"),
-        _place_row("p-end", "Journey's End Bar", *NEAR_END_LATLON),
-        _place_row("p-beyond", "Off Corridor Diner", *BEYOND_LATLON),
-        _place_row("p-far", "Far Corner Shop", *FAR_LATLON),
-    ])
+    _write_places(
+        tmp_path,
+        [
+            _place_row("p-start", "Start Deli", *NEAR_START_LATLON),
+            _place_row(
+                "p-mid",
+                "Midway Coffee",
+                *MID_LATLON,
+                category="coffee_shop",
+                basic_category="coffee_shop",
+            ),
+            _place_row("p-end", "Journey's End Bar", *NEAR_END_LATLON),
+            _place_row("p-beyond", "Off Corridor Diner", *BEYOND_LATLON),
+            _place_row("p-far", "Far Corner Shop", *FAR_LATLON),
+        ],
+    )
     yield
 
 
@@ -171,9 +177,7 @@ def test_place_far_outside_the_corridor_is_excluded(corridor_places):
     """The far-corner shop is ~2km off the route: excluded by the bbox
     prefilter at a generous 1km corridor, and admitted only once
     max_detour_m is widened past its true distance."""
-    nearest_m = min(
-        routing._haversine_m(*FAR_LATLON, *fx.node_latlon(2, j)) for j in (2, 3, 4, 5)
-    )
+    nearest_m = min(routing._haversine_m(*FAR_LATLON, *fx.node_latlon(2, j)) for j in (2, 3, 4, 5))
     assert nearest_m > 1000.0
     assert "Far Corner Shop" not in {r["name"] for r in _corridor(max_detour_m=1000)["results"]}
     assert "Far Corner Shop" in {
@@ -216,7 +220,9 @@ def test_every_mode_answers(corridor_places, mode):
         FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode=mode, max_detour_m=MAX_DETOUR_M
     )
     assert [r["name"] for r in result["results"]] == [
-        "Start Deli", "Midway Coffee", "Journey's End Bar"
+        "Start Deli",
+        "Midway Coffee",
+        "Journey's End Bar",
     ]
     assert result["route"]["mode"] == mode
     assert result["route"]["distance_m"] > 0
@@ -225,8 +231,17 @@ def test_every_mode_answers(corridor_places, mode):
 def test_rows_keep_the_find_places_shape(corridor_places):
     row = _corridor()["results"][0]
     for field in (
-        "id", "name", "category", "basic_category", "operating_status",
-        "confidence", "brand", "has_website", "has_phone", "lat", "lon",
+        "id",
+        "name",
+        "category",
+        "basic_category",
+        "operating_status",
+        "confidence",
+        "brand",
+        "has_website",
+        "has_phone",
+        "lat",
+        "lon",
     ):
         assert field in row
     assert row["detour_m"] >= 0 and row["along_m"] >= 0
@@ -254,9 +269,7 @@ def test_unsupported_mode_propagates(corridor_places):
 def test_no_route_result_is_returned_when_nothing_connects(corridor_places, monkeypatch):
     """A disconnected pair yields route()'s own structured no_route answer
     rather than a bare empty result set."""
-    monkeypatch.setattr(
-        routing, "_shortest_path", lambda *a, **k: (routing.Graph(), None, {})
-    )
+    monkeypatch.setattr(routing, "_shortest_path", lambda *a, **k: (routing.Graph(), None, {}))
     result = _corridor()
     assert result["error"] == "no_route"
     assert result["mode"] == "walk"
@@ -266,9 +279,7 @@ def test_no_route_result_is_returned_when_nothing_connects(corridor_places, monk
 
 
 def test_truncated_flag_when_candidate_cap_is_hit(corridor_places, monkeypatch):
-    monkeypatch.setattr(
-        overture, "find_places_in_bbox", lambda *a, **k: ([], True)
-    )
+    monkeypatch.setattr(overture, "find_places_in_bbox", lambda *a, **k: ([], True))
     result = _corridor()
     assert result["truncated"] is True
     assert "narrow" in result["note"]
@@ -305,12 +316,20 @@ def alphabetical_decoy_places(tmp_path):
     """
     decoy_lat, decoy_lon = _offset(*fx.node_latlon(2, 4), 30.0, 90)
     rows = [
-        _place_row(f"decoy-{i:03d}", f"Aaa Shop {i:03d}",
-                   *_offset(decoy_lat, decoy_lon, float(i % 20), 0))
+        _place_row(
+            f"decoy-{i:03d}", f"Aaa Shop {i:03d}", *_offset(decoy_lat, decoy_lon, float(i % 20), 0)
+        )
         for i in range(599)
     ]
-    rows.append(_place_row("p-zzz", "Zzz Cafe", *_offset(TO_LAT, TO_LON, 20.0, 90),
-                           category="coffee_shop", basic_category="coffee_shop"))
+    rows.append(
+        _place_row(
+            "p-zzz",
+            "Zzz Cafe",
+            *_offset(TO_LAT, TO_LON, 20.0, 90),
+            category="coffee_shop",
+            basic_category="coffee_shop",
+        )
+    )
     _write_places(tmp_path, rows, "decoy_places.parquet")
     yield
 
@@ -377,9 +396,13 @@ def mid_segment_place(tmp_path):
     route passes 60m away.
     """
     midpoint = _offset(FROM_LAT, FROM_LON, 50.0, 0)  # halfway to node (2, 3)
-    _write_places(tmp_path, [
-        _place_row("p-block", "Mid Block Bakery", *_offset(*midpoint, 60.0, 90)),
-    ], "mid_segment_places.parquet")
+    _write_places(
+        tmp_path,
+        [
+            _place_row("p-block", "Mid Block Bakery", *_offset(*midpoint, 60.0, 90)),
+        ],
+        "mid_segment_places.parquet",
+    )
     yield
 
 
@@ -418,9 +441,7 @@ def test_point_to_segment_measures_perpendicular_distance_and_position():
 def test_corridor_bbox_wraps_instead_of_spanning_the_globe_at_the_seam():
     """A path straddling the antimeridian gets a tight box running past +180
     (which overture folds into two in-range boxes), not a whole latitude band."""
-    xmin, ymin, xmax, ymax = routing._corridor_bbox(
-        [(-17.5, 179.98), (-17.5, -179.98)], 100.0
-    )
+    xmin, ymin, xmax, ymax = routing._corridor_bbox([(-17.5, 179.98), (-17.5, -179.98)], 100.0)
     assert xmin > 179.0
     assert xmax > 180.0
     assert xmax - xmin < 1.0
@@ -457,7 +478,10 @@ def test_dijkstra_path_to_target_returns_the_node_chain():
         graph, source, target, routing.DEFAULT_SPEED_M_S
     )
     assert [node for node, _along in path] == [
-        fx.node_id(2, 2), fx.node_id(2, 3), fx.node_id(2, 4), fx.node_id(2, 5)
+        fx.node_id(2, 2),
+        fx.node_id(2, 3),
+        fx.node_id(2, 4),
+        fx.node_id(2, 5),
     ]
     alongs = [along for _node, along in path]
     assert alongs[0] == 0.0
@@ -496,7 +520,9 @@ def test_server_tool_returns_results_and_route(corridor_places):
         FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", max_detour_m=MAX_DETOUR_M
     )
     assert [r["name"] for r in result["results"]] == [
-        "Start Deli", "Midway Coffee", "Journey's End Bar"
+        "Start Deli",
+        "Midway Coffee",
+        "Journey's End Bar",
     ]
     assert result["route"]["mode"] == "walk"
     assert result["route"]["distance_m"] > 0
@@ -513,12 +539,13 @@ def test_server_tool_rejects_bad_coordinates(corridor_places):
 
 
 def test_server_tool_rejects_bad_max_detour(corridor_places):
-    result = server.places_along_route(
-        FROM_LAT, FROM_LON, TO_LAT, TO_LON, max_detour_m=0
-    )
+    result = server.places_along_route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, max_detour_m=0)
     assert result["error"] == "bad_request"
     over_cap = server.places_along_route(
-        FROM_LAT, FROM_LON, TO_LAT, TO_LON,
+        FROM_LAT,
+        FROM_LON,
+        TO_LAT,
+        TO_LON,
         max_detour_m=routing.CORRIDOR_MAX_DETOUR_M * 2,
     )
     assert over_cap["error"] == "bad_request"
@@ -528,15 +555,11 @@ def test_server_tool_rejects_bad_max_detour(corridor_places):
 def test_server_tool_route_too_long(corridor_places):
     result = server.places_along_route(0.0, 0.0, 10.0, 10.0, mode="walk")
     assert result["error"] == "route_too_long"
-    assert result["max_distance_m"] == pytest.approx(
-        routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"]
-    )
+    assert result["max_distance_m"] == pytest.approx(routing.ROUTE_MAX_STRAIGHT_LINE_M["walk"])
 
 
 def test_server_tool_unsupported_mode(corridor_places):
-    result = server.places_along_route(
-        FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="teleport"
-    )
+    result = server.places_along_route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="teleport")
     assert result["error"] == "unsupported_mode"
     assert "walk" in result["supported"]
     assert result["detail"] == "unsupported mode 'teleport'; supported: ['cycle', 'drive', 'walk']"

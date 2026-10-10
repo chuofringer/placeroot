@@ -45,9 +45,11 @@ def local_probe(monkeypatch):
     def probe(glob: str):
         if glob not in cache_:
             try:
-                desc = duckdb.connect().execute(
-                    f"SELECT * FROM read_parquet({db._sql_str(glob)}) LIMIT 0"
-                ).description
+                desc = (
+                    duckdb.connect()
+                    .execute(f"SELECT * FROM read_parquet({db._sql_str(glob)}) LIMIT 0")
+                    .description
+                )
             except duckdb.Error:
                 return None
             cache_[glob] = frozenset(c[0] for c in desc)
@@ -119,24 +121,20 @@ def test_cached_tile_paths_for_bbox_prunes_to_the_box(cache_dir, con):
     cache.ensure_tile(con, RELEASE, THEME, (-74, 40), glob, fp)
     cache.ensure_tile(con, RELEASE, THEME, (10, 50), glob, fp)  # far away, must be pruned
 
-    paths = cache.cached_tile_paths_for_bbox(
-        RELEASE, THEME, glob, (-73.95, 40.65, -73.85, 40.75)
-    )
+    paths = cache.cached_tile_paths_for_bbox(RELEASE, THEME, glob, (-73.95, 40.65, -73.85, 40.75))
     assert [p.name for p in paths] == ["tile_40_-74.parquet"]
     # The touched tile is claimed against eviction (#142).
     with cache._claims_lock:
         assert str(paths[0]) in cache._claims
 
     # A box touching no cached tile returns [] without touching upstream.
-    assert cache.cached_tile_paths_for_bbox(
-        RELEASE, THEME, glob, (0.05, 0.05, 0.15, 0.15)
-    ) == []
+    assert cache.cached_tile_paths_for_bbox(RELEASE, THEME, glob, (0.05, 0.05, 0.15, 0.15)) == []
 
     # An oversized box (over MAX_TILES_PER_QUERY tiles) returns [] — there
     # is no upstream fallback on this path, so skipping is the bounded answer.
-    assert cache.cached_tile_paths_for_bbox(
-        RELEASE, THEME, glob, (-179.0, -80.0, 179.0, 80.0)
-    ) == []
+    assert (
+        cache.cached_tile_paths_for_bbox(RELEASE, THEME, glob, (-179.0, -80.0, 179.0, 80.0)) == []
+    )
 
 
 def test_tiles_for_bbox_pole_query_stays_bounded():
@@ -177,8 +175,7 @@ def test_tiles_for_bbox_oversize_early_out_returns_real_tiles():
     assert len(tiles) > cache.MAX_TILES_PER_QUERY
     assert len(set(tiles)) == len(tiles)  # distinct ids, not N copies of one
     assert tiles[0] == (-180, -90)  # the bbox's own corner tile
-    assert all(t in {(x, y) for x in range(-180, 180) for y in range(-90, 90)}
-               for t in tiles)
+    assert all(t in {(x, y) for x in range(-180, 180) for y in range(-90, 90)} for t in tiles)
 
 
 def test_offline_fallback_picks_most_recently_used_not_most_recently_created(
@@ -191,8 +188,8 @@ def test_offline_fallback_picks_most_recently_used_not_most_recently_created(
     # newer dir. Rank by newest contained tile instead.
     base = cache_dir / RELEASE / THEME
     source = cache.source_key("unused-glob")
-    fp_active = base / f"aaaaaaaaaaaa-{source}"   # the real working set
-    fp_stray = base / f"bbbbbbbbbbbb-{source}"    # a later one-off, near-empty
+    fp_active = base / f"aaaaaaaaaaaa-{source}"  # the real working set
+    fp_stray = base / f"bbbbbbbbbbbb-{source}"  # a later one-off, near-empty
     fp_active.mkdir(parents=True)
     for i in range(5):
         (fp_active / f"tile_{i}_0.parquet").write_bytes(b"x")
@@ -336,9 +333,11 @@ def test_concurrent_writers_of_one_tile_do_not_clobber_each_other(cache_dir, loc
     assert not any(w.is_alive() for w in writers)
     assert errors == []
     assert path.exists()
-    (n,) = duckdb.connect().execute(
-        f"SELECT count(*) FROM read_parquet({db._sql_str(str(path))})"
-    ).fetchone()
+    (n,) = (
+        duckdb.connect()
+        .execute(f"SELECT count(*) FROM read_parquet({db._sql_str(str(path))})")
+        .fetchone()
+    )
     assert n > 0  # a complete, readable tile — not a clobbered or partial one
     assert list(path.parent.glob("*.tmp")) == []  # no temp files left behind
 
@@ -710,9 +709,7 @@ def test_offline_fallback_serves_newest_existing_fingerprint_dir(
     # reachability, not the configured source.
     monkeypatch.setattr(db, "probe_schema", lambda glob: None)
 
-    served = cache.local_paths_for_query(
-        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con
-    )
+    served = cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con)
     assert served == populated  # same on-disk tiles, served without touching "upstream"
 
 
@@ -727,9 +724,12 @@ def test_offline_fallback_never_serves_another_sources_tiles(
     assert cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con)
 
     monkeypatch.setattr(db, "probe_schema", lambda glob: None)
-    assert cache.local_paths_for_query(
-        con, RELEASE, THEME, bbox, "s3://some-other-mirror/*", lambda: con
-    ) is None
+    assert (
+        cache.local_paths_for_query(
+            con, RELEASE, THEME, bbox, "s3://some-other-mirror/*", lambda: con
+        )
+        is None
+    )
     assert cache.cached_tile_paths(RELEASE, THEME, "s3://some-other-mirror/*") == []
 
 
@@ -866,9 +866,7 @@ def test_resolved_tiles_survive_a_concurrent_eviction(con, cache_dir, sync_cache
     the first query's SELECT runs. The resolved tiles must still be there.
     """
     bbox = (-74.0, 40.0, -73.0, 41.0)
-    paths = cache.local_paths_for_query(
-        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con
-    )
+    paths = cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con)
     assert paths
 
     # Cap of ~0 bytes: without the claim guard, eviction walks the whole
@@ -900,9 +898,7 @@ def test_claims_expire_so_tiles_do_not_pin_the_cache_forever(con, cache_dir, syn
     abandoned query would keep its tiles un-evictable for the process's life.
     """
     bbox = (-74.0, 40.0, -73.0, 41.0)
-    paths = cache.local_paths_for_query(
-        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con
-    )
+    paths = cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con)
     assert paths
     now = time.monotonic()
     with cache._claims_lock:
@@ -948,9 +944,7 @@ def test_eviction_blocked_while_a_query_is_resolving_its_tiles(con, cache_dir, s
     correct by construction, not because this test can observe it.
     """
     bbox = (-74.0, 40.0, -73.0, 41.0)
-    assert cache.local_paths_for_query(
-        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con
-    )
+    assert cache.local_paths_for_query(con, RELEASE, THEME, bbox, str(FIXTURE_PATH), lambda: con)
     # Forget the populate step's claims: this test is about whether the
     # cache-HIT path protects what it resolves.
     with cache._claims_lock:
@@ -987,13 +981,17 @@ def test_eviction_blocked_while_a_query_is_resolving_its_tiles(con, cache_dir, s
     assert not missing, f"eviction deleted {len(missing)} tile(s) mid-resolve: {missing}"
 
 
-
 def test_force_sync_materializes_without_cache_sync_env(con, cache_dir, monkeypatch):
     """warmup_city / _warm_start must not depend on PLACEROOT_CACHE_SYNC."""
     monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
     bbox = (-74.0, 40.0, -73.0, 41.0)
     paths = cache.local_paths_for_query(
-        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), duckdb.connect,
+        con,
+        RELEASE,
+        THEME,
+        bbox,
+        str(FIXTURE_PATH),
+        duckdb.connect,
         force_sync=True,
     )
     assert paths
@@ -1004,13 +1002,23 @@ def test_prewarm_bbox_reuses_the_tile_cache(con, cache_dir, monkeypatch):
     monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
     bbox = (-74.0, 40.0, -73.0, 41.0)
     first = cache.prewarm_bbox(
-        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), duckdb.connect,
+        con,
+        RELEASE,
+        THEME,
+        bbox,
+        str(FIXTURE_PATH),
+        duckdb.connect,
     )
     assert first["status"] == "warmed"
     assert first["fetched"] >= 1
     assert first["cached"] >= 1
     second = cache.prewarm_bbox(
-        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), duckdb.connect,
+        con,
+        RELEASE,
+        THEME,
+        bbox,
+        str(FIXTURE_PATH),
+        duckdb.connect,
     )
     assert second["status"] == "already_warm"
     assert second["fetched"] == 0
@@ -1019,7 +1027,11 @@ def test_prewarm_bbox_reuses_the_tile_cache(con, cache_dir, monkeypatch):
 def test_prewarm_bbox_is_noop_when_cache_disabled(con, monkeypatch):
     monkeypatch.setenv("PLACEROOT_CACHE", "off")
     result = cache.prewarm_bbox(
-        con, RELEASE, THEME, (-74.0, 40.0, -73.0, 41.0), str(FIXTURE_PATH),
+        con,
+        RELEASE,
+        THEME,
+        (-74.0, 40.0, -73.0, 41.0),
+        str(FIXTURE_PATH),
     )
     assert result["status"] == "cache_disabled"
     assert result["cached"] == 0
@@ -1040,7 +1052,12 @@ def test_force_sync_respects_heavy_theme_tile_cap(cache_dir, con, monkeypatch):
     tiles = cache.tiles_for_bbox(*bbox, tile_deg=0.25)
     assert len(tiles) > cache.HEAVY_SYNC_MAX_TILES
     cache.local_paths_for_query(
-        con, RELEASE, THEME, bbox, str(FIXTURE_PATH), duckdb.connect,
+        con,
+        RELEASE,
+        THEME,
+        bbox,
+        str(FIXTURE_PATH),
+        duckdb.connect,
         force_sync=True,
         schedule_missing=False,
     )

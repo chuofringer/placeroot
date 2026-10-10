@@ -80,7 +80,8 @@ def stage(stage_dir: Path) -> list[Path]:
         shutil.copy2(REPO_ROOT / name, stage_dir / name)
     for tree in STAGED_TREES:
         shutil.copytree(
-            REPO_ROOT / tree, stage_dir / tree,
+            REPO_ROOT / tree,
+            stage_dir / tree,
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
     return sorted(p for p in stage_dir.rglob("*") if p.is_file())

@@ -63,7 +63,7 @@ def test_compare_areas_density_uses_effective_clamped_radius():
     areas = [(CENTER_LAT, CENTER_LON), (0.0, 0.0)]
     result = overture.compare_areas(areas, radius_m=5_000_000)
     effective_radius_km = geo.MAX_QUERY_RADIUS_M / 1000
-    expected_area_km2 = math.pi * effective_radius_km ** 2
+    expected_area_km2 = math.pi * effective_radius_km**2
     for area in result["areas"]:
         expected_density = round(area["total_places"] / expected_area_km2, 2)
         assert area["density_per_km2"] == expected_density
@@ -72,7 +72,7 @@ def test_compare_areas_density_uses_effective_clamped_radius():
 def test_compare_areas_density_unchanged_for_normal_radius():
     areas = [(CENTER_LAT, CENTER_LON), (0.0, 0.0)]
     result = overture.compare_areas(areas, radius_m=1000)
-    expected_area_km2 = math.pi * 1 ** 2
+    expected_area_km2 = math.pi * 1**2
     for area in result["areas"]:
         expected_density = round(area["total_places"] / expected_area_km2, 2)
         assert area["density_per_km2"] == expected_density
