@@ -182,7 +182,10 @@ def test_single_resolve_place_critical_path_is_unchanged(timeline):
     assert results[0]["match"] == "exact"
     assert timeline.rounds() == 5
     assert timeline.rounds({"find_places", "_query_places_fallback"}) == 2
-    assert timeline.wall() == pytest.approx(1.0, abs=0.6)  # 5 rounds x 0.2 s; CI runners are slow
+    # Lower bound only: 5 sequential rounds cannot finish faster than 5 sleeps.
+    # No upper bound — a shared CI runner adds arbitrary wall time; the round
+    # count above is the structural claim.
+    assert timeline.wall() >= 5 * SLEEP_S * 0.9
     assert timeline.call_set() == SHIBUYA_PLACE_CALLS
 
 
@@ -193,7 +196,7 @@ def test_named_place_is_two_serial_legs_and_is_unchanged(timeline):
     assert hit["id"] == "pl-gare-shibuya"
     assert timeline.rounds() == 10
     assert timeline.rounds({"find_places", "_query_places_fallback"}) == 3
-    assert timeline.wall() == pytest.approx(2.0, abs=0.9)  # 10 rounds x 0.2 s; CI runners are slow
+    assert timeline.wall() >= 10 * SLEEP_S * 0.9  # lower bound only; a shared runner adds arbitrary wall time
     assert timeline.call_set() == SHIBUYA_NAMED_CALLS
 
 
@@ -205,7 +208,9 @@ def test_pair_of_plain_names_already_overlaps(timeline):
     assert origin["id"] == "pl-gare-shibuya"
     assert dest["id"] == "pl-yoyogi"
     assert timeline.overlapping("_query_divisions", "_query_divisions")
-    assert timeline.wall() < 3.2  # one named resolve (~2.0 s), not two in series (~4.0 s)
+    # Overlap shows up as the round count of ONE named resolve (10), not two
+    # in series (20); wall time on a shared runner is not a reliable witness.
+    assert timeline.rounds() == 10
 
 
 def test_pair_of_name_and_gers_id_overlaps(timeline):
@@ -218,7 +223,7 @@ def test_pair_of_name_and_gers_id_overlaps(timeline):
     assert dest["matched_by"] == "gers_id"
     assert timeline.overlapping("gers_lookup", "_query_divisions"), "ends ran in turn"
     assert timeline.rounds() == 10
-    assert timeline.wall() == pytest.approx(2.0, abs=0.9)  # 10 rounds x 0.2 s; CI runners are slow
+    assert timeline.wall() >= 10 * SLEEP_S * 0.9  # lower bound only; a shared runner adds arbitrary wall time
     name_calls = [c for c in timeline.call_set() if c[0] != "gers_lookup"]
     assert name_calls == SHIBUYA_NAMED_CALLS
 
