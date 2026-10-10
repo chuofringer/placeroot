@@ -111,6 +111,7 @@ import logging
 import math
 import os
 import pickle
+import stat
 import threading
 from collections import OrderedDict
 from collections.abc import Iterable
@@ -2012,7 +2013,9 @@ def _persist_graph_to_disk(
     }
     tmp = path.with_name(path.name + ".tmp")
     try:
-        root.mkdir(parents=True, exist_ok=True)
+        # Private to this user: the files inside are unpickled on load
+        # (see _graph_file_is_trusted), so nobody else may plant one here.
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
         with open(tmp, "wb") as fh:
             pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
         os.replace(tmp, path)
@@ -2025,9 +2028,38 @@ def _persist_graph_to_disk(
             pass
 
 
+def _graph_file_is_trusted(path: Path, st: os.stat_result) -> str | None:
+    """Why `path` must not be unpickled, or None when it may be.
+
+    pickle.load runs whatever the file says, so a graph file is only ever
+    loaded when it could only have been written by this process's user:
+    it must be a regular file owned by the current uid and writable by no
+    one else (group/world write bits clear). Windows has no uid/mode
+    model worth checking (st_uid is always 0 there), so the check is
+    skipped where os.getuid is absent.
+    """
+    if not stat.S_ISREG(st.st_mode):
+        return "not a regular file"
+    if not hasattr(os, "getuid"):
+        return None
+    if st.st_uid != os.getuid():
+        return f"owned by uid {st.st_uid}, not {os.getuid()}"
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return f"group/world writable (mode {stat.S_IMODE(st.st_mode):o})"
+    return None
+
+
 def _load_one_graph_file(path: Path) -> tuple[tuple[float, float, float, float], Graph] | None:
     try:
         with open(path, "rb") as fh:
+            # stat the open descriptor, not the path, so the file checked is
+            # the file read (no swap between the two).
+            reason = _graph_file_is_trusted(path, os.fstat(fh.fileno()))
+            if reason is not None:
+                logger.warning(
+                    "graph cache file %s refused (%s); will rebuild", path, reason
+                )
+                return None
             payload = pickle.load(fh)
     except Exception:  # noqa: BLE001 - corrupt/unreadable file: rebuild
         logger.warning("graph load failed for %s; will rebuild", path, exc_info=True)
