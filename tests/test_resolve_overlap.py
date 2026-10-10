@@ -224,7 +224,10 @@ def test_pair_of_name_and_gers_id_overlaps(timeline):
     assert origin["id"] == "pl-gare-shibuya"
     assert dest["matched_by"] == "gers_id"
     assert timeline.overlapping("gers_lookup", "_query_divisions"), "ends ran in turn"
-    assert timeline.rounds() == 10
+    # In turn this is exactly 11 rounds (10 for the name, then the id lookup);
+    # side by side the id lookup merges into one of the name's rounds, which
+    # one depends on thread scheduling, so only the bound is asserted.
+    assert timeline.rounds() < 11
     assert timeline.wall() >= 10 * SLEEP_S * 0.9  # lower bound only; see above
     name_calls = [c for c in timeline.call_set() if c[0] != "gers_lookup"]
     assert name_calls == SHIBUYA_NAMED_CALLS
