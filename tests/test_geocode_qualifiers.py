@@ -4,6 +4,7 @@ per-table memos — all exercised offline against the pure helpers (and, where
 a whole resolve is needed, with the query functions monkeypatched the way
 test_resolve_place.py does)."""
 
+import duckdb
 import pytest
 
 from placeroot import geocode, overture
@@ -164,3 +165,36 @@ def test_is_word_prefix():
     assert geocode._is_word_prefix("mall", "mall-mart")
     assert not geocode._is_word_prefix("ma", "mall of america")
     assert not geocode._is_word_prefix("", "mall")
+
+
+# ---------------------------------------------------------------------------
+# per-table memos
+# ---------------------------------------------------------------------------
+
+
+def test_region_population_lookup_scans_once_per_table(monkeypatch):
+    geocode._region_population_lookup_cached.cache_clear()
+    executed = []
+    outcomes = iter([duckdb.Error("transient"), [("US-CA", 39_000_000)]])
+
+    class FakeConn:
+        def execute(self, sql, params=None):
+            executed.append(sql)
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                raise outcome
+
+            class R:
+                def fetchall(self_inner):
+                    return outcome
+
+            return R()
+
+    monkeypatch.setattr(overture, "conn", lambda: FakeConn())
+    assert geocode._region_population_lookup("t.parquet") == {}  # failure: not cached
+    assert geocode._region_population_lookup("t.parquet") == {"US-CA": 39_000_000}
+    assert geocode._region_population_lookup("t.parquet") == {"US-CA": 39_000_000}
+    assert len(executed) == 2
+    assert geocode._region_population_lookup(None) == {}
+    geocode.clear_resolve_session()
+    assert geocode._region_population_lookup_cached.cache_info().currsize == 0

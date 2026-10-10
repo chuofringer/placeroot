@@ -449,6 +449,7 @@ import time
 import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass
+from functools import lru_cache
 from importlib import resources
 from pathlib import Path
 
@@ -1161,6 +1162,12 @@ def _local_divisions_table_path(active_release: str) -> Path:
     return cache.cache_dir() / active_release / _DIVISIONS_TABLE_SUBDIR / _DIVISIONS_TABLE_FILENAME
 
 
+def _clear_table_derived_caches() -> None:
+    """Drop every in-process memo derived from a local table's contents:
+    called when a table is (re)published and from clear_resolve_session."""
+    _region_population_lookup_cached.cache_clear()
+
+
 def _publish_copied_parquet(con: duckdb.DuckDBPyConnection, tmp_path: Path, path: Path) -> None:
     """Close the COPY writer, publish `tmp_path` as `path`, drop stale cache.
 
@@ -1188,6 +1195,9 @@ def _publish_copied_parquet(con: duckdb.DuckDBPyConnection, tmp_path: Path, path
         shared = overture.conn()
         shared.execute("SET enable_external_file_cache=false")
         shared.execute("SET enable_external_file_cache=true")
+    # The table at `path` just changed: anything memoized from its rows
+    # (region populations, exact-name probes, anchor derivations) is stale.
+    _clear_table_derived_caches()
 
 
 def _materialize_alt_names_table(path: Path, glob: str) -> None:
@@ -1819,15 +1829,28 @@ def _region_population_lookup(local_table: str | None) -> dict[str, int]:
     """
     if not local_table:
         return {}
+    try:
+        return _region_population_lookup_cached(local_table)
+    except duckdb.Error:
+        return {}
+
+
+@lru_cache(maxsize=8)
+def _region_population_lookup_cached(local_table: str) -> dict[str, int]:
+    """The scan behind _region_population_lookup, once per table path per
+    process. The file at a path is immutable for the release it belongs to
+    (a rebuild publishes through _publish_copied_parquet, which clears this
+    via _clear_table_derived_caches), so re-reading every region row on
+    every geocode call was pure overhead. Raises duckdb.Error rather than
+    caching a failed read as an empty map — lru_cache never stores an
+    exception, so the next call retries. Callers only read the map.
+    """
     sql = f"""
         SELECT region, population FROM read_parquet('{local_table}')
         WHERE subtype = 'region' AND region IS NOT NULL AND population IS NOT NULL
     """
-    try:
-        with overture._conn_lock:
-            rows = overture.conn().execute(sql).fetchall()
-    except duckdb.Error:
-        return {}
+    with overture._conn_lock:
+        rows = overture.conn().execute(sql).fetchall()
     return dict(rows)
 
 
@@ -2311,6 +2334,7 @@ def clear_resolve_session() -> None:
     with _last_good_lock:
         _last_good_city = None
         _last_good_coords = None
+    _clear_table_derived_caches()
 
 
 # --- #53: name-variant normalization -------------------------------------
