@@ -132,8 +132,8 @@ def _set_op(op: str, geometry, geometry2) -> dict:
     )
     params = {"g1": json.dumps(geometry), "g2": json.dumps(geometry2)}
     try:
-        with db.conn_lock:
-            row = db.shared_conn().execute(sql, params).fetchone()
+        with db.read_conn() as rc:
+            row = rc.execute(sql, params).fetchone()
     except duckdb.Error as e:
         raise InvalidGeometryOp(
             f"op={op} could not process this geometry pair (invalid or "

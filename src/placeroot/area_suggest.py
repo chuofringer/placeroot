@@ -89,8 +89,8 @@ def intersect_sheds(polygons: list[dict]) -> list[dict]:
         params[f"p{i}"] = json.dumps(poly)
     sql = f"SELECT ST_Area({expr}), ST_AsGeoJSON({expr})"
     try:
-        with db.conn_lock:
-            area, geojson_str = db.shared_conn().execute(sql, params).fetchone()
+        with db.read_conn() as rc:
+            area, geojson_str = rc.execute(sql, params).fetchone()
     except duckdb.Error:
         # A malformed or degenerate shed polygon (e.g. from an isochrone
         # fallback shape with < 3 distinct points) can't be intersected —

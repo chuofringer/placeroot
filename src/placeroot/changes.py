@@ -195,8 +195,8 @@ def _scan_release(
         LIMIT {SCAN_LIMIT}
     """
     try:
-        with db.conn_lock:
-            rows = db.shared_conn().execute(sql, params).fetchall()
+        with db.read_conn() as rc:
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     cols = ["id", "name", "category", "confidence", "lat", "lon"]
