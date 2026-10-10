@@ -88,3 +88,52 @@ def test_default_budget_holds_for_realistic_worst_case_row():
     assert omitted == 0
     assert budget.estimate_tokens(kept) <= before
     assert budget.estimate_tokens(kept) <= budget.DEFAULT_TOKEN_BUDGET
+
+
+def _fit_rows_reference(rows, budget_tokens, optional_fields=budget.OPTIONAL_FIELD_PRIORITY):
+    """The pre-optimisation fit_rows, verbatim: re-serialises the whole list
+    on every pop. Kept here as the oracle the O(n) version is held to."""
+    kept = list(rows)
+    while len(kept) > 1 and budget.estimate_tokens(kept) > budget_tokens:
+        kept.pop()
+    omitted = len(rows) - len(kept)
+
+    stripped = False
+    for field in optional_fields:
+        if budget.estimate_tokens(kept) <= budget_tokens:
+            break
+        if any(field in row for row in kept):
+            kept = [{k: v for k, v in row.items() if k != field} for row in kept]
+            stripped = True
+
+    return kept, omitted > 0 or stripped, omitted
+
+
+def test_fit_rows_matches_the_pop_loop_reference_on_random_inputs():
+    import random
+
+    rng = random.Random(20261010)
+    for _ in range(60):
+        n = rng.randint(0, 40)
+        rows = []
+        for i in range(n):
+            row = _row(i)
+            row["name"] = "x" * rng.randint(0, 120)
+            if rng.random() < 0.3:
+                row["website"] = "https://example.com/" + "y" * rng.randint(0, 80)
+            if rng.random() < 0.3:
+                row["unicode"] = "caf\u00e9 \u2014 " * rng.randint(0, 5)
+            if rng.random() < 0.2:
+                del row["confidence"]
+            rows.append(row)
+        # Budgets from "nothing fits" through "everything fits", including
+        # exact boundaries around the full-list size.
+        full = budget.estimate_tokens(rows)
+        for b in (0, 1, 7, 50, 200, full - 1, full, full + 1, 10_000):
+            if b < 0:
+                continue
+            assert budget.fit_rows(rows, b) == _fit_rows_reference(rows, b), (n, b)
+
+
+def test_fit_rows_empty_input():
+    assert budget.fit_rows([], 100) == ([], False, 0)
