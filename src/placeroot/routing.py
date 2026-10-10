@@ -1255,10 +1255,37 @@ def build_graph(
         if present is not None and "subtype" in present
         else ""
     )
+    # The mode's class exclusions (plus any avoid overlay) are applied in
+    # SQL, not after the fetch, so the LIMIT below counts only rows the
+    # graph can actually use: a dense box full of footways used to spend a
+    # drive graph's whole row budget on segments Python then threw away.
+    # The Python-side check further down stays as a cheap second line of
+    # defense (and is the only one when the class column is absent).
+    params = dict(bbox_params)
+    excluded_classes = _excluded_classes_for(mode, avoid)
+    class_filter = ""
+    if class_expr != "NULL" and excluded_classes:
+        placeholders = []
+        for i, excluded in enumerate(sorted(excluded_classes)):
+            params[f"excluded_class_{i}"] = excluded
+            placeholders.append(f"$excluded_class_{i}")
+        class_filter = f"AND (class IS NULL OR class NOT IN ({', '.join(placeholders)}))"
     # LIMIT to one past the cap: fetching exactly MAX_GRAPH_SEGMENTS would
     # look identical whether the true result set was exactly that size or
     # much larger, so the extra row is how truncation is detected below
-    # without a separate COUNT(*) query.
+    # without a separate COUNT(*) query. ORDER BY makes the cap meaningful:
+    # without one DuckDB hands back whichever rows it scanned first, so a
+    # truncated graph was an arbitrary slice of the box. Ordering by the
+    # squared equirectangular distance of each segment's bbox centre from
+    # the query centre (longitude scaled by cos(lat), no spatial function
+    # needed) keeps the rows nearest the query — the ones a route or
+    # isochrone from (lat, lon) reaches first — and the id tie-break makes
+    # the slice deterministic across runs. For an antimeridian-crossing box
+    # the naive longitude difference misorders the far side of the seam;
+    # that only affects which rows a *truncated* graph keeps.
+    params["center_lon"] = lon
+    params["center_lat"] = lat
+    params["lon_scale"] = max(math.cos(math.radians(lat)), 1e-6)
     sql = f"""
         SELECT
             id,
@@ -1271,9 +1298,15 @@ def build_graph(
         FROM {_from_source(bbox)}
         WHERE {bbox_filter}
           {subtype_filter}
+          {class_filter}
+        ORDER BY
+            (((bbox.xmin + bbox.xmax) / 2 - $center_lon) * $lon_scale)
+              * (((bbox.xmin + bbox.xmax) / 2 - $center_lon) * $lon_scale)
+            + ((bbox.ymin + bbox.ymax) / 2 - $center_lat)
+              * ((bbox.ymin + bbox.ymax) / 2 - $center_lat),
+            id
         LIMIT {MAX_GRAPH_SEGMENTS + 1}
     """
-    params = bbox_params
     try:
         # The WKT expression above may need ST_AsText/ST_GeomFromWKB —
         # ensure the spatial extension is loaded on the shared connection
@@ -1301,10 +1334,15 @@ def build_graph(
     graph.has_shapes = want_shapes
     graph.weight_is_time = bake_time
     graph.truncated = truncated
-    excluded_classes = _excluded_classes_for(mode, avoid)
     respects_oneway = config["respects_oneway"]
     for _id, cls, connectors, speed_limits, access_restrictions, names, wkt in rows:
         if cls is not None and cls in excluded_classes:
+            continue
+        # A segment with no geometry (NULL in the source, or a WKT
+        # expression that produced nothing) has no place in the graph;
+        # _parse_linestring_wkt would raise AttributeError on None, which
+        # the malformed-WKT guard below never caught.
+        if wkt is None:
             continue
         primary_name = names.get("primary") if names else None
         try:
@@ -1316,21 +1354,29 @@ def build_graph(
 
         start_lon, start_lat = points[0]
         end_lon, end_lat = points[-1]
-        start_id, end_id = None, None
+        # Overture may attach more than one connector to the same endpoint
+        # (at=0 or at=1) — e.g. two junction connectors sharing a position.
+        # Every one of them must become a graph node, or a neighbouring
+        # segment that references only the "other" connector is left
+        # dangling; the first becomes the endpoint's node and the rest are
+        # tied to it with zero-length edges below.
+        start_ids: list[str] = []
+        end_ids: list[str] = []
         interior: list[tuple[float, str]] = []  # (at, connector_id), 0 < at < 1
         if connectors:
             for conn in connectors:
                 at = conn["at"]
                 if at <= 0.0:
-                    start_id = conn["connector_id"]
+                    start_ids.append(conn["connector_id"])
                 elif at >= 1.0:
-                    end_id = conn["connector_id"]
+                    end_ids.append(conn["connector_id"])
                 else:
                     interior.append((at, conn["connector_id"]))
-        if start_id is None:
-            start_id = f"pt_{round(start_lon, 6)}_{round(start_lat, 6)}"
-        if end_id is None:
-            end_id = f"pt_{round(end_lon, 6)}_{round(end_lat, 6)}"
+        if not start_ids:
+            start_ids.append(f"pt_{round(start_lon, 6)}_{round(start_lat, 6)}")
+        if not end_ids:
+            end_ids.append(f"pt_{round(end_lon, 6)}_{round(end_lat, 6)}")
+        start_id, end_id = start_ids[0], end_ids[0]
 
         cum = _cumulative_lengths_m(points)
         total_length_m = cum[-1]
@@ -1347,6 +1393,16 @@ def build_graph(
         for at, connector_id in interior:
             ilat, ilon = _point_at_fraction(points, at, cum)
             graph.add_node(connector_id, ilat, ilon)
+        # Co-located duplicate endpoint connectors: a connector is a point,
+        # not a direction, so the tie is undirected and free regardless of
+        # the segment's own one-way status.
+        for anchor_id, (alat, alon), duplicates in (
+            (start_id, (start_lat, start_lon), start_ids[1:]),
+            (end_id, (end_lat, end_lon), end_ids[1:]),
+        ):
+            for duplicate_id in duplicates:
+                graph.add_node(duplicate_id, alat, alon)
+                graph.add_edge(anchor_id, duplicate_id, 0.0, 0.0, directed=False)
 
         forward_allowed, backward_allowed = (
             _oneway_allowed(access_restrictions, mode) if respects_oneway else (True, True)
