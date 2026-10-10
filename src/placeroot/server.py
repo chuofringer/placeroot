@@ -10,28 +10,18 @@ See overture.py's module docstring for how the shared query connection
 stays safe under that concurrency.
 """
 
-import argparse
-import asyncio
-import contextvars
 import functools
 import importlib.metadata
 import inspect
-import json
 import logging
 import math
 import os
-import re
-import threading
-import time
-from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor
-from typing import Annotated
+from collections.abc import Callable
 
-from mcp.server.caching import CacheableMethod, CacheHint
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.utilities.func_metadata import func_metadata
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import ValidationError
 
 from placeroot import (
     addresses,
@@ -39,10 +29,9 @@ from placeroot import (
     area_suggest,
     budget,
     buildings,
-    cache,
     categories,
     changes,
-    db,
+    db,  # noqa: F401 - tests read server.db (autowarm and warmup lock checks)
     divisions,
     elevation,
     errors,
@@ -52,7 +41,6 @@ from placeroot import (
     geometry_setops,
     gers,
     ground,
-    home_region,
     honesty,
     infrastructure,
     land_use,
@@ -60,17 +48,14 @@ from placeroot import (
     mapexplain,
     mapview,
     meeting,
-    output_schemas,
     overture,
     progress,
     prompts,
     release,
     resources,
     routing,
-    session,
     simplify,
     tool_profiles,
-    trace,
     transit,
     verdict,
     water,
@@ -84,6 +69,90 @@ from placeroot import (
 )
 from placeroot import (
     timezone as timezone_lookup,
+)
+from placeroot._server_cli import (
+    _LISTING_CACHE_HINT,  # noqa: F401 - re-exported for tests and callers
+    _LISTING_TTL_MS,  # noqa: F401 - re-exported for tests and callers
+    _WARMUP_THEMES,  # noqa: F401 - re-exported for tests and callers
+    CACHE_HINTS,
+    DEFAULT_HTTP_HOST,  # noqa: F401 - re-exported for tests and callers
+    DEFAULT_HTTP_PORT,  # noqa: F401 - re-exported for tests and callers
+    DEFAULT_WARMUP_RADIUS_M,
+    MAX_WARMUP_RADIUS_M,  # noqa: F401 - re-exported for tests and callers
+    _build_arg_parser,  # noqa: F401 - re-exported for tests and callers
+    _prewarm_region,
+    _warm_divisions,  # noqa: F401 - re-exported for tests and callers
+    _warm_divisions_async,  # noqa: F401 - re-exported for tests and callers
+    _warm_home_async,  # noqa: F401 - re-exported for tests and callers
+    _warm_metadata_async,  # noqa: F401 - re-exported for tests and callers
+    _warm_start,  # noqa: F401 - re-exported for tests and callers
+    _warmup_is_cached,
+    main,
+    parse_transport_args,  # noqa: F401 - re-exported for tests and callers
+)
+from placeroot._server_confirm import (
+    _confirm_graph_cap_s,  # noqa: F401 - re-exported for tests and callers
+    _eta_exceeded_graph,  # noqa: F401 - re-exported for tests and callers
+    _needs_confirm_graph,
+    _needs_confirm_warmup,
+    _run_route,
+)
+from placeroot._server_errors import (
+    _invalid_coord,
+    _point_coord_error,
+    _points_list_coord_error,
+    _schema_error,
+    _upstream_error,
+    _upstream_errors,
+)
+from placeroot._server_middleware import (
+    _amend_tool_payload,  # noqa: F401 - re-exported for tests and callers
+    _progress_middleware,
+    _render_tool_text,  # noqa: F401 - re-exported for tests and callers
+    _session_id_of,  # noqa: F401 - re-exported for tests and callers
+    _session_middleware,
+    _tool_name_of,  # noqa: F401 - re-exported for tests and callers
+    _trace_middleware,
+    _with_timing,  # noqa: F401 - re-exported for tests and callers
+)
+from placeroot._server_refs import (
+    _GERS_ID_RE,  # noqa: F401 - re-exported for tests and callers
+    _LOCATION_REF_BAD_REQUEST,  # noqa: F401 - re-exported for tests and callers
+    _NAME_NOT_FOUND_TRY,  # noqa: F401 - re-exported for tests and callers
+    _location_ref_echo,
+    _matrix_resolved_echo,
+    _resolve_location_ref,
+    _resolve_location_refs,
+    _resolve_matrix_side,
+    _resolve_named_place,
+    _resolve_pair,  # noqa: F401 - re-exported for tests and callers
+    _resolve_ref_pair,  # noqa: F401 - re-exported for tests and callers
+    _resolve_route_ends,
+    _resolve_string_origins,
+)
+from placeroot._server_schemas import (
+    _DETAIL_ENUM,
+    _GEOMETRY_OP_REQUIRED,
+    _MODE_ENUM,  # noqa: F401 - re-exported for tests and callers
+    _AvoidArg,
+    _compare_modes_arg_model,  # noqa: F401 - re-exported for tests and callers
+    _CompareModesArg,  # noqa: F401 - re-exported for tests and callers
+    _CursorArg,
+    _DetailArg,
+    _from_alias_base,  # noqa: F401 - re-exported for tests and callers
+    _from_to_arg_model,  # noqa: F401 - re-exported for tests and callers
+    _LangArg,
+    _ModeArgContextDefault,
+    _ModeArgDriveDefault,
+    _ModeArgWalkDefault,
+    _ModeSetArg,
+    _OpArg,
+    _OperatingStatusArg,
+    _PermissiveOutput,  # noqa: F401 - re-exported for tests and callers
+    _PreferArg,
+    _publish_from_keyword,
+    _publish_output_schemas,
+    _route_arg_model,  # noqa: F401 - re-exported for tests and callers
 )
 
 logger = logging.getLogger(__name__)
@@ -124,8 +193,6 @@ BASE_INSTRUCTIONS = (
     "geocode + route or resolve + find_places for those questions."
 )
 
-DEFAULT_HTTP_HOST = "127.0.0.1"
-DEFAULT_HTTP_PORT = 8321
 
 # Every @_tool function, in definition order. Registration is deferred to
 # build_server() so PLACEROOT_TOOLS can select a subset *before* anything is
@@ -221,109 +288,6 @@ _FOLLOWS_A_SHORT_LINK_ANNOTATIONS = ToolAnnotations(
 
 _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {}
 
-# Annotated aliases that put an enum + a stated default into the published
-# schema without changing runtime validation: the type stays plain
-# `str | None`, so a bad string still reaches the function and comes back
-# as a structured unsupported_mode/bad_request error (see CONTRIBUTING
-# design rule 2 — a Literal would reject it before the self-correcting
-# error ever ran, and schema tokens are a budget so these are shared
-# rather than repeated per tool).
-_MODE_ENUM = sorted(preference_store.MODES)
-_ModeArgWalkDefault = Annotated[
-    str | None,
-    Field(
-        description="Travel mode. Default: stored preference, else walk.",
-        json_schema_extra={"enum": _MODE_ENUM},
-    ),
-]
-_ModeArgDriveDefault = Annotated[
-    str | None,
-    Field(
-        description="Travel mode. Default: stored preference, else drive.",
-        json_schema_extra={"enum": _MODE_ENUM},
-    ),
-]
-_PreferArg = Annotated[
-    str | None,
-    Field(
-        description="Grade preference. Default: none (plain-distance routing).",
-        json_schema_extra={"enum": sorted(routing.SUPPORTED_PREFERENCES)},
-    ),
-]
-# #425: the enum lives on `items` (this is an array), and the runtime type
-# stays a plain list so an unsupported class reaches the function and comes
-# back as a self-correcting bad_request naming the supported values.
-_AvoidArg = Annotated[
-    list | None,
-    Field(
-        description="Road classes to keep the route off. No toll or ferry option exists: "
-        "Overture carries no toll attribute, and the graph is road-only. "
-        "Default: none (no class avoided).",
-        json_schema_extra={"items": {"type": "string", "enum": list(routing.AVOIDABLE_CLASSES)}},
-    ),
-]
-# neighborhood_verdict doesn't consult stored preferences; its default is
-# inferred from free-text context (no car -> walk, bike -> cycle, car ->
-# drive), falling back to walk.
-_ModeArgContextDefault = Annotated[
-    str | None,
-    Field(
-        description="Travel mode override. Default: inferred from context, else walk.",
-        json_schema_extra={"enum": _MODE_ENUM},
-    ),
-]
-# compare_modes' subset (#459): enum on `items` like _AvoidArg, runtime type a
-# plain list so an unknown mode comes back as a self-correcting bad_request.
-_CompareModesArg = Annotated[
-    list | None,
-    Field(
-        description="Modes to compare, in answer order. Default: walk, cycle, drive.",
-        json_schema_extra={"items": {"type": "string", "enum": _MODE_ENUM}},
-    ),
-]
-_ModeSetArg = Annotated[
-    str | None,
-    Field(
-        description="Travel mode to store. Omit to leave it unchanged.",
-        json_schema_extra={"enum": _MODE_ENUM},
-    ),
-]
-# #410: no fixed enum — a language code is validated by shape (2-3 lowercase
-# letters), not membership in a closed list the way mode is, since Overture's
-# names.common keys are not a small fixed set.
-_LangArg = Annotated[
-    str | None,
-    Field(
-        description="Result-language code (2-3 lowercase letters, e.g. \"de\"). "
-        "Overture-tagged name variants only — never transliterated or invented. "
-        "Default: stored preference, else the primary name.",
-    ),
-]
-_OperatingStatusArg = Annotated[
-    str | None,
-    Field(
-        description="Business-lifecycle status filter (relabeled or raw Overture value, "
-        "case-insensitive). Default: no filter.",
-        json_schema_extra={"enum": overture.accepted_operating_status_values()},
-    ),
-]
-_CursorArg = Annotated[
-    str | None,
-    Field(
-        description="Continuation cursor from a previous truncated answer; valid for the "
-        "same query on the same data release.",
-    ),
-]
-_DETAIL_ENUM = ["ids", "compact", "full"]
-_DetailArg = Annotated[
-    str | None,
-    Field(
-        description="Row detail tier for find_places rows: 'ids' (id + distance_m only), "
-        "'compact' (id/name/category/lat/lon/distance_m/trust), or 'full' (every field, "
-        "incl. trust_note prose). Default: compact.",
-        json_schema_extra={"enum": _DETAIL_ENUM},
-    ),
-]
 
 # placeroot_call reaches every tool, render_map included, so it inherits the
 # weakest claim any of them makes rather than its own: a dispatcher that
@@ -371,70 +335,6 @@ def _tool(
         return fn
 
     return register
-
-
-def _upstream_error(e: Exception) -> dict:
-    """Structured, agent-readable error for a failed remote scan — never a raw traceback."""
-    return {"error": "upstream_unavailable", "detail": e.detail, "retry_advised": True}
-
-
-def _schema_error(e: overture.SchemaDegraded) -> dict:
-    return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
-
-
-def _upstream_errors(fn: Callable) -> Callable:
-    """The upstream-failure except ladder, once, around a whole handler.
-
-    Nearly every handler repeats `except UpstreamUnavailable: return
-    _upstream_error(e)` / `except SchemaDegraded: return _schema_error(e)`
-    after each query call it makes. routing.UpstreamUnavailable and
-    overture.UpstreamUnavailable are the same class (errors.py; likewise
-    SchemaDegraded), so a handler that lists both catches one thing twice.
-    Put this between @_tool and the def and the handler can drop its copies:
-    the same two classes become the same two envelopes. Applied to
-    find_places, compare_areas and verify_claims so far; the other handlers
-    still carry the ladder inline and behave identically.
-    """
-
-    @functools.wraps(fn)
-    def guarded(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except overture.UpstreamUnavailable as e:
-            return _upstream_error(e)
-        except overture.SchemaDegraded as e:
-            return _schema_error(e)
-
-    return guarded
-
-
-def _invalid_coord(lat, lon) -> dict | None:
-    """bad_request dict if lat/lon are out of range or non-finite, else None.
-
-    Issue #163 (A2): bbox_around only clamps pole-*overshoot*, so an
-    out-of-range lat (e.g. 91.0, or the common LLM mistake of swapping
-    lat/lon) produced an inverted ymin>ymax box that silently matched zero
-    rows instead of erroring. Every coordinate-taking tool calls this at
-    its boundary and returns the error before doing any work. bool is
-    checked separately from (int, float) because bool is a subclass of int
-    (isinstance(True, int) is True) and a stray True/False would otherwise
-    pass the range check.
-    """
-    for name, val, lo, hi in (("lat", lat, -90.0, 90.0), ("lon", lon, -180.0, 180.0)):
-        if (
-            not isinstance(val, (int, float))
-            or isinstance(val, bool)
-            or not math.isfinite(val)
-            or not (lo <= val <= hi)
-        ):
-            return {
-                "error": "bad_request",
-                "detail": (
-                    f"{name}={val!r} is out of range; lat must be in [-90, 90] and "
-                    "lon in [-180, 180] (did you swap lat and lon?)"
-                ),
-            }
-    return None
 
 
 def _with_degraded_fields(result: dict) -> dict:
@@ -621,246 +521,6 @@ def _with_name_fallback_note(
         hint = f"no exact match for name {name!r}; showing {fallback['name']!r} via {via}."
         payload["note"] = "; ".join(filter(None, [payload.get("note"), hint]))
     return payload
-
-
-# Roadmap §4, next tier: not_found from a name-resolution dead end names the
-# next move rather than leaving the caller to guess. resolve_place carries
-# its own "need"/"retry_with" sketch for the same situation (a plain
-# `resolve_place()` call with no rows) — this "try" string is for the
-# tools that resolve a name internally and cannot offer that structured
-# retry, since they don't expose the intermediate resolve step for the
-# caller to redo more specifically. core (the default profile) always
-# carries resolve_place and geocode, so naming them here holds for the
-# common case; a narrower PLACEROOT_TOOLS selection may not register one.
-_NAME_NOT_FOUND_TRY = (
-    "resolve_place with near_lat/near_lon or city to disambiguate; "
-    "or geocode for street addresses"
-)
-
-
-def _resolve_named_place(query: str) -> dict:
-    """A free-text name -> compact {name, lat, lon, id, type} or an error.
-
-    Shared by from_to and find_near. Ambiguous same-score names return
-    candidates instead of silently picking a city. An unresolvable name
-    returns {"error": "not_found", "detail", "try"} — "try" names the next
-    move (roadmap §4). A comma-qualified name whose qualifier resolved but
-    held nothing (#427) says so by naming the qualifier it searched,
-    instead of reporting a same-ish name from the other side of the world.
-    """
-    if not isinstance(query, str) or not query.strip():
-        return {"error": "bad_request", "detail": "place name must be a non-empty string"}
-    query = query.strip()
-    try:
-        resolved = geocoding.resolve_named_place(query)
-    except errors.AnchoredNotFound as e:
-        return {"error": "not_found", "detail": e.detail, "try": _NAME_NOT_FOUND_TRY}
-    except errors.AmbiguousPlace as e:
-        return {
-            "error": "ambiguous_place",
-            "detail": e.detail,
-            "query": e.query,
-            "candidates": e.candidates,
-        }
-    except overture.UpstreamUnavailable as e:
-        return _upstream_error(e)
-    if resolved is None:
-        return {
-            "error": "not_found",
-            "detail": f"no place matched {query!r}",
-            "try": _NAME_NOT_FOUND_TRY,
-        }
-    return resolved
-
-
-def _resolve_pair(a: str, b: str) -> tuple[dict, dict]:
-    """Resolve two names in parallel, each on its own cursor.
-
-    db.isolated_reads gives each worker a private cursor and lock so the
-    two resolves genuinely overlap instead of serializing on the shared
-    conn lock (#328's parallel-inside-the-compose requirement).
-
-    Workers do not inherit contextvars, so copy the request context into
-    each submit — otherwise progress.report from a cold resolve lands in
-    a throwaway per-thread log and never reaches attach().
-    """
-
-    def _isolated(query: str) -> dict:
-        with db.isolated_reads():
-            return _resolve_named_place(query)
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fa = pool.submit(contextvars.copy_context().run, _isolated, a)
-        fb = pool.submit(contextvars.copy_context().run, _isolated, b)
-        return fa.result(), fb.result()
-
-
-# Real GERS ids are 32 lowercase hex characters (gers.py's module docstring
-# and _validate_id's own comment). Deliberately stricter than gers.py's own
-# ID_CHARSET_RE, which has to admit synthetic fixture ids like
-# "gers-div-brooklyn" for gers_lookup's own tests — LocationRef needs the
-# opposite bias: a free-text name must never be misread as an id, so this
-# only recognizes the one shape a real id actually has. Case-insensitive
-# since nothing here depends on it and rejecting a same-shape uppercase id
-# would just cost the caller a confusing not_found.
-_GERS_ID_RE = re.compile(r"^[0-9a-f]{32}$", re.IGNORECASE)
-
-_LOCATION_REF_BAD_REQUEST = {
-    "error": "bad_request",
-    "detail": (
-        "location must be one of: {\"lat\": ..., \"lon\": ...} with numeric lat/lon in "
-        "range, a GERS id string (32 hex characters), or a non-empty free-text place name"
-    ),
-}
-
-
-def _resolve_location_ref(ref) -> tuple[dict | None, dict | None]:
-    """A LocationRef ({lat,lon} | GERS id string | free-text name) -> (resolved, error).
-
-    Exactly one of the two return values is not None. `resolved` always
-    carries numeric lat/lon; a coordinate dict passes through untouched (no
-    `id`/`name`/`matched_by` — nothing to echo back, on purpose: raw
-    coordinate input must not grow the answer). A string input additionally
-    carries `id`, `name`, and `matched_by` ("gers_id" or "name") so callers
-    can build the compact `resolved` echo the roadmap calls for.
-
-    `error` is a structured envelope ready to return as-is (bad_request,
-    not_found, ambiguous_place, or an upstream/schema failure) — callers
-    that resolve several refs prefix its `detail` with the failing index.
-    A not_found also carries "try" naming the next move (roadmap §4).
-    """
-    if isinstance(ref, dict):
-        lat, lon = ref.get("lat"), ref.get("lon")
-        coord_error = _invalid_coord(lat, lon)
-        if coord_error is not None:
-            return None, _LOCATION_REF_BAD_REQUEST
-        return {"lat": float(lat), "lon": float(lon)}, None
-    if isinstance(ref, str):
-        text = ref.strip()
-        if not text:
-            return None, _LOCATION_REF_BAD_REQUEST
-        if _GERS_ID_RE.match(text):
-            try:
-                hit = gers.gers_lookup(text)
-            except ValueError:
-                hit = None
-            except overture.UpstreamUnavailable as e:
-                return None, _upstream_error(e)
-            except overture.SchemaDegraded as e:
-                return None, _schema_error(e)
-            if hit is None or hit.get("lat") is None or hit.get("lon") is None:
-                return None, {
-                    "error": "not_found",
-                    "detail": (
-                        f"{text!r} looked like a GERS id; no feature has it in this release"
-                    ),
-                    "try": (
-                        "resolve_place or geocode to find the right id; "
-                        "or pass a {\"lat\", \"lon\"} location instead"
-                    ),
-                }
-            return {
-                "id": hit.get("id"),
-                "name": hit.get("name"),
-                "lat": hit["lat"],
-                "lon": hit["lon"],
-                "matched_by": "gers_id",
-            }, None
-        hit = _resolve_named_place(text)
-        if "error" in hit:
-            return None, hit
-        item = {
-            "id": hit.get("id"),
-            "name": hit.get("name"),
-            "lat": hit["lat"],
-            "lon": hit["lon"],
-            "matched_by": "name",
-        }
-        if hit.get("note"):
-            # #427: the name carried a qualifier that resolved to nothing,
-            # so the whole string was searched instead. Non-fatal, but the
-            # caller stated something that was not honored and has to hear
-            # it — the echo is where it stays visible.
-            item["note"] = hit["note"]
-        return item, None
-    return None, _LOCATION_REF_BAD_REQUEST
-
-
-def _resolve_location_refs(refs, param_name: str) -> tuple[list[dict] | None, dict | None]:
-    """A list of LocationRefs -> (resolved list, error), same contract as above.
-
-    Items that need network resolution (strings: GERS ids or names) resolve
-    in parallel, mirroring _resolve_pair's ThreadPoolExecutor + contextvars
-    pattern (workers do not inherit contextvars, so the request context is
-    copied into each submit or progress.report from a cold resolve would
-    never reach attach()). Plain {lat,lon} dicts need no network round-trip
-    and are resolved inline.
-
-    On any failure, returns the error for the lowest-indexed failing item
-    (deterministic regardless of which worker finishes first), with
-    `"index"` set and `detail` prefixed `f"{param_name}[{i}]: "` so the
-    agent can retry that one argument instead of the whole call.
-    """
-    if not isinstance(refs, list):
-        return None, {"error": "bad_request", "detail": f"{param_name} must be a list"}
-
-    resolved: list[dict | None] = [None] * len(refs)
-    failures: dict[int, dict] = {}
-    network_idxs = [i for i, r in enumerate(refs) if isinstance(r, str)]
-
-    def _isolated(i: int, ref):
-        with db.isolated_reads():
-            return i, _resolve_location_ref(ref)
-
-    if len(network_idxs) > 1:
-        with ThreadPoolExecutor(max_workers=min(len(network_idxs), 8)) as pool:
-            futures = [
-                pool.submit(contextvars.copy_context().run, _isolated, i, refs[i])
-                for i in network_idxs
-            ]
-            for future in futures:
-                i, (item, err) = future.result()
-                if err is not None:
-                    failures[i] = err
-                else:
-                    resolved[i] = item
-        pending = [i for i in range(len(refs)) if i not in network_idxs]
-    else:
-        pending = list(range(len(refs)))
-
-    for i in pending:
-        item, err = _resolve_location_ref(refs[i])
-        if err is not None:
-            failures[i] = err
-        else:
-            resolved[i] = item
-
-    if failures:
-        idx = min(failures)
-        err = failures[idx]
-        detail = f"{param_name}[{idx}]: {err.get('detail', '')}"
-        return None, {**err, "index": idx, "detail": detail}
-    return resolved, None
-
-
-def _location_ref_echo(item: dict) -> dict:
-    """The compact {name, id, lat, lon, matched_by} block for a resolved string LocationRef.
-
-    Only called for items that carry `matched_by` — coordinate inputs never
-    reach this (see _resolve_location_ref's contract), which is what keeps
-    the `resolved` echo absent for pure-coordinate calls. Plus `note` when
-    the resolution has something non-fatal to disclose (#427).
-    """
-    echo = {
-        "name": item.get("name"),
-        "id": item.get("id"),
-        "lat": item["lat"],
-        "lon": item["lon"],
-        "matched_by": item["matched_by"],
-    }
-    if item.get("note"):
-        echo["note"] = item["note"]
-    return echo
 
 
 def _category_slug(category: str) -> str:
@@ -1638,40 +1298,6 @@ def within_distance(
     return result
 
 
-def _resolve_matrix_side(points: list, param_name: str) -> tuple[list[dict] | None, dict | None]:
-    """origins/destinations LocationRef list -> ([{"lat","lon",...}], error).
-
-    A thin name for _resolve_location_refs at the matrix tools' call sites —
-    a missing/non-numeric lat or lon on a plain {"lat", "lon"} dict already
-    comes back as an indexed bad_request via _invalid_coord inside
-    _resolve_location_ref, so no separate precheck is needed here (and
-    adding one would let a malformed dict at a higher index preempt an
-    unresolved string at a lower one, breaking "lowest index wins").
-    """
-    return _resolve_location_refs(points, param_name)
-
-
-def _matrix_resolved_echo(origins: list, resolved_origins: list[dict],
-                           destinations: list, resolved_destinations: list[dict]) -> dict | None:
-    """The {"origins": [...], "destinations": [...]} resolved echo, string items only."""
-    echo = {}
-    o_echo = [
-        {"index": i, **_location_ref_echo(r)}
-        for i, r in enumerate(resolved_origins)
-        if isinstance(origins[i], str)
-    ]
-    d_echo = [
-        {"index": i, **_location_ref_echo(r)}
-        for i, r in enumerate(resolved_destinations)
-        if isinstance(destinations[i], str)
-    ]
-    if o_echo:
-        echo["origins"] = o_echo
-    if d_echo:
-        echo["destinations"] = d_echo
-    return echo or None
-
-
 @_tool("Distance matrix")
 def distance_matrix(origins: list[dict | str], destinations: list[dict | str]) -> dict:
     """Straight-line (great-circle) distance in meters between every origin and destination.
@@ -1851,60 +1477,6 @@ def _meeting_travel_time_for(origin: tuple, dest_lat: float, dest_lon: float) ->
     if result.get("truncated"):
         leg["truncated"] = True
     return leg
-
-
-def _resolve_string_origins(
-    origins: list, string_idxs: list[int]
-) -> tuple[dict[int, dict], dict | None]:
-    """Resolve just origins' string entries (by real index), in parallel.
-
-    meeting_point's per-index validation loop mixes string LocationRefs
-    with dict {"lat","lon","mode"} origins that need their own mode
-    validation, so it can't just hand the whole `origins` list to
-    _resolve_location_refs (that function would try to coordinate-validate
-    the dict origins itself, with a different error shape than this tool
-    documents). This resolves only the string entries — same
-    ThreadPoolExecutor + contextvars.copy_context() + db.isolated_reads()
-    pattern _resolve_location_refs uses, so 2-5 cold name/GERS resolutions
-    run concurrently instead of serially eating into the question's time
-    budget — and returns them keyed by their real position in `origins`,
-    so the caller's per-index loop and error messages need no index
-    remapping. On any failure, returns the lowest-indexed failure with
-    `"index"` and `detail` prefixed `f"origins[{i}]: "`, same contract as
-    _resolve_location_refs.
-    """
-    resolved: dict[int, dict] = {}
-    failures: dict[int, dict] = {}
-
-    def _isolated(i: int):
-        with db.isolated_reads():
-            return i, _resolve_location_ref(origins[i])
-
-    if len(string_idxs) > 1:
-        with ThreadPoolExecutor(max_workers=min(len(string_idxs), 8)) as pool:
-            futures = [
-                pool.submit(contextvars.copy_context().run, _isolated, i) for i in string_idxs
-            ]
-            for future in futures:
-                i, (item, err) = future.result()
-                if err is not None:
-                    failures[i] = err
-                else:
-                    resolved[i] = item
-    else:
-        for i in string_idxs:
-            item, err = _resolve_location_ref(origins[i])
-            if err is not None:
-                failures[i] = err
-            else:
-                resolved[i] = item
-
-    if failures:
-        idx = min(failures)
-        err = failures[idx]
-        detail = f"origins[{idx}]: {err.get('detail', '')}"
-        return {}, {**err, "index": idx, "detail": detail}
-    return resolved, None
 
 
 @_tool("Meeting point")
@@ -4032,74 +3604,6 @@ def simplify_geometry(geojson: dict, max_tokens: int = 500) -> dict:
         return {"error": "invalid_geometry", "detail": e.detail}
 
 
-# op -> the geometry_op() params that op needs set. Single source of truth
-# for both the missing-params error message and the dispatch below, so the
-# two can't drift on what an op requires.
-_GEOMETRY_OP_REQUIRED: dict[str, tuple[str, ...]] = {
-    "distance": ("point", "point2"),
-    "bearing": ("point", "point2"),
-    "destination": ("point", "bearing_deg", "distance_m"),
-    "midpoint": ("point", "point2"),
-    "area": ("geometry",),
-    "length": ("geometry",),
-    "bbox": ("geometry",),
-    "centroid": ("geometry",),
-    "buffer": ("point", "radius_m"),
-    "convex_hull": ("points",),
-    "point_in_polygon": ("points", "geometry"),
-    "nearest_point": ("point", "points"),
-    "nearest_point_on_line": ("point", "geometry"),
-    "union": ("geometry", "geometry2"),
-    "intersect": ("geometry", "geometry2"),
-    "difference": ("geometry", "geometry2"),
-}
-_OpArg = Annotated[
-    str,
-    Field(
-        description="Geometry operation; each takes a different subset of the "
-        "other arguments — see below.",
-        json_schema_extra={"enum": sorted(_GEOMETRY_OP_REQUIRED)},
-    ),
-]
-
-
-def _point_coord_error(point, label: str) -> dict | None:
-    """bad_request dict if point isn't a well-formed, in-range {"lat","lon"}, else None."""
-    if not isinstance(point, dict):
-        return {
-            "error": "bad_request",
-            "detail": f"{label} must be a {{'lat': ..., 'lon': ...}} object",
-        }
-    try:
-        lat, lon = float(point.get("lat")), float(point.get("lon"))
-    except (TypeError, ValueError):
-        return {"error": "bad_request", "detail": f"{label} needs numeric 'lat' and 'lon'"}
-    coord_error = _invalid_coord(lat, lon)
-    if coord_error is not None:
-        coord_error["detail"] = f"{label}: {coord_error['detail']}"
-        return coord_error
-    return None
-
-
-def _points_list_coord_error(points, label: str) -> dict | None:
-    """bad_request dict if points isn't a non-empty, in-range, within-cap point list, else None."""
-    if not isinstance(points, list) or not points:
-        return {"error": "bad_request", "detail": f"{label} must be a non-empty list of points"}
-    if len(points) > geometry_ops.MAX_BATCH_POINTS:
-        return {
-            "error": "bad_request",
-            "detail": (
-                f"{label} accepts at most {geometry_ops.MAX_BATCH_POINTS} points, "
-                f"got {len(points)}"
-            ),
-        }
-    for i, p in enumerate(points):
-        coord_error = _point_coord_error(p, f"{label}[{i}]")
-        if coord_error is not None:
-            return coord_error
-    return None
-
-
 @_tool("Geometry operations")
 def geometry_op(
     op: _OpArg,
@@ -4971,52 +4475,6 @@ def _route_between_refs(
     return result
 
 
-def _resolve_route_ends(from_, to) -> tuple[dict | None, dict | None, dict | None]:
-    """Resolve a routing call's two LocationRef ends — (origin, dest, error).
-
-    Exactly one of the two shapes comes back: (origin, dest, None) with both
-    ends resolved to dicts carrying lat/lon (plus name/id/type/admin_context
-    when the input was a name or GERS id), or (None, None, error) where the
-    error dict names the offending side in "field": "from" | "to". Shared by
-    _route_between_refs (route/from_to) and compare_modes so the end
-    semantics — empty-string bad_request, the byte-identical parallel
-    _resolve_pair fast path for two plain names, per-side field — are one
-    implementation rather than two that can drift.
-    """
-    if isinstance(from_, str) and not from_.strip():
-        return None, None, {
-            "error": "bad_request",
-            "detail": "from must be a non-empty place name",
-            "field": "from",
-        }
-    if isinstance(to, str) and not to.strip():
-        return None, None, {
-            "error": "bad_request",
-            "detail": "to must be a non-empty place name",
-            "field": "to",
-        }
-    # Both ends still plain names (not GERS ids): the original, byte-
-    # identical path — same parallel _resolve_pair call, same
-    # ambiguous_place/not_found shape as before this feature existed.
-    if (
-        isinstance(from_, str) and isinstance(to, str)
-        and not _GERS_ID_RE.match(from_.strip()) and not _GERS_ID_RE.match(to.strip())
-    ):
-        origin, dest = _resolve_pair(from_, to)
-        if "error" in origin:
-            return None, None, {**origin, "field": "from"}
-        if "error" in dest:
-            return None, None, {**dest, "field": "to"}
-        return origin, dest, None
-    origin, origin_error = _resolve_location_ref(from_)
-    if origin_error is not None:
-        return None, None, {**origin_error, "field": "from"}
-    dest, dest_error = _resolve_location_ref(to)
-    if dest_error is not None:
-        return None, None, {**dest_error, "field": "to"}
-    return origin, dest, None
-
-
 # compare_modes' row order and the verbs its deterministic summary uses.
 _COMPARE_MODES_DEFAULT = ("walk", "cycle", "drive")
 _COMPARE_MODES_VERB = {"walk": "walking", "cycle": "cycling", "drive": "driving"}
@@ -5842,217 +5300,6 @@ def preferences(
         return exc.as_dict()
 
 
-def _confirm_graph_cap_s() -> float:
-    """2x the advertised graph-build upper bound. Warm cache hits stay uncapped."""
-    return 2.0 * float(progress.GRAPH_BUILD_S[1])
-
-
-def _eta_exceeded_graph() -> dict:
-    lo, hi = progress.GRAPH_BUILD_S
-    return {
-        "error": "eta_exceeded",
-        "eta": progress.format_eta(lo, hi),
-        "eta_s": [int(lo), int(hi)],
-        "limit_s": int(_confirm_graph_cap_s()),
-        "detail": (
-            "The street-graph build exceeded twice the advertised wait "
-            f"({progress.format_eta(lo, hi)}). Try a smaller area or a warm cache."
-        ),
-    }
-
-
-def _run_route(
-    from_lat: float,
-    from_lon: float,
-    to_lat: float,
-    to_lon: float,
-    *,
-    mode: str,
-    include_path: bool,
-    include_elevation: bool = False,
-    prefer: str | None = None,
-    avoid: tuple[str, ...] = (),
-    cap_confirm_build: bool,
-) -> dict:
-    """routing.route, with a 2x-ETA cap on a confirmed cold graph build."""
-    if not cap_confirm_build:
-        return routing.route(
-            from_lat, from_lon, to_lat, to_lon, mode=mode, include_path=include_path,
-            include_elevation=include_elevation, prefer=prefer, avoid=avoid,
-        )
-    limit_s = _confirm_graph_cap_s()
-    # Install a log list before copy so worker report() appends are visible
-    # to attach() on this thread (copy_context snapshots the list reference).
-    progress._ensure_log()
-    ctx = contextvars.copy_context()
-    pool = ThreadPoolExecutor(max_workers=1)
-    try:
-        fut = pool.submit(
-            ctx.run,
-            routing.route,
-            from_lat, from_lon, to_lat, to_lon,
-            mode=mode, include_path=include_path,
-            include_elevation=include_elevation, prefer=prefer, avoid=avoid,
-        )
-        try:
-            return fut.result(timeout=limit_s)
-        except TimeoutError:
-            fut.add_done_callback(lambda f: f.cancelled() or f.exception())
-            return _eta_exceeded_graph()
-    finally:
-        # Do not join the worker — that would turn the cap back into a hang.
-        pool.shutdown(wait=False, cancel_futures=True)
-
-
-def _needs_confirm_graph(mode: str) -> dict:
-    """Cheap reject before a cold street-graph extract (#336)."""
-    lo, hi = progress.GRAPH_BUILD_S
-    return {
-        "error": "needs_confirm",
-        "eta": progress.format_eta(lo, hi),
-        "eta_s": [int(lo), int(hi)],
-        "detail": (
-            f"First {mode} in this city builds the street graph. "
-            "Ask the user if they want to wait, then call the same tool "
-            "again with confirm=true."
-        ),
-    }
-
-
-def _needs_confirm_warmup() -> dict:
-    lo, hi = progress.WARMUP_S
-    return {
-        "error": "needs_confirm",
-        "eta": progress.format_eta(lo, hi),
-        "eta_s": [int(lo), int(hi)],
-        "detail": (
-            "First warmup in this city copies map tiles into the local cache. "
-            "Ask the user if they want to wait, then call the same tool "
-            "again with confirm=true."
-        ),
-    }
-
-
-def _warmup_is_cached(lat: float, lon: float, radius_m: float) -> bool:
-    """True if warmup would not COPY — cache off, or both themes already on disk."""
-    if not cache.enabled():
-        return True
-    radius_m = min(max(float(radius_m), 0.0), MAX_WARMUP_RADIUS_M)
-    bbox = geo.bbox_around(lat, lon, radius_m)
-    rel = release.resolve_release()
-    for theme, type_ in _WARMUP_THEMES:
-        glob = overture.upstream_glob(theme=theme, type_=type_)
-        if not cache.bbox_is_cached(rel, theme, bbox, glob):
-            return False
-    return True
-
-
-DEFAULT_WARMUP_RADIUS_M = 8000.0
-MAX_WARMUP_RADIUS_M = 25_000.0
-
-# Themes the first real question typically hits. places first ("what's
-# around downtown"); transportation tiles next (the routing graph is
-# still built on the first route). Buildings stay out: a metro bbox
-# fans into too many 0.0625° tiles.
-_WARMUP_THEMES: tuple[tuple[str, str], ...] = (
-    ("places", "place"),
-    ("transportation", "segment"),
-)
-
-
-def _prewarm_region(lat: float, lon: float, radius_m: float) -> dict:
-    """Materialize existing-cache tiles for a metro bbox.
-
-    Shared by warmup_city, _warm_start, and autowarm (first city-scale
-    resolve). Same cache.py tiles — no second cache, no extra remote API.
-    Tiles are not a built street graph.
-    """
-    radius_m = min(max(float(radius_m), 0.0), MAX_WARMUP_RADIUS_M)
-    if not cache.enabled():
-        return {
-            "lat": lat,
-            "lon": lon,
-            "radius_m": radius_m,
-            "status": "cache_disabled",
-            "themes": [],
-            "note": (
-                "The tile cache is off (PLACEROOT_CACHE=off), so there is "
-                "nothing to pre-warm. Repeat queries will still hit upstream."
-            ),
-        }
-    bbox = geo.bbox_around(lat, lon, radius_m)
-    themes = []
-    # Do not hold conn_lock across the warmup. prewarm_bbox COPYs run
-    # on new_connection() cursors (the same path background fetches
-    # use), so other tools can keep answering between tiles/themes.
-    # Holding the lock here was a server-wide stall at 25 km.
-    for theme, type_ in _WARMUP_THEMES:
-        with db.conn_lock:
-            con = db.shared_conn()
-        glob = overture.upstream_glob(theme=theme, type_=type_)
-        themes.append(
-            cache.prewarm_bbox(
-                con,
-                release.resolve_release(),
-                theme,
-                bbox,
-                glob,
-                db.new_connection,
-            )
-        )
-    statuses = {row["status"] for row in themes}
-    graph = progress.format_eta(*progress.GRAPH_BUILD_S)
-    coverage = (
-        "Places and transportation tiles are cached; buildings are not. "
-        f"The first route still builds the street graph ({graph})."
-    )
-    if statuses <= {"already_warm"}:
-        status = "already_warm"
-        note = (
-            "This area is already cached. Later place searches over it "
-            f"should be fast. {coverage}"
-        )
-    elif "partial" in statuses and not (
-        statuses & {"upstream_unavailable", "too_large"}
-    ):
-        status = "partial"
-        note = (
-            "Some tiles for this area are cached; a heavy theme stopped "
-            "at the inline-tile cap so warmup would not monopolize the "
-            f"server. {coverage}"
-        )
-    elif statuses <= {"warmed", "already_warm"}:
-        status = "warmed"
-        note = (
-            "Places and transportation tiles for this area are cached. "
-            "Place searches over this city should now be fast. "
-            f"{coverage}"
-        )
-    elif "upstream_unavailable" in statuses and statuses & {
-        "warmed",
-        "already_warm",
-        "partial",
-    }:
-        status = "partial"
-        note = "Some themes cached; others could not reach upstream."
-    elif "too_large" in statuses:
-        status = "too_large"
-        note = "The radius covers too many tiles; try a smaller radius_m."
-    else:
-        status = "failed"
-        note = (
-            "Warmup could not cache this area; the next query will scan upstream."
-        )
-    return {
-        "lat": lat,
-        "lon": lon,
-        "radius_m": radius_m,
-        "status": status,
-        "themes": themes,
-        "note": note,
-    }
-
-
 @_tool("Get to know my city")
 def warmup_city(
     city: str | None = None,
@@ -6294,506 +5541,6 @@ def placeroot_call(tool: str, args: dict | None = None) -> dict:
 
 _UNSET = object()
 
-# MCP 2026-07-28 caching hints (SEP-2549). The spec requires a `ttlMs` and a
-# `cacheScope` on every `resultType: "complete"` listing result; the SDK's
-# default is ttlMs=0 ("immediately stale"), which is valid but throws away the
-# whole point for a server whose listings are frozen at build time.
-#
-# Why 24 hours: our listings are a pure function of the installed placeroot
-# version and PLACEROOT_TOOLS. Nothing at runtime can change them — no tool is
-# registered after startup, and we never send notifications/tools/list_changed
-# — so the only event that invalidates a cached listing is the operator
-# upgrading the package. TTL is therefore a bound on how long a client could
-# keep showing a pre-upgrade tool list, and one day is the honest trade: it
-# spares a re-fetch of a ~33k-token schema surface on every session within a
-# day, while an upgrade is visible by the next one. A week would buy almost
-# nothing extra (sessions cluster well inside a day) for seven times the
-# staleness window; 0 is what we'd declare if the surface could move at
-# runtime, and it can't.
-#
-# Why "public": these listings carry no caller-specific data. PlaceRoot is
-# keyless, does no per-caller filtering, and returns the same bytes to every
-# request on a given process, so a shared gateway may serve one caller's copy
-# to another.
-#
-# Two of the six cacheable methods are deliberately left at the SDK default
-# (ttlMs=0/private), for the same reason: their bodies carry the resolved
-# Overture release, which is discovered from S3 at process start rather than
-# baked into the build, so a day-long shared cache could outlive the value.
-#   `resources/read` — placeroot://data-version reports the release directly.
-#   `server/discover` — its DiscoverResult carries `instructions`, and main()
-#       appends "Backed by Overture Maps release {release}." to those at
-#       startup (the SDK's default handler reads them at call time). A 24h
-#       public entry would keep serving the pre-restart release string — to
-#       other callers too, under "public" — after an operator restarts onto a
-#       new Overture release, and that string is model-visible grounding.
-_LISTING_TTL_MS = 24 * 60 * 60 * 1000
-_LISTING_CACHE_HINT = CacheHint(ttl_ms=_LISTING_TTL_MS, scope="public")
-CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
-    "tools/list": _LISTING_CACHE_HINT,
-    "prompts/list": _LISTING_CACHE_HINT,
-    "resources/list": _LISTING_CACHE_HINT,
-    "resources/templates/list": _LISTING_CACHE_HINT,
-}
-
-
-def _tool_name_of(ctx) -> str:
-    """The tool a tools/call request names, from its raw inbound params.
-
-    The middleware context carries the request's unvalidated params as
-    `ctx.params` (a mapping, per mcp.server.context.ServerRequestContext);
-    there is no `tool_name` attribute, so reading one would label every
-    trace "tools/call".
-    """
-    params = getattr(ctx, "params", None)
-    name = params.get("name") if isinstance(params, Mapping) else None
-    return name if isinstance(name, str) and name else "tools/call"
-
-
-def _amend_tool_payload(result, amend: Callable[[dict], dict]):
-    """Apply `amend` to the tool's JSON answer inside a tools/call wire result.
-
-    What `call_next` hands a middleware for tools/call is not the handler's
-    CallToolResult but its *wire form*: the SDK's ServerRunner serializes the
-    handler result inside the chain (runner.py `_inner` returns
-    `self._serialize(...)`), so a middleware sees a dict shaped
-    {"content": [{"type": "text", "text": <json>}], "structuredContent":
-    {...}, "isError": false, ...}. The tool's answer lives in
-    structuredContent (every tool here declares an outputSchema, so a
-    successful call always has it) and, for clients that only read text, as
-    the same JSON in the single text block. A key written onto the envelope
-    itself — which is what `result["timing"] = ...` used to do — is not part
-    of the answer and never reaches the agent.
-
-    So this amends structuredContent and re-renders the text block from it
-    (pydantic_core.to_json, the SDK's own rendering, so the two stay
-    byte-identical — tests/test_output_schemas.py asserts that). Anything
-    else — a non-dict, an isError result whose text is an exception message,
-    a result with no JSON-object payload — is returned untouched.
-    """
-    if not isinstance(result, dict) or result.get("isError"):
-        return result
-    payload = result.get("structuredContent")
-    content = result.get("content")
-    text_block = (
-        content[0]
-        if isinstance(content, list) and len(content) == 1
-        and isinstance(content[0], dict) and content[0].get("type") == "text"
-        else None
-    )
-    if not isinstance(payload, dict):
-        # No structuredContent (a tool without an outputSchema): the text
-        # block is the only copy of the answer, when it is a JSON object.
-        if text_block is None:
-            return result
-        try:
-            payload = json.loads(text_block["text"])
-        except (TypeError, ValueError):
-            return result
-        if not isinstance(payload, dict):
-            return result
-        amended = amend(dict(payload))
-        if amended == payload:
-            return result
-        out = dict(result)
-        out["content"] = [{**text_block, "text": _render_tool_text(amended)}]
-        return out
-    amended = amend(dict(payload))
-    if amended == payload:
-        return result
-    out = dict(result)
-    out["structuredContent"] = amended
-    if text_block is not None:
-        out["content"] = [{**text_block, "text": _render_tool_text(amended)}]
-    return out
-
-
-def _render_tool_text(payload: dict) -> str:
-    """The text block the SDK renders for a dict tool result (func_metadata's
-    _convert_to_content), so an amended answer reads the same as an
-    unamended one."""
-    import pydantic_core
-
-    return pydantic_core.to_json(payload, fallback=str, indent=2).decode()
-
-
-def _session_id_of(ctx) -> str:
-    """The client session a request belongs to, from the SDK's request context.
-
-    Over stateful streamable HTTP (the default for --http) the SDK's
-    StreamableHTTPSessionManager hands `http_transport.mcp_session_id` —
-    the `Mcp-Session-Id` the client echoes on every request — to
-    `serve_loop`, which stores it as `Connection.session_id`; the
-    middleware's `ctx.session` is a `ServerSession` over that connection
-    (its `_connection`; the SDK exposes no public accessor from the
-    middleware tier). That id is the stable per-client identity. Where the
-    connection carries none, the request itself decides: no HTTP request
-    object means stdio (one process = one session, session.STDIO_SESSION_ID).
-    An HTTP request without one — a stateless app, or a 2026-07-28 client,
-    whose era has no handshake and no session (the SDK's
-    `handle_modern_request` builds a fresh `Connection` per request and the
-    client never learns an id) — uses the header if the client sent one and
-    is otherwise its own ephemeral session: nothing persists between two
-    such requests, which is that era's own contract, and nothing leaks.
-    """
-    connection = getattr(getattr(ctx, "session", None), "_connection", None)
-    sid = getattr(connection, "session_id", None)
-    if isinstance(sid, str) and sid:
-        return sid
-    request = getattr(ctx, "request", None)
-    if request is None:
-        return session.STDIO_SESSION_ID
-    headers = getattr(request, "headers", None)
-    try:
-        sid = headers.get("mcp-session-id") if headers is not None else None
-    except Exception:  # noqa: BLE001 - an odd request object must not fail the call
-        sid = None
-    if isinstance(sid, str) and sid:
-        return sid
-    return session.new_ephemeral_id()
-
-
-async def _session_middleware(ctx, call_next):
-    """Bind the client session id for the whole request (session.py).
-
-    Outermost in the chain so every handler — tools, resources, prompts —
-    runs with session.session_id() set to the client it serves; the
-    contextvar follows the request onto the worker thread the SDK runs a
-    sync tool on (anyio copies the context), and into the pools server.py
-    itself fans out to (which copy it explicitly). geocode's last-city
-    memory and preferences' HTTP overlay key on it.
-    """
-    with session.bind_session(_session_id_of(ctx)):
-        return await call_next(ctx)
-
-
-async def _progress_middleware(ctx, call_next):
-    """Narrate slow tool calls via MCP progress notifications.
-
-    A cold query (first over a new area) legitimately spends tens of
-    seconds in S3 scans and tile COPYs; without this, the client shows a
-    silent spinner indistinguishable from a hang. When the caller attached
-    a progressToken to its tools/call, this installs a request-scoped
-    reporter (progress.set_reporter) that the query layer's phase
-    boundaries feed — the start of a direct upstream scan, each tile COPY
-    — and the client renders as live status. Every tools/call also starts
-    a request-scoped log so attach() can put the same line on the JSON
-    answer when the client never sent a token. Non-tool requests pass
-    through untouched.
-
-    The reporter is called from the worker thread the SDK runs a sync tool
-    on, so the async send is scheduled onto the event loop with
-    run_coroutine_threadsafe, fire-and-forget: progress must never block or
-    fail the query it narrates (see progress.py's contract), and per the
-    spec a progress send for a completed request is dropped harmlessly.
-    """
-    if ctx.method != "tools/call":
-        return await call_next(ctx)
-    log_token = progress.begin()
-    token = (ctx.meta or {}).get("progress_token")
-    if token is None:
-        try:
-            result = await call_next(ctx)
-            return _amend_tool_payload(result, progress.attach)
-        finally:
-            progress.reset_log(log_token)
-
-    loop = asyncio.get_running_loop()
-    session, request_id = ctx.session, ctx.request_id
-    # The spec requires progress to increase with every notification on a
-    # token. Call sites report per-phase counts that reset between phases
-    # (tile 1..N for places, then 1..M for each base theme), so the wire
-    # value is a per-request monotonic sequence instead; the human-facing
-    # counts live in the message, which is what clients render anyway.
-    seq = 0
-    seq_lock = threading.Lock()
-
-    def reporter(message: str, current: float | None, total: float | None) -> None:
-        nonlocal seq
-        # Scheduling happens under the same lock as the increment so the
-        # wire order matches the sequence order even if two threads ever
-        # report concurrently — a later value must not reach the loop first.
-        with seq_lock:
-            seq += 1
-            future = asyncio.run_coroutine_threadsafe(
-                session.send_progress_notification(
-                    token, seq, None, message, related_request_id=request_id,
-                ),
-                loop,
-            )
-        # Consume the eventual result: a failed or cancelled send is already
-        # best-effort (progress.py's contract) and must not surface as an
-        # exception-was-never-retrieved warning at GC time.
-        future.add_done_callback(lambda f: f.cancelled() or f.exception())
-
-    reset_token = progress.set_reporter(reporter)
-    try:
-        result = await call_next(ctx)
-        return _amend_tool_payload(result, progress.attach)
-    finally:
-        progress.reset(reset_token)
-        progress.reset_log(log_token)
-
-
-async def _trace_middleware(ctx, call_next):
-    """Record where a tool call spent its time, and let a slow one say so.
-
-    Every latency investigation here has started with a user reporting "that
-    took a minute" and ended with a number the server already knew while it
-    was running — which phase, which scan, whether it was bounded. This
-    middleware records that for every tools/call (trace.py), logs it under
-    PLACEROOT_TRACE=1, and, when the call took longer than
-    PLACEROOT_TRACE_SLOW_S, attaches the breakdown to the response as
-    `timing` so the agent that waited gets the explanation with the answer.
-
-    Attached only to JSON-object answers (see _amend_tool_payload) and only
-    when slow: a fast call's payload is unchanged, byte for byte, and a tool
-    returning a list or a scalar is left alone rather than being reshaped to
-    carry telemetry.
-    """
-    if ctx.method != "tools/call":
-        return await call_next(ctx)
-
-    token = trace.start()
-    started = time.perf_counter()
-    try:
-        result = await call_next(ctx)
-        # Inside the try: the records are read before `finally` resets them.
-        return _amend_tool_payload(
-            result, functools.partial(_with_timing, elapsed=time.perf_counter() - started)
-        )
-    finally:
-        elapsed = time.perf_counter() - started
-        try:
-            trace.log_summary(_tool_name_of(ctx), elapsed)
-        except Exception:  # noqa: BLE001 - telemetry must not fail the call
-            logger.debug("trace summary failed", exc_info=True)
-        trace.reset(token)
-
-
-def _with_timing(payload: dict, *, elapsed: float) -> dict:
-    """Add `timing` to a tool answer that took longer than the slow threshold."""
-    threshold = trace.slow_threshold_s()
-    if not threshold or elapsed < threshold or "timing" in payload:
-        return payload
-    rows = trace.summary()
-    if not rows:
-        return payload
-    payload["timing"] = {
-        "total_s": round(elapsed, 1),
-        "phases": rows[:8],
-        "note": (
-            "This call was slow enough to explain itself. Scans marked "
-            "bounded:false read everything they touch."
-        ),
-    }
-    return payload
-
-
-def _from_alias_base():
-    """The ArgModelBase subclass that maps a published `from` back to `from_`.
-
-    ArgModelBase.model_dump_one_level keys its kwargs by alias, which would
-    call the tool with from=... — a syntax error waiting to happen. This
-    keys them by field name instead, for every declared field, so a
-    parameter can never be dropped from the dump by being forgotten in a
-    hand-written dict (the #328/#395 bug class).
-
-    Imported lazily: placeroot.server imports without mcp installed
-    (test_import_hardening), and only server construction needs this.
-    """
-    from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase
-
-    class _FromAliasArguments(ArgModelBase):
-        def model_dump_one_level(self) -> dict:
-            return {name: getattr(self, name) for name in type(self).model_fields}
-
-    return _FromAliasArguments
-
-
-def _from_to_arg_model():
-    """from_to's published argument model: every parameter, `from_` as `from`."""
-    from pydantic import ConfigDict, Field
-
-    class FromToArguments(_from_alias_base()):
-        model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
-        from_: str | dict = Field(alias="from")
-        to: str | dict
-        mode: _ModeArgWalkDefault = None
-        include_path: bool = False
-        include_elevation: bool = False
-        prefer: _PreferArg = None
-        avoid: _AvoidArg = None
-        confirm: bool = False
-
-    return FromToArguments
-
-
-def _compare_modes_arg_model():
-    """compare_modes' published argument model: `from_` as `from`, the rest verbatim (#459)."""
-    from pydantic import ConfigDict, Field
-
-    class CompareModesArguments(_from_alias_base()):
-        model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
-        from_: str | dict = Field(alias="from")
-        to: str | dict
-        modes: _CompareModesArg = None
-        include_elevation: bool = False
-        confirm: bool = False
-
-    return CompareModesArguments
-
-
-def _route_arg_model():
-    """route's published argument model: the four scalars, from/to, and the rest (#419)."""
-    from pydantic import ConfigDict, Field
-
-    class RouteArguments(_from_alias_base()):
-        model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
-        from_lat: float | None = None
-        from_lon: float | None = None
-        to_lat: float | None = None
-        to_lon: float | None = None
-        mode: _ModeArgDriveDefault = None
-        include_path: bool = False
-        include_elevation: bool = False
-        prefer: _PreferArg = None
-        avoid: _AvoidArg = None
-        confirm: bool = False
-        from_: str | dict | None = Field(default=None, alias="from")
-        to: str | dict | None = None
-
-    return RouteArguments
-
-
-def _publish_from_keyword(mcp_server) -> None:
-    """Advertise from_to's, route's and compare_modes' origin as `from` — a reserved word in Python.
-
-    The implementation parameter is from_ on all three tools. The public schema
-    and the validator both use from so the agent never sees the underscore.
-
-    Each model is checked against the function's real signature before it is
-    published: a hand-written arg model that forgets a parameter silently
-    deletes it from the published schema, which is exactly what #328/#395
-    shipped and had to be fixed twice.
-
-    Patches mcp 2.0.0 private internals (pinned in uv.lock). If those
-    move, fail with a clear assertion rather than a raw AttributeError.
-    """
-    for name, fn, build in (
-        ("from_to", from_to, _from_to_arg_model),
-        ("route", route, _route_arg_model),
-        ("compare_modes", compare_modes, _compare_modes_arg_model),
-    ):
-        try:
-            tool = mcp_server._tool_manager.get_tool(name)
-            if tool is None:
-                continue
-            model = build()
-            missing = set(inspect.signature(fn).parameters) - set(model.model_fields)
-            assert not missing, f"{name} schema patch drops {sorted(missing)}"
-            tool.fn_metadata = tool.fn_metadata.model_copy(update={"arg_model": model})
-            tool.parameters = model.model_json_schema(by_alias=True)
-        except (AttributeError, ImportError) as e:
-            raise AssertionError(f"{name} schema patch failed; mcp internals changed") from e
-
-
-class _PermissiveOutput(BaseModel):
-    """A pydantic model that accepts any dict, unchanged, as extra fields.
-
-    `FuncMetadata.convert_result` (mcp/server/mcpserver/utilities/
-    func_metadata.py:110-144) is the *real* runtime gate: once
-    `fn_metadata.output_schema` is non-None it asserts `output_model is not
-    None` and calls `output_model.model_validate(result)`, then ships
-    `model_dump(mode="json", by_alias=True)` as `structuredContent`. A
-    spec-compliant client requires exactly that — confirmed empirically:
-    `mcp.client.session.ClientSession.validate_tool_result` (session.py:
-    1080-1100) raises `RuntimeError` on any tool whose declared outputSchema
-    has no matching `structured_content`. So structured output cannot be
-    faked at the publication layer alone (see `_publish_output_schemas`);
-    this model is what actually produces it, deliberately never rejecting a
-    real answer: no declared fields, `extra="allow"`, so
-    `model_validate(any_dict)` always succeeds and `model_dump` round-trips
-    it byte-for-byte. Real validation happens client-side, against the
-    precise schema `_publish_output_schemas` shadows onto `Tool.output_schema`
-    below — decoupled on purpose, so the schema tools/list advertises can be
-    richer than what this pass-through model would derive on its own.
-    """
-
-    model_config = ConfigDict(extra="allow")
-
-
-def _publish_output_schemas(mcp_server) -> None:
-    """Attach a declared `outputSchema` to every registered tool (roadmap §4.3 / §5.3).
-
-    Every tool here returns a bare `dict` — the SDK's own schema derivation
-    (func_metadata, driven by return-type annotations) gives nothing for
-    that (a bare `dict` return type carries no field types to derive from),
-    so the schemas in output_schemas.py are hand-written instead.
-
-    Runtime-safety finding, in two parts:
-
-    1. `Tool.output_schema` (mcp/server/mcpserver/tools/base.py:53-55) is a
-       `functools.cached_property` that *defaults* to reading
-       `self.fn_metadata.output_schema`, and tools/list publishes exactly
-       that cached_property (mcp/server/mcpserver/server.py:490,
-       `output_schema=info.output_schema`). `cached_property` stores its
-       computed value in the instance's own `__dict__`; setting that key
-       directly (confirmed empirically) permanently shadows the descriptor,
-       so tools/list can advertise our own richer, hand-authored schema —
-       decoupled from whatever `fn_metadata.output_schema` says.
-    2. `FuncMetadata.convert_result` (utilities/func_metadata.py:110-144) —
-       the actual runtime gate a `tools/call` goes through — reads a
-       *different* attribute: `self.fn_metadata.output_schema`, the
-       `FuncMetadata` field, not the `Tool` cached_property. Originally
-       that field is None (bare-`dict` return, no `structured_output=`), so
-       `convert_result` never touches `output_model` at all and every
-       existing answer is untouched. Initially this function left that
-       field alone entirely, on the theory that a schema which never
-       drives validation can never break a call — but a real
-       spec-compliant client rejects that: `mcp.client.session.
-       ClientSession.validate_tool_result` (session.py:1080-1100) raises
-       `RuntimeError` the moment a tool's declared outputSchema has no
-       matching `structuredContent` on the response (confirmed by running
-       tests/test_http.py's real `mcp.client.client.Client` against a
-       tool with only the publication-layer patch applied — it failed).
-       So `fn_metadata.output_schema`/`output_model` are patched too, via
-       `_PermissiveOutput` (above) — a model that accepts and round-trips
-       any dict, never rejecting a real answer regardless of which shape it
-       takes. `wrap_output=False` because our tools already return a bare
-       dict, not a primitive needing `{"result": ...}` wrapping.
-
-    Net effect: every tools/call now also carries `structuredContent`
-    (additive — `content`'s text block, computed from the same raw `result`
-    before `output_model` ever sees it, is byte-identical to before), and
-    what a client validates that structuredContent against is the precise,
-    additionalProperties-true, drift-tolerant schema from output_schemas.py
-    — honest enough by construction that every real answer satisfies it.
-
-    Patches mcp 2.0.0 private internals (pinned in uv.lock). If those move —
-    the cached_property's storage mechanism, or `convert_result`'s
-    reliance on `fn_metadata.output_schema`/`output_model` — fail with a
-    clear assertion rather than a raw AttributeError or a silently
-    unpublished/unvalidated schema.
-    """
-    try:
-        for tool in mcp_server._tool_manager.list_tools():
-            schema = output_schemas.OUTPUT_SCHEMAS.get(tool.name)
-            assert schema is not None, (
-                f"{tool.name} has no declared outputSchema; add it to "
-                "output_schemas.OUTPUT_SCHEMAS (FIRST_WAVE for a precise "
-                "shape, or _GENERIC_TOOLS otherwise)"
-            )
-            tool.fn_metadata = tool.fn_metadata.model_copy(update={
-                "output_schema": {"type": "object"},
-                "output_model": _PermissiveOutput,
-                "wrap_output": False,
-            })
-            tool.__dict__["output_schema"] = schema
-            assert tool.output_schema is schema, "cached_property shadow did not take"
-    except AttributeError as e:
-        raise AssertionError("output schema publish failed; mcp internals changed") from e
-
 
 def build_server(spec=_UNSET) -> MCPServer:
     """An MCPServer with the PLACEROOT_TOOLS-selected subset registered.
@@ -6872,146 +5619,6 @@ except tool_profiles.InvalidToolSelection as e:
     # who typo'd a profile name gets told which names are valid rather than
     # a traceback, and never a server that quietly loaded everything.
     raise SystemExit(f"placeroot: {e}") from e
-
-
-def _warm_start() -> None:
-    """Best-effort cache pre-warm for PLACEROOT_WARM_REGION. Never blocks or raises.
-
-    "Never blocks" refers to startup not being able to hang or crash on
-    this — the call itself is synchronous (cache.prewarm_bbox force_sync),
-    since this already only runs once, at startup, specifically to
-    materialize the home region's tiles before real traffic arrives.
-    """
-    spec = os.environ.get("PLACEROOT_WARM_REGION")
-    if not spec or not cache.enabled():
-        return
-    parsed = cache.parse_warm_region(spec)
-    if parsed is None:
-        logger.warning("PLACEROOT_WARM_REGION=%r is malformed, expected 'lat,lon,radius_m'", spec)
-        return
-    lat, lon, radius_m = parsed
-    try:
-        _prewarm_region(lat, lon, radius_m)
-    except Exception as e:  # noqa: BLE001 - warm-on-start must never break startup
-        logger.warning("PLACEROOT_WARM_REGION pre-warm failed (continuing): %s", e)
-
-
-def _warm_metadata_async() -> None:
-    """Kick off the shared connection's parquet-metadata pre-warm (issue #31)
-    on a daemon thread so it doesn't delay startup, only the first query.
-    """
-    threading.Thread(target=overture.warm_metadata, daemon=True).start()
-
-
-def _warm_divisions() -> None:
-    """Thread target for _warm_divisions_async: build (or reuse) the #43
-    local divisions name table, logging and swallowing anything that goes
-    wrong rather than letting it become an unhandled exception on a daemon
-    thread. geocode._local_divisions_table() already logs and degrades
-    internally for the failure modes it recognizes (duckdb.Error,
-    UpstreamUnavailable); this is a last-resort backstop for anything else.
-    """
-    try:
-        geocoding._local_divisions_table()
-    except Exception as e:  # noqa: BLE001 - warm-on-start must never break startup
-        logger.warning("divisions-table pre-warm failed (continuing): %s", e)
-
-
-def _warm_divisions_async() -> None:
-    """Kick off geocode.py's #43 local divisions name-table materialization
-    (issue #93) on a daemon thread at startup, mirroring
-    _warm_metadata_async — so the ~20-30s one-time build (cold extension
-    load plus a full COPY of the divisions theme) is already done, or at
-    least underway, before the first real geocode()/resolve_place() call
-    pays for it silently.
-
-    A no-op when caching is off (PLACEROOT_CACHE=off) — checked here,
-    before a thread is even spawned, rather than relying on
-    _local_divisions_table's own cache.enabled() check, so this function's
-    behavior is visible without reading into geocode.py.
-    """
-    if not cache.enabled():
-        return
-    threading.Thread(target=_warm_divisions, daemon=True).start()
-
-
-def _warm_home_async() -> None:
-    """Kick off #406's home-region resolution (PLACEROOT_HOME today; MCP
-    roots stubbed, see home_region.resolve_home_from_roots) on a daemon
-    thread at startup, mirroring _warm_divisions_async.
-
-    Resolving here — rather than waiting for the first geocode/resolve_place
-    call to do it lazily — both warms geocode.py's ranking bias ahead of
-    real traffic and, when it resolves, schedules the same background tile
-    warm a city-scale resolve gets (autowarm.py). Never blocks startup;
-    schedule_autowarm itself already no-ops when PLACEROOT_CACHE=off, so no
-    extra gating is needed here.
-    """
-    threading.Thread(target=home_region.kick_home_autowarm, daemon=True).start()
-
-
-def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="placeroot",
-        description="PlaceRoot MCP server — ground AI agents in open map data.",
-    )
-    parser.add_argument(
-        "--http",
-        action="store_true",
-        help="Serve the streamable-HTTP transport instead of stdio (the default).",
-    )
-    parser.add_argument(
-        "--host",
-        default=DEFAULT_HTTP_HOST,
-        help=f"Host to bind in --http mode (default: {DEFAULT_HTTP_HOST}).",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=DEFAULT_HTTP_PORT,
-        help=f"Port to bind in --http mode (default: {DEFAULT_HTTP_PORT}).",
-    )
-    return parser
-
-
-def parse_transport_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse CLI args into transport config (mode/host/port). Extracted from
-    main() so the mode-selection logic is directly unit-testable without
-    starting a server.
-    """
-    return _build_arg_parser().parse_args(argv)
-
-
-def main() -> None:
-    args = parse_transport_args()
-    active_release = release.resolve_release()
-    # MCPServer.instructions is a read-only property over the low-level
-    # server, which is what the initialize response actually reads from.
-    mcp._lowlevel_server.instructions = (
-        f"{BASE_INSTRUCTIONS} Backed by Overture Maps release {active_release}."
-    )
-    _warm_metadata_async()
-    _warm_divisions_async()
-    _warm_start()
-    _warm_home_async()
-    if args.http:
-        logger.info("placeroot: streamable-HTTP on http://%s:%s/mcp", args.host, args.port)
-        if args.host not in ("127.0.0.1", "localhost", "::1"):
-            # The SDK only auto-enables DNS-rebinding/Origin protection for the
-            # loopback literals, and placeroot configures no authentication —
-            # so a non-loopback bind exposes every tool, unauthenticated, to
-            # anyone who can reach this host:port. Warn loudly; the operator
-            # must front it with a reverse proxy / auth layer (see README).
-            logger.warning(
-                "placeroot is bound to a NON-LOOPBACK host (%s) with NO "
-                "authentication — every tool is exposed to anyone who can reach "
-                "%s:%s. Put a reverse proxy / auth layer in front of it before "
-                "using this beyond a trusted local network.",
-                args.host, args.host, args.port,
-            )
-        mcp.run(transport="streamable-http", host=args.host, port=args.port)
-    else:
-        mcp.run()
 
 
 if __name__ == "__main__":

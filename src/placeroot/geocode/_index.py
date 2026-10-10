@@ -80,9 +80,16 @@ def _publish_copied_parquet(con: duckdb.DuckDBPyConnection, tmp_path: Path, path
     tests use the same toggle.
     """
     con.close()
-    fd = os.open(tmp_path, os.O_RDONLY)
+    # Durability before the rename: flush the COPY's bytes to disk. Windows'
+    # FlushFileBuffers needs a writable handle (a read-only one fails with
+    # EBADF), and fsync is best-effort there anyway, so open read-write and
+    # treat a flush failure as non-fatal — the rename below is what publishes.
+    fd = os.open(tmp_path, os.O_RDWR if os.name == "nt" else os.O_RDONLY)
     try:
         os.fsync(fd)
+    except OSError:
+        if os.name != "nt":
+            raise
     finally:
         os.close(fd)
     os.replace(tmp_path, path)

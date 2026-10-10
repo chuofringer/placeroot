@@ -145,10 +145,14 @@ jobs:
             fi
           fi
 
-  # The Desktop Extension bundle (#233): rebuilt from the tagged tree and
-  # attached to the release, so repo users get the exact artifact the tag
-  # describes. The canonical public download stays site/placeroot.mcpb on
-  # placeroot.dev; tests/test_mcpb_bundle.py keeps that copy in sync.
+  # The Desktop Extension bundle (#233): a build product, never committed.
+  # Built here from the tagged tree and attached to the release, so repo
+  # users get the exact artifact the tag describes. The canonical public
+  # download, https://placeroot.dev/placeroot.mcpb, is built the same way
+  # by deploy-site.yml (which also runs on this release event) right
+  # before the site upload. tests/test_mcpb_bundle.py runs against the
+  # fresh build in both places: manifest version == pyproject, and under
+  # Cloudflare Pages' 25 MiB per-file limit.
   mcpb:
     needs: verify
     if: github.event_name == 'release'
@@ -166,9 +170,15 @@ jobs:
           # Keep true so uv still installs *and* the uv cache is used.
           enable-cache: true
 
-      - name: Build and attach the bundle
+      - name: Build the bundle
+        run: uv run python scripts/build_mcpb.py dist/placeroot.mcpb
+
+      - name: Check the built bundle (version matches the tag, fits Pages)
+        run: uv run pytest tests/test_mcpb_bundle.py -q
+        env:
+          PLACEROOT_MCPB: dist/placeroot.mcpb
+
+      - name: Attach the bundle to the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          uv run python scripts/build_mcpb.py dist/placeroot.mcpb
-          gh release upload "${{ github.event.release.tag_name }}" dist/placeroot.mcpb --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/placeroot.mcpb --clobber

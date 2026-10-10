@@ -217,8 +217,8 @@ def _geometry_is_native(glob: str) -> bool:
     if cached is not None:
         return cached
     try:
-        with db.conn_lock:
-            described = db.shared_conn().execute(
+        with db.read_conn() as rc:
+            described = rc.execute(
                 f"DESCRIBE SELECT geometry FROM read_parquet('{glob}') LIMIT 0"
             ).fetchone()
         type_name = described[1] if described else ""

@@ -145,10 +145,12 @@ def test_c15_cold_half_scan_counts(recorder, query, top):
     scans = [c for c in recorder if c[0] == "find_places"]
     # First round only: the whole phrase (all tiers) and the type scan
     # (fuzzy tier off) — no single-word scan after a confident hit.
-    assert [(c[1], bool(c[2]), c[3]) for c in scans] == [
+    # Round 1 runs these two in parallel, so the recorder sees them in
+    # completion order: compare as a set, not a sequence.
+    assert sorted((c[1], bool(c[2]), c[3]) for c in scans) == sorted([
         (query.rsplit(" ", 1)[0], False, True),
         (query.split(" ", 1)[0], True, False),
-    ]
+    ])
 
 
 def test_word_scans_still_run_when_the_first_round_is_not_confident(recorder, monkeypatch):
