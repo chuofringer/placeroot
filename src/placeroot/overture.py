@@ -738,8 +738,11 @@ def _find_places_name_fallback(
     exprs: dict[str, str],
     name: str,
     limit: int,
+    fuzzy: bool = True,
 ) -> list[dict]:
     """Tiers 2 (alt-name) and 3 (fuzzy) of the #373 POI name fallback.
+
+    fuzzy=False stops after tier 2: see find_places' `fuzzy_fallback`.
 
     Only called when tier 1's ILIKE substring search came back empty and a
     name filter was given. `base_filters` is every find_places filter
@@ -819,6 +822,11 @@ def _find_places_name_fallback(
             d["matched_by"] = "alt_name"
             d.pop("matched_alt")
         return results
+    if not fuzzy:
+        # perf: the caller said a close-spelling match of this `name`
+        # would not be an answer (resolve_place's single-word token scans)
+        # — the alt-name tier was the last one worth a scan.
+        return []
 
     # --- tier 3: fuzzy (jaro_winkler) on names.primary -----------------
     #
@@ -1094,6 +1102,7 @@ def find_places(
     offset: int = 0,
     categories: list[str] | None = None,
     within_polygon: dict | None = None,
+    fuzzy_fallback: bool = True,
 ) -> list[dict]:
     """Places near a point, nearest first, compact rows.
 
@@ -1149,7 +1158,12 @@ def find_places(
     tiers — for callers whose answer shape can't honestly carry a
     correction (#374: within_distance is a yes/no with no note surface, and
     "is there a Startbucks within 200m" must not silently become a claim
-    about Starbucks).
+    about Starbucks). fuzzy_fallback=False keeps the alt-name tier and
+    skips only the fuzzy one — for a caller searching a single word of a
+    longer query (resolve_place's per-token scans), where one token's
+    close-spelling match against every place in the box is rarely the
+    answer and always a full scan of it. Default True: every other caller
+    is byte-identical to before.
 
     offset skips that many rows of the same nearest-first ordering before
     LIMIT applies (cursor pagination, ROADMAP feature 4) - 0 for a first
@@ -1245,7 +1259,8 @@ def find_places(
         # own results, not that tier 1 found nothing at all — falling back
         # there would silently restart the search from a different tier).
         results = _find_places_name_fallback(
-            from_source, base_filters, params, has_recreation, exprs, name, limit
+            from_source, base_filters, params, has_recreation, exprs, name, limit,
+            fuzzy=fuzzy_fallback,
         )
     for d in results:
         _annotate_place(d)
