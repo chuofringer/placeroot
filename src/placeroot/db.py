@@ -5,10 +5,14 @@ metadata cache, memory/temp dir, S3 timeouts/retries) and loads the spatial
 extension; every theme module
 (overture, routing, divisions, buildings) goes through it.
 
-Concurrency (issue #24): conn_lock serializes every use of shared_conn(),
-since DuckDB connections aren't safe for concurrent execute() calls.
-Background tile materialization (cache.py) is the one exception, by
-design: it always runs on its own connection via new_connection().
+Concurrency: DuckDB connections aren't safe for concurrent execute() calls,
+but cursors of one instance are. Read-only queries therefore run on a
+cursor leased from a bounded pool (read_conn) and take no lock, so a slow
+cold S3 scan in one tool call no longer queues a fast lookup in another.
+conn_lock still serializes shared_conn() — the write/DDL/configure paths
+(extension LOAD/INSTALL, the geocode table builds, COPY). Background
+tile materialization (cache.py) runs on its own cursor via
+new_connection(), outside both.
 
 overture._conn/overture._conn_lock remain as thin aliases to shared_conn/
 conn_lock (deprecated in favor of importing db directly) so existing
@@ -18,6 +22,7 @@ external references — tests included — keep working unchanged.
 import contextlib
 import logging
 import os
+import re
 import threading
 import time
 from functools import lru_cache
@@ -59,7 +64,11 @@ class _ThreadAwareRLock:
         return self._target().__exit__(*exc)
 
 
-# Guards every use of shared_conn(). See the module docstring above.
+# Guards every use of shared_conn() that writes or needs exclusive access
+# (see the module docstring). Read-only queries use read_conn() instead and
+# never take it. Cold instance creation in _shared_instance() takes it too,
+# so configure-time SETs and LOADs are serialized with the other exclusive
+# users.
 #
 # Reentrant (RLock, #145): the cache-path schema probe re-enters this lock
 # from the same thread — _from_source holds conn_lock, then calls into
@@ -71,7 +80,8 @@ class _ThreadAwareRLock:
 # runs two shared_conn().execute() calls at once (they're sequential).
 conn_lock = _ThreadAwareRLock()
 
-_spatial_loaded = False
+# Extensions this process has LOADed on the shared instance (see _ensure_extension).
+_loaded_extensions: set[str] = set()
 
 
 
@@ -257,7 +267,10 @@ def _shared_instance() -> duckdb.DuckDBPyConnection:
     global _instance
     inst = _instance
     if inst is None:
-        with _instance_lock:
+        # Lock order is conn_lock, then _instance_lock — the order every
+        # exclusive caller already reaches them in — so configure-time
+        # SET/LOAD run under conn_lock and nothing can deadlock against it.
+        with conn_lock, _instance_lock:
             if _instance is None:
                 _instance = _configure(duckdb.connect())
             inst = _instance
@@ -275,6 +288,9 @@ def shared_conn() -> duckdb.DuckDBPyConnection:
     if override is not None:
         return override
     return _shared_instance()
+
+
+_SHARED_CONN_IMPL = shared_conn
 
 
 @contextlib.contextmanager
@@ -297,7 +313,7 @@ def isolated_reads():
     if getattr(_isolation, "conn", None) is not None:
         yield
         return
-    _isolation.conn = _shared_instance().cursor()
+    _isolation.conn = _open_cursor(_shared_instance())
     _isolation.lock = threading.RLock()
     try:
         yield
@@ -308,6 +324,200 @@ def isolated_reads():
             pass
         _isolation.conn = None
         _isolation.lock = None
+
+
+READ_CURSORS_ENV = "PLACEROOT_DUCKDB_CURSORS"
+DEFAULT_READ_CURSORS = 8
+
+
+def _read_cursor_cap() -> int:
+    """Max live read cursors (PLACEROOT_DUCKDB_CURSORS, default 8)."""
+    raw = os.environ.get(READ_CURSORS_ENV, "").strip()
+    if not raw:
+        return DEFAULT_READ_CURSORS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("Ignoring %s=%r (not an integer); using %d",
+                       READ_CURSORS_ENV, raw, DEFAULT_READ_CURSORS)
+        return DEFAULT_READ_CURSORS
+
+
+_SETTING_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _open_cursor(instance: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
+    """A cursor of `instance` whose settings match the instance's.
+
+    DuckDB does not reliably carry a SET made on an instance over to a
+    cursor created from it. Session-scoped settings (TimeZone) and
+    extension options (httpfs' s3_endpoint and s3_region, icu's Calendar)
+    come out of cursor() at their defaults, whatever scope duckdb_settings()
+    reports, while global core settings (threads, memory_limit) do carry
+    over. So the cursor is brought in line here, name by name: every
+    setting whose value differs on the instance is SET on the cursor. A
+    setting the cursor refuses is skipped; only its name is logged, since
+    some values are credentials.
+    """
+    cur = instance.cursor()
+    try:
+        _inherit_settings(cur, instance)
+    except BaseException:
+        _close_quietly(cur)
+        raise
+    return cur
+
+
+def _inherit_settings(cur, instance) -> None:
+    want = dict(instance.execute("SELECT name, value FROM duckdb_settings()").fetchall())
+    have = dict(cur.execute("SELECT name, value FROM duckdb_settings()").fetchall())
+    for name, value in want.items():
+        if value is None or have.get(name) == value or not _SETTING_NAME.match(name):
+            continue
+        try:
+            cur.execute(f"SET {name} = {_sql_str(value)};")
+        except duckdb.Error:
+            logger.debug("cursor did not take setting %s", name)
+
+
+def _close_quietly(cur) -> None:
+    try:
+        cur.close()
+    except duckdb.Error:  # pragma: no cover - close is best-effort
+        pass
+
+
+class CursorPool:
+    """At most `cap` cursors of one DuckDB instance, each leased to one thread at a time.
+
+    lease() hands a cursor out for the duration of a `with` block and takes
+    it back afterwards. When every slot is leased, lease() blocks until one
+    is returned: that wait is the cap. A cursor is closed rather than
+    returned when the block raised — a failed statement can leave a cursor
+    mid-transaction, and discarding is cheaper than proving it is clean. A
+    cursor copies the instance's session-scoped (LOCAL) settings when it is
+    created and sees its GLOBAL ones directly; the instance is fully
+    configured before the first cursor exists (see _shared_instance), so
+    nothing needs re-applying per cursor.
+    """
+
+    def __init__(self, instance: duckdb.DuckDBPyConnection, cap: int):
+        self.instance = instance
+        self.cap = cap
+        self._slots = threading.BoundedSemaphore(cap)
+        self._guard = threading.Lock()
+        self._idle: list[duckdb.DuckDBPyConnection] = []
+        self._closed = False
+        self.live = 0      # cursors created and not yet closed
+        self.created = 0   # lifetime total (diagnostics and tests)
+
+    @contextlib.contextmanager
+    def lease(self):
+        self._slots.acquire()
+        try:
+            cur = self._take_idle()
+            if cur is None:
+                cur = self._new_cursor()
+        except BaseException:
+            self._slots.release()
+            raise
+        try:
+            yield cur
+        except BaseException:
+            self._close(cur)
+            raise
+        else:
+            self._give_back(cur)
+        finally:
+            self._slots.release()
+
+    def _take_idle(self):
+        with self._guard:
+            return self._idle.pop() if self._idle else None
+
+    def _new_cursor(self):
+        cur = _open_cursor(self.instance)
+        with self._guard:
+            self.live += 1
+            self.created += 1
+        return cur
+
+    def _give_back(self, cur):
+        with self._guard:
+            if not self._closed:
+                self._idle.append(cur)
+                return
+        self._close(cur)
+
+    def _close(self, cur):
+        _close_quietly(cur)
+        with self._guard:
+            self.live -= 1
+
+    def close(self) -> None:
+        """Close idle cursors now; leased ones close as they are returned."""
+        with self._guard:
+            self._closed = True
+            idle, self._idle = self._idle, []
+        for cur in idle:
+            self._close(cur)
+
+
+_pool_guard = threading.Lock()
+_read_pool_obj: CursorPool | None = None
+# This thread's cursor while it is inside read_conn(), so nested reads reuse
+# it instead of leasing a second slot (which could deadlock at the cap).
+_reading = threading.local()
+
+
+def _read_pool() -> CursorPool:
+    global _read_pool_obj
+    inst = _shared_instance()
+    pool = _read_pool_obj
+    if pool is not None and pool.instance is inst:
+        return pool
+    with _pool_guard:
+        pool = _read_pool_obj
+        if pool is None or pool.instance is not inst:
+            if pool is not None:
+                pool.close()
+            pool = CursorPool(inst, _read_cursor_cap())
+            _read_pool_obj = pool
+        return pool
+
+
+@contextlib.contextmanager
+def read_conn():
+    """A cursor for read-only queries, leased from the bounded pool, holding no lock.
+
+    Use it for any statement that only reads (SELECT, DESCRIBE, LIMIT 0
+    probes) and fetch inside the `with` block: the cursor goes back to the
+    pool when the block exits. Do not take conn_lock inside the block — a
+    thread waiting for a cursor slot while holding a lock that a slot-holder
+    needs would deadlock. Do not run DDL, COPY, SET or LOAD through it;
+    those belong on shared_conn() under conn_lock.
+
+    Honours the two overrides that already reroute queries: a thread inside
+    isolated_reads() gets its private cursor, and a replaced db.shared_conn
+    (tests stub it to observe queries) is called as before.
+    """
+    if shared_conn is not _SHARED_CONN_IMPL:
+        yield shared_conn()
+        return
+    private = getattr(_isolation, "conn", None)
+    if private is not None:
+        yield private
+        return
+    held = getattr(_reading, "conn", None)
+    if held is not None:
+        yield held
+        return
+    with _read_pool().lease() as cur:
+        _reading.conn = cur
+        try:
+            yield cur
+        finally:
+            _reading.conn = None
 
 
 def new_connection() -> duckdb.DuckDBPyConnection:
@@ -324,29 +534,44 @@ def new_connection() -> duckdb.DuckDBPyConnection:
     read per file (buildings: 512 files, measured ~50s at default
     threads). On separate instances every background COPY and every warm
     pre-read paid that pass again for nothing; on cursors it is paid once
-    per process, and a warm run on any cursor warms every query. Instance
-    settings (httpfs, s3, threads) are already applied by shared_conn's
-    _configure.
+    per process, and a warm run on any cursor warms every query. The
+    cursor's settings (httpfs, s3 endpoint, threads) are synced from the
+    instance's by _open_cursor, which DuckDB's cursor() alone does not do.
     """
-    return shared_conn().cursor()
+    base = shared_conn()
+    cur = base.cursor()
+    try:
+        _inherit_settings(cur, base)
+    except Exception:  # best effort: a substituted connection may not introspect
+        logger.debug("could not sync settings onto new cursor", exc_info=True)
+    return cur
+
+
+def _ensure_extension(name: str) -> None:
+    """LOAD an extension on the shared instance, once per process, under conn_lock.
+
+    Extensions are database-wide in DuckDB: once LOADed on the instance,
+    every cursor (existing or later) sees their functions. Callers that
+    need one call this before their first read_conn() that uses it.
+    """
+    if name in _loaded_extensions:
+        return
+    with conn_lock:
+        if name in _loaded_extensions:
+            return
+        load_extension(shared_conn(), name)
+        _loaded_extensions.add(name)
 
 
 def ensure_spatial() -> None:
-    """Load DuckDB's spatial extension on the shared connection, once.
+    """Load DuckDB's spatial extension on the shared instance, once.
 
-    Lock-held internally. Idempotent and cheap to call on every query that
-    needs ST_* functions (divisions.py, buildings.py, routing.py all do);
-    the actual LOAD (and INSTALL, if the extension is missing locally — see
-    load_extension) only ever runs once per process.
+    Idempotent and cheap to call on every query that needs ST_* functions
+    (divisions.py, buildings.py, routing.py all do); the actual LOAD (and
+    INSTALL, if the extension is missing locally — see load_extension) only
+    ever runs once per process.
     """
-    global _spatial_loaded
-    if _spatial_loaded:
-        return
-    with conn_lock:
-        if _spatial_loaded:
-            return
-        load_extension(shared_conn(), "spatial")
-        _spatial_loaded = True
+    _ensure_extension("spatial")
 
 
 # Sized above the number of distinct theme/type globs a process touches
@@ -363,8 +588,8 @@ def _probe_schema_cached(glob: str) -> frozenset:
     schemas stay cached (LRU, maxsize=32) since the LIMIT 0 metadata read,
     while cheap, isn't free to redo on every query.
     """
-    with conn_lock:
-        cols = shared_conn().execute(
+    with read_conn() as con:
+        cols = con.execute(
             f"SELECT * FROM read_parquet('{glob}') LIMIT 0"
         ).description
     return frozenset(c[0] for c in cols)
