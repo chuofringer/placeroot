@@ -325,3 +325,47 @@ def test_build_graph_sql_pushes_bbox_down_on_physical_struct_columns(monkeypatch
         assert col in sql.split("FROM", 1)[0]
 
 
+# --- widen-and-retry: the retry is not padded a second time -----------------
+
+
+def test_retry_extraction_is_not_padded_again(monkeypatch):
+    """The first attempt pads by GRAPH_CACHE_MARGIN (1.3) so nearby repeats
+    hit; the retry is already 1.6x wider — padding it again (2.08x) only
+    makes the failure path's second extraction 4.3x the base area."""
+    routing.clear_graph_cache()
+    built = []
+
+    def fake_build_graph(lat, lon, radius_m, **kwargs):
+        built.append(radius_m)
+        return routing.Graph()
+
+    monkeypatch.setattr(routing, "build_graph", fake_build_graph)
+    monkeypatch.setattr(routing, "_load_graph_from_disk", lambda *a, **k: None)
+    monkeypatch.setattr(routing, "_persist_graph_to_disk", lambda *a, **k: None)
+    monkeypatch.setattr(routing, "_upstream_glob", lambda: "s3://fake/segment/*")
+
+    lat, lon = 12.345, 67.891  # nowhere another test caches a graph
+    routing._get_or_build_graph(lat, lon, 1000.0, "walk", None)
+    routing._get_or_build_graph(lat, lon, 1600.0, "walk", None, pad=False)
+    assert built == [pytest.approx(1300.0), pytest.approx(1600.0)]
+    routing.clear_graph_cache()
+
+
+def test_shortest_path_retry_reuses_margin_only_on_first_attempt(monkeypatch):
+    """_shortest_path's loop: first radius padded, the 1.6x retry not —
+    and the retry really is wider than the first attempt's padding, which
+    is the whole reason it cannot (and must not pretend to) reuse it."""
+    calls = []
+
+    def fake_get_or_build(lat, lon, radius_m, mode, speed_m_s=None, **kwargs):
+        calls.append((radius_m, kwargs.get("pad", True)))
+        return routing.Graph()  # empty: forces the retry, then NoGraphNearby
+
+    monkeypatch.setattr(routing, "_get_or_build_graph", fake_get_or_build)
+    with pytest.raises(routing.NoGraphNearby):
+        routing._shortest_path(35.658, 139.7016, 35.6717, 139.6949, "walk")
+    assert len(calls) == 2
+    (first_r, first_pad), (retry_r, retry_pad) = calls
+    assert first_pad is True and retry_pad is False
+    assert retry_r == pytest.approx(first_r * routing.ROUTE_RADIUS_RETRY_FACTOR)
+    assert routing.ROUTE_RADIUS_RETRY_FACTOR > routing.GRAPH_CACHE_MARGIN
