@@ -8,6 +8,8 @@ fixing behavior is patch.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-10-10
+
 ### Fixed
 - `npx placeroot@<version>` now runs that exact PyPI version (this release):
   `npm/index.js` spawns `uvx placeroot==<its own package.json version>` instead
