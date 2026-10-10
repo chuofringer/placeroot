@@ -431,8 +431,11 @@ def ensure_tile(
             # fingerprint for this release/theme: there's no local tile to
             # fall back to, so let the COPY below run and raise upstream's
             # real error rather than inventing a fingerprint for a tile
-            # that's about to fail to materialize anyway.
-            fingerprint = "unreachable"
+            # that's about to fail to materialize anyway. Source-keyed like
+            # every other fingerprint dir, so that if the COPY does succeed
+            # (a local path whose schema probe failed for an unrelated
+            # reason) the offline fallback can still find what it wrote.
+            fingerprint = f"unreachable-{source_key(upstream_glob)}"
 
     path = tile_path(release, theme, fingerprint, tile)
     if path.exists():
