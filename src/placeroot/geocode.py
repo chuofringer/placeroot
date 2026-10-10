@@ -878,6 +878,12 @@ def _effective_tier(row: dict, query: str) -> int:
 # only after; see its docstring.
 _STRONG_TIER = 2
 
+# perf: the literal tier at which a division answer found inside a caller's
+# near box (#476) is confident enough to stand geocode()'s later local
+# passes down — the same exact-or-prefix line _STRONG_TIER draws for the
+# abbreviation retries, applied to the diacritic-folded pass as well.
+_CONFIDENT_TIER = _STRONG_TIER
+
 
 def _home_bias_flag(row: dict, *, active: bool = True) -> int:
     """0 when `row` sits inside the configured home region (#406), else 1.
@@ -4564,7 +4570,21 @@ def geocode_detailed(
     # and unlike folding they rewrite the query into a genuinely different
     # string, so running them against an already-good literal answer buys
     # noise rather than reach.
-    if local_table is not None or not literal_answer_is_good_enough:
+    #
+    # perf: under a caller's near box (#476 — resolve_place's city pin) a
+    # literal answer that is already confident (_CONFIDENT_TIER or better,
+    # with a population behind it) stands the folded pass down as well.
+    # #221's reason for always running it — a populated namesake village
+    # somewhere on Earth shadowing the folded spelling of a famous city — is
+    # a worldwide problem; inside the one city's box the caller pinned, an
+    # exact-or-prefix populated division IS the answer, and the folded pass
+    # could only pad it. Unpinned callers keep #221's always-run rule.
+    confident_literal = (
+        near is not None
+        and best_literal_tier >= _CONFIDENT_TIER
+        and literal_match_has_prominence
+    )
+    if not confident_literal and (local_table is not None or not literal_answer_is_good_enough):
         stripped_query = _strip_diacritics(search_query)
         # Not when stripping left nothing: a query of only combining marks
         # folds to "", and searching for it is an ILIKE '%%' that matches
