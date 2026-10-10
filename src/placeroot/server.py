@@ -145,13 +145,16 @@ _META_TOOL_FUNCS: dict[str, Callable] = {}
 _TOOL_TITLES: dict[str, str] = {}
 
 # The behavioral hints a PlaceRoot tool carries (MCP `annotations`).
-# This is the default, and 24 of the 25 tools take it unchanged because they
-# are pure reads:
+# This is the default; every tool takes it unchanged except the few that
+# override it at their definition site (render_map, preferences,
+# placeroot_call, resolve_map_url — each explained next to its override),
+# because the rest are pure reads:
 #   read_only_hint  — the tool writes nothing anywhere the caller can see;
 #                     the only side effect is a local parquet tile cache,
 #                     which is invisible to the caller and to the upstream
-#                     data. render_map is the exception: it writes an HTML
-#                     file to disk, so it overrides this (see below).
+#                     data. render_map (writes an HTML file), preferences
+#                     (writes/deletes a JSON file) and placeroot_call (can
+#                     dispatch to either) override this (see below).
 #   destructive_hint/idempotent_hint — spelled out even though the spec says
 #                     they only matter when read_only_hint is false, because
 #                     clients that predate readOnlyHint-aware gating still
@@ -161,6 +164,8 @@ _TOOL_TITLES: dict[str, str] = {}
 #                     web. Nothing here searches or fetches arbitrary URLs,
 #                     so a client can reason about the blast radius as
 #                     closed even though the bytes come over the network.
+#                     resolve_map_url is the one exception (it follows a
+#                     pasted Google short link) and says so (see below).
 # Shared instance: ToolAnnotations is treated as immutable here, and the
 # per-tool `title` rides on the top-level Tool.title field instead (which is
 # what the current spec prefers), so one object serves every registration.
@@ -199,6 +204,18 @@ _PREFERENCES_ANNOTATIONS = ToolAnnotations(
     destructive_hint=True,
     idempotent_hint=True,
     open_world_hint=False,
+)
+
+# resolve_map_url is a pure read, but it makes an outbound HTTP request to
+# expand a Google short link (maps.app.goo.gl, goo.gl/maps, g.co) — a
+# destination outside the pinned dataset, chosen by the caller's input. That
+# is exactly what openWorldHint exists to disclose, so it is True here
+# while the other three hints keep the read-only default.
+_FOLLOWS_A_SHORT_LINK_ANNOTATIONS = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
 )
 
 _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {}
@@ -362,6 +379,32 @@ def _upstream_error(e: Exception) -> dict:
 
 def _schema_error(e: overture.SchemaDegraded) -> dict:
     return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
+
+
+def _upstream_errors(fn: Callable) -> Callable:
+    """The upstream-failure except ladder, once, around a whole handler.
+
+    Nearly every handler repeats `except UpstreamUnavailable: return
+    _upstream_error(e)` / `except SchemaDegraded: return _schema_error(e)`
+    after each query call it makes. routing.UpstreamUnavailable and
+    overture.UpstreamUnavailable are the same class (errors.py; likewise
+    SchemaDegraded), so a handler that lists both catches one thing twice.
+    Put this between @_tool and the def and the handler can drop its copies:
+    the same two classes become the same two envelopes. Applied to
+    find_places, compare_areas and verify_claims so far; the other handlers
+    still carry the ladder inline and behave identically.
+    """
+
+    @functools.wraps(fn)
+    def guarded(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except overture.UpstreamUnavailable as e:
+            return _upstream_error(e)
+        except overture.SchemaDegraded as e:
+            return _schema_error(e)
+
+    return guarded
 
 
 def _invalid_coord(lat, lon) -> dict | None:
@@ -886,6 +929,7 @@ _FIND_NEAR_KEYS = (
 
 
 @_tool("Find places")
+@_upstream_errors
 def find_places(
     lat: float | None = None,
     lon: float | None = None,
@@ -1233,8 +1277,6 @@ def find_places(
                 "detail": e.detail,
                 "supported": sorted(routing.MODE_CONFIG),
             }
-        except routing.UpstreamUnavailable as e:
-            return _upstream_error(e)
         except routing.SchemaDegraded as e:
             return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
         except routing.NoGraphNearby as e:
@@ -1267,8 +1309,6 @@ def find_places(
                 "detail": e.detail,
                 "candidates": e.candidates,
             }
-        except overture.UpstreamUnavailable as e:
-            return _upstream_error(e)
         if resolved_area is None:
             return {"error": "not_found", "detail": f"no division matched area {area!r}"}
         division_id = resolved_area["division_id"]
@@ -1293,10 +1333,6 @@ def find_places(
                 )
             except ValueError as e:
                 return {"error": "bad_request", "detail": str(e)}
-            except overture.UpstreamUnavailable as e:
-                return _upstream_error(e)
-            except overture.SchemaDegraded as e:
-                return _schema_error(e)
             if grouped is None:
                 return {
                     "error": "not_found",
@@ -1324,10 +1360,6 @@ def find_places(
             )
         except ValueError as e:
             return {"error": "bad_request", "detail": str(e)}
-        except overture.UpstreamUnavailable as e:
-            return _upstream_error(e)
-        except overture.SchemaDegraded as e:
-            return _schema_error(e)
         if rows is None:
             return {
                 "error": "not_found",
@@ -1367,10 +1399,6 @@ def find_places(
             )
         except ValueError as e:
             return {"error": "bad_request", "detail": str(e)}
-        except overture.UpstreamUnavailable as e:
-            return _upstream_error(e)
-        except overture.SchemaDegraded as e:
-            return _schema_error(e)
         grouped = _project_grouped_places(grouped, effective_detail)
         payload = _with_degraded_fields(
             budget.apply_budget_grouped({"results": grouped}, "results")
@@ -1390,10 +1418,6 @@ def find_places(
         )
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
-    except overture.UpstreamUnavailable as e:
-        return _upstream_error(e)
-    except overture.SchemaDegraded as e:
-        return _schema_error(e)
     # #373's alt-name/fuzzy fallback tiers run their own bounded pool query
     # (only at offset 0) rather than this call's offset-aware one, so a
     # cursor over that pool can't honestly promise the next page won't
@@ -2493,6 +2517,7 @@ def suggest_areas(
 
 
 @_tool("Compare areas")
+@_upstream_errors
 def compare_areas(
     areas: list[dict | str], radius_m: float = 1000, priorities: list[dict] | None = None
 ) -> dict:
@@ -2551,6 +2576,14 @@ def compare_areas(
     """
     if not isinstance(areas, list):
         return {"error": "bad_request", "detail": "areas must be a list of area centers"}
+    if not 2 <= len(areas) <= 5:
+        # Checked before any name resolution — that is up to 8 threads of
+        # network lookups per call — so an over-cap list fails on the cap
+        # first, as distance_matrix/travel_time_matrix already do.
+        return {
+            "error": "bad_request",
+            "detail": f"compare_areas takes between 2 and 5 area centers, got {len(areas)}",
+        }
     resolved_areas, resolve_error = _resolve_location_refs(areas, "areas")
     if resolve_error is not None:
         return resolve_error
@@ -2570,10 +2603,6 @@ def compare_areas(
         result = overture.compare_areas(centers, radius_m, priorities=normalized_priorities)
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
-    except overture.UpstreamUnavailable as e:
-        return _upstream_error(e)
-    except overture.SchemaDegraded as e:
-        return _schema_error(e)
     result = _with_degraded_fields(budget.apply_budget(result, "differentiators"))
     if "verdict" in result:
         map_payload = mapexplain.from_compare_areas_result(result, radius_m)
@@ -3854,7 +3883,7 @@ def geocode_intersection(
     return budget.apply_budget(result, "results")
 
 
-@_tool("Resolve a pasted map link")
+@_tool("Resolve a pasted map link", annotations=_FOLLOWS_A_SHORT_LINK_ANNOTATIONS)
 def resolve_map_url(url: str, include_place: bool = True) -> dict:
     """Pasted Google/Apple/OpenStreetMap/geo: map link -> its coordinate and place.
 
@@ -5500,6 +5529,7 @@ def neighborhood_verdict(
 
 
 @_tool("Verify listing claims")
+@_upstream_errors
 def verify_claims(lat: float, lon: float, claims: list[dict]) -> dict:
     """Grade spatial listing claims ("8 min to the metro", "shops on the doorstep",
     "green space nearby") against real routing and places data.
@@ -5568,12 +5598,6 @@ def verify_claims(lat: float, lon: float, claims: list[dict]) -> dict:
             "detail": e.detail,
             "supported": sorted(routing.MODE_CONFIG),
         }
-    except routing.UpstreamUnavailable as e:
-        return _upstream_error(e)
-    except overture.UpstreamUnavailable as e:
-        return _upstream_error(e)
-    except (routing.SchemaDegraded, overture.SchemaDegraded) as e:
-        return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
     return _with_degraded_fields(budget.apply_budget(result, "results"))
