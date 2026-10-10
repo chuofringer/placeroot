@@ -1,7 +1,7 @@
 """Street-level forward search: geocode_address() and address-row helpers."""
 
 import re
-import sys
+import sys as _sys
 from dataclasses import dataclass
 
 import duckdb
@@ -9,7 +9,7 @@ import duckdb
 from placeroot import release
 from placeroot.geocode._variants import _STREET_SUFFIX_VARIANTS
 
-_pkg = sys.modules["placeroot.geocode"]
+_pkg = _sys.modules["placeroot.geocode"]
 
 
 # --- #225: street-level forward search --------------------------------------

@@ -1,10 +1,10 @@
 """reverse_geocode() and its nearest-address and nearest-division lookups."""
 
-import sys
+import sys as _sys
 
 import duckdb
 
-_pkg = sys.modules["placeroot.geocode"]
+_pkg = _sys.modules["placeroot.geocode"]
 
 
 def _nearest_address(lat: float, lon: float) -> dict | None:

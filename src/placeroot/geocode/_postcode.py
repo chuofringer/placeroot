@@ -2,11 +2,11 @@
 
 import math
 import re
-import sys
+import sys as _sys
 
 import duckdb
 
-_pkg = sys.modules["placeroot.geocode"]
+_pkg = _sys.modules["placeroot.geocode"]
 
 
 # --- #223: postcode-shaped queries -----------------------------------------

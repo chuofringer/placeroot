@@ -36,7 +36,7 @@ import logging  # noqa: F401
 import math  # noqa: F401
 import os  # noqa: F401
 import re  # noqa: F401
-import sys
+import sys as _sys
 import tempfile  # noqa: F401
 import threading  # noqa: F401
 import time  # noqa: F401
@@ -394,7 +394,7 @@ from placeroot.geocode._variants import (
     _token_variants,  # noqa: F401
 )
 
-_pkg = sys.modules[__name__]
+_pkg = _sys.modules[__name__]
 
 
 logger = logging.getLogger(__name__)

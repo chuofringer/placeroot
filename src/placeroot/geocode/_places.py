@@ -5,7 +5,7 @@ import contextvars
 import inspect
 import os
 import re
-import sys
+import sys as _sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
@@ -13,7 +13,7 @@ import duckdb
 
 from placeroot import categories, db
 
-_pkg = sys.modules["placeroot.geocode"]
+_pkg = _sys.modules["placeroot.geocode"]
 
 
 def _unbounded_name_search_enabled() -> bool:

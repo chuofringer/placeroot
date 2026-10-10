@@ -1,10 +1,10 @@
 """Intersections: "A & B, City" parsing and geocode_intersection()."""
 
-import sys
+import sys as _sys
 
 from placeroot import geo, routing
 
-_pkg = sys.modules["placeroot.geocode"]
+_pkg = _sys.modules["placeroot.geocode"]
 
 
 def _looks_like_street(half: str, *, strict: bool) -> bool:

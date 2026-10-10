@@ -2,12 +2,12 @@
 
 import math
 import re
-import sys
+import sys as _sys
 import unicodedata
 
 from placeroot import home_region
 
-_pkg = sys.modules["placeroot.geocode"]
+_pkg = _sys.modules["placeroot.geocode"]
 
 
 def _kick_autowarm(hit: dict | None) -> None:

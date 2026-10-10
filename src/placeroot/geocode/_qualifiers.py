@@ -1,11 +1,11 @@
 """Query qualifier parsing: "City, ST", "City, Country", country codes and notes."""
 
-import sys
+import sys as _sys
 from functools import lru_cache
 
 import duckdb
 
-_pkg = sys.modules["placeroot.geocode"]
+_pkg = _sys.modules["placeroot.geocode"]
 
 
 # --- #46: "City, ST" / "City, Region" parsing ---------------------------

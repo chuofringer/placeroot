@@ -1,11 +1,11 @@
 """resolve_area(), resolve_named_place(), the typo tier and comma-qualified names."""
 
-import sys
+import sys as _sys
 
 from placeroot import geo
 from placeroot.errors import AmbiguousArea, AmbiguousPlace, AnchoredNotFound
 
-_pkg = sys.modules["placeroot.geocode"]
+_pkg = _sys.modules["placeroot.geocode"]
 
 
 # --- #123: free-text area name -> a division to constrain a search to -------

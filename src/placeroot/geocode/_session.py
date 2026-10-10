@@ -1,14 +1,14 @@
 """Per-session state: resolve LRU, last-good city memory, POI aliases, city hints."""
 
 import json
-import sys
+import sys as _sys
 import threading
 from collections import OrderedDict
 from importlib import resources
 
 from placeroot import geo, session
 
-_pkg = sys.modules["placeroot.geocode"]
+_pkg = _sys.modules["placeroot.geocode"]
 
 
 # --- #329: city hints, POI aliases, last-resolve LRU ----------------------

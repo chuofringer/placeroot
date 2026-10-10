@@ -1,9 +1,9 @@
 """Name-variant generators (abbreviations, ordinals, street suffixes) and match SQL helpers."""
 
 import re
-import sys
+import sys as _sys
 
-_pkg = sys.modules["placeroot.geocode"]
+_pkg = _sys.modules["placeroot.geocode"]
 
 
 # --- #53: name-variant normalization -------------------------------------

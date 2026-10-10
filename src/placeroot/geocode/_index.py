@@ -1,7 +1,7 @@
 """Local materialised Overture name tables (divisions, alt and lang names) and builds."""
 
 import os
-import sys
+import sys as _sys
 import tempfile
 import threading
 import time
@@ -13,7 +13,7 @@ import duckdb
 
 from placeroot import progress, release
 
-_pkg = sys.modules["placeroot.geocode"]
+_pkg = _sys.modules["placeroot.geocode"]
 
 
 # --- #43: local divisions name table -----------------------------------

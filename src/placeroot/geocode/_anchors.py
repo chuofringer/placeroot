@@ -1,6 +1,6 @@
 """Anchor resolution for qualified names and the places fallback search."""
 
-import sys
+import sys as _sys
 import threading
 from collections import OrderedDict
 
@@ -8,7 +8,7 @@ import duckdb
 
 from placeroot import geo, home_region, manifest, trace
 
-_pkg = sys.modules["placeroot.geocode"]
+_pkg = _sys.modules["placeroot.geocode"]
 
 
 def _fallback_anchor_candidates(

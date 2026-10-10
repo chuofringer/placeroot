@@ -1,12 +1,12 @@
 """geocode(), geocode_batch() and geocode_detailed(): the division search pipeline."""
 
-import sys
+import sys as _sys
 
 from placeroot import geo, home_region
 from placeroot.geocode._divisions import NearConstraint
 from placeroot.geocode._ranking import DEFAULT_LIMIT
 
-_pkg = sys.modules["placeroot.geocode"]
+_pkg = _sys.modules["placeroot.geocode"]
 
 
 def geocode(

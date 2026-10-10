@@ -1,13 +1,13 @@
 """Division name search: literal, variant and fuzzy passes over the divisions table."""
 
-import sys
+import sys as _sys
 from pathlib import Path
 
 import duckdb
 
 from placeroot import geo, trace
 
-_pkg = sys.modules["placeroot.geocode"]
+_pkg = _sys.modules["placeroot.geocode"]
 
 
 # #476: a (lat, lon, radius_m) constraint on the division rows a name query

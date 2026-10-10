@@ -1,11 +1,11 @@
 """resolve_place(): merges division and places results into one typed, ranked list."""
 
-import sys
+import sys as _sys
 from collections.abc import Callable
 
 from placeroot import geo
 
-_pkg = sys.modules["placeroot.geocode"]
+_pkg = _sys.modules["placeroot.geocode"]
 
 
 def resolve_place(
