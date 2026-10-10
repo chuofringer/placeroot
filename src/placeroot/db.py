@@ -1,7 +1,8 @@
 """Shared DuckDB connection management for the query layer.
 
-This is the one place that configures a connection (httpfs, object cache,
-S3 timeouts/retries) and loads the spatial extension; every theme module
+This is the one place that configures a connection (httpfs, parquet
+metadata cache, memory/temp dir, S3 timeouts/retries) and loads the spatial
+extension; every theme module
 (overture, routing, divisions, buildings) goes through it.
 
 Concurrency (issue #24): conn_lock serializes every use of shared_conn(),
@@ -130,6 +131,33 @@ def load_extension(con: duckdb.DuckDBPyConnection, name: str) -> None:
     con.execute(f"INSTALL {name}; LOAD {name};")
 
 
+def _cache_dir() -> str:
+    """The placeroot cache directory, resolved the way cache.cache_dir()
+    does (PLACEROOT_CACHE_DIR, else ~/.cache/placeroot) without importing
+    cache.py — it imports this module, and _configure runs early."""
+    return os.environ.get("PLACEROOT_CACHE_DIR") or os.path.expanduser(
+        "~/.cache/placeroot"
+    )
+
+
+# httpfs' http_timeout is in SECONDS (DuckDB >= 1.1; default 30). An earlier
+# version of this file set 5000 believing the unit was milliseconds — that
+# is ~83 minutes, the opposite of issue #5's fail-fast intent.
+DEFAULT_HTTP_TIMEOUT_S = 30
+
+
+def _http_timeout_s() -> int:
+    raw = os.environ.get("PLACEROOT_HTTP_TIMEOUT_S", "")
+    try:
+        return max(1, int(raw)) if raw else DEFAULT_HTTP_TIMEOUT_S
+    except ValueError:
+        logger.warning(
+            "Ignoring PLACEROOT_HTTP_TIMEOUT_S=%r (not an integer); using %ds",
+            raw, DEFAULT_HTTP_TIMEOUT_S,
+        )
+        return DEFAULT_HTTP_TIMEOUT_S
+
+
 def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     ext_dir = _extension_directory()
     if ext_dir:
@@ -155,11 +183,35 @@ def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     else:
         con.execute("SET s3_access_key_id='';")  # public bucket: anonymous access
         con.execute("SET s3_secret_access_key='';")
-    # Caches parquet footer/metadata per connection (issue #31): a repeat
-    # query against the same file on the same connection skips the ~5s cold
-    # footer-read cost. Combined with overture.warm_metadata's startup
-    # pre-warm, this is often already paid before a real query arrives.
-    con.execute("SET enable_object_cache=true;")
+    # Cache parquet footers/metadata across queries on this instance (issue
+    # #31): a repeat query against a file this process has already scanned
+    # skips the cold footer read (~5s per theme on a warm link, far more
+    # cold). Combined with overture.warm_metadata's startup pre-warm, that
+    # cost is often already paid before a real query arrives. Note this is
+    # `parquet_metadata_cache` (default false), NOT `enable_object_cache`:
+    # in DuckDB 1.5 the latter is documented by duckdb_settings() as a
+    # "[PLACEHOLDER] Legacy setting - does nothing". The external file cache
+    # (enable_external_file_cache, default true) separately keeps read
+    # ranges of remote files in memory; its default validation mode stays
+    # on, since locally materialized tiles (cache.py) are rewritten in place.
+    con.execute("SET parquet_metadata_cache=true;")
+    # Memory and spill location. The thread count below is high, so give
+    # operators a knob for DuckDB's memory ceiling (default: DuckDB's own,
+    # ~80% of RAM) and keep spill files under the placeroot cache dir rather
+    # than DuckDB's default `.tmp` relative to whatever the cwd happens to be.
+    memory_limit = os.environ.get("PLACEROOT_DUCKDB_MEMORY_LIMIT", "").strip()
+    if memory_limit:
+        try:
+            con.execute(f"SET memory_limit={_sql_str(memory_limit)};")
+        except duckdb.Error as e:
+            logger.warning(
+                "Ignoring PLACEROOT_DUCKDB_MEMORY_LIMIT=%r: %s", memory_limit, e
+            )
+    try:
+        temp_dir = os.path.join(_cache_dir(), "duckdb_tmp")
+        con.execute(f"SET temp_directory={_sql_str(temp_dir)};")
+    except duckdb.Error as e:
+        logger.warning("Could not set DuckDB temp_directory: %s", e)
     # Remote scans are IO-bound, and the first query against a theme pays
     # one parquet-footer read per file (Overture themes span hundreds of
     # files). DuckDB parallelizes those reads across threads, so more
@@ -180,9 +232,11 @@ def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     except duckdb.Error as e:
         logger.debug("enable_http_metadata_cache unavailable: %s", e)
     # Bounded timeout + retry on remote scans (issue #5): a slow or down
-    # upstream fails fast instead of hanging a tool call.
+    # upstream fails fast instead of hanging a tool call. http_timeout is
+    # in seconds (see DEFAULT_HTTP_TIMEOUT_S); PLACEROOT_HTTP_TIMEOUT_S
+    # overrides it.
     try:
-        con.execute("SET http_timeout=5000;")  # ms
+        con.execute(f"SET http_timeout={_http_timeout_s()};")  # seconds
         con.execute("SET http_retries=2;")
         con.execute("SET http_retry_wait_ms=200;")
         con.execute("SET http_retry_backoff=2;")
