@@ -1,0 +1,56 @@
+name: Live tests
+
+# Monthly run of the `-m live` suite (tests/test_live.py plus the handful of
+# live-marked tests elsewhere) against real Overture S3 data. These are
+# excluded from the default `pytest` run (pyproject addopts: -m 'not live'),
+# so without a schedule they only run when someone remembers to — and rot.
+#
+# Do not add this to pull_request. The suite is bandwidth-bound (cold scans
+# of several themes) and a flaky upstream would block unrelated PRs. PR
+# authors run it locally when touching the data path:
+#
+#   uv run pytest -m live -q
+on:
+  schedule:
+    - cron: '20 14 3 * *'   # 14:20 UTC on the 3rd of each month
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        with:
+          # v10 still installs uv if cache is off. schedule/workflow_dispatch
+          # are not in the auto-disable list; keep true anyway.
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --python 3.12
+
+      - name: Run the live suite
+        run: |
+          set -o pipefail
+          uv run pytest -m live -q -p no:cacheprovider \
+            --junitxml live-tests.xml \
+            | tee live-tests-report.txt
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: live-tests-results
+          archive: true
+          path: |
+            live-tests.xml
+            live-tests-report.txt
