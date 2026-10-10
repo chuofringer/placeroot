@@ -271,3 +271,27 @@ upgraded to a build whose artifacts match.
 newest data immediately and give up the bundled acceleration, set
 `PLACEROOT_OVERTURE_RELEASE` to that release — an explicit override always
 wins.
+
+## Optional native accelerator
+
+`placeroot_native` is an optional compiled extension (source in `native/`)
+for the two routing hot spots: the street-graph build from the segment rows,
+and the target Dijkstra behind `route`, `map_match` and `places_along_route`.
+It is not installed by default, and nothing requires it: `uvx placeroot`
+stays pure Python. Answers are identical with or without it, including the
+tie-breaking order; `tests/test_native_routing.py` checks this on the routing
+fixture and on synthetic graphs.
+
+- **Where it helps:** a large graph searched many times, such as a cached
+  area serving repeated routes or a long map-match trace. The first search on
+  a graph stays in Python (`routing.NATIVE_MIN_SEARCHES`), because building
+  the native search structure costs about as much as one Python search. Walk
+  graphs that carry shape vertices (`want_shapes`) keep the Python build.
+- **Measured** (`uv run python native/bench_routing.py`, 200,000 synthetic
+  segments forming one 160,000-node component, 50 long-route searches): graph
+  build 4.2 s to 1.9 s (2.2x); searches 14.6 s to 1.4 s (10x), including the
+  one-time native build. Real streets will differ.
+- **Install from source.** Wheels are not published yet, so this needs a Rust
+  toolchain: `pip install ./native`, or `uv pip install maturin` followed by
+  `maturin develop --release -m native/Cargo.toml` from a checkout.
+- **Turn it off:** `PLACEROOT_NATIVE=0` disables it even when installed.
