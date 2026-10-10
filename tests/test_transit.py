@@ -369,12 +369,6 @@ def straddling_platform(tmp_path, monkeypatch):
         infrastructure.set_data_path(None)
 
 
-@pytest.mark.xfail(
-    reason="transit._run_query builds its own SELECT over infrastructure._from_source "
-    "and does not yet apply infrastructure._dedupe_clause(missing) after its WHERE; "
-    "drop this marker when it does",
-    strict=False,
-)
 def test_a_platform_straddling_a_tile_edge_is_listed_once(straddling_platform):
     rows, _radius, total_in_range, _fallback, _class_missing = transit.transit_stops_near(
         40.65, -74.0005, radius_m=500, limit=10, kind="platform"

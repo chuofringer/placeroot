@@ -158,6 +158,7 @@ def _run_query(
                 {nlat_expr} AS nlat
             FROM {infrastructure._from_source(bbox)}
             WHERE {" AND ".join(filters)}
+            {infrastructure._dedupe_clause(missing)}
         ),
         in_range AS (
             SELECT id, kind, name, {distance_expr} AS distance_m
