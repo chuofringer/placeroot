@@ -439,6 +439,9 @@ with the far west end of Market St; the division point is the city's label
 point, which is what "in San Francisco" means.
 """
 
+import contextlib
+import contextvars
+import inspect
 import json
 import logging
 import math
@@ -449,6 +452,8 @@ import threading
 import time
 import unicodedata
 from collections import OrderedDict
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import resources
@@ -460,6 +465,7 @@ from placeroot import (
     addresses,
     cache,
     categories,
+    db,
     geo,
     home_region,
     manifest,
@@ -5338,6 +5344,69 @@ def _type_word_slugs(search_query: str) -> tuple[str, ...]:
     return _TYPE_WORD_CATEGORIES.get(tokens[-1].lower().strip(".,"), ())
 
 
+# perf: how many of resolve_place's bounded places scans run side by side.
+# Each runs on its own cursor (db.isolated_reads) rather than under the
+# global connection lock; small because every scan still competes for the
+# same S3 bandwidth and DuckDB thread pool, and a query has at most a
+# handful of distinctive words.
+_PLACE_SCAN_WORKERS = 4
+
+# perf: the label a first-round row must earn for resolve_place to skip its
+# per-word scans. "exact" is the one label a single-word scan can never
+# beat — a row found by one word alone is at best "prefix" (its name is a
+# word-prefix of the query; see _place_match_label), so skipping those
+# scans cannot change the top result.
+_CONFIDENT_PLACE_LABEL = "exact"
+
+
+def _find_places_kwargs(**extra) -> dict:
+    """The keywords in `extra` that the installed overture.find_places
+    accepts. The suite's test doubles answer to the six-parameter pre-#373
+    signature (lat, lon, radius_m, category, name, limit); a newer, rarely
+    non-default keyword is passed only when the callee can take it — the
+    same opt-in idiom as #457's `country_kw`."""
+    try:
+        params = inspect.signature(overture.find_places).parameters
+    except (TypeError, ValueError):  # pragma: no cover - a C callable
+        return dict(extra)
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return dict(extra)
+    return {k: v for k, v in extra.items() if k in params}
+
+
+def _run_place_scans(jobs: list[Callable[[], list[dict]]]) -> list[list[dict]]:
+    """Run independent bounded places scans side by side; results in job
+    order, so the caller merges them exactly as a serial loop would have.
+
+    Each worker reads on a private cursor (db.isolated_reads) so the scans
+    overlap instead of queueing on overture._conn_lock, and runs under a
+    copy of the calling context so trace/progress records land in the
+    caller's request. The first job's exception (in job order) is
+    re-raised after every job has finished — UpstreamUnavailable from a
+    scan propagates exactly as it did from the serial loop.
+    """
+    if len(jobs) <= 1:
+        return [job() for job in jobs]
+
+    def _isolated(job):
+        with contextlib.ExitStack() as stack:
+            try:
+                stack.enter_context(db.isolated_reads())
+            except duckdb.Error:
+                # No private cursor to be had (the shared instance could
+                # not be opened — offline, httpfs missing): the scan still
+                # runs, just serialized on the global lock as before, and
+                # whether it can answer is its own business to report.
+                logger.debug("isolated cursor unavailable; scanning unisolated", exc_info=True)
+            return job()
+
+    with ThreadPoolExecutor(max_workers=min(_PLACE_SCAN_WORKERS, len(jobs))) as pool:
+        futures = [
+            pool.submit(contextvars.copy_context().run, _isolated, job) for job in jobs
+        ]
+        return [f.result() for f in futures]
+
+
 def _type_scan_rows(
     lat: float, lon: float, slugs: tuple[str, ...], token: str
 ) -> list[dict]:
@@ -5352,9 +5421,13 @@ def _type_scan_rows(
     not evidence against it. Each kept row is tagged "_type_scan" for the
     grading in resolve_place.
     """
+    # perf: one word of the query within one category — a close-spelling
+    # match of it is not the answer, so the fuzzy tier is off (see
+    # find_places' fuzzy_fallback); the alt-name tier still runs.
     rows = overture.find_places(
         lat, lon, radius_m=_RESOLVE_PLACE_RADIUS_M,
         categories=list(slugs), name=token, limit=_RESOLVE_OVERFETCH,
+        **_find_places_kwargs(fuzzy_fallback=False),
     )
     kept = []
     for row in rows:
@@ -5860,41 +5933,85 @@ def resolve_place(
         # *alternative* spelling of the query, not extra context the name
         # has to contain too). See _fuzzy_place_covers_query.
         gate_tokens = [t for t in tokens if " " not in t and t not in alias_tokens]
-        if geocode_places < limit:
-            for token in tokens:
-                for row in overture.find_places(
-                    ref_lat, ref_lon, radius_m=_RESOLVE_PLACE_RADIUS_M,
-                    name=token, limit=_RESOLVE_OVERFETCH,
-                ):
-                    if row["id"] and row["id"] not in seen_place_ids:
-                        seen_place_ids.add(row["id"])
-                        if row.get("matched_by"):
-                            # Which token the #373 fallback actually matched
-                            # this row against — the #374 gate below trusts
-                            # the fuzzy label only when that was the whole
-                            # query.
-                            row["_matched_token"] = token
-                        place_rows.append(row)
         # #469: the query's kind, searched by category on its distinctive
-        # word. Runs regardless of coverage — the name scans above cannot
-        # reach a row filed under the category rather than the English
-        # word, however many rows they return. Skipped when no distinctive
-        # word survived the pruning ("Station" alone, or "Tokyo Station"
-        # once the city word is set aside): a category scan with nothing
-        # to match names against is every station in the metro.
+        # word. Runs regardless of coverage — the name scans cannot reach a
+        # row filed under the category rather than the English word,
+        # however many rows they return. Skipped when no distinctive word
+        # survived the pruning ("Station" alone, or "Tokyo Station" once
+        # the city word is set aside): a category scan with nothing to
+        # match names against is every station in the metro.
         type_slugs = _type_word_slugs(search_query)
-        if type_slugs and gate_tokens:
-            for row in _type_scan_rows(ref_lat, ref_lon, type_slugs, gate_tokens[0]):
+        type_token = gate_tokens[0] if type_slugs and gate_tokens else None
+        # perf: these scans used to run one after another, each queued on
+        # the global connection lock and each paying tier 1 + alt-name +
+        # fuzzy on a miss — the cold half of the c15 corpus leg. Now a
+        # first round runs the two scans most likely to settle the query
+        # side by side: the whole phrase (all its tiers, as before) and the
+        # #469 type scan. When either produced a row the grading below will
+        # call _CONFIDENT_PLACE_LABEL, the per-word scans are skipped: a row
+        # found by one word alone is at best "prefix", so none of them could
+        # have outranked it. Otherwise the second round runs every remaining
+        # word side by side with the fuzzy tier off (one word's close
+        # spelling is not the answer to a longer query). Results are merged
+        # in the serial loop's order — phrase, words, type scan — so the
+        # candidate set and ranking are what they were whenever the first
+        # round is not confident. Not under an alias pin (#481: the pin, not
+        # the label, picks first place) or a guessed anchor (#464: the cover
+        # rule may drop the confident row), where every scan runs as before.
+        name_tokens = list(tokens) if geocode_places < limit else []
+        phrase = name_tokens[0] if name_tokens and name_tokens[0] == search_query else None
+
+        def _name_scan(token: str, fuzzy: bool) -> Callable[[], list[dict]]:
+            return lambda: overture.find_places(
+                ref_lat, ref_lon, radius_m=_RESOLVE_PLACE_RADIUS_M,
+                name=token, limit=_RESOLVE_OVERFETCH,
+                **({} if fuzzy else _find_places_kwargs(fuzzy_fallback=False)),
+            )
+
+        first_round: list[Callable[[], list[dict]]] = []
+        if phrase is not None:
+            first_round.append(_name_scan(phrase, fuzzy=True))
+        if type_token is not None:
+            first_round.append(lambda: _type_scan_rows(ref_lat, ref_lon, type_slugs, type_token))
+        first_rows = _run_place_scans(first_round)
+        phrase_rows = first_rows.pop(0) if phrase is not None else []
+        type_rows = first_rows.pop(0) if type_token is not None else []
+        confident = alias_pin is None and split_cover_tokens is None and (
+            any(
+                r["name"] and not r.get("matched_by")
+                and _best_place_label(r["name"], query, query_alternates, context_words)
+                == _CONFIDENT_PLACE_LABEL
+                for r in phrase_rows
+            )
+            or any(
+                r["name"] and _fuzzy_place_covers_query(r["name"], gate_tokens)
+                for r in type_rows
+            )
+        )
+        word_tokens = [] if confident else [t for t in name_tokens if t != phrase]
+        word_rows = _run_place_scans([_name_scan(t, fuzzy=False) for t in word_tokens])
+        for token, rows in [(phrase, phrase_rows), *zip(word_tokens, word_rows)]:
+            for row in rows:
                 if row["id"] and row["id"] not in seen_place_ids:
                     seen_place_ids.add(row["id"])
+                    if row.get("matched_by"):
+                        # Which token the #373 fallback actually matched
+                        # this row against — the #374 gate below trusts
+                        # the fuzzy label only when that was the whole
+                        # query.
+                        row["_matched_token"] = token
                     place_rows.append(row)
-                    continue
-                # Already in hand from a name scan — carry the tag over so
-                # the grading below sees the row for the kind it is.
-                for held in place_rows:
-                    if held["id"] == row["id"]:
-                        held["_type_scan"] = True
-                        break
+        for row in type_rows:
+            if row["id"] and row["id"] not in seen_place_ids:
+                seen_place_ids.add(row["id"])
+                place_rows.append(row)
+                continue
+            # Already in hand from a name scan — carry the tag over so
+            # the grading below sees the row for the kind it is.
+            for held in place_rows:
+                if held["id"] == row["id"]:
+                    held["_type_scan"] = True
+                    break
 
     # #481: the alias pin is a curated coordinate for a specific landmark,
     # so look at what actually stands there. The name-filtered scans above
