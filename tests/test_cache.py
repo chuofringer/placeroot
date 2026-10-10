@@ -829,10 +829,19 @@ def test_inflight_dedup_key_includes_fingerprint(con, cache_dir, monkeypatch):
     tile = cache.tiles_for_bbox(*bbox)[0]
     cache.local_paths_for_query(con, RELEASE, THEME, bbox, "upstreamA", duckdb.connect)
     cache.local_paths_for_query(con, RELEASE, THEME, bbox, "upstreamB", duckdb.connect)
-    time.sleep(0.3)  # let both background attempts finish
 
     fp_a = cache.resolve_fingerprint(RELEASE, THEME, "upstreamA")
     fp_b = cache.resolve_fingerprint(RELEASE, THEME, "upstreamB")
+    # Wait on the condition, not a fixed sleep: the fakes sleep 0.1 s each
+    # and the background fetches share bounded slots, so on a slow runner
+    # (macOS CI) schema B's fetch can start well after 0.3 s.
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        with lock:
+            seen = set(calls)
+        if (fp_a, tile) in seen and (fp_b, tile) in seen:
+            break
+        time.sleep(0.05)
     assert fp_a.startswith("fingerprintA-") and fp_b.startswith("fingerprintB-")
     assert (fp_a, tile) in calls
     assert (fp_b, tile) in calls
