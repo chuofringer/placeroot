@@ -31,7 +31,7 @@ by cache.py's per-tile materialization keyed on where queries land),
 geocode queries are name lookups with no spatial locality to exploit, so a
 tile cache doesn't fit; instead, the *entire* divisions/type=division name
 table is materialized locally, once per Overture release, the first time
-geocode() runs. Only the columns geocode.py needs survive the copy, and
+geocode() runs. Only the columns the geocode package needs survive the copy (see `_index.py`), and
 the `hierarchies` struct is flattened to a plain admin-chain name list —
 keeping the raw nested struct roughly doubled the materialized table's
 size for no benefit here (nothing downstream needs division_id/subtype

@@ -61,6 +61,25 @@ Bumping `release.PINNED_RELEASE` (the fallback Overture release, watched by
 the weekly canary) is its own multi-step runbook, not a single sync guard —
 see [docs/PIN.md](docs/PIN.md) and `scripts/bump_pin.py`.
 
+## Where things live
+
+- `src/placeroot/server.py` keeps the tool handlers, the registry and
+  `build_server()`. The helpers that used to sit beside them are in the
+  `_server_*` modules: `_server_errors`, `_server_refs` (LocationRef
+  resolution), `_server_middleware`, `_server_confirm`, `_server_schemas`
+  (from-keyword schema patches) and `_server_cli`. Import the public names from
+  `placeroot.server`; the underscore modules are internal.
+- `src/placeroot/geocode/` is a package with an underscore submodule per
+  concern. Its `__init__` docstring maps each submodule to what it holds, and
+  the design notes (why the divisions table is materialised, ranking rules) are
+  in [docs/GEOCODE-INTERNALS.md](docs/GEOCODE-INTERNALS.md). Import
+  `placeroot.geocode` rather than a submodule, and see the docstring's note on
+  `monkeypatch` before patching a helper in a test.
+
+Ruff format is not yet enforced in CI: CI runs `ruff check` only. A
+`ruff format` sweep of the tree is planned, so do not reformat unrelated code
+in a PR.
+
 ## Design rules
 
 These are the constraints that shape every tool; a PR that fights them will
@@ -99,7 +118,7 @@ tool answers, why existing tools can't answer it, which Overture theme(s)
 it reads, and a sketch of the response shape with a token estimate. Tools
 also need: MCP annotations (`readOnlyHint`, title), registration in the
 appropriate `PLACEROOT_TOOLS` profiles, a row in the tool catalog in
-[docs/REFERENCE.md](docs/REFERENCE.md#all-30-tools) and the site tool grid
+[docs/REFERENCE.md](docs/REFERENCE.md#all-48-tools) and the site tool grid
 in `site/index.html`, and offline tests against fixtures. `tests/test_site_tools_sync.py`
 only guards the site side — it asserts every registered tool is shown on
 the marketing site's tool grid (and vice versa) and that the site's
@@ -109,8 +128,8 @@ so a new tool's catalog row is on you to add and keep accurate.
 ## Commits and pull requests
 
 - Keep PRs focused; one change per PR.
-- CI must be green: ruff, the offline suite on all three Python versions,
-  and the browser smoke job.
+- CI must be green: ruff, the offline suite on all three Python versions
+  (Ubuntu; macOS and Windows run the suite on 3.12), and the browser smoke job.
 - Reference the issue you're addressing (`#123`) in the PR description.
 - Response-shape changes are breaking for agents that parse our output —
   call them out explicitly in the PR description.
