@@ -305,7 +305,8 @@ def warm_metadata() -> None:
         upstream = _upstream_glob(theme, type_)
         try:
             db.new_connection().execute(
-                f"SELECT * FROM read_parquet('{upstream}', hive_partitioning=1) LIMIT 0"
+                f"SELECT * FROM read_parquet({db._sql_str(upstream)}, hive_partitioning=1) "
+                "LIMIT 0"
             )
         except duckdb.Error as e:
             logger.warning("Metadata pre-warm failed for %s (continuing): %s", upstream, e)
@@ -1586,7 +1587,7 @@ def _resolve_division_geometry(
     sql = f"""
         WITH merged AS (
             SELECT ST_Union_Agg({geom_expr}) AS geom
-            FROM read_parquet('{div_upstream}', hive_partitioning=1)
+            FROM read_parquet({db._sql_str(div_upstream)}, hive_partitioning=1)
             WHERE {id_filter_expr} = $division_id
         )
         SELECT ST_AsWKB(geom), ST_XMin(geom), ST_XMax(geom), ST_YMin(geom), ST_YMax(geom)
@@ -2193,7 +2194,7 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
     if cache.enabled():
         tile_paths = cache.claimed_tile_paths(release.resolve_release(), THEME, upstream)
         if tile_paths:
-            joined = ", ".join(f"'{p}'" for p in tile_paths)
+            joined = ", ".join(db._sql_str(str(p)) for p in tile_paths)
             source, active = _with_recreation(f"read_parquet([{joined}])", None)
             row, lang_variant = _run_place_details_query(
                 source, ["id = $id"], "1", {"id": id}, missing, active, lang=lang,
@@ -2221,7 +2222,9 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
         "place_details(id=%s) fell back to a full-dataset scan (no cache hit, "
         "no near_lat/near_lon hint given, or the hint missed) — issue #41", id,
     )
-    source, active = _with_recreation(f"read_parquet('{upstream}', hive_partitioning=1)", None)
+    source, active = _with_recreation(
+        f"read_parquet({db._sql_str(upstream)}, hive_partitioning=1)", None
+    )
     return _run_place_details_query(
         source, ["id = $id"], "1", {"id": id}, missing, active, lang=lang,
     )

@@ -355,6 +355,38 @@ def test_failed_tile_copy_leaves_no_temp_file(cache_dir, local_probe, tmp_path):
     assert list(path.parent.glob("*.tmp")) == []
 
 
+def test_paths_with_a_single_quote_are_quoted_into_sql(
+    con, cache_dir, local_probe, monkeypatch, tmp_path
+):
+    """A `'` in PLACEROOT_CACHE_DIR or in the upstream path is data, not SQL:
+    both are interpolated into COPY/read_parquet statements and must go
+    through db._sql_str rather than a bare f-string quote."""
+    quoted_cache = tmp_path / "o'brien" / "placeroot-cache"
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(quoted_cache))
+    upstream = tmp_path / "it's here" / "places.parquet"
+    upstream.parent.mkdir()
+    upstream.write_bytes(FIXTURE_PATH.read_bytes())
+
+    from placeroot import release
+
+    tile = cache.tiles_for_bbox(-73.95, 40.65, -73.85, 40.75)[0]
+    # source_sql lists tiles of the *active* release, so write under it.
+    path = cache.ensure_tile(con, release.resolve_release(), THEME, tile, str(upstream))
+    assert path.exists() and "o'brien" in str(path)
+
+    source = cache.source_sql(THEME, str(upstream), None)  # the cached-tiles listing
+    assert source.startswith("read_parquet([")
+    assert db._sql_str(str(path)) in source
+    (n,) = con.execute(f"SELECT count(*) FROM {source}").fetchone()
+    assert n > 0
+
+    monkeypatch.setenv("PLACEROOT_CACHE", "off")
+    plain = cache.source_sql(THEME, str(upstream), None)
+    assert plain == f"read_parquet({db._sql_str(str(upstream))}, hive_partitioning=1)"
+    (n,) = con.execute(f"SELECT count(*) FROM {plain}").fetchone()
+    assert n > 0
+
+
 def test_populate_then_hit_does_not_touch_upstream_again(con, cache_dir, sync_cache, tmp_path):
     # Copy the fixture somewhere we can delete, standing in for "upstream".
     upstream = tmp_path / "upstream.parquet"

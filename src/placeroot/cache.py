@@ -1036,7 +1036,7 @@ def source_sql(
                     db.new_connection, schedule_missing=schedule_missing,
                 )
         if paths:
-            joined = ", ".join(f"'{p}'" for p in paths)
+            joined = ", ".join(db._sql_str(str(p)) for p in paths)
             return f"read_parquet([{joined}])"
     if not upstream_fallback:
         return None
@@ -1046,7 +1046,7 @@ def source_sql(
     pruned = manifest.pruned_source_sql(upstream_glob, bbox)
     if pruned is not None:
         return pruned
-    return f"read_parquet('{upstream_glob}', hive_partitioning=1)"
+    return f"read_parquet({db._sql_str(upstream_glob)}, hive_partitioning=1)"
 
 
 def parse_warm_region(spec: str) -> tuple[float, float, float] | None:
