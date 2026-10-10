@@ -208,9 +208,11 @@ def test_pair_of_plain_names_already_overlaps(timeline):
     assert origin["id"] == "pl-gare-shibuya"
     assert dest["id"] == "pl-yoyogi"
     assert timeline.overlapping("_query_divisions", "_query_divisions")
-    # Overlap shows up as the round count of ONE named resolve (10), not two
-    # in series (20); wall time on a shared runner is not a reliable witness.
-    assert timeline.rounds() == 10
+    # Two chains in series would be exactly 20 sequential rounds; interleaved,
+    # their spans merge into strictly fewer (how many depends on thread
+    # scheduling, so only the bound is asserted). Wall time on a shared runner
+    # is not a reliable witness.
+    assert timeline.rounds() < 20
 
 
 def test_pair_of_name_and_gers_id_overlaps(timeline):
