@@ -7,7 +7,6 @@ shared by every theme module (as_wkt covers callers that need text).
 
 import logging
 import math
-from functools import lru_cache
 
 import duckdb
 
@@ -199,17 +198,24 @@ def bbox_prune_literal_sql(bbox: tuple[float, float, float, float]) -> str:
     )
 
 
-@lru_cache(maxsize=16)
-def geom_expr(glob: str, as_wkt: bool = False) -> str:
-    """SQL expression yielding a GEOMETRY (or, if as_wkt, its WKT text) for glob's geometry column.
+# glob -> whether its geometry column is a native GEOMETRY (True) or a WKB
+# BLOB (False). Only *successful* probes land here: a transient failure
+# (network blip, httpfs not yet loaded) must not pin the WKB assumption for
+# the life of the process the way an lru_cache around the whole function
+# did — the next call re-probes.
+_GEOM_NATIVE_CACHE: dict[str, bool] = {}
+_GEOM_NATIVE_CACHE_MAX = 64
 
-    Real Overture GeoParquet carries geo metadata, so DuckDB spatial reads
-    `geometry` as a native GEOMETRY column directly; plain-parquet test
-    fixtures store it as a raw WKB BLOB, needing ST_GeomFromWKB first.
-    Detected once per (glob, as_wkt) pair and cached. A failed probe
-    degrades to the WKB-BLOB assumption rather than raising — the real
-    query hits the same problem and surfaces UpstreamUnavailable instead.
-    """
+
+def clear_geom_expr_cache() -> None:
+    """Forget every probed geometry type (tests, and a data-path change)."""
+    _GEOM_NATIVE_CACHE.clear()
+
+
+def _geometry_is_native(glob: str) -> bool:
+    cached = _GEOM_NATIVE_CACHE.get(glob)
+    if cached is not None:
+        return cached
     try:
         with db.conn_lock:
             described = db.shared_conn().execute(
@@ -218,8 +224,27 @@ def geom_expr(glob: str, as_wkt: bool = False) -> str:
         type_name = described[1] if described else ""
     except duckdb.Error as e:
         logger.warning("Geometry type probe failed for %s: %s", glob, e)
-        type_name = ""
+        return False
     is_native = type_name.upper().startswith("GEOMETRY")
+    if len(_GEOM_NATIVE_CACHE) >= _GEOM_NATIVE_CACHE_MAX:
+        _GEOM_NATIVE_CACHE.clear()
+    _GEOM_NATIVE_CACHE[glob] = is_native
+    return is_native
+
+
+def geom_expr(glob: str, as_wkt: bool = False) -> str:
+    """SQL expression yielding a GEOMETRY (or, if as_wkt, its WKT text) for glob's geometry column.
+
+    Real Overture GeoParquet carries geo metadata, so DuckDB spatial reads
+    `geometry` as a native GEOMETRY column directly; plain-parquet test
+    fixtures store it as a raw WKB BLOB, needing ST_GeomFromWKB first.
+    Detected once per glob and cached (_geometry_is_native). A failed
+    probe degrades to the WKB-BLOB assumption for *this call* rather than
+    raising — the real query hits the same problem and surfaces
+    UpstreamUnavailable instead — and is not cached, so a later call
+    probes again instead of inheriting the failure.
+    """
+    is_native = _geometry_is_native(glob)
     if as_wkt:
         return "ST_AsText(geometry)" if is_native else "ST_AsText(ST_GeomFromWKB(geometry))"
     return "geometry" if is_native else "ST_GeomFromWKB(geometry)"
