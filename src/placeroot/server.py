@@ -1275,7 +1275,11 @@ def find_places(
     # Overfetch by one row beyond the effective (post-clamp) limit so a
     # scan that stops only because it hit limit — not because it ran out of
     # matches — is distinguishable from one that didn't (has_more below).
-    effective_limit = max(0, min(int(limit), overture.MAX_ROWS))
+    # Clamped to at least 1, like every other tool's limit (out-of-range is
+    # not an error): a 0-row page would still overfetch its one lookahead
+    # row, report has_more, and hand back a cursor whose offset never
+    # advances — a pager that loops forever on the same empty page.
+    effective_limit = max(1, min(int(limit), overture.MAX_ROWS))
 
     if division_id is not None:
         if group_by_category:
