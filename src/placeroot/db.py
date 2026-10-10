@@ -1,7 +1,8 @@
 """Shared DuckDB connection management for the query layer.
 
-This is the one place that configures a connection (httpfs, object cache,
-S3 timeouts/retries) and loads the spatial extension; every theme module
+This is the one place that configures a connection (httpfs, parquet
+metadata cache, memory/temp dir, S3 timeouts/retries) and loads the spatial
+extension; every theme module
 (overture, routing, divisions, buildings) goes through it.
 
 Concurrency (issue #24): conn_lock serializes every use of shared_conn(),
@@ -102,8 +103,67 @@ def _s3_endpoint() -> str | None:
     return os.environ.get("PLACEROOT_S3_ENDPOINT") or None
 
 
+def _extension_directory() -> str | None:
+    """Where DuckDB looks for (and installs) extensions, if the operator
+    overrode DuckDB's default (~/.duckdb/extensions) via
+    PLACEROOT_DUCKDB_EXTENSION_DIR — e.g. a pre-populated, read-only
+    directory on an air-gapped host. None means DuckDB's own default."""
+    return os.environ.get("PLACEROOT_DUCKDB_EXTENSION_DIR") or None
+
+
+def load_extension(con: duckdb.DuckDBPyConnection, name: str) -> None:
+    """LOAD a DuckDB extension, installing it first only if LOAD fails.
+
+    `INSTALL x; LOAD x` makes every connection go through INSTALL's
+    install-path logic (a write into extension_directory, and a download
+    from extensions.duckdb.org when the extension isn't there). LOAD alone
+    is purely local: a machine that already has the extension — from an
+    earlier run, or a pre-populated, possibly read-only
+    PLACEROOT_DUCKDB_EXTENSION_DIR — loads it without ever considering the
+    network. Only a genuinely missing extension pays the download, and if
+    that fails too the error is DuckDB's own, naming the extension and URL.
+    """
+    try:
+        con.execute(f"LOAD {name};")
+        return
+    except duckdb.Error as e:
+        logger.debug("LOAD %s failed (%s); trying INSTALL first", name, e)
+    con.execute(f"INSTALL {name}; LOAD {name};")
+
+
+def _cache_dir() -> str:
+    """The placeroot cache directory, resolved the way cache.cache_dir()
+    does (PLACEROOT_CACHE_DIR, else ~/.cache/placeroot) without importing
+    cache.py — it imports this module, and _configure runs early."""
+    return os.environ.get("PLACEROOT_CACHE_DIR") or os.path.expanduser(
+        "~/.cache/placeroot"
+    )
+
+
+# httpfs' http_timeout is in SECONDS (DuckDB >= 1.1; default 30). An earlier
+# version of this file set 5000 believing the unit was milliseconds — that
+# is ~83 minutes, the opposite of issue #5's fail-fast intent.
+DEFAULT_HTTP_TIMEOUT_S = 30
+
+
+def _http_timeout_s() -> int:
+    raw = os.environ.get("PLACEROOT_HTTP_TIMEOUT_S", "")
+    try:
+        return max(1, int(raw)) if raw else DEFAULT_HTTP_TIMEOUT_S
+    except ValueError:
+        logger.warning(
+            "Ignoring PLACEROOT_HTTP_TIMEOUT_S=%r (not an integer); using %ds",
+            raw, DEFAULT_HTTP_TIMEOUT_S,
+        )
+        return DEFAULT_HTTP_TIMEOUT_S
+
+
 def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
-    con.execute("INSTALL httpfs; LOAD httpfs;")
+    ext_dir = _extension_directory()
+    if ext_dir:
+        # Must precede the first LOAD: it is where LOAD looks.
+        con.execute(f"SET extension_directory={_sql_str(ext_dir)};")
+    load_extension(con, "httpfs")
     # An MCP tool call isn't an interactive terminal; a progress bar just
     # clutters (or, piped through a wrapping process, can garble) output.
     con.execute("SET enable_progress_bar=false;")
@@ -123,11 +183,34 @@ def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     else:
         con.execute("SET s3_access_key_id='';")  # public bucket: anonymous access
         con.execute("SET s3_secret_access_key='';")
-    # Caches parquet footer/metadata per connection (issue #31): a repeat
-    # query against the same file on the same connection skips the ~5s cold
-    # footer-read cost. Combined with overture.warm_metadata's startup
-    # pre-warm, this is often already paid before a real query arrives.
-    con.execute("SET enable_object_cache=true;")
+    # No parquet footer cache. `enable_object_cache` (the setting issue #31
+    # reached for) is a "[PLACEHOLDER] Legacy setting - does nothing" in
+    # DuckDB 1.5 per duckdb_settings(), and its replacement
+    # `parquet_metadata_cache` is keyed by path: this codebase rewrites
+    # parquet files in place at a fixed path (cache.py tiles, the geocode
+    # alt-name table, division polygons), and a rebuild inside one mtime
+    # tick then serves the old footer against the new bytes
+    # ("TProtocolException: Invalid data" — seen in CI the one time it was
+    # enabled). The external file cache (enable_external_file_cache, default
+    # true) keeps read ranges of remote files with validation on, which is
+    # the safe form of the same win for the immutable upstream release files.
+    # Memory and spill location. The thread count below is high, so give
+    # operators a knob for DuckDB's memory ceiling (default: DuckDB's own,
+    # ~80% of RAM) and keep spill files under the placeroot cache dir rather
+    # than DuckDB's default `.tmp` relative to whatever the cwd happens to be.
+    memory_limit = os.environ.get("PLACEROOT_DUCKDB_MEMORY_LIMIT", "").strip()
+    if memory_limit:
+        try:
+            con.execute(f"SET memory_limit={_sql_str(memory_limit)};")
+        except duckdb.Error as e:
+            logger.warning(
+                "Ignoring PLACEROOT_DUCKDB_MEMORY_LIMIT=%r: %s", memory_limit, e
+            )
+    try:
+        temp_dir = os.path.join(_cache_dir(), "duckdb_tmp")
+        con.execute(f"SET temp_directory={_sql_str(temp_dir)};")
+    except duckdb.Error as e:
+        logger.warning("Could not set DuckDB temp_directory: %s", e)
     # Remote scans are IO-bound, and the first query against a theme pays
     # one parquet-footer read per file (Overture themes span hundreds of
     # files). DuckDB parallelizes those reads across threads, so more
@@ -148,9 +231,11 @@ def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     except duckdb.Error as e:
         logger.debug("enable_http_metadata_cache unavailable: %s", e)
     # Bounded timeout + retry on remote scans (issue #5): a slow or down
-    # upstream fails fast instead of hanging a tool call.
+    # upstream fails fast instead of hanging a tool call. http_timeout is
+    # in seconds (see DEFAULT_HTTP_TIMEOUT_S); PLACEROOT_HTTP_TIMEOUT_S
+    # overrides it.
     try:
-        con.execute("SET http_timeout=5000;")  # ms
+        con.execute(f"SET http_timeout={_http_timeout_s()};")  # seconds
         con.execute("SET http_retries=2;")
         con.execute("SET http_retry_wait_ms=200;")
         con.execute("SET http_retry_backoff=2;")
@@ -251,7 +336,8 @@ def ensure_spatial() -> None:
 
     Lock-held internally. Idempotent and cheap to call on every query that
     needs ST_* functions (divisions.py, buildings.py, routing.py all do);
-    the actual INSTALL/LOAD only ever runs once per process.
+    the actual LOAD (and INSTALL, if the extension is missing locally — see
+    load_extension) only ever runs once per process.
     """
     global _spatial_loaded
     if _spatial_loaded:
@@ -259,18 +345,22 @@ def ensure_spatial() -> None:
     with conn_lock:
         if _spatial_loaded:
             return
-        shared_conn().execute("INSTALL spatial; LOAD spatial;")
+        load_extension(shared_conn(), "spatial")
         _spatial_loaded = True
 
 
-@lru_cache(maxsize=8)
+# Sized above the number of distinct theme/type globs a process touches
+# (a dozen or so across places, divisions, buildings, transportation, base
+# subtypes, plus mirror/override variants): a smaller cache evicted live
+# globs under normal use and re-probed them over the network.
+@lru_cache(maxsize=32)
 def _probe_schema_cached(glob: str) -> frozenset:
     """Column names present in glob's dataset. Raises duckdb.Error if the probe fails.
 
     lru_cache memoizes only successful returns — a raised exception is NOT
     cached — so a transient probe failure is retried on the next call rather
     than poisoning the cache for the process lifetime (#144). Successful
-    schemas stay cached (LRU, maxsize=8) since the LIMIT 0 metadata read,
+    schemas stay cached (LRU, maxsize=32) since the LIMIT 0 metadata read,
     while cheap, isn't free to redo on every query.
     """
     with conn_lock:

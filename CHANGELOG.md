@@ -16,23 +16,52 @@ fixing behavior is patch.
 - `pydantic` is declared as a direct dependency (this release); `server.py`
   imports it directly but it only arrived transitively through `mcp`.
 - Question-gate name check ignores case, accents and punctuation (#500).
-- Routing `mode` tokens are checked against the real mode enum (this release),
-  so an unknown mode is rejected up front instead of failing mid-route.
-- DuckDB `http_timeout` and `parquet_metadata_cache` settings are applied on
-  the shared connection (this release): slow S3 reads time out cleanly and
-  repeated scans of the same files reuse their Parquet metadata.
+- Routing honours Overture's real `access_restrictions` mode enum (#502).
+  `RESTRICTION_MODE_TOKENS` used `"motorVehicle"`, which is not an Overture
+  `travelMode` value, so motor-vehicle restrictions were ignored for drive;
+  drive now matches `{vehicle, motor_vehicle, car}` and cycle
+  `{vehicle, bicycle}`, a truck/hgv-only ban no longer drops a street for
+  cars, `allowed`/`designated` exceptions reopen a heading, partial
+  `between` rules are ignored, a truncated graph keeps the nearest rows,
+  null geometries are skipped, duplicate endpoint connectors both become
+  nodes, graph pickles are loaded only from owner-only files, and
+  `map_match` bounds its stitch search and validates coordinates.
+- Concurrent cold routes for one area share a single graph build (#501); the
+  in-memory graph LRU keeps the larger of two overlapping graphs; the disk
+  lookup reads a sidecar index instead of unpickling every candidate;
+  connected components are computed once per graph; autowarm yields to a
+  foreground build.
+- DuckDB `http_timeout` is set in seconds (this release): the setting is
+  seconds in DuckDB ≥ 1.1, so the old `5000` was ~83 minutes rather than the
+  intended fail-fast. Default 30 s, `PLACEROOT_HTTP_TIMEOUT_S` overrides.
+  The do-nothing `enable_object_cache` is no longer set; `parquet_metadata_cache`
+  is deliberately left off because it is path-keyed and this server rebuilds
+  parquet files in place. `temp_directory` lives under the placeroot cache
+  dir; `PLACEROOT_DUCKDB_MEMORY_LIMIT` caps DuckDB memory when set.
 - DuckDB extensions already on disk load without reaching the extension
-  repository (this release), so an offline or proxied host no longer fails
-  on the `INSTALL` step.
-- `find_places(limit=0)` no longer returns a cursor for a page it did not
-  serve (this release).
-- The resolve cache key includes `limit` (this release), so a cached
-  small-`limit` answer is not served to a later call asking for more rows.
-- Bare trailing-word qualifier parsing (this release): a query ending in a
-  lone word is no longer mis-split into a qualifier when it is part of the
-  name.
-- Tile cache keys include the data source (this release), so tiles cached
-  from a mirror and from upstream for the same release no longer collide.
+  repository (this release): `LOAD` is tried before `INSTALL`, and
+  `PLACEROOT_DUCKDB_EXTENSION_DIR` points at a pre-populated directory.
+- `find_places(limit=0)` no longer pages forever (#504): `limit` is clamped
+  to at least 1 and a cursor is never emitted for a page that delivered no
+  rows. The progress and trace middleware now amend the tool's own answer
+  instead of the wire envelope, so `timing` and progress reach the agent;
+  `compare_areas` checks list size before resolving; `resolve_map_url` is
+  annotated open-world; `budget.fit_rows` is O(n); "don't have a car" counts
+  as no car in verdicts; `render_map` filenames are unique.
+- The resolve cache stores the un-truncated candidate list (#505), so a
+  cached `limit=1` answer is not served to a later call asking for more
+  rows. A comma-less trailing word is read as a region/country qualifier
+  only when the head is a plausible name and the whole query is not itself a
+  division ("West Virginia" and "New Mexico" stay whole, "Portland Oregon"
+  still splits); name tiers fold accents, case and punctuation; explicit
+  `country=` survives the degrade and fuzzy paths; prefix labels need a word
+  boundary; per-query division lookups are memoised; alt/lang table builds
+  are locked and use unique temp files.
+- Tile cache directories include the data source (#503), so tiles cached
+  from a mirror, a local extract and upstream for the same release no longer
+  collide; tile COPYs use unique temp files; recreation rows that straddle a
+  tile edge are returned once; division polygons get their own eviction cap;
+  cache paths are quoted into SQL.
 - Quarterly listings check no longer fails on Cloudflare Bot Fight Mode
   interstitials for placeroot.dev (#495). A `403` with `cf-mitigated:
   challenge` (the "Just a moment..." page) is treated as a false outage only

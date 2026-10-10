@@ -7,7 +7,7 @@ what the tests expect, and the design rules a change needs to fit.
 
 ```bash
 uv sync              # install runtime + dev dependencies
-uv run pytest        # offline test suite (no network needed)
+uv run pytest        # offline test suite (see below for the one-time extension setup)
 uv run ruff check .  # lint
 ```
 
@@ -15,9 +15,23 @@ Python ≥ 3.11. CI runs the suite on 3.11, 3.12 and 3.13.
 
 ### Offline vs. live tests
 
-The default `pytest` run is fully offline: it queries small GeoParquet
-fixtures under `tests/fixtures/`, built by `scripts/build_fixture.py` and
-friends. Tests that hit the real Overture S3 release are marked `live` and
+The default `pytest` run queries small GeoParquet fixtures under
+`tests/fixtures/`, built by `scripts/build_fixture.py` and friends, and
+never touches the Overture release. It does need the DuckDB `httpfs` and
+`spatial` extensions to be present locally: the first run on a fresh
+machine downloads them once (a few MB from extensions.duckdb.org, into
+`~/.duckdb/extensions/`), after which the suite is fully offline. The
+runtime only runs `INSTALL` when a plain `LOAD` fails, so an extension
+that is already present is loaded without any network access. To
+pre-install them on a host that has no network access at test time (or
+to point DuckDB at a directory you populated elsewhere, set
+`PLACEROOT_DUCKDB_EXTENSION_DIR`):
+
+```bash
+uv run python -c "import duckdb; duckdb.connect().execute('INSTALL httpfs; INSTALL spatial')"
+```
+
+Tests that hit the real Overture S3 release are marked `live` and
 excluded by default:
 
 ```bash
