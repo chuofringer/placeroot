@@ -273,6 +273,7 @@ def _shared_instance() -> duckdb.DuckDBPyConnection:
         with conn_lock, _instance_lock:
             if _instance is None:
                 _instance = _configure(duckdb.connect())
+                _snapshot_settings(_instance)
             inst = _instance
     return inst
 
@@ -313,7 +314,8 @@ def isolated_reads():
     if getattr(_isolation, "conn", None) is not None:
         yield
         return
-    _isolation.conn = _open_cursor(_shared_instance())
+    inst = _shared_instance()
+    _isolation.conn = _open_cursor(inst, _instance_settings(inst))
     _isolation.lock = threading.RLock()
     try:
         yield
@@ -346,30 +348,58 @@ def _read_cursor_cap() -> int:
 _SETTING_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def _open_cursor(instance: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
-    """A cursor of `instance` whose settings match the instance's.
+# The instance's settings as {name: value}, read once when it is configured.
+# DuckDB does not reliably carry a SET made on an instance over to a cursor
+# created from it (see _open_cursor), so cursors need the values. Reading
+# them live from the instance would race: DuckDBPyConnection.execute() is
+# not safe to call from two threads, and cursors are created from threads
+# that do not hold conn_lock. So the snapshot is taken where the instance
+# is still private (configure time, or the first lease in a fresh process)
+# and only ever read afterwards. Anything that changes an instance setting
+# later must be reflected here too; the geocode cache-toggle is net-neutral.
+_settings_snapshot: tuple[object, dict] | None = None
+
+
+def _snapshot_settings(instance) -> dict:
+    global _settings_snapshot
+    values = {
+        name: value
+        for name, value in instance.execute(
+            "SELECT name, value FROM duckdb_settings()").fetchall()
+    }
+    _settings_snapshot = (instance, values)
+    return values
+
+
+def _instance_settings(instance) -> dict:
+    snap = _settings_snapshot
+    if snap is not None and snap[0] is instance:
+        return snap[1]
+    return _snapshot_settings(instance)
+
+
+def _open_cursor(instance, want: dict) -> duckdb.DuckDBPyConnection:
+    """A cursor of `instance` whose settings match `want` (the instance's snapshot).
 
     DuckDB does not reliably carry a SET made on an instance over to a
     cursor created from it. Session-scoped settings (TimeZone) and
     extension options (httpfs' s3_endpoint and s3_region, icu's Calendar)
     come out of cursor() at their defaults, whatever scope duckdb_settings()
     reports, while global core settings (threads, memory_limit) do carry
-    over. So the cursor is brought in line here, name by name: every
-    setting whose value differs on the instance is SET on the cursor. A
+    over. So every setting that differs is SET on the cursor here. A
     setting the cursor refuses is skipped; only its name is logged, since
     some values are credentials.
     """
     cur = instance.cursor()
     try:
-        _inherit_settings(cur, instance)
+        _inherit_settings(cur, want)
     except BaseException:
         _close_quietly(cur)
         raise
     return cur
 
 
-def _inherit_settings(cur, instance) -> None:
-    want = dict(instance.execute("SELECT name, value FROM duckdb_settings()").fetchall())
+def _inherit_settings(cur, want: dict) -> None:
     have = dict(cur.execute("SELECT name, value FROM duckdb_settings()").fetchall())
     for name, value in want.items():
         if value is None or have.get(name) == value or not _SETTING_NAME.match(name):
@@ -401,9 +431,12 @@ class CursorPool:
     nothing needs re-applying per cursor.
     """
 
-    def __init__(self, instance: duckdb.DuckDBPyConnection, cap: int):
+    def __init__(self, instance: duckdb.DuckDBPyConnection, cap: int,
+                 settings: dict | None = None):
         self.instance = instance
         self.cap = cap
+        # Taken here, outside any lease, so cursor creation never reads the instance.
+        self.settings = settings if settings is not None else _instance_settings(instance)
         self._slots = threading.BoundedSemaphore(cap)
         self._guard = threading.Lock()
         self._idle: list[duckdb.DuckDBPyConnection] = []
@@ -436,7 +469,7 @@ class CursorPool:
             return self._idle.pop() if self._idle else None
 
     def _new_cursor(self):
-        cur = _open_cursor(self.instance)
+        cur = _open_cursor(self.instance, self.settings)
         with self._guard:
             self.live += 1
             self.created += 1
@@ -481,7 +514,7 @@ def _read_pool() -> CursorPool:
         if pool is None or pool.instance is not inst:
             if pool is not None:
                 pool.close()
-            pool = CursorPool(inst, _read_cursor_cap())
+            pool = CursorPool(inst, _read_cursor_cap(), _instance_settings(inst))
             _read_pool_obj = pool
         return pool
 
@@ -539,12 +572,12 @@ def new_connection() -> duckdb.DuckDBPyConnection:
     instance's by _open_cursor, which DuckDB's cursor() alone does not do.
     """
     base = shared_conn()
-    cur = base.cursor()
     try:
-        _inherit_settings(cur, base)
+        want = _instance_settings(base)
     except Exception:  # best effort: a substituted connection may not introspect
-        logger.debug("could not sync settings onto new cursor", exc_info=True)
-    return cur
+        logger.debug("no settings snapshot for new cursor", exc_info=True)
+        return base.cursor()
+    return _open_cursor(base, want)
 
 
 def _ensure_extension(name: str) -> None:

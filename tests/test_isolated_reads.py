@@ -260,6 +260,29 @@ def test_closing_the_pool_closes_cursors_returned_after_it(instance):
 # --- settings and extensions on the cursors ----------------------------------
 
 
+class _NoReadsInstance:
+    """Stands in for the instance: cursor() works, execute() must never run."""
+
+    def __init__(self, inst):
+        self._inst = inst
+
+    def cursor(self):
+        return self._inst.cursor()
+
+    def execute(self, *args, **kwargs):
+        raise AssertionError("cursor creation read the instance")
+
+
+def test_cursor_creation_never_reads_the_instance(instance):
+    """Cursors are created from background threads that do not hold
+    conn_lock; reading the instance there would race its execute()."""
+    snapshot = db._instance_settings(instance)
+    pool = db.CursorPool(_NoReadsInstance(instance), cap=2, settings=snapshot)
+    with pool.lease() as cur:
+        assert cur.execute("SELECT 1").fetchone()[0] == 1
+    pool.close()
+
+
 def test_settings_set_before_creation_are_seen_by_pooled_cursors(instance):
     instance.execute("SET threads=3;")
     instance.execute("SET TimeZone='Asia/Tokyo';")  # session-scoped (LOCAL)
