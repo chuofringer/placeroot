@@ -112,20 +112,34 @@ entries pointing at a 404 get rejected.
 
 ## Desktop Extension bundle (.mcpb, issue #233)
 
-`site/placeroot.mcpb` is the one-click install for Claude Desktop's **Chat**
-surface, served publicly from placeroot.dev (a stable URL that install
-instructions can point at, independent of GitHub). It is a committed build
-artifact:
+`placeroot.mcpb` is the one-click install for Claude Desktop's **Chat**
+surface, served publicly at https://placeroot.dev/placeroot.mcpb (a stable
+URL that install instructions can point at, independent of GitHub). It is a
+**build product, not a committed file** — ~23 MB per release was too much
+to keep in git history — so `site/placeroot.mcpb` is gitignored and nothing
+in a checkout needs rebuilding after a version bump. Two workflows build it:
+
+- **Release** (`release.yml`, `mcpb` job): builds from the tagged tree and
+  attaches `placeroot.mcpb` to the GitHub release for repo users.
+- **Deploy Site** (`deploy-site.yml`; `pages.yml` likewise): builds it into
+  `site/` right before the upload, on every site push and on every published
+  release, so placeroot.dev always serves a bundle built from the tree it
+  deployed.
+
+Both run `tests/test_mcpb_bundle.py` against the fresh build (pointed at it
+via `PLACEROOT_MCPB`): the manifest version must equal `pyproject.toml`'s,
+and the file must stay under Cloudflare Pages' 25 MiB per-file limit. In an
+ordinary offline `uv run pytest` those tests skip unless a bundle exists at
+`dist/placeroot.mcpb` or `site/placeroot.mcpb`; `mcpb/manifest.json` itself
+is guarded by `tests/test_registry_manifests.py` regardless.
+
+To build one locally (needs Node for the `@anthropic-ai/mcpb` packer):
 
 ```bash
-uv run python scripts/build_mcpb.py site/placeroot.mcpb   # rebuild after a version bump
+uv run python scripts/build_mcpb.py                     # -> dist/placeroot.mcpb
+uv run python scripts/build_mcpb.py --dry-run           # list what would be staged, no Node
+uv run python scripts/build_mcpb.py site/placeroot.mcpb # for a local site preview
 ```
-
-`tests/test_mcpb_bundle.py` fails when the bundle's manifest version doesn't
-match `pyproject.toml`, so a release can't ship a stale bundle; the Prepare
-Release workflow rebuilds it as part of the bump. The Release workflow also
-rebuilds from the tagged tree and attaches `placeroot.mcpb` to the GitHub
-release for repo users.
 
 Honest limitation, repeated wherever the bundle is offered: the server type
 is `uv`, and Claude Desktop does not bundle a Python/uv runtime — one-click
