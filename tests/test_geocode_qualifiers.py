@@ -9,7 +9,7 @@ import threading
 import duckdb
 import pytest
 
-from placeroot import geocode, overture
+from placeroot import db, geo, geocode, overture
 
 # ---------------------------------------------------------------------------
 # bare trailing words are not qualifiers of a bare modifier
@@ -356,3 +356,35 @@ def test_lang_table_build_is_attempted_once(monkeypatch, tmp_path):
     assert geocode._local_lang_names_table(table) is None
     assert geocode._local_lang_names_table(table) is None
     assert len(builds) == 1
+
+
+# ---------------------------------------------------------------------------
+# geo.geom_expr: a failed probe is not cached
+# ---------------------------------------------------------------------------
+
+
+def test_geom_expr_reprobes_after_a_failed_probe(monkeypatch):
+    geo.clear_geom_expr_cache()
+    outcomes = iter([duckdb.Error("httpfs not loaded"), ("geometry", "GEOMETRY")])
+    probes = []
+
+    class FakeConn:
+        def execute(self, sql):
+            probes.append(sql)
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                raise outcome
+
+            class R:
+                def fetchone(self_inner):
+                    return outcome
+
+            return R()
+
+    monkeypatch.setattr(db, "shared_conn", lambda: FakeConn())
+    glob = "s3://bucket/theme=places/*.parquet"
+    assert geo.geom_expr(glob) == "ST_GeomFromWKB(geometry)"   # degraded, not cached
+    assert geo.geom_expr(glob) == "geometry"                   # re-probed
+    assert geo.geom_expr(glob, as_wkt=True) == "ST_AsText(geometry)"  # cached
+    assert len(probes) == 2
+    geo.clear_geom_expr_cache()
