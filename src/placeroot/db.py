@@ -314,18 +314,18 @@ def isolated_reads():
     if getattr(_isolation, "conn", None) is not None:
         yield
         return
-    inst = _shared_instance()
-    _isolation.conn = _open_cursor(inst, _instance_settings(inst))
-    _isolation.lock = threading.RLock()
-    try:
-        yield
-    finally:
+    # Lease a pre-configured cursor from the read pool rather than opening
+    # (and settings-replaying, and closing) a fresh one per call: a resolve
+    # fans out several short jobs through here, and a cursor open plus a
+    # duckdb_settings() round trip per job was most of their wall time.
+    with _read_pool().lease() as cur:
+        _isolation.conn = cur
+        _isolation.lock = threading.RLock()
         try:
-            _isolation.conn.close()
-        except duckdb.Error:  # pragma: no cover - close is best-effort
-            pass
-        _isolation.conn = None
-        _isolation.lock = None
+            yield
+        finally:
+            _isolation.conn = None
+            _isolation.lock = None
 
 
 READ_CURSORS_ENV = "PLACEROOT_DUCKDB_CURSORS"
