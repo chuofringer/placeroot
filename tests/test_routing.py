@@ -714,3 +714,308 @@ def test_graph_cache_max_size_evicts_least_recently_used():
         offset_lat = lat + i * 1.0
         routing._get_or_build_graph(offset_lat, lon, 100.0, "walk", None)
     assert len(routing._graph_cache) <= routing.GRAPH_CACHE_MAXSIZE
+
+
+# --- Graph cache: single-flight builds, bbox-keyed LRU, sidecar index, ------
+# --- memoized components, autowarm yielding to the foreground ---------------
+
+
+def _hand_graph(n: int, lat0: float, lon0: float, *, has_shapes: bool = False) -> routing.Graph:
+    """A chain of n nodes ~35 m apart along a parallel — no DuckDB, no upstream."""
+    graph = routing.Graph()
+    graph.has_shapes = has_shapes
+    prev = None
+    for i in range(n):
+        node_id = f"n{i}"
+        graph.add_node(node_id, lat0, lon0 + i * 0.0005)
+        if prev is not None:
+            graph.add_edge(prev, node_id, 35.0, 35.0)
+        prev = node_id
+    return graph
+
+
+def _walk_key_prefix() -> tuple:
+    return (
+        routing.release.resolve_release(),
+        routing._upstream_glob(),
+        "walk",
+        routing._graph_cache_speed_tag("walk", None),
+        routing._graph_cache_avoid_tag("walk", ()),
+    )
+
+
+def test_concurrent_cold_requests_share_one_graph_build(monkeypatch):
+    """Single-flight: a second cold caller for a covered area waits for the
+    first build rather than running its own extraction."""
+    import threading
+    import time
+
+    routing.clear_graph_cache()
+    lat, lon = 51.5, -0.1
+    calls = []
+    entered = threading.Event()
+
+    def slow_build(*args, **kwargs):
+        calls.append(1)
+        entered.set()
+        time.sleep(0.3)
+        return _hand_graph(5, lat, lon, has_shapes=True)
+
+    monkeypatch.setattr(routing, "build_graph", slow_build)
+    results = []
+
+    def worker():
+        results.append(
+            routing._get_or_build_graph(lat, lon, 500.0, "walk", None, want_shapes=True)
+        )
+
+    first = threading.Thread(target=worker)
+    first.start()
+    assert entered.wait(timeout=2)
+    second = threading.Thread(target=worker)
+    second.start()
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert len(calls) == 1
+    assert len(results) == 2
+    assert results[0] is results[1]
+    assert routing._inflight_builds == {}
+
+
+def test_failed_in_flight_build_lets_the_waiter_build_its_own(monkeypatch):
+    import threading
+    import time
+
+    routing.clear_graph_cache()
+    lat, lon = 51.5, -0.1
+    calls = []
+    entered = threading.Event()
+
+    def flaky_build(*args, **kwargs):
+        calls.append(1)
+        entered.set()
+        time.sleep(0.2)
+        if len(calls) == 1:
+            raise RuntimeError("upstream hiccup")
+        return _hand_graph(5, lat, lon)
+
+    monkeypatch.setattr(routing, "build_graph", flaky_build)
+    outcomes = []
+
+    def worker():
+        try:
+            outcomes.append(routing._get_or_build_graph(lat, lon, 500.0, "walk", None))
+        except RuntimeError as e:
+            outcomes.append(e)
+
+    first = threading.Thread(target=worker)
+    first.start()
+    assert entered.wait(timeout=2)
+    second = threading.Thread(target=worker)
+    second.start()
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert len(calls) == 2
+    assert sum(isinstance(o, RuntimeError) for o in outcomes) == 1
+    assert sum(isinstance(o, routing.Graph) for o in outcomes) == 1
+    assert routing._inflight_builds == {}
+
+
+def test_memory_cache_keeps_larger_graph_when_smaller_same_tile_graph_is_stored():
+    """A 400 m graph stored after autowarm's 5 km graph in the same 0.05°
+    tile must not evict it — the bigger one already answers both."""
+    routing.clear_graph_cache()
+    lat, lon = 51.5, -0.1
+    prefix = _walk_key_prefix()
+    big = _hand_graph(50, lat, lon, has_shapes=True)
+    small = _hand_graph(5, lat, lon, has_shapes=True)
+    routing._store_graph_in_memory(prefix, lat, lon, routing._bbox_around(lat, lon, 5000.0), big)
+    routing._store_graph_in_memory(prefix, lat, lon, routing._bbox_around(lat, lon, 400.0), small)
+    assert len(routing._graph_cache) == 1
+    assert routing._memory_graph_for(lat, lon, 400.0, "walk", None, want_shapes=True) is big
+    assert routing._memory_graph_for(lat, lon, 4000.0, "walk", None, want_shapes=True) is big
+
+
+def test_memory_cache_larger_graph_replaces_contained_smaller_entry():
+    routing.clear_graph_cache()
+    lat, lon = 51.5, -0.1
+    prefix = _walk_key_prefix()
+    small = _hand_graph(5, lat, lon, has_shapes=True)
+    big = _hand_graph(50, lat, lon, has_shapes=True)
+    routing._store_graph_in_memory(prefix, lat, lon, routing._bbox_around(lat, lon, 400.0), small)
+    routing._store_graph_in_memory(prefix, lat, lon, routing._bbox_around(lat, lon, 5000.0), big)
+    assert len(routing._graph_cache) == 1
+    assert routing._memory_graph_for(lat, lon, 400.0, "walk", None) is big
+
+
+def test_memory_cache_shapeless_entry_does_not_subsume_a_shaped_one():
+    """Shapes stay a one-way subsumption dimension at insert time too: a
+    shaped small graph coexists with a shapeless big one, and each request
+    gets the one it can use."""
+    routing.clear_graph_cache()
+    lat, lon = 51.5, -0.1
+    prefix = _walk_key_prefix()
+    big_plain = _hand_graph(50, lat, lon, has_shapes=False)
+    small_shaped = _hand_graph(5, lat, lon, has_shapes=True)
+    routing._store_graph_in_memory(
+        prefix, lat, lon, routing._bbox_around(lat, lon, 5000.0), big_plain
+    )
+    routing._store_graph_in_memory(
+        prefix, lat, lon, routing._bbox_around(lat, lon, 400.0), small_shaped
+    )
+    assert len(routing._graph_cache) == 2
+    shaped_hit = routing._memory_graph_for(lat, lon, 400.0, "walk", None, want_shapes=True)
+    assert shaped_hit is small_shaped
+    assert routing._memory_graph_for(lat, lon, 4000.0, "walk", None) is big_plain
+
+
+def test_disk_lookup_reads_sidecar_index_and_unpickles_only_the_matching_file(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "c"))
+    monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
+    routing.clear_graph_cache()
+    prefix = _walk_key_prefix()
+    lat, lon = 51.5, -0.1
+    # Same 0.05° tile, distinct radii (so distinct filenames); only the
+    # first-persisted file's bbox covers a query at (lat + 0.02, lon).
+    far_lat = lat + 0.02
+    covering = _hand_graph(8, far_lat, lon, has_shapes=True)
+    routing._persist_graph_to_disk(
+        prefix, far_lat, lon, 400.0, routing._bbox_around(far_lat, lon, 400.0), covering
+    )
+    decoy = _hand_graph(4, lat, lon, has_shapes=True)
+    routing._persist_graph_to_disk(
+        prefix, lat, lon, 300.0, routing._bbox_around(lat, lon, 300.0), decoy
+    )
+    graphs_dir = next(p for p in (tmp_path / "c").rglob("graphs") if p.is_dir())
+    pickles = sorted(graphs_dir.glob("*.pkl"))
+    assert len(pickles) == 2
+    assert all(routing._graph_disk_index_path(p).is_file() for p in pickles)
+    decoy_path = next(p for p in pickles if "_r300_" in p.name)
+    covering_path = next(p for p in pickles if "_r400_" in p.name)
+    # Make the decoy unambiguously the newest so the mtime-ordered scan
+    # tries it first — the sidecar must rule it out without an unpickle.
+    newer = covering_path.stat().st_mtime + 10
+    import os
+
+    os.utime(decoy_path, (newer, newer))
+
+    unpickled = []
+    real_load = routing._load_one_graph_file
+
+    def counting_load(path):
+        unpickled.append(path.name)
+        return real_load(path)
+
+    monkeypatch.setattr(routing, "_load_one_graph_file", counting_load)
+    needed = routing._bbox_around(far_lat, lon, 100.0)
+    loaded = routing._load_graph_from_disk(prefix, needed, True, far_lat, lon)
+    assert loaded is not None
+    assert loaded[1].node_count() == covering.node_count()
+    assert unpickled == [covering_path.name]
+
+    # Backwards compatibility: files persisted before the sidecar existed
+    # take the old unpickle path once and get a sidecar written.
+    for p in pickles:
+        routing._graph_disk_index_path(p).unlink()
+    unpickled.clear()
+    loaded = routing._load_graph_from_disk(prefix, needed, True, far_lat, lon)
+    assert loaded is not None
+    assert unpickled == [decoy_path.name, covering_path.name]
+    assert all(routing._graph_disk_index_path(p).is_file() for p in pickles)
+    unpickled.clear()
+    assert routing._load_graph_from_disk(prefix, needed, True, far_lat, lon) is not None
+    assert unpickled == [covering_path.name]
+
+    # A stale sidecar (pickle rewritten underneath it) is ignored, not trusted.
+    index_path = routing._graph_disk_index_path(decoy_path)
+    index_path.write_text(
+        index_path.read_text(encoding="utf-8").replace('"size": ', '"size": 1'),
+        encoding="utf-8",
+    )
+    assert routing._read_graph_disk_index(decoy_path) is None
+
+
+def test_snap_to_graph_computes_components_once_per_graph(monkeypatch):
+    graph = _hand_graph(10, 51.5, -0.1)
+    calls = []
+    real = routing.Graph._compute_connected_components
+
+    def counting(self):
+        calls.append(1)
+        return real(self)
+
+    monkeypatch.setattr(routing.Graph, "_compute_connected_components", counting)
+    a = routing.snap_to_graph(graph, 51.5, -0.1)
+    b = routing.snap_to_graph(graph, 51.5, -0.1 + 0.002)
+    assert a == "n0"
+    assert b == "n4"
+    assert len(calls) == 1
+    assert len(graph.connected_components()) == 1
+    assert len(calls) == 1
+    # Growing the graph afterwards (hand-assembled graphs in tests do this)
+    # invalidates the memo rather than answering for the old shape.
+    graph.add_node("island", 51.6, -0.1)
+    assert len(graph.connected_components()) == 2
+    assert len(calls) == 2
+
+
+def test_autowarm_skips_walk_graph_build_while_foreground_build_in_flight(
+    monkeypatch, tmp_path
+):
+    from placeroot import autowarm, server
+
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "c"))
+    monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
+    lat, lon = 51.5, -0.1
+    monkeypatch.setattr(
+        server, "_prewarm_region", lambda la, lo, r: {"status": "already_warm"}
+    )
+    builds = []
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: builds.append(1))
+    bbox = routing._bbox_around(lat, lon, 500.0)
+    key = (*_walk_key_prefix(), bbox, True)
+    routing._inflight_builds[key] = routing._InflightBuild(bbox, True)
+    try:
+        assert routing.graph_build_in_flight(lat, lon, 5000.0, "walk")
+        assert not routing.graph_build_in_flight(lat, lon, 5000.0, "drive")
+        assert not routing.graph_build_in_flight(lat + 1.0, lon, 5000.0, "walk")
+        autowarm.clear_autowarm_state()
+        autowarm._run_autowarm(lat, lon, autowarm.metro_key(lat, lon))
+    finally:
+        routing._inflight_builds.pop(key, None)
+    assert builds == []
+    autowarm._run_autowarm(lat, lon, autowarm.metro_key(lat, lon))
+    assert builds == [1]
+
+
+def test_autowarm_thread_yields_to_the_request_that_scheduled_it(monkeypatch, tmp_path):
+    import threading
+    import time
+
+    from placeroot import autowarm, server
+
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "c"))
+    monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
+    # Opt in to the real thread (conftest's no_autowarm_threads sets it off).
+    monkeypatch.delenv("PLACEROOT_AUTOWARM", raising=False)
+    monkeypatch.setattr(autowarm, "AUTOWARM_START_DELAY_S", 0.3)
+    monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: None)
+    started = []
+
+    def prewarm(la, lo, r):
+        started.append(time.perf_counter())
+        return {"status": "already_warm"}
+
+    monkeypatch.setattr(server, "_prewarm_region", prewarm)
+    autowarm.clear_autowarm_state()
+    t0 = time.perf_counter()
+    autowarm.schedule_autowarm(51.5, -0.1)
+    time.sleep(0.05)
+    assert started == []
+    for t in threading.enumerate():
+        if t.name.startswith("placeroot-autowarm-"):
+            t.join(timeout=5)
+    assert len(started) == 1
+    assert started[0] - t0 >= 0.3

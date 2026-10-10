@@ -31,6 +31,7 @@ import logging
 import math
 import os
 import threading
+import time
 from pathlib import Path
 
 from placeroot import cache, release
@@ -66,6 +67,15 @@ _METRO_TILE_DEG = 0.25
 
 _inflight: set[tuple[int, int]] = set()
 _inflight_lock = threading.Lock()
+
+# Seconds the autowarm thread idles before touching DuckDB. The resolve
+# that kicked it is still answering when the thread starts (there is no
+# after-response hook on the MCP path: geocode kicks mid-request), and a
+# warm that begins at once competes with that very request for conn_lock
+# and the GIL. Short on purpose: long enough for the foreground resolve
+# to return, short enough that an immediately following route still
+# finds the metro warming. Tests that need the real thread lower it.
+AUTOWARM_START_DELAY_S = 0.5
 
 
 def is_city_scale(hit: dict) -> bool:
@@ -150,15 +160,34 @@ def schedule_autowarm(lat: float, lon: float) -> None:
             return
         _inflight.add(key)
     threading.Thread(
-        target=_run_autowarm,
+        target=_run_autowarm_after_delay,
         args=(lat, lon, key),
         name=f"placeroot-autowarm-{key[0]}-{key[1]}",
         daemon=True,
     ).start()
 
 
+def _run_autowarm_after_delay(lat: float, lon: float, key: tuple[int, int]) -> None:
+    """Thread target: yield to the request that scheduled us, then warm.
+
+    The sleep is here rather than in _run_autowarm so the work itself
+    stays directly callable (tests drive _run_autowarm synchronously).
+    """
+    if AUTOWARM_START_DELAY_S > 0:
+        time.sleep(AUTOWARM_START_DELAY_S)
+    _run_autowarm(lat, lon, key)
+
+
 def _run_autowarm(lat: float, lon: float, key: tuple[int, int]) -> None:
-    """Own thread: existing prewarm path, then a walk graph. Never raises out."""
+    """Own thread: existing prewarm path, then a walk graph. Never raises out.
+
+    The walk-graph step yields to the foreground: when some request is
+    already building a walk graph that overlaps this metro (see
+    routing.graph_build_in_flight) the build is skipped outright rather
+    than run as a second extraction contending for conn_lock and the GIL
+    against the request a user is waiting on. That foreground build parks
+    its own graph in the LRU and on disk, so the area is not left cold.
+    """
     try:
         from placeroot import routing, server
 
@@ -184,6 +213,13 @@ def _run_autowarm(lat: float, lon: float, key: tuple[int, int]) -> None:
         # this extract cheaper than cold S3; the graph still has to be
         # built (or loaded from disk) here.
         radius = min(server.DEFAULT_WARMUP_RADIUS_M, routing.WALK_MAX_RADIUS_M)
+        if routing.graph_build_in_flight(lat, lon, radius, "walk"):
+            logger.info(
+                "autowarm: foreground walk-graph build overlaps %s; "
+                "skipping the background graph build",
+                key,
+            )
+            return
         routing._get_or_build_graph(
             lat, lon, radius, "walk", None, want_shapes=True,
         )
