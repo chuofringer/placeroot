@@ -179,7 +179,11 @@ def test_server_geocode_per_call_lang_beats_stored_preference(geocode_cache):
 
 def test_resolve_place_lang_swaps_division_candidate(geocode_cache):
     rows = geocode.resolve_place(
-        "München", near_lat=48.14, near_lon=11.58, limit=3, lang="en",
+        "München",
+        near_lat=48.14,
+        near_lon=11.58,
+        limit=3,
+        lang="en",
     )
     division_rows = [r for r in rows if r["kind"] == "division"]
     assert division_rows, "expected at least one division candidate"
@@ -192,10 +196,17 @@ def test_resolve_place_lang_cache_key_does_not_leak_across_langs(geocode_cache):
     """The #410 resolve cache is keyed on lang (see geocode._resolve_cache_key)
     — a lang="en" call must not be replayed for a later call with no lang."""
     lang_rows = geocode.resolve_place(
-        "München", near_lat=48.14, near_lon=11.58, limit=3, lang="en",
+        "München",
+        near_lat=48.14,
+        near_lon=11.58,
+        limit=3,
+        lang="en",
     )
     plain_rows = geocode.resolve_place(
-        "München", near_lat=48.14, near_lon=11.58, limit=3,
+        "München",
+        near_lat=48.14,
+        near_lon=11.58,
+        limit=3,
     )
     lang_top = next(r for r in lang_rows if r["kind"] == "division")
     plain_top = next(r for r in plain_rows if r["kind"] == "division")
@@ -232,7 +243,10 @@ def test_place_details_no_lang_is_byte_identical():
 
 def test_place_details_lang_swaps_in_the_variant():
     result = overture.place_details(
-        name="Kaffeehaus Wien", lat=_WIEN_LAT, lon=_WIEN_LON, lang="en",
+        name="Kaffeehaus Wien",
+        lat=_WIEN_LAT,
+        lon=_WIEN_LON,
+        lang="en",
     )
     assert result["name"] == "Vienna Coffee House"
     assert result["name_primary"] == "Kaffeehaus Wien"
@@ -240,7 +254,10 @@ def test_place_details_lang_swaps_in_the_variant():
 
 def test_place_details_lang_with_no_variant_leaves_primary_untouched():
     result = overture.place_details(
-        name="Kaffeehaus Wien", lat=_WIEN_LAT, lon=_WIEN_LON, lang="de",
+        name="Kaffeehaus Wien",
+        lat=_WIEN_LAT,
+        lon=_WIEN_LON,
+        lang="de",
     )
     assert result["name"] == "Kaffeehaus Wien"
     assert "name_primary" not in result
@@ -254,7 +271,10 @@ def test_place_details_lang_on_a_row_with_no_names_common_at_all():
     than a second fixture: an empty map already answers "no variant"
     through the same code path as a missing column would."""
     result = overture.place_details(
-        name="Blue Bottle Roastery", lat=40.700000, lon=-73.900000, lang="en",
+        name="Blue Bottle Roastery",
+        lat=40.700000,
+        lon=-73.900000,
+        lang="en",
     )
     assert result["name"] == "Blue Bottle Roastery"
     assert "name_primary" not in result
@@ -270,7 +290,10 @@ def test_server_place_details_uses_stored_lang(geocode_cache):
 def test_server_place_details_per_call_lang_beats_preference(geocode_cache):
     preferences.update(lang="de")
     result = server.place_details(
-        name="Kaffeehaus Wien", lat=_WIEN_LAT, lon=_WIEN_LON, lang="en",
+        name="Kaffeehaus Wien",
+        lat=_WIEN_LAT,
+        lon=_WIEN_LON,
+        lang="en",
     )
     assert result["name"] == "Vienna Coffee House"
     assert result["name_primary"] == "Kaffeehaus Wien"
@@ -289,10 +312,14 @@ def test_lang_names_table_is_materialized_beside_the_divisions_table(geocode_cac
     table = geocode._local_divisions_table()
     lang_table = geocode._local_lang_names_table(table)
     assert lang_table is not None
-    rows = duckdb.connect().execute(
-        f"SELECT id, lang, name FROM read_parquet('{lang_table}') "
-        "WHERE id = 'gers-div-munchen' ORDER BY lang"
-    ).fetchall()
+    rows = (
+        duckdb.connect()
+        .execute(
+            f"SELECT id, lang, name FROM read_parquet('{lang_table}') "
+            "WHERE id = 'gers-div-munchen' ORDER BY lang"
+        )
+        .fetchall()
+    )
     langs = {r[1]: r[2] for r in rows}
     assert langs["en"] == "Munich"
     assert langs["fr"] == "Munich"
@@ -329,11 +356,14 @@ def test_lang_does_not_change_division_match_labels_in_resolve_place(geocode_cac
     division the query "München" matched exactly."""
     base = geocode.resolve_place("München", near_lat=48.14, near_lon=11.58, limit=3)
     swapped = geocode.resolve_place(
-        "München", near_lat=48.14, near_lon=11.58, limit=3, lang="en",
+        "München",
+        near_lat=48.14,
+        near_lon=11.58,
+        limit=3,
+        lang="en",
     )
     base_div = next(r for r in base if r["kind"] == "division")
     swapped_div = next(
-        r for r in swapped
-        if r["kind"] == "division" and r.get("name_primary") == "München"
+        r for r in swapped if r["kind"] == "division" and r.get("name_primary") == "München"
     )
     assert swapped_div["match"] == base_div["match"]

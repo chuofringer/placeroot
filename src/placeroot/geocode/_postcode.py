@@ -34,14 +34,14 @@ _pkg = _sys.modules["placeroot.geocode"]
 # paid once per (dataset, code) per process, so a year-shaped query costs at
 # most one scan for the life of the process rather than one per call.
 _POSTCODE_PATTERNS = (
-    re.compile(r"^\d{4}$"),           # AT BE AU CH DK HU LU NO NZ SI ...
-    re.compile(r"^\d{5}$"),           # US ZIP, DE, FR, ES, IT, FI, MX
-    re.compile(r"^\d{6}$"),           # SG
-    re.compile(r"^\d{5}-\d{4}$"),     # US ZIP+4
-    re.compile(r"^\d{5}-\d{3}$"),     # BR CEP
-    re.compile(r"^\d{4}-\d{3}$"),     # PT
-    re.compile(r"^\d{4} ?[A-Z]{2}$"),                 # NL 1011AB / 1011 AB
-    re.compile(r"^[A-Z]\d[A-Z] ?\d[A-Z]\d$"),         # CA M5V 3L9
+    re.compile(r"^\d{4}$"),  # AT BE AU CH DK HU LU NO NZ SI ...
+    re.compile(r"^\d{5}$"),  # US ZIP, DE, FR, ES, IT, FI, MX
+    re.compile(r"^\d{6}$"),  # SG
+    re.compile(r"^\d{5}-\d{4}$"),  # US ZIP+4
+    re.compile(r"^\d{5}-\d{3}$"),  # BR CEP
+    re.compile(r"^\d{4}-\d{3}$"),  # PT
+    re.compile(r"^\d{4} ?[A-Z]{2}$"),  # NL 1011AB / 1011 AB
+    re.compile(r"^[A-Z]\d[A-Z] ?\d[A-Z]\d$"),  # CA M5V 3L9
     re.compile(r"^[A-Z]{1,2}\d[A-Z\d]? ?\d[A-Z]{2}$"),  # GB SW1A 1AA (full only)
 )
 
@@ -86,7 +86,6 @@ _POSTCODE_LOCALITY_WINDOW_DEG = 0.5
 _POSTCODE_LOCALITY_COS_FLOOR = 0.05
 
 
-
 def _locality_lon_window(lat: float) -> float:
     """Longitude half-window (degrees) covering _POSTCODE_LOCALITY_MAX_M at
     `lat` -- see _POSTCODE_LOCALITY_COS_FLOOR."""
@@ -106,7 +105,6 @@ _LOCAL_DISTANCE_EXPR = """2 * 6371000 * asin(sqrt(
 
 
 _POSTCODE_LOCALITY_SUBTYPES = "('locality', 'localadmin', 'neighborhood')"
-
 
 
 def _postcode_variants(query: str) -> list[str] | None:
@@ -132,13 +130,11 @@ def _postcode_variants(query: str) -> list[str] | None:
     return sorted(variants)
 
 
-
 def _postcode_display(query: str) -> str:
     """The spelling a postcode result is reported under: the caller's own,
     uppercased and whitespace-collapsed. Not normalized further -- we don't
     know which spelling the country actually uses, only which one matched."""
     return " ".join(query.strip().upper().split())
-
 
 
 # Aggregate results already computed this process, keyed by (dataset glob,
@@ -156,7 +152,6 @@ _POSTCODE_AGGREGATE_CACHE: dict[tuple[str, tuple[str, ...]], list[tuple]] = {}
 # in a long-lived server is a leak. Oldest-first eviction (dicts preserve
 # insertion order) is enough -- the cost of a miss is one scan, not an error.
 _POSTCODE_AGGREGATE_CACHE_MAX = 256
-
 
 
 def _query_postcode_countries(variants: list[str]) -> list[tuple]:
@@ -220,7 +215,6 @@ def _query_postcode_countries(variants: list[str]) -> list[tuple]:
     return rows
 
 
-
 def _covering_division_from_local(
     lat: float, lon: float, local_table: str, country: str | None = None
 ) -> dict | None:
@@ -264,9 +258,10 @@ def _covering_division_from_local(
         return None
     if row is None or row[3] > _pkg._POSTCODE_LOCALITY_MAX_M:
         return None
-    return {"name": row[0], "admin_context": [*_pkg._admin_chain_context(row[2], self_name=row[0]),
-                                              row[0]]}
-
+    return {
+        "name": row[0],
+        "admin_context": [*_pkg._admin_chain_context(row[2], self_name=row[0]), row[0]],
+    }
 
 
 def _covering_division(
@@ -284,7 +279,6 @@ def _covering_division(
     if local_table is not None:
         return _pkg._covering_division_from_local(lat, lon, local_table, country)
     return _pkg._nearest_division(lat, lon, country=country)
-
 
 
 def _postcode_results(
@@ -316,19 +310,20 @@ def _postcode_results(
     for country, count, lat, lon in rows[:limit]:
         lat, lon = round(lat, 6), round(lon, 6)
         covering = _pkg._covering_division(lat, lon, local_table, country)
-        results.append({
-            "name": display,
-            "type": "postcode",
-            "lat": lat,
-            "lon": lon,
-            "id": None,
-            "admin_context": covering["admin_context"] if covering else [],
-            "rank_score": round(count / top, 3),
-            "country": country,
-            "address_count": count,
-        })
+        results.append(
+            {
+                "name": display,
+                "type": "postcode",
+                "lat": lat,
+                "lon": lon,
+                "id": None,
+                "admin_context": covering["admin_context"] if covering else [],
+                "rank_score": round(count / top, 3),
+                "country": country,
+                "address_count": count,
+            }
+        )
     return results
-
 
 
 def _postcode_coverage_sentence() -> str:
@@ -342,7 +337,6 @@ def _postcode_coverage_sentence() -> str:
     )
 
 
-
 def _postcode_cold_scan_sentence() -> str:
     """Said only when the aggregate actually went over the network -- against
     a local dataset or mirror it would be a lie."""
@@ -354,11 +348,10 @@ def _postcode_cold_scan_sentence() -> str:
     )
 
 
-
 def _postcode_note(display: str) -> str:
     """Note accompanying a postcode answer that found something."""
     return (
-        f"\"{display}\" was read as a postcode, not a name: one aggregate over "
+        f'"{display}" was read as a postcode, not a name: one aggregate over '
         f"Overture's addresses theme, one row per country whose address points "
         f"carry that code, each point being the mean of those points and "
         f"address_count the evidence behind it. Several countries can share a "
@@ -371,7 +364,6 @@ def _postcode_note(display: str) -> str:
     )
 
 
-
 def _postcode_empty_note(display: str) -> str:
     """Note for a query that is postcode-shaped but matched no address point.
 
@@ -380,7 +372,7 @@ def _postcode_empty_note(display: str) -> str:
     outside the theme (GB) or inside it without postcode values (IT, JP).
     """
     return (
-        f"\"{display}\" is postcode-shaped, but no address point in Overture "
+        f'"{display}" is postcode-shaped, but no address point in Overture '
         f"carries it -- which is not the same as it not existing: "
         f"{_postcode_coverage_sentence()}. So a postcode in the UK, Italy or "
         f"Japan comes back empty here whether or not it is real. The name "

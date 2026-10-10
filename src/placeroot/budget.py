@@ -23,7 +23,11 @@ CHARS_PER_TOKEN = 4
 # Stripped from rows, in this order, if dropping rows alone isn't enough
 # to fit a single remaining row within budget.
 OPTIONAL_FIELD_PRIORITY = [
-    "confidence", "operating_status", "category", "basic_category", "trust_note",
+    "confidence",
+    "operating_status",
+    "category",
+    "basic_category",
+    "trust_note",
 ]
 
 
@@ -108,9 +112,7 @@ def apply_budget(payload: dict, list_key: str, budget_tokens: int | None = None)
     return result
 
 
-def apply_budget_grouped(
-    payload: dict, group_key: str, budget_tokens: int | None = None
-) -> dict:
+def apply_budget_grouped(payload: dict, group_key: str, budget_tokens: int | None = None) -> dict:
     """Grouped-results analog of apply_budget for find_places'
     group_by_category=True path (roadmap §4.5), where payload[group_key]
     is {category: [rows...]} instead of a flat ranked list.

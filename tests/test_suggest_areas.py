@@ -81,14 +81,25 @@ def _write_divisions(tmp_path, rows):
         (wkb,) = con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{_box_wkt(lat, lon)}'))").fetchone()
         half = 0.0003
         bbox = {
-            "xmin": lon - half, "ymin": lat - half, "xmax": lon + half, "ymax": lat + half,
+            "xmin": lon - half,
+            "ymin": lat - half,
+            "xmax": lon + half,
+            "ymax": lat + half,
         }
         area_rows.append((id_, {"primary": name}, "neighborhood", "US", wkb, bbox, id_))
         point_bbox = {"xmin": lon, "ymin": lat, "xmax": lon, "ymax": lat}
-        point_rows.append((
-            id_, point_bbox, {"primary": name, "common": None}, "neighborhood",
-            "US", None, None, None,
-        ))
+        point_rows.append(
+            (
+                id_,
+                point_bbox,
+                {"primary": name, "common": None},
+                "neighborhood",
+                "US",
+                None,
+                None,
+                None,
+            )
+        )
 
     con.execute("""
         CREATE TABLE division_areas (
@@ -199,9 +210,7 @@ def grid_places(tmp_path):
 
 
 def test_one_anchor_returns_a_plausible_ranked_shortlist_with_reasons(grid_divisions, grid_places):
-    result = server.suggest_areas(
-        [_anchor(*ANCHOR_A)], ["parks", "groceries"], confirm=True
-    )
+    result = server.suggest_areas([_anchor(*ANCHOR_A)], ["parks", "groceries"], confirm=True)
     assert "error" not in result
     assert result["results"], "expected at least one candidate"
     ids = [r["division_id"] for r in result["results"]]
@@ -246,9 +255,7 @@ def test_two_anchors_exclude_single_anchor_only_areas(grid_divisions):
 
 
 def test_two_anchors_both_candidate_carries_two_travel_legs(grid_divisions):
-    result = server.suggest_areas(
-        [_anchor(*ANCHOR_A), _anchor(*ANCHOR_B)], ["parks"], confirm=True
-    )
+    result = server.suggest_areas([_anchor(*ANCHOR_A), _anchor(*ANCHOR_B)], ["parks"], confirm=True)
     top = next(r for r in result["results"] if r["division_id"] == BOTH_ID)
     assert len(top["travel"]) == 2
     assert {leg["anchor_idx"] for leg in top["travel"]} == {0, 1}
@@ -278,9 +285,9 @@ def test_subjective_requirement_passes_through_as_measurable_false(grid_division
     top = result["results"][0]
     assert top["requirements"][0]["measurable"] is False
     assert top["overall_score"] is None
-    assert "not measurable" in top["reason"] or "subjective" in top["reason"].lower() or top[
-        "reason"
-    ]
+    assert (
+        "not measurable" in top["reason"] or "subjective" in top["reason"].lower() or top["reason"]
+    )
 
 
 def test_honesty_note_present(grid_divisions, grid_places):
@@ -338,9 +345,7 @@ def test_empty_requirements_is_bad_request():
 
 
 def test_too_many_requirements_is_bad_request():
-    result = server.suggest_areas(
-        [_anchor(*ANCHOR_A)], ["a"] * (area_score.MAX_REQUIREMENTS + 1)
-    )
+    result = server.suggest_areas([_anchor(*ANCHOR_A)], ["a"] * (area_score.MAX_REQUIREMENTS + 1))
     assert result["error"] == "bad_request"
 
 
@@ -379,7 +384,8 @@ def test_confirm_gate_checks_every_anchor_before_building_any(grid_divisions, mo
     isochrone_calls = []
     real_isochrone = server.routing.isochrone
     monkeypatch.setattr(
-        server.routing, "isochrone",
+        server.routing,
+        "isochrone",
         lambda *a, **k: (isochrone_calls.append(1), real_isochrone(*a, **k))[1],
     )
     result = server.suggest_areas([_anchor(*ANCHOR_A), _anchor(*ANCHOR_B)], ["parks"])
@@ -423,13 +429,15 @@ def test_area_score_schema_degraded_is_a_structured_error(grid_divisions, monkey
 def _square(lat, lon, half_deg):
     return {
         "type": "Polygon",
-        "coordinates": [[
-            [lon - half_deg, lat - half_deg],
-            [lon - half_deg, lat + half_deg],
-            [lon + half_deg, lat + half_deg],
-            [lon + half_deg, lat - half_deg],
-            [lon - half_deg, lat - half_deg],
-        ]],
+        "coordinates": [
+            [
+                [lon - half_deg, lat - half_deg],
+                [lon - half_deg, lat + half_deg],
+                [lon + half_deg, lat + half_deg],
+                [lon + half_deg, lat - half_deg],
+                [lon - half_deg, lat - half_deg],
+            ]
+        ],
     }
 
 
@@ -458,18 +466,18 @@ def test_build_reason_all_unmeasurable():
 
 
 def test_build_reason_single_measurable():
-    reason = area_suggest.build_reason(
-        [{"label": "parks", "measurable": True, "score": 0.8}]
-    )
+    reason = area_suggest.build_reason([{"label": "parks", "measurable": True, "score": 0.8}])
     assert "parks" in reason
     assert "0.8" in reason
 
 
 def test_build_reason_strongest_and_weakest():
-    reason = area_suggest.build_reason([
-        {"label": "parks", "measurable": True, "score": 0.9},
-        {"label": "groceries", "measurable": True, "score": 0.1},
-    ])
+    reason = area_suggest.build_reason(
+        [
+            {"label": "parks", "measurable": True, "score": 0.9},
+            {"label": "groceries", "measurable": True, "score": 0.1},
+        ]
+    )
     assert "parks" in reason
     assert "groceries" in reason
 

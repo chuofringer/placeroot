@@ -62,7 +62,8 @@ def test_category_filter_matches_ground_truth():
         CENTER_LAT, CENTER_LON, radius_m=radius_m, category="coffee_shop", limit=25
     )
     expected = [
-        row for row in raw_rows()
+        row
+        for row in raw_rows()
         if row["basic_category"] == "coffee_shop"
         and haversine_m(CENTER_LAT, CENTER_LON, row["lat"], row["lon"]) <= radius_m
     ]
@@ -156,7 +157,8 @@ def _raw_rows_with_confidence_and_status():
 
 def _within(radius_m):
     return [
-        row for row in _raw_rows_with_confidence_and_status()
+        row
+        for row in _raw_rows_with_confidence_and_status()
         if haversine_m(CENTER_LAT, CENTER_LON, row["lat"], row["lon"]) <= radius_m
     ]
 
@@ -200,9 +202,7 @@ def test_operating_status_accepts_raw_value_equivalently():
 
 
 def test_operating_status_permanently_closed_matches_raw_closed_permanently():
-    expected_ids = {
-        r["id"] for r in _within(100) if r["operating_status"] == "closed_permanently"
-    }
+    expected_ids = {r["id"] for r in _within(100) if r["operating_status"] == "closed_permanently"}
     assert len(expected_ids) == 3
 
     results = overture.find_places(
@@ -218,8 +218,13 @@ def test_unknown_operating_status_is_bad_request():
 
 def test_min_confidence_and_operating_status_compose_with_category():
     results = overture.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, category="coffee_shop",
-        min_confidence=0.5, operating_status="in business", limit=25,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        category="coffee_shop",
+        min_confidence=0.5,
+        operating_status="in business",
+        limit=25,
     )
     assert results
     for r in results:
@@ -241,8 +246,12 @@ def test_min_confidence_and_operating_status_are_noop_when_columns_missing(tmp_p
     overture.set_data_path(str(out))
     try:
         results = overture.find_places(
-            CENTER_LAT, CENTER_LON, radius_m=100,
-            min_confidence=0.99, operating_status="in business", limit=25,
+            CENTER_LAT,
+            CENTER_LON,
+            radius_m=100,
+            min_confidence=0.99,
+            operating_status="in business",
+            limit=25,
         )
         assert len(results) == 13  # every row within 100m — filters were no-ops
         assert all(r["confidence"] is None for r in results)
@@ -310,25 +319,25 @@ def test_has_website_false_excludes_places_with_a_website():
 
 
 def test_has_phone_true_returns_only_places_with_a_phone():
-    results = overture.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, has_phone=True, limit=25
-    )
+    results = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, has_phone=True, limit=25)
     assert len(results) == 1
     assert results[0]["name"] == "Blue Bottle Roastery"
     assert results[0]["has_phone"] is True
 
 
 def test_has_phone_false_excludes_places_with_a_phone():
-    results = overture.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000, has_phone=False, limit=25
-    )
+    results = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, has_phone=False, limit=25)
     assert all(r["name"] != "Blue Bottle Roastery" for r in results)
     # Cluster Place 010 has a website but no phone, so has_phone=False
     # (narrowed with a name filter — it's one of 200 in a dense cluster,
     # not guaranteed to land in a bare top-25-by-distance) still includes it.
     narrowed = overture.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000,
-        name="Cluster Place 010", has_phone=False, limit=25,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        name="Cluster Place 010",
+        has_phone=False,
+        limit=25,
     )
     assert len(narrowed) == 1
     assert narrowed[0]["name"] == "Cluster Place 010"
@@ -339,15 +348,23 @@ def test_brand_composes_with_category():
     is 'bar' in the fixture (synthetic data), so pairing brand with the
     right category narrows to it, and the wrong category excludes it."""
     matching = overture.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000,
-        brand="Blue Bottle Coffee", category="bar", limit=25,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        brand="Blue Bottle Coffee",
+        category="bar",
+        limit=25,
     )
     assert len(matching) == 1
     assert matching[0]["name"] == "Blue Bottle Roastery"
 
     non_matching = overture.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000,
-        brand="Blue Bottle Coffee", category="coffee_shop", limit=25,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        brand="Blue Bottle Coffee",
+        category="coffee_shop",
+        limit=25,
     )
     assert non_matching == []
 
@@ -357,8 +374,12 @@ def test_has_website_composes_with_category():
     (grocery_store, has a website) should match; Blue Bottle Roastery is
     excluded here because its category is 'bar', not 'grocery_store'."""
     results = overture.find_places(
-        CENTER_LAT, CENTER_LON, radius_m=1000,
-        has_website=True, category="grocery_store", limit=25,
+        CENTER_LAT,
+        CENTER_LON,
+        radius_m=1000,
+        has_website=True,
+        category="grocery_store",
+        limit=25,
     )
     assert len(results) == 1
     assert results[0]["name"] == "Cluster Place 010"
@@ -443,9 +464,7 @@ def test_place_details_name_literal_underscore_does_not_wildcard_match(tmp_path)
     )
     overture.set_data_path(str(fixture))
     try:
-        result = overture.place_details(
-            name="A_B", lat=CENTER_LAT, lon=CENTER_LON, radius_m=10
-        )
+        result = overture.place_details(name="A_B", lat=CENTER_LAT, lon=CENTER_LON, radius_m=10)
         assert result is not None
         assert result["name"] == "A_B"
     finally:
@@ -461,9 +480,7 @@ def test_name_filter_literal_percent_does_not_wildcard_match(tmp_path):
     )
     overture.set_data_path(str(fixture))
     try:
-        results = overture.find_places(
-            CENTER_LAT, CENTER_LON, radius_m=10, name="50%OFF", limit=25
-        )
+        results = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=10, name="50%OFF", limit=25)
         names = {r["name"] for r in results}
         assert names == {"50%OFF"}
     finally:
@@ -499,7 +516,8 @@ def test_category_filter_snake_case_still_matches_ground_truth():
         CENTER_LAT, CENTER_LON, radius_m=radius_m, category="coffee_shop", limit=25
     )
     expected = [
-        row for row in raw_rows()
+        row
+        for row in raw_rows()
         if row["basic_category"] == "coffee_shop"
         and haversine_m(CENTER_LAT, CENTER_LON, row["lat"], row["lon"]) <= radius_m
     ]
@@ -523,15 +541,20 @@ def test_operating_status_garbage_value_is_bad_request_even_when_column_missing(
     try:
         try:
             overture.find_places(
-                CENTER_LAT, CENTER_LON, radius_m=1000,
-                operating_status="totally_bogus_value", limit=25,
+                CENTER_LAT,
+                CENTER_LON,
+                radius_m=1000,
+                operating_status="totally_bogus_value",
+                limit=25,
             )
             assert False, "expected ValueError for an unrecognized operating_status"
         except ValueError:
             pass
 
         result = server.find_places(
-            CENTER_LAT, CENTER_LON, radius_m=1000,
+            CENTER_LAT,
+            CENTER_LON,
+            radius_m=1000,
             operating_status="totally_bogus_value",
         )
         assert result["error"] == "bad_request"
@@ -552,7 +575,11 @@ def test_operating_status_still_noop_filters_rows_when_column_missing_and_value_
     overture.set_data_path(str(out))
     try:
         results = overture.find_places(
-            CENTER_LAT, CENTER_LON, radius_m=100, operating_status="in business", limit=25,
+            CENTER_LAT,
+            CENTER_LON,
+            radius_m=100,
+            operating_status="in business",
+            limit=25,
         )
         assert len(results) == 13  # every row within 100m — filter is a no-op
         assert all(r["operating_status"] is None for r in results)
@@ -574,8 +601,13 @@ def test_brand_and_presence_filters_noop_when_columns_missing(tmp_path):
     overture.set_data_path(str(degraded))
     try:
         results = overture.find_places(
-            CENTER_LAT, CENTER_LON, radius_m=1000,
-            brand="Blue Bottle Coffee", has_website=True, has_phone=True, limit=25,
+            CENTER_LAT,
+            CENTER_LON,
+            radius_m=1000,
+            brand="Blue Bottle Coffee",
+            has_website=True,
+            has_phone=True,
+            limit=25,
         )
         # The filters no-op on missing columns, so the radius search still
         # returns its normal full set of matches rather than an empty list.

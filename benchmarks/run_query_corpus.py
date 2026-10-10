@@ -73,11 +73,17 @@ def _ensure_warm_leg(rows: list[dict], q: dict) -> list[dict]:
     tail = ""
     if rows:
         tail = str(rows[-1].get("detail") or "")[-80:]
-    rows.append({
-        "id": q["id"], "tool": q["tool"], "q": q["question"],
-        "leg": "warm", "s": 0.0, "ok": False,
-        "detail": "WARM MISSING (worker died after cold) " + tail,
-    })
+    rows.append(
+        {
+            "id": q["id"],
+            "tool": q["tool"],
+            "q": q["question"],
+            "leg": "warm",
+            "s": 0.0,
+            "ok": False,
+            "detail": "WARM MISSING (worker died after cold) " + tail,
+        }
+    )
     return rows
 
 
@@ -127,31 +133,46 @@ def _annotate_row(row: dict, budget_s: float, stretch_s: float) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    ap.add_argument("--tool", action="append", default=[],
-                    help="only queries for this tool (repeatable)")
-    ap.add_argument("--id", action="append", default=[],
-                    help="only these query ids (repeatable)")
-    ap.add_argument("--question-gate", action="store_true",
-                    help="the 20-id question-level ship subset (#331)")
-    ap.add_argument("--smoke", action="store_true",
-                    help="3-id PR smoke: r01, g10, c01")
-    ap.add_argument("--warm", action="store_true",
-                    help="after each cold leg, rerun the same id in the "
-                         "same process against the cache it just filled")
-    ap.add_argument("--budget-s", type=float, default=None,
-                    help="per-leg wall budget; over it is a failure "
-                         "(default 15 with --question-gate/--smoke, else 10)")
-    ap.add_argument("--stretch-s", type=float, default=10.0,
-                    help="stretch target printed as STRETCH; never fails "
-                         "the suite (default 10)")
-    ap.add_argument("--timeout-s", type=float, default=180.0,
-                    help="hard per-leg watchdog (default 180)")
+    ap.add_argument(
+        "--tool", action="append", default=[], help="only queries for this tool (repeatable)"
+    )
+    ap.add_argument("--id", action="append", default=[], help="only these query ids (repeatable)")
+    ap.add_argument(
+        "--question-gate", action="store_true", help="the 20-id question-level ship subset (#331)"
+    )
+    ap.add_argument("--smoke", action="store_true", help="3-id PR smoke: r01, g10, c01")
+    ap.add_argument(
+        "--warm",
+        action="store_true",
+        help="after each cold leg, rerun the same id in the "
+        "same process against the cache it just filled",
+    )
+    ap.add_argument(
+        "--budget-s",
+        type=float,
+        default=None,
+        help="per-leg wall budget; over it is a failure "
+        "(default 15 with --question-gate/--smoke, else 10)",
+    )
+    ap.add_argument(
+        "--stretch-s",
+        type=float,
+        default=10.0,
+        help="stretch target printed as STRETCH; never fails the suite (default 10)",
+    )
+    ap.add_argument(
+        "--timeout-s", type=float, default=180.0, help="hard per-leg watchdog (default 180)"
+    )
     ap.add_argument("--json", type=Path, help="also write raw results as JSONL")
-    ap.add_argument("--fail-on", choices=("wrong", "slow", "both"), default="both",
-                    help="what makes the exit code non-zero. Correctness is "
-                         "deterministic; latency is not (a residential "
-                         "connection swings 2-3x in the evening), so scheduled "
-                         "runs should gate on 'wrong' and read the times.")
+    ap.add_argument(
+        "--fail-on",
+        choices=("wrong", "slow", "both"),
+        default="both",
+        help="what makes the exit code non-zero. Correctness is "
+        "deterministic; latency is not (a residential "
+        "connection swings 2-3x in the evening), so scheduled "
+        "runs should gate on 'wrong' and read the times.",
+    )
     args = ap.parse_args()
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -171,9 +192,9 @@ def main() -> int:
         id_filter = list(QUESTION_GATE_IDS)
 
     picked = [
-        (i, q) for i, q in enumerate(QUERIES)
-        if (not args.tool or q["tool"] in args.tool)
-        and (not id_filter or q["id"] in id_filter)
+        (i, q)
+        for i, q in enumerate(QUERIES)
+        if (not args.tool or q["tool"] in args.tool) and (not id_filter or q["id"] in id_filter)
     ]
     if not picked:
         print("no queries matched", file=sys.stderr)
@@ -193,13 +214,15 @@ def main() -> int:
     results = []
     for n, (index, q) in enumerate(picked, start=1):
         cache_dir = Path(tempfile.mkdtemp(prefix="placeroot-corpus-"))
-        cmd = [sys.executable, str(WORKER), str(index), str(cache_dir),
-               str(args.timeout_s)]
+        cmd = [sys.executable, str(WORKER), str(index), str(cache_dir), str(args.timeout_s)]
         if args.warm:
             cmd.append("warm")
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, cwd=str(ROOT),
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=str(ROOT),
             )
             rows = []
             for line in proc.stdout.splitlines():
@@ -210,16 +233,29 @@ def main() -> int:
                     except json.JSONDecodeError:
                         continue
             if not rows:
-                rows = [{
-                    "id": q["id"], "tool": q["tool"], "q": q["question"],
-                    "leg": "cold", "s": 0.0, "ok": False,
-                    "detail": f"WORKER CRASH rc={proc.returncode} "
-                              f"{proc.stderr.strip()[-120:]}",
-                }]
+                rows = [
+                    {
+                        "id": q["id"],
+                        "tool": q["tool"],
+                        "q": q["question"],
+                        "leg": "cold",
+                        "s": 0.0,
+                        "ok": False,
+                        "detail": f"WORKER CRASH rc={proc.returncode} {proc.stderr.strip()[-120:]}",
+                    }
+                ]
         except OSError as e:  # noqa: PERF203
-            rows = [{"id": q["id"], "tool": q["tool"], "q": q["question"],
-                     "leg": "cold", "s": 0.0, "ok": False,
-                     "detail": f"RUNNER ERROR {e}"}]
+            rows = [
+                {
+                    "id": q["id"],
+                    "tool": q["tool"],
+                    "q": q["question"],
+                    "leg": "cold",
+                    "s": 0.0,
+                    "ok": False,
+                    "detail": f"RUNNER ERROR {e}",
+                }
+            ]
         finally:
             shutil.rmtree(cache_dir, ignore_errors=True)
 
@@ -238,9 +274,11 @@ def main() -> int:
                 flags += " SLOW"
             elif row["over_stretch"]:
                 flags += " STRETCH"
-            print(f"[{n:>3}/{len(picked)}] {mark}{flags:<8} {row['s']:>6.1f}s  "
-                  f"{row['id']:<5} {row['leg']:<5} "
-                  f"{row['q'][:46]:<48} {row['detail'][:40]}")
+            print(
+                f"[{n:>3}/{len(picked)}] {mark}{flags:<8} {row['s']:>6.1f}s  "
+                f"{row['id']:<5} {row['leg']:<5} "
+                f"{row['q'][:46]:<48} {row['detail'][:40]}"
+            )
 
     if args.json:
         args.json.write_text("".join(json.dumps(r) + "\n" for r in results))
@@ -251,26 +289,23 @@ def main() -> int:
     times = sorted(r["s"] for r in results)
     cold_t = [r["s"] for r in results if r.get("leg") == "cold"]
     warm_t = [r["s"] for r in results if r.get("leg") == "warm"]
-    print(f"\n{len(results)} legs · median {times[len(times) // 2]:.1f}s · "
-          f"max {times[-1]:.1f}s · p95 { _p95(times):.1f}s · "
-          f"{len(slow)} over {args.budget_s:g}s · "
-          f"{len(stretch)} stretch (>{args.stretch_s:g}s) · "
-          f"{len(wrong)} wrong or empty")
+    print(
+        f"\n{len(results)} legs · median {times[len(times) // 2]:.1f}s · "
+        f"max {times[-1]:.1f}s · p95 {_p95(times):.1f}s · "
+        f"{len(slow)} over {args.budget_s:g}s · "
+        f"{len(stretch)} stretch (>{args.stretch_s:g}s) · "
+        f"{len(wrong)} wrong or empty"
+    )
     if cold_t:
-        print(f"  cold p95 {_p95(cold_t):.1f}s  (n={len(cold_t)}; "
-              f"p95 is reported, not the gate)")
+        print(f"  cold p95 {_p95(cold_t):.1f}s  (n={len(cold_t)}; p95 is reported, not the gate)")
     if warm_t:
-        print(f"  warm p95 {_p95(warm_t):.1f}s  (n={len(warm_t)}; "
-              f"p95 is reported, not the gate)")
+        print(f"  warm p95 {_p95(warm_t):.1f}s  (n={len(warm_t)}; p95 is reported, not the gate)")
     for r in wrong:
-        print(f"  WRONG {r['id']:<5} {r.get('leg','?'):<5} "
-              f"{r['q'][:46]:<48} {r['detail'][:56]}")
+        print(f"  WRONG {r['id']:<5} {r.get('leg', '?'):<5} {r['q'][:46]:<48} {r['detail'][:56]}")
     for r in slow:
-        print(f"  SLOW  {r['id']:<5} {r.get('leg','?'):<5} "
-              f"{r['s']:>6.1f}s  {r['q'][:50]}")
+        print(f"  SLOW  {r['id']:<5} {r.get('leg', '?'):<5} {r['s']:>6.1f}s  {r['q'][:50]}")
     for r in stretch:
-        print(f"  STRETCH {r['id']:<5} {r.get('leg','?'):<5} "
-              f"{r['s']:>6.1f}s  {r['q'][:50]}")
+        print(f"  STRETCH {r['id']:<5} {r.get('leg', '?'):<5} {r['s']:>6.1f}s  {r['q'][:50]}")
     failed = (wrong if args.fail_on in ("wrong", "both") else []) + (
         slow if args.fail_on in ("slow", "both") else []
     )

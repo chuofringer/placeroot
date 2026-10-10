@@ -48,18 +48,28 @@ def _scans(recorded):
 # --- point and radius tools bound everything they read ----------------------
 
 
-@pytest.mark.parametrize("call", [
-    pytest.param(lambda: overture.find_places(CENTER_LAT, CENTER_LON, radius_m=500),
-                 id="find_places"),
-    pytest.param(lambda: overture.summarize_area(CENTER_LAT, CENTER_LON, radius_m=500),
-                 id="summarize_area"),
-    pytest.param(lambda: buildings.buildings_at(CENTER_LAT, CENTER_LON), id="buildings_at"),
-    pytest.param(lambda: buildings.summarize_buildings(CENTER_LAT, CENTER_LON, radius_m=500),
-                 id="summarize_buildings"),
-    pytest.param(lambda: divisions.admin_lookup(CENTER_LAT, CENTER_LON), id="admin_lookup"),
-    pytest.param(lambda: land_use.land_use_at(CENTER_LAT, CENTER_LON), id="land_use_at"),
-    pytest.param(lambda: water.water_near(CENTER_LAT, CENTER_LON, radius_m=500), id="water_near"),
-])
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(
+            lambda: overture.find_places(CENTER_LAT, CENTER_LON, radius_m=500), id="find_places"
+        ),
+        pytest.param(
+            lambda: overture.summarize_area(CENTER_LAT, CENTER_LON, radius_m=500),
+            id="summarize_area",
+        ),
+        pytest.param(lambda: buildings.buildings_at(CENTER_LAT, CENTER_LON), id="buildings_at"),
+        pytest.param(
+            lambda: buildings.summarize_buildings(CENTER_LAT, CENTER_LON, radius_m=500),
+            id="summarize_buildings",
+        ),
+        pytest.param(lambda: divisions.admin_lookup(CENTER_LAT, CENTER_LON), id="admin_lookup"),
+        pytest.param(lambda: land_use.land_use_at(CENTER_LAT, CENTER_LON), id="land_use_at"),
+        pytest.param(
+            lambda: water.water_near(CENTER_LAT, CENTER_LON, radius_m=500), id="water_near"
+        ),
+    ],
+)
 def test_a_located_query_never_scans_without_a_bound(traced, call):
     """These tools are all handed a coordinate. There is no reason for any
     read they make to lack a bbox — and an unbounded read against a
@@ -89,12 +99,14 @@ def _recall_watcher(monkeypatch):
 
     index = (
         __import__("pathlib").Path("src/placeroot/data/geocode-index")
-        / release_mod.PINNED_RELEASE / "table.parquet"
+        / release_mod.PINNED_RELEASE
+        / "table.parquet"
     )
     calls = []
     monkeypatch.setattr(geocode, "_local_divisions_table", lambda: str(index))
     monkeypatch.setattr(
-        geocode, "_query_divisions_from_upstream",
+        geocode,
+        "_query_divisions_from_upstream",
         lambda *a, **k: calls.append(a[0]) or [],
     )
     monkeypatch.setattr(geocode, "_query_places_fallback", lambda *a, **k: [])

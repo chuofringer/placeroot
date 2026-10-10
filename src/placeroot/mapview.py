@@ -1165,7 +1165,6 @@ def _unwrap_longitudes(points: list[dict], shapes: list[dict]) -> None:
                     c[0] += 360
 
 
-
 def _fmt_distance(meters) -> str:
     try:
         m = float(meters)
@@ -1285,10 +1284,7 @@ def _stops_html(points: list[dict], shapes: list[dict]) -> tuple[str, str]:
         name = html.escape(str(shape.get("name") or shape.get("kind") or "Shape"))
         meta = html.escape(_stop_meta(shape.get("props") or {}))
         meta_html = f'<div class="stop-meta">{meta}</div>' if meta else ""
-        items.append(
-            f'<li class="stop">'
-            f'<div class="stop-name">{name}</div>{meta_html}</li>'
-        )
+        items.append(f'<li class="stop"><div class="stop-name">{name}</div>{meta_html}</li>')
     n = len(items)
     if n == 0:
         return "Stops", '<p class="stops-empty">No stop details.</p>'
@@ -1789,9 +1785,7 @@ def write_artifact(
     # first — contradicting destructive_hint=False, which promises this
     # tool only ever adds. A short random suffix makes a collision a
     # practical impossibility; the response shape (path, ...) is unchanged.
-    filename = (
-        f"map_{int(time.time() * 1000)}_{_slug(title)}_{secrets.token_hex(3)}.html"
-    )
+    filename = f"map_{int(time.time() * 1000)}_{_slug(title)}_{secrets.token_hex(3)}.html"
     path = directory / filename
     path.write_bytes(encoded)
 

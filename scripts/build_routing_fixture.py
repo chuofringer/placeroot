@@ -117,17 +117,28 @@ def _offset_m(east_m: float, north_m: float) -> tuple[float, float]:
     return _offset(lat1, lon1, north_m, 0)
 
 
-def _segment_row(idx: int, p0: tuple[float, float], p1: tuple[float, float], cls: str,
-                  connectors: list[dict], speed_limits: list[dict] | None = None,
-                  access_restrictions: list[dict] | None = None,
-                  name: str | None = None) -> tuple:
+def _segment_row(
+    idx: int,
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    cls: str,
+    connectors: list[dict],
+    speed_limits: list[dict] | None = None,
+    access_restrictions: list[dict] | None = None,
+    name: str | None = None,
+) -> tuple:
     return _polyline_row(idx, [p0, p1], cls, connectors, speed_limits, access_restrictions, name)
 
 
-def _polyline_row(idx: int, points: list[tuple[float, float]], cls: str,
-                   connectors: list[dict], speed_limits: list[dict] | None = None,
-                   access_restrictions: list[dict] | None = None,
-                   name: str | None = None) -> tuple:
+def _polyline_row(
+    idx: int,
+    points: list[tuple[float, float]],
+    cls: str,
+    connectors: list[dict],
+    speed_limits: list[dict] | None = None,
+    access_restrictions: list[dict] | None = None,
+    name: str | None = None,
+) -> tuple:
     """A segment row from an arbitrary-length (lat, lon) vertex list.
 
     Most fixture segments are straight two-point lines; the switchback below
@@ -143,12 +154,22 @@ def _polyline_row(idx: int, points: list[tuple[float, float]], cls: str,
     lats = [lat for lat, _lon in points]
     lons = [lon for _lat, lon in points]
     bbox = {
-        "xmin": min(lons), "ymin": min(lats), "xmax": max(lons), "ymax": max(lats),
+        "xmin": min(lons),
+        "ymin": min(lats),
+        "xmax": max(lons),
+        "ymax": max(lats),
     }
     names = {"primary": name} if name else None
     return (
-        f"seg-{idx:05d}", f"LINESTRING ({wkt_points})", bbox, cls, None, connectors,
-        speed_limits, access_restrictions, names,
+        f"seg-{idx:05d}",
+        f"LINESTRING ({wkt_points})",
+        bbox,
+        cls,
+        None,
+        connectors,
+        speed_limits,
+        access_restrictions,
+        names,
     )
 
 
@@ -176,16 +197,28 @@ def build_cross_rows(start_idx: int) -> list[tuple]:
     b0 = _offset_m(cx_m, cy_m - CROSS_HALF_LEN_M)
     b1 = _offset_m(cx_m, cy_m + CROSS_HALF_LEN_M)
     return [
-        _segment_row(start_idx, a0, a1, "residential", [
-            {"connector_id": "x_a0", "at": 0.0},
-            {"connector_id": CROSS_CONNECTOR_ID, "at": 0.5},
-            {"connector_id": "x_a1", "at": 1.0},
-        ]),
-        _segment_row(start_idx + 1, b0, b1, "residential", [
-            {"connector_id": "x_b0", "at": 0.0},
-            {"connector_id": CROSS_CONNECTOR_ID, "at": 0.5},
-            {"connector_id": "x_b1", "at": 1.0},
-        ]),
+        _segment_row(
+            start_idx,
+            a0,
+            a1,
+            "residential",
+            [
+                {"connector_id": "x_a0", "at": 0.0},
+                {"connector_id": CROSS_CONNECTOR_ID, "at": 0.5},
+                {"connector_id": "x_a1", "at": 1.0},
+            ],
+        ),
+        _segment_row(
+            start_idx + 1,
+            b0,
+            b1,
+            "residential",
+            [
+                {"connector_id": "x_b0", "at": 0.0},
+                {"connector_id": CROSS_CONNECTOR_ID, "at": 0.5},
+                {"connector_id": "x_b1", "at": 1.0},
+            ],
+        ),
     ]
 
 
@@ -213,10 +246,16 @@ def build_isolated_fragment_rows(start_idx: int) -> list[tuple]:
     f0 = _offset(qlat, qlon, dist_m, bearing)
     f1 = _offset(f0[0], f0[1], ISOLATED_FRAGMENT_LENGTH_M, bearing + 90)
     return [
-        _segment_row(start_idx, f0, f1, "footway", [
-            {"connector_id": "frag_0", "at": 0.0},
-            {"connector_id": "frag_1", "at": 1.0},
-        ]),
+        _segment_row(
+            start_idx,
+            f0,
+            f1,
+            "footway",
+            [
+                {"connector_id": "frag_0", "at": 0.0},
+                {"connector_id": "frag_1", "at": 1.0},
+            ],
+        ),
     ]
 
 
@@ -249,7 +288,10 @@ def build_oneway_rows(start_idx: int) -> list[tuple]:
     ]
     return [
         _segment_row(
-            start_idx, a, b, "residential",
+            start_idx,
+            a,
+            b,
+            "residential",
             [
                 {"connector_id": ONEWAY_A_ID, "at": 0.0},
                 {"connector_id": ONEWAY_B_ID, "at": 1.0},
@@ -271,8 +313,13 @@ SWITCHBACK_END_ID = "sw_end"
 # (east_m, north_m) from ORIGIN, after the anchor node. Zig north / east /
 # south repeatedly: ~850 m of road across a ~430 m chord.
 SWITCHBACK_OFFSETS_M = [
-    (2000.0, 0.0), (2000.0, 150.0), (2100.0, 150.0), (2100.0, 0.0),
-    (2200.0, 0.0), (2200.0, 150.0), (2300.0, 150.0),
+    (2000.0, 0.0),
+    (2000.0, 150.0),
+    (2100.0, 150.0),
+    (2100.0, 0.0),
+    (2200.0, 0.0),
+    (2200.0, 150.0),
+    (2300.0, 150.0),
 ]
 
 
@@ -285,10 +332,15 @@ def build_switchback_rows(start_idx: int) -> list[tuple]:
     start, _end = switchback_endpoints_latlon()
     points = [start] + [_offset_m(*p) for p in SWITCHBACK_OFFSETS_M]
     return [
-        _polyline_row(start_idx, points, "residential", [
-            {"connector_id": node_id(*SWITCHBACK_ANCHOR_NODE), "at": 0.0},
-            {"connector_id": SWITCHBACK_END_ID, "at": 1.0},
-        ]),
+        _polyline_row(
+            start_idx,
+            points,
+            "residential",
+            [
+                {"connector_id": node_id(*SWITCHBACK_ANCHOR_NODE), "at": 0.0},
+                {"connector_id": SWITCHBACK_END_ID, "at": 1.0},
+            ],
+        ),
     ]
 
 
@@ -362,8 +414,13 @@ def build_rows() -> list[tuple]:
             ]
         rows.append(
             _segment_row(
-                idx, (lat1, lon1), (lat2, lon2), cls, connectors,
-                speed_limits=speed_limits, name=name,
+                idx,
+                (lat1, lon1),
+                (lat2, lon2),
+                cls,
+                connectors,
+                speed_limits=speed_limits,
+                name=name,
             )
         )
 

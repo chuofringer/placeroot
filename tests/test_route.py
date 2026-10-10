@@ -431,12 +431,8 @@ def test_route_path_traces_the_route_not_the_straight_line():
         CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, mode="walk", include_path=True
     )
     coords = result["path"]["coordinates"]
-    traced_m = sum(
-        routing._haversine_m(a[1], a[0], b[1], b[0]) for a, b in zip(coords, coords[1:])
-    )
-    straight_m = routing._haversine_m(
-        CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON
-    )
+    traced_m = sum(routing._haversine_m(a[1], a[0], b[1], b[0]) for a, b in zip(coords, coords[1:]))
+    straight_m = routing._haversine_m(CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON)
     assert traced_m > straight_m * 1.2
     assert traced_m == pytest.approx(result["distance_m"], rel=0.05)
 
@@ -508,11 +504,16 @@ def test_route_path_omitted_rather_than_truncated_when_simplify_cannot_fit(monke
     """Even with budget headroom for the envelope, if the simplified line
     still overflows (simplify_geometry returns a best effort rather than
     failing) the path is dropped, never handed back over budget."""
-    monkeypatch.setattr(routing.simplify, "simplify_geometry", lambda geojson, max_tokens: {
-        "geometry": geojson, "max_deviation_m": 0.0,
-        "original_points": len(geojson["coordinates"]),
-        "kept_points": len(geojson["coordinates"]),
-    })
+    monkeypatch.setattr(
+        routing.simplify,
+        "simplify_geometry",
+        lambda geojson, max_tokens: {
+            "geometry": geojson,
+            "max_deviation_m": 0.0,
+            "original_points": len(geojson["coordinates"]),
+            "kept_points": len(geojson["coordinates"]),
+        },
+    )
     monkeypatch.setenv("PLACEROOT_TOKEN_BUDGET", "120")
     result = routing.route(
         CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, mode="walk", include_path=True
@@ -539,9 +540,7 @@ def test_route_include_path_leaves_no_route_result_unchanged():
     far_lat, far_lon = fx.node_latlon(fx.RIVER_GAP_I + 1, j)
 
     plain = routing.route(near_lat, near_lon, far_lat, far_lon, mode="drive")
-    with_path = routing.route(
-        near_lat, near_lon, far_lat, far_lon, mode="drive", include_path=True
-    )
+    with_path = routing.route(near_lat, near_lon, far_lat, far_lon, mode="drive", include_path=True)
     assert with_path == plain
     assert with_path["error"] == "no_route"
 
@@ -592,9 +591,7 @@ def test_route_path_follows_segment_shape_instead_of_chording_it():
     road: pre-fix the emitted line had 2 coordinates and was half the length
     of the distance_m printed beside it, while path_max_deviation_m claimed
     0.0. The emitted geometry must account for the distance it reports."""
-    result = routing.route(
-        *SWITCHBACK_START, *SWITCHBACK_END, mode="walk", include_path=True
-    )
+    result = routing.route(*SWITCHBACK_START, *SWITCHBACK_END, mode="walk", include_path=True)
     coords = result["path"]["coordinates"]
     line_m = _linestring_length_m(coords)
 
@@ -614,9 +611,7 @@ def test_route_path_deviation_is_zero_only_when_the_shape_is_fully_kept():
     dropped, not 0.0."""
     full = routing.route(*SWITCHBACK_START, *SWITCHBACK_END, mode="walk", include_path=True)
     assert full["path_max_deviation_m"] == 0.0
-    assert len(full["path"]["coordinates"]) == len(
-        set(map(tuple, full["path"]["coordinates"]))
-    )
+    assert len(full["path"]["coordinates"]) == len(set(map(tuple, full["path"]["coordinates"])))
 
 
 def test_route_path_deviation_accounts_for_build_time_shape_pruning(monkeypatch):
@@ -639,9 +634,7 @@ def test_route_path_shape_is_direction_symmetric():
     B->A must return the same road, reversed."""
     forward = routing.route(*SWITCHBACK_START, *SWITCHBACK_END, mode="walk", include_path=True)
     backward = routing.route(*SWITCHBACK_END, *SWITCHBACK_START, mode="walk", include_path=True)
-    assert backward["path"]["coordinates"] == list(
-        reversed(forward["path"]["coordinates"])
-    )
+    assert backward["path"]["coordinates"] == list(reversed(forward["path"]["coordinates"]))
 
 
 def test_route_path_omitted_note_is_priced_inside_the_budget(monkeypatch):
@@ -655,8 +648,12 @@ def test_route_path_omitted_note_is_priced_inside_the_budget(monkeypatch):
         kwargs = dict(mode="walk")
         plain = routing.route(CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON, **kwargs)
         result = routing.route(
-            CORNER_A_LAT, CORNER_A_LON, CORNER_B_LAT, CORNER_B_LON,
-            include_path=True, **kwargs,
+            CORNER_A_LAT,
+            CORNER_A_LON,
+            CORNER_B_LAT,
+            CORNER_B_LON,
+            include_path=True,
+            **kwargs,
         )
         # The distance/duration answer is irreducible, so at absurd budgets
         # the floor is what route() costs without a path at all; include_path

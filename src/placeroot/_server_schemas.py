@@ -95,7 +95,7 @@ _ModeSetArg = Annotated[
 _LangArg = Annotated[
     str | None,
     Field(
-        description="Result-language code (2-3 lowercase letters, e.g. \"de\"). "
+        description='Result-language code (2-3 lowercase letters, e.g. "de"). '
         "Overture-tagged name variants only — never transliterated or invented. "
         "Default: stored preference, else the primary name.",
     ),
@@ -361,11 +361,13 @@ def _publish_output_schemas(mcp_server) -> None:
                 "output_schemas.OUTPUT_SCHEMAS (FIRST_WAVE for a precise "
                 "shape, or _GENERIC_TOOLS otherwise)"
             )
-            tool.fn_metadata = tool.fn_metadata.model_copy(update={
-                "output_schema": {"type": "object"},
-                "output_model": _PermissiveOutput,
-                "wrap_output": False,
-            })
+            tool.fn_metadata = tool.fn_metadata.model_copy(
+                update={
+                    "output_schema": {"type": "object"},
+                    "output_model": _PermissiveOutput,
+                    "wrap_output": False,
+                }
+            )
             tool.__dict__["output_schema"] = schema
             assert tool.output_schema is schema, "cached_property shadow did not take"
     except AttributeError as e:

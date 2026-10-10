@@ -87,7 +87,6 @@ def test_household_dedupes_and_strips():
     assert saved["household"] == ["dog", "no_stairs"]
 
 
-
 def test_isochrone_uses_stored_mode_when_omitted(monkeypatch):
     preferences.update(mode="cycle")
     seen: dict = {}
@@ -131,7 +130,6 @@ def test_route_uses_stored_mode_when_omitted(monkeypatch):
     monkeypatch.setattr(server.routing, "route", fake)
     server.route(from_lat=37.0, from_lon=-122.0, to_lat=37.1, to_lon=-122.1, confirm=True)
     assert seen["mode"] == "cycle"
-
 
 
 def test_torn_json_is_not_wiped(tmp_path, monkeypatch):
@@ -246,8 +244,13 @@ def test_http_clear_empties_the_session_view_but_keeps_the_file(tmp_path, monkey
         assert server.preferences(mode="drive")["mode"] == "drive"
         assert preferences.get("lang") is None
     assert dest.is_file()
-    assert preferences.load() == {"mode": "walk", "pace": None, "household": [],
-                                  "note": None, "lang": "de"}
+    assert preferences.load() == {
+        "mode": "walk",
+        "pace": None,
+        "household": [],
+        "note": None,
+        "lang": "de",
+    }
     preferences.clear_overlays()
 
 

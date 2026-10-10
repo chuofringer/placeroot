@@ -221,7 +221,9 @@ def _warn_if_stale(info: dict) -> None:
         logger.warning(
             "active Overture release %s is %d days old (threshold %d) — "
             "%s; data served from an old vintage",
-            info["release"], days, _stale_days_threshold(),
+            info["release"],
+            days,
+            _stale_days_threshold(),
             "discovery keeps failing and the pinned fallback has gone stale"
             if info["source"] == "pinned-fallback"
             else "check upstream discovery and the deployment's egress",
@@ -316,7 +318,9 @@ def _resolved(discovered: str | None) -> dict:
             "bundled artifacts target (upgrade placeroot to move up, or set "
             "PLACEROOT_OVERTURE_RELEASE=%s to take the newer data now and "
             "give up the bundled acceleration).",
-            discovered, artifacts, discovered,
+            discovered,
+            artifacts,
+            discovered,
         )
         return {
             "release": artifacts,
@@ -328,7 +332,9 @@ def _resolved(discovered: str | None) -> dict:
             "Adopting Overture %s: this build's bundled artifacts target %s, "
             "which is now %s days old. Cold queries will be slower until "
             "placeroot is upgraded to a build whose artifacts match.",
-            discovered, artifacts, age_days(artifacts),
+            discovered,
+            artifacts,
+            age_days(artifacts),
         )
     return {"release": discovered, "source": "discovered"}
 
@@ -453,7 +459,8 @@ def resolve_release_info() -> dict:
                 logger.info(
                     "Overture release rollover: %s -> %s (tile/table caches are "
                     "release-keyed; old-release files age out under the size cap)",
-                    previous["release"], discovered,
+                    previous["release"],
+                    discovered,
                 )
             _cached = {"release": discovered, "source": "discovered"}
         else:

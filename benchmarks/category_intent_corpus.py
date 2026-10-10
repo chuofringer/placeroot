@@ -47,26 +47,39 @@ LIMIT = 5
 CASES = [
     # -- control: unchanged from #355, must still hit --------------------
     ("fix my cracked phone screen", {"mobile_phone_repair"}, "control"),
-    ("place to work out",
-     {"gym", "boxing_gym", "rock_climbing_gym", "sports_and_fitness_instruction"}, "control"),
+    (
+        "place to work out",
+        {"gym", "boxing_gym", "rock_climbing_gym", "sports_and_fitness_instruction"},
+        "control",
+    ),
     ("coffee shops", {"coffee_shop"}, "control"),
     ("grocery stores", {"grocery_store"}, "control"),
     ("somewhere to get my nails done", {"nail_salon"}, "control"),
-    ("need to charge my phone",
-     {"ev_charging_station", "mobile_phone_accessories", "mobile_phone_store"}, "control"),
-    ("a place to donate old clothes",
-     {"thrift_store", "used_vintage_and_consignment"}, "control"),
-    ("somewhere to buy fresh flowers",
-     {"florist", "flower_markets", "flowers_and_gifts_shop", "farmers_market"}, "control"),
-    ("somewhere quiet to study",
-     {"library", "tea_room", "cafe", "coffee_shop", "tutoring_center"}, "control"),
+    (
+        "need to charge my phone",
+        {"ev_charging_station", "mobile_phone_accessories", "mobile_phone_store"},
+        "control",
+    ),
+    ("a place to donate old clothes", {"thrift_store", "used_vintage_and_consignment"}, "control"),
+    (
+        "somewhere to buy fresh flowers",
+        {"florist", "flower_markets", "flowers_and_gifts_shop", "farmers_market"},
+        "control",
+    ),
+    (
+        "somewhere quiet to study",
+        {"library", "tea_room", "cafe", "coffee_shop", "tutoring_center"},
+        "control",
+    ),
     ("somewhere to get a tattoo", {"tattoo", "tattoo_and_piercing"}, "control"),
     # -- long-tail: misspellings / morphological variants -----------------
     ("need a plumer", {"plumbing"}, "longtail"),
     ("crackd screen repare", {"mobile_phone_repair"}, "longtail"),
-    ("need my flat tyre fixd",
-     {"tire_shop", "tire_repair_shop", "tire_dealer_and_repair", "bike_repair_maintenance"},
-     "longtail"),
+    (
+        "need my flat tyre fixd",
+        {"tire_shop", "tire_repair_shop", "tire_dealer_and_repair", "bike_repair_maintenance"},
+        "longtail",
+    ),
     ("reserv a haircutt", {"hair_salon", "barber"}, "longtail"),
     ("librairy near me", {"library"}, "longtail"),
     ("bicicle repair shop", {"bicycle_shop", "bike_repair_maintenance"}, "longtail"),
@@ -75,12 +88,17 @@ CASES = [
     ("bakerey for bread", {"bakery"}, "longtail"),
     ("farmer's markett produce", {"farmers_market"}, "longtail"),
     # -- long-tail: genuine semantic paraphrase, zero vocabulary overlap --
-    ("somewhere romantic for a date",
-     {"restaurant", "bar", "cocktail_bar", "wine_bar"}, "longtail"),
+    (
+        "somewhere romantic for a date",
+        {"restaurant", "bar", "cocktail_bar", "wine_bar"},
+        "longtail",
+    ),
     ("looking for a place to meditate", {"yoga_studio", "meditation_center"}, "longtail"),
-    ("a place for kids to burn off energy",
-     {"playground", "gymnastics_center", "kids_recreation_and_party", "trampoline_park"},
-     "longtail"),
+    (
+        "a place for kids to burn off energy",
+        {"playground", "gymnastics_center", "kids_recreation_and_party", "trampoline_park"},
+        "longtail",
+    ),
     ("somewhere to buy sneakers", {"shoe_store", "sporting_goods"}, "longtail"),
     ("need a mechanic for my car", {"automotive_repair"}, "longtail"),
     ("place to get a massage", {"massage", "massage_therapy"}, "longtail"),
@@ -111,12 +129,17 @@ def _hits(limit: int, *, lexical_only: bool) -> tuple[int, int, list[str]]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--limit", type=int, default=LIMIT)
-    ap.add_argument("--lexical-only", action="store_true",
-                     help="disable the embeddings tail extension for this run")
+    ap.add_argument(
+        "--lexical-only",
+        action="store_true",
+        help="disable the embeddings tail extension for this run",
+    )
     args = ap.parse_args()
 
-    print(f"{len(CASES)} queries, top-{args.limit} hit check "
-          f"({'lexical-only' if args.lexical_only else 'lexical + embeddings blend'})\n")
+    print(
+        f"{len(CASES)} queries, top-{args.limit} hit check "
+        f"({'lexical-only' if args.lexical_only else 'lexical + embeddings blend'})\n"
+    )
 
     for group in ("control", "longtail"):
         cases = [c for c in CASES if c[2] == group]

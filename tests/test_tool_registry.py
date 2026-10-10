@@ -126,11 +126,7 @@ def test_render_map_is_not_advertised_as_read_only():
 
 def test_every_other_tool_is_still_read_only():
     """The exception stays an exception: the other 24 are pure lookups."""
-    reads = [
-        t.name
-        for t in asyncio.run(server.mcp.list_tools())
-        if t.name not in WRITING_TOOLS
-    ]
+    reads = [t.name for t in asyncio.run(server.mcp.list_tools()) if t.name not in WRITING_TOOLS]
     assert len(reads) == len(server._TOOL_FUNCS) - len(WRITING_TOOLS)
     not_read_only = [
         t.name
@@ -150,9 +146,7 @@ def test_annotation_overrides_are_declared_for_real_tools():
     assert set(server._TOOL_ANNOTATIONS) == (
         set(WRITING_TOOLS) | set(OPEN_WORLD_TOOLS) | {"placeroot_call"}
     )
-    assert set(server._TOOL_ANNOTATIONS) <= set(server._TOOL_FUNCS) | set(
-        server._META_TOOL_FUNCS
-    )
+    assert set(server._TOOL_ANNOTATIONS) <= set(server._TOOL_FUNCS) | set(server._META_TOOL_FUNCS)
 
 
 def test_every_registered_tool_has_a_nonempty_unique_title():

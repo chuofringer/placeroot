@@ -37,8 +37,7 @@ def test_npm_readme_is_up_to_date():
         "Run: uv run python scripts/sync_npm_readme.py"
     )
     assert NPM_README.read_text(encoding="utf-8") == render(_root_readme()), (
-        "npm/README.md is out of date with README.md. "
-        "Run: uv run python scripts/sync_npm_readme.py"
+        "npm/README.md is out of date with README.md. Run: uv run python scripts/sync_npm_readme.py"
     )
 
 
@@ -56,12 +55,8 @@ def test_npm_readme_is_shipped_in_the_tarball():
     """`files` lists README.md, so it cannot be dropped from the package."""
     import json
 
-    package = json.loads(
-        (ROOT / "npm" / "package.json").read_text(encoding="utf-8")
-    )
-    assert "README.md" in package["files"], (
-        "npm/package.json's `files` no longer lists README.md"
-    )
+    package = json.loads((ROOT / "npm" / "package.json").read_text(encoding="utf-8"))
+    assert "README.md" in package["files"], "npm/package.json's `files` no longer lists README.md"
 
 
 def test_generated_readme_targets_npx_not_uvx():
@@ -75,9 +70,9 @@ def test_generated_readme_targets_npx_not_uvx():
     # reader something true about the launcher rather than handing them a
     # command to run instead. Anything else is a leaked instruction.
     allowed_markers = (
-        "thin wrapper",       # Quick start aside pointing at the Python server
-        "spawns",             # launcher note under the intro
-        "shells out",         # Requirements: the uv prerequisite
+        "thin wrapper",  # Quick start aside pointing at the Python server
+        "spawns",  # launcher note under the intro
+        "shells out",  # Requirements: the uv prerequisite
         "skips this launcher",  # Requirements: uvx as the equivalent path
     )
     for line in rendered.splitlines():
@@ -129,9 +124,7 @@ def test_links_pin_the_release_tag_not_main():
 
     from sync_npm_readme import GITHUB_BLOB, GITHUB_RAW
 
-    version = json.loads(
-        (ROOT / "npm" / "package.json").read_text(encoding="utf-8")
-    )["version"]
+    version = json.loads((ROOT / "npm" / "package.json").read_text(encoding="utf-8"))["version"]
     assert f"/blob/v{version}/" in GITHUB_BLOB
     assert f"/v{version}/" in GITHUB_RAW
     assert "/main/" not in GITHUB_BLOB and "/main/" not in GITHUB_RAW
@@ -154,9 +147,9 @@ def test_rewrites_match_the_pypi_substitutions():
     from sync_npm_readme import _NPM_VERSION, REWRITES
 
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    substitutions = pyproject["tool"]["hatch"]["metadata"]["hooks"][
-        "fancy-pypi-readme"
-    ]["substitutions"]
+    substitutions = pyproject["tool"]["hatch"]["metadata"]["hooks"]["fancy-pypi-readme"][
+        "substitutions"
+    ]
     pypi_pairs = [(s["pattern"], s["replacement"]) for s in substitutions]
     script_pairs = [
         (pattern, replacement.replace(f"v{_NPM_VERSION}", "v$HFPR_VERSION"))
@@ -177,8 +170,6 @@ def test_generator_fails_loudly_on_a_renamed_section():
 
 def test_generator_fails_loudly_on_a_reworded_launcher_aside():
     """The aside this generator rewrites must still be findable."""
-    mangled = _root_readme().replace(
-        "Prefer npm? Use", "npm works too — use"
-    )
+    mangled = _root_readme().replace("Prefer npm? Use", "npm works too — use")
     with pytest.raises(SyncError, match="npm-launcher aside"):
         render(mangled)

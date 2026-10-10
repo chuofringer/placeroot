@@ -58,8 +58,7 @@ def synthetic_rows(segments: int, seed: int) -> list[tuple]:
         lat0 = LAT0 + gi * 0.0002
         lon0 = LON0 + gj * 0.00025
         points = [
-            (lon0 + i * 0.00005, lat0 + rng.uniform(-1e-5, 1e-5))
-            for i in range(rng.randint(2, 6))
+            (lon0 + i * 0.00005, lat0 + rng.uniform(-1e-5, 1e-5)) for i in range(rng.randint(2, 6))
         ]
         wkt = "LINESTRING (" + ", ".join(f"{x} {y}" for x, y in points) + ")"
         connectors = [

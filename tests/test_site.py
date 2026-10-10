@@ -14,7 +14,10 @@ from pathlib import Path
 
 SITE_DIR = Path(__file__).parent.parent / "site"
 PAGES = [
-    "index.html", "how-it-works.html", "add-to-your-ai.html", "why-placeroot.html",
+    "index.html",
+    "how-it-works.html",
+    "add-to-your-ai.html",
+    "why-placeroot.html",
     "privacy.html",
 ]
 
@@ -122,8 +125,12 @@ def test_installer_page_keeps_verbatim_install_commands():
         assert cmd in doc, f"add-to-your-ai.html: install instruction drifted: {cmd!r}"
     # All six tools/tabs present.
     tabs = (
-        "Claude Desktop", "Claude Code", "ChatGPT Desktop",
-        "Gemini CLI", "Cursor", "any MCP agent",
+        "Claude Desktop",
+        "Claude Code",
+        "ChatGPT Desktop",
+        "Gemini CLI",
+        "Cursor",
+        "any MCP agent",
     )
     for tool in tabs:
         assert tool in doc, f"add-to-your-ai.html: missing tab {tool}"
@@ -165,8 +172,11 @@ def test_robots_and_sitemap_present():
     assert sm.is_file()
     doc = sm.read_text(encoding="utf-8")
     pages = (
-        "placeroot.dev/", "how-it-works.html", "add-to-your-ai.html",
-        "why-placeroot.html", "privacy.html",
+        "placeroot.dev/",
+        "how-it-works.html",
+        "add-to-your-ai.html",
+        "why-placeroot.html",
+        "privacy.html",
     )
     for page in pages:
         assert page in doc, f"sitemap missing {page}"

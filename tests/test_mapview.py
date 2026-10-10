@@ -302,10 +302,16 @@ def test_extract_features_linestring_and_multilinestring():
     line_b = [[CENTER_LON + 0.02, CENTER_LAT], [CENTER_LON + 0.03, CENTER_LAT]]
     payload = {
         "features": [
-            {"type": "Feature", "geometry": {"type": "LineString", "coordinates": line_a},
-             "properties": {"name": "Trail"}},
-            {"type": "Feature", "geometry": {"type": "MultiLineString",
-             "coordinates": [line_a, line_b]}, "properties": {"name": "Trail network"}},
+            {
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": line_a},
+                "properties": {"name": "Trail"},
+            },
+            {
+                "type": "Feature",
+                "geometry": {"type": "MultiLineString", "coordinates": [line_a, line_b]},
+                "properties": {"name": "Trail network"},
+            },
         ]
     }
     result = mapview.extract_features(payload)
@@ -359,11 +365,16 @@ def test_write_artifact_isochrone_result_renders_one_polygon_and_stats_popup(tmp
 def test_extract_features_mixed_points_and_polygon_bounds_data():
     payload = {
         "features": [
-            {"type": "Feature", "geometry": {"type": "Point",
-             "coordinates": [CENTER_LON + 0.5, CENTER_LAT + 0.5]},
-             "properties": {"name": "Far point"}},
-            {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [_OUTER_RING]},
-             "properties": {"name": "Near polygon"}},
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [CENTER_LON + 0.5, CENTER_LAT + 0.5]},
+                "properties": {"name": "Far point"},
+            },
+            {
+                "type": "Feature",
+                "geometry": {"type": "Polygon", "coordinates": [_OUTER_RING]},
+                "properties": {"name": "Near polygon"},
+            },
         ]
     }
     result = mapview.extract_features(payload)
@@ -381,8 +392,11 @@ def test_extract_features_mixed_points_and_polygon_bounds_data():
 def test_render_html_with_shapes_has_no_external_references():
     payload = {
         "features": [
-            {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [_OUTER_RING]},
-             "properties": {"name": "Area"}},
+            {
+                "type": "Feature",
+                "geometry": {"type": "Polygon", "coordinates": [_OUTER_RING]},
+                "properties": {"name": "Area"},
+            },
         ]
     }
     result = mapview.extract_features(payload)
@@ -393,20 +407,44 @@ def test_render_html_with_shapes_has_no_external_references():
 def test_extract_features_malformed_geometry_is_skipped_and_counted():
     payload = {
         "features": [
-            {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [[]]},
-             "properties": {}},
-            {"type": "Feature", "geometry": {"type": "Polygon",
-             "coordinates": [[[0, 0], [1, 1]]]}, "properties": {}},  # ring too short
-            {"type": "Feature", "geometry": {"type": "LineString", "coordinates": [[0, 0]]},
-             "properties": {}},  # line needs >= 2 points
-            {"type": "Feature", "geometry": {"type": "MultiPolygon", "coordinates": []},
-             "properties": {}},
-            {"type": "Feature", "geometry": {"type": "Polygon",
-             "coordinates": [[["a", "b"], [1, 1], [2, 2], [0, 0]]]}, "properties": {}},
-            {"type": "Feature", "geometry": {"type": "Sphere", "coordinates": []},
-             "properties": {}},  # unsupported geometry type
-            {"type": "Feature", "geometry": {"type": "Point",
-             "coordinates": [CENTER_LON, CENTER_LAT]}, "properties": {"name": "Good point"}},
+            {
+                "type": "Feature",
+                "geometry": {"type": "Polygon", "coordinates": [[]]},
+                "properties": {},
+            },
+            {
+                "type": "Feature",
+                "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [1, 1]]]},
+                "properties": {},
+            },  # ring too short
+            {
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": [[0, 0]]},
+                "properties": {},
+            },  # line needs >= 2 points
+            {
+                "type": "Feature",
+                "geometry": {"type": "MultiPolygon", "coordinates": []},
+                "properties": {},
+            },
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[["a", "b"], [1, 1], [2, 2], [0, 0]]],
+                },
+                "properties": {},
+            },
+            {
+                "type": "Feature",
+                "geometry": {"type": "Sphere", "coordinates": []},
+                "properties": {},
+            },  # unsupported geometry type
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [CENTER_LON, CENTER_LAT]},
+                "properties": {"name": "Good point"},
+            },
         ]
     }
     result = mapview.extract_features(payload)
@@ -418,10 +456,16 @@ def test_extract_features_malformed_geometry_is_skipped_and_counted():
 def test_write_artifact_malformed_geometry_degrades_gracefully(tmp_path):
     payload = {
         "features": [
-            {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [[]]},
-             "properties": {}},
-            {"type": "Feature", "geometry": {"type": "Point",
-             "coordinates": [CENTER_LON, CENTER_LAT]}, "properties": {"name": "Good"}},
+            {
+                "type": "Feature",
+                "geometry": {"type": "Polygon", "coordinates": [[]]},
+                "properties": {},
+            },
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [CENTER_LON, CENTER_LAT]},
+                "properties": {"name": "Good"},
+            },
         ]
     }
     result = mapview.write_artifact(payload, title="Degrade", out_dir=tmp_path)
@@ -435,8 +479,9 @@ def test_write_artifact_malformed_geometry_degrades_gracefully(tmp_path):
 
 
 def test_render_html_renders_shapes_group_and_evenodd_fill_rule():
-    shapes = [{"kind": "polygon", "rings": [_OUTER_RING, _HOLE_RING], "name": "Hole test",
-               "props": {}}]
+    shapes = [
+        {"kind": "polygon", "rings": [_OUTER_RING, _HOLE_RING], "name": "Hole test", "props": {}}
+    ]
     doc = mapview.render_html([], title="Shapes only", shapes=shapes)
     assert "shape-polygon" in doc
     assert "fill-rule" in doc
@@ -467,9 +512,7 @@ def test_cap_vertices_drops_a_shape_that_would_exceed_the_cap():
     points = [{"lat": 0.0, "lon": 0.0}] * 3
     small_shape = {"kind": "line", "lines": [[[0, 0], [1, 1]]]}  # 2 vertices
     big_shape = {"kind": "polygon", "rings": [[[0, 0]] * 20]}  # 20 vertices
-    kept_points, kept_shapes, dropped = mapview._cap_vertices(
-        points, [small_shape, big_shape], 6
-    )
+    kept_points, kept_shapes, dropped = mapview._cap_vertices(points, [small_shape, big_shape], 6)
     assert kept_points == points
     assert kept_shapes == [small_shape]
     assert dropped == 1

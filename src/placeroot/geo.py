@@ -143,9 +143,7 @@ def bbox_around(lat: float, lon: float, radius_m: float) -> tuple[float, float, 
     return lon - dlon, ymin, lon + dlon, ymax
 
 
-def bbox_filter_sql(
-    xmin: float, ymin: float, xmax: float, ymax: float
-) -> tuple[str, dict]:
+def bbox_filter_sql(xmin: float, ymin: float, xmax: float, ymax: float) -> tuple[str, dict]:
     """SQL bbox-intersection filter for [xmin, xmax] x [ymin, ymax], antimeridian-safe.
 
     xmin/xmax may be outside [-180, 180] (see bbox_around) when the box

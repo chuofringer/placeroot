@@ -36,23 +36,44 @@ def test_famous_poi_does_not_lose_to_an_obscure_exact_division(monkeypatch):
     def fake_geocode(query, limit=5, lang=None, near=None):
         q = query.lower()
         if q in {"rome", "roma"}:
-            return [{
-                "name": "Rome", "type": "locality", "lat": 41.89, "lon": 12.49,
-                "id": "rome", "admin_context": ["Italy"], "rank_score": 1.0,
-            }]
-        return [{
-            "name": "Colosseum", "type": "locality", "lat": -23.4, "lon": 150.5,
-            "id": "qld-colosseum", "admin_context": ["Australia", "Queensland"],
-            "rank_score": 1.0,
-        }]
+            return [
+                {
+                    "name": "Rome",
+                    "type": "locality",
+                    "lat": 41.89,
+                    "lon": 12.49,
+                    "id": "rome",
+                    "admin_context": ["Italy"],
+                    "rank_score": 1.0,
+                }
+            ]
+        return [
+            {
+                "name": "Colosseum",
+                "type": "locality",
+                "lat": -23.4,
+                "lon": 150.5,
+                "id": "qld-colosseum",
+                "admin_context": ["Australia", "Queensland"],
+                "rank_score": 1.0,
+            }
+        ]
 
     def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10, **kwargs):
         if abs(lat - 41.8902) < 0.5 and name and "coloss" in name.lower():
-            return [{
-                "id": "colosseum-rome", "name": "Colosseo", "category": "monument",
-                "basic_category": "monument", "operating_status": "open",
-                "confidence": 0.95, "lat": 41.8902, "lon": 12.4922, "distance_m": 8,
-            }]
+            return [
+                {
+                    "id": "colosseum-rome",
+                    "name": "Colosseo",
+                    "category": "monument",
+                    "basic_category": "monument",
+                    "operating_status": "open",
+                    "confidence": 0.95,
+                    "lat": 41.8902,
+                    "lon": 12.4922,
+                    "distance_m": 8,
+                }
+            ]
         return []
 
     monkeypatch.setattr(geocode, "geocode", fake_geocode)
@@ -66,23 +87,44 @@ def test_famous_poi_does_not_lose_to_an_obscure_exact_division(monkeypatch):
 def test_ebisu_alias_does_not_aim_at_shikoku(monkeypatch):
     def fake_geocode(query, limit=5, lang=None, near=None):
         if query.lower() == "tokyo":
-            return [{
-                "name": "Tokyo", "type": "locality", "lat": 35.68, "lon": 139.69,
-                "id": "tokyo", "admin_context": ["Japan"], "rank_score": 1.0,
-            }]
-        return [{
-            "name": "Ebisu", "type": "locality", "lat": 33.9, "lon": 133.2,
-            "id": "shikoku-ebisu", "admin_context": ["Japan", "Ehime"],
-            "rank_score": 1.0,
-        }]
+            return [
+                {
+                    "name": "Tokyo",
+                    "type": "locality",
+                    "lat": 35.68,
+                    "lon": 139.69,
+                    "id": "tokyo",
+                    "admin_context": ["Japan"],
+                    "rank_score": 1.0,
+                }
+            ]
+        return [
+            {
+                "name": "Ebisu",
+                "type": "locality",
+                "lat": 33.9,
+                "lon": 133.2,
+                "id": "shikoku-ebisu",
+                "admin_context": ["Japan", "Ehime"],
+                "rank_score": 1.0,
+            }
+        ]
 
     def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10, **kwargs):
         if abs(lat - 35.6467) < 0.5:
-            return [{
-                "id": "ebisu-tokyo", "name": "Ebisu", "category": "neighbourhood",
-                "basic_category": "neighbourhood", "operating_status": "open",
-                "confidence": 0.8, "lat": 35.6467, "lon": 139.7101, "distance_m": 20,
-            }]
+            return [
+                {
+                    "id": "ebisu-tokyo",
+                    "name": "Ebisu",
+                    "category": "neighbourhood",
+                    "basic_category": "neighbourhood",
+                    "operating_status": "open",
+                    "confidence": 0.8,
+                    "lat": 35.6467,
+                    "lon": 139.7101,
+                    "distance_m": 20,
+                }
+            ]
         return []
 
     monkeypatch.setattr(geocode, "geocode", fake_geocode)
@@ -119,19 +161,33 @@ def test_last_city_is_reused_for_the_next_poi(monkeypatch):
 
     def fake_geocode(query, limit=5, lang=None, near=None):
         seen.setdefault("q", []).append(query)
-        return [{
-            "name": query, "type": "locality", "lat": CENTER_LAT, "lon": CENTER_LON,
-            "id": "div", "admin_context": ["United States", "New York"],
-            "rank_score": 0.5,
-        }]
+        return [
+            {
+                "name": query,
+                "type": "locality",
+                "lat": CENTER_LAT,
+                "lon": CENTER_LON,
+                "id": "div",
+                "admin_context": ["United States", "New York"],
+                "rank_score": 0.5,
+            }
+        ]
 
     def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10, **kwargs):
         seen["near"] = (lat, lon)
-        return [{
-            "id": "place-1", "name": "Some Tower", "category": "monument",
-            "basic_category": "monument", "operating_status": "open",
-            "confidence": 0.7, "lat": CENTER_LAT, "lon": CENTER_LON, "distance_m": 5,
-        }]
+        return [
+            {
+                "id": "place-1",
+                "name": "Some Tower",
+                "category": "monument",
+                "basic_category": "monument",
+                "operating_status": "open",
+                "confidence": 0.7,
+                "lat": CENTER_LAT,
+                "lon": CENTER_LON,
+                "distance_m": 5,
+            }
+        ]
 
     monkeypatch.setattr(geocode, "geocode", fake_geocode)
     monkeypatch.setattr(overture, "find_places", fake_find_places)
@@ -155,30 +211,57 @@ def test_observation_tower_does_not_replay_brooklyn_after_paris(monkeypatch):
     def fake_geocode(query, limit=5, lang=None, near=None):
         q = query.lower()
         if q == "paris":
-            return [{
-                "name": "Paris", "type": "locality", "lat": 48.857, "lon": 2.351,
-                "id": "paris", "admin_context": ["France"], "rank_score": 1.0,
-            }]
-        return [{
-            "name": query, "type": "locality", "lat": CENTER_LAT, "lon": CENTER_LON,
-            "id": "div", "admin_context": ["United States", "New York"],
-            "rank_score": 0.5,
-        }]
+            return [
+                {
+                    "name": "Paris",
+                    "type": "locality",
+                    "lat": 48.857,
+                    "lon": 2.351,
+                    "id": "paris",
+                    "admin_context": ["France"],
+                    "rank_score": 1.0,
+                }
+            ]
+        return [
+            {
+                "name": query,
+                "type": "locality",
+                "lat": CENTER_LAT,
+                "lon": CENTER_LON,
+                "id": "div",
+                "admin_context": ["United States", "New York"],
+                "rank_score": 0.5,
+            }
+        ]
 
     def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10, **kwargs):
         if abs(lat - 48.857) < 1.0:
-            return [{
-                "id": "paris-tower", "name": "Observation Tower",
-                "category": "monument", "basic_category": "monument",
-                "operating_status": "open", "confidence": 0.8,
-                "lat": 48.858, "lon": 2.294, "distance_m": 10,
-            }]
-        return [{
-            "id": "bk-tower", "name": "Observation Tower",
-            "category": "monument", "basic_category": "monument",
-            "operating_status": "open", "confidence": 0.8,
-            "lat": CENTER_LAT, "lon": CENTER_LON, "distance_m": 5,
-        }]
+            return [
+                {
+                    "id": "paris-tower",
+                    "name": "Observation Tower",
+                    "category": "monument",
+                    "basic_category": "monument",
+                    "operating_status": "open",
+                    "confidence": 0.8,
+                    "lat": 48.858,
+                    "lon": 2.294,
+                    "distance_m": 10,
+                }
+            ]
+        return [
+            {
+                "id": "bk-tower",
+                "name": "Observation Tower",
+                "category": "monument",
+                "basic_category": "monument",
+                "operating_status": "open",
+                "confidence": 0.8,
+                "lat": CENTER_LAT,
+                "lon": CENTER_LON,
+                "distance_m": 5,
+            }
+        ]
 
     monkeypatch.setattr(geocode, "geocode", fake_geocode)
     monkeypatch.setattr(overture, "find_places", fake_find_places)
@@ -202,14 +285,24 @@ def test_last_city_does_not_bind_a_bare_city_query(monkeypatch):
 
 def test_casablanca_well_known_pin_outranks_a_namesake():
     morocco = {
-        "id": "ma", "name": "Casablanca", "subtype": "locality",
-        "lat": 33.57, "lon": -7.59, "population": 3_000_000,
-        "admin_context": ["Morocco"], "region": "MA-CAS",
+        "id": "ma",
+        "name": "Casablanca",
+        "subtype": "locality",
+        "lat": 33.57,
+        "lon": -7.59,
+        "population": 3_000_000,
+        "admin_context": ["Morocco"],
+        "region": "MA-CAS",
     }
     chile = {
-        "id": "cl", "name": "Casablanca", "subtype": "locality",
-        "lat": -33.32, "lon": -71.41, "population": 18_000,
-        "admin_context": ["Chile"], "region": "CL-VS",
+        "id": "cl",
+        "name": "Casablanca",
+        "subtype": "locality",
+        "lat": -33.32,
+        "lon": -71.41,
+        "population": 18_000,
+        "admin_context": ["Chile"],
+        "region": "CL-VS",
     }
     pop = {}
     assert geocode._rank_key(morocco, "Casablanca", pop) < geocode._rank_key(

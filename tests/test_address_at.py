@@ -279,9 +279,9 @@ def test_failed_country_lookup_status_is_distinct_from_not_found(tmp_path):
 def test_a_containment_failure_does_not_become_a_not_found_verdict(tmp_path, monkeypatch):
     """Containment broken + fallback finds nothing must stay lookup_failed."""
     monkeypatch.setattr(
-        addresses, "_country_by_containment", lambda lat, lon: addresses.Country(
-            addresses.LOOKUP_FAILED
-        )
+        addresses,
+        "_country_by_containment",
+        lambda lat, lon: addresses.Country(addresses.LOOKUP_FAILED),
     )
     assert addresses._country_at(0.0, 0.0).status == addresses.LOOKUP_FAILED
 
@@ -341,9 +341,7 @@ def test_territories_without_address_data_are_not_claimed_as_covered():
 
 
 def test_a_territory_note_names_the_territory_and_the_parent_feed():
-    note = addresses._coverage_note(
-        addresses.Country(addresses.RESOLVED, "MQ", "Martinique")
-    )
+    note = addresses._coverage_note(addresses.Country(addresses.RESOLVED, "MQ", "Martinique"))
     assert "Martinique (MQ) is covered" in note
     assert "carried under FR" in note
 
@@ -378,9 +376,7 @@ def test_missing_bbox_column_is_a_schema_error(tmp_path, restore_addresses_path)
         addresses.address_at(CENTER_LAT, CENTER_LON)
 
 
-def test_missing_optional_column_degrades_to_null_and_is_reported(
-    tmp_path, restore_addresses_path
-):
+def test_missing_optional_column_degrades_to_null_and_is_reported(tmp_path, restore_addresses_path):
     degraded = _fixture_missing_column(
         ADDRESSES_FIXTURE_PATH, "postal_city", tmp_path, "addresses_no_postal_city.parquet"
     )
@@ -432,9 +428,7 @@ def test_server_tool_maps_an_outage_to_a_structured_error(tmp_path, restore_addr
     assert result["retry_advised"] is True
 
 
-def test_server_tool_maps_a_degraded_schema_to_a_structured_error(
-    tmp_path, restore_addresses_path
-):
+def test_server_tool_maps_a_degraded_schema_to_a_structured_error(tmp_path, restore_addresses_path):
     degraded = _fixture_missing_column(
         ADDRESSES_FIXTURE_PATH, "street", tmp_path, "addresses_no_street.parquet"
     )
@@ -564,9 +558,7 @@ def test_containment_query_is_bounded(tmp_path, monkeypatch):
     assert country.code == "AX"
     containment_sql = [q for q in seen if "ST_Contains" in q]
     assert containment_sql
-    assert all(
-        f"LIMIT {addresses._CONTAINMENT_ROW_LIMIT}" in q for q in containment_sql
-    )
+    assert all(f"LIMIT {addresses._CONTAINMENT_ROW_LIMIT}" in q for q in containment_sql)
 
 
 # --- the tile cache (issue #189) -------------------------------------------
@@ -668,9 +660,7 @@ def test_warm_reverse_geocode_address_hop_answers_from_the_cache(
     assert elapsed < _WARM_BUDGET_S, f"warm reverse_geocode took {elapsed:.3f}s"
 
 
-def test_address_at_and_reverse_geocode_share_one_set_of_tiles(
-    address_cache, disposable_upstream
-):
+def test_address_at_and_reverse_geocode_share_one_set_of_tiles(address_cache, disposable_upstream):
     """One theme, one tile set: whichever reader runs first warms the other."""
     addresses.address_at(CENTER_LAT, CENTER_LON)
     after_first = _address_tiles(address_cache)
@@ -690,6 +680,7 @@ def test_reverse_geocode_still_degrades_to_divisions_when_the_cache_path_fails(
     which is a new failure mode on this hop -- reverse_geocode's contract is
     still a divisions-only answer, never an exception.
     """
+
     def boom(_bbox):
         raise overture.UpstreamUnavailable("cache path is down")
 
@@ -715,9 +706,7 @@ def test_address_tiles_are_evicted_under_the_cache_cap(address_cache, monkeypatc
     assert paths[-1].exists()  # LRU keeps the newest
 
 
-def test_a_multi_tile_address_query_does_not_evict_its_own_tiles(
-    address_cache, monkeypatch
-):
+def test_a_multi_tile_address_query_does_not_evict_its_own_tiles(address_cache, monkeypatch):
     """The claim-before-ensure_tile guarantee (#158), for the addresses theme.
 
     A sync query spanning more missing tiles than fit under the cap must claim

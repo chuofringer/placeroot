@@ -36,32 +36,75 @@ def _bbox(lat_min, lat_max, lon_min, lon_max):
 # differ is the interesting case.
 _LAND_USE_ROWS = [
     # Centre at (CENTER_LAT, CENTER_LON + 0.002) — ~169 m east of centre.
-    ("lu-play-named", _bbox(CENTER_LAT - _DEG, CENTER_LAT + _DEG,
-                            CENTER_LON + _DEG, CENTER_LON + 3 * _DEG),
-     "recreation", "playground", "Riverside Playground"),
+    (
+        "lu-play-named",
+        _bbox(CENTER_LAT - _DEG, CENTER_LAT + _DEG, CENTER_LON + _DEG, CENTER_LON + 3 * _DEG),
+        "recreation",
+        "playground",
+        "Riverside Playground",
+    ),
     # The row the whole layer exists for: a real playground with no name.
-    ("lu-play-unnamed", _bbox(CENTER_LAT, CENTER_LAT + 2 * _DEG,
-                              CENTER_LON, CENTER_LON + 2 * _DEG),
-     "recreation", "playground", None),
-    ("lu-park", _bbox(CENTER_LAT - 2 * _DEG, CENTER_LAT, CENTER_LON - 2 * _DEG, CENTER_LON),
-     "park", "park", "Test Park"),
-    ("lu-dog-park", _bbox(CENTER_LAT, CENTER_LAT + _DEG, CENTER_LON, CENTER_LON + _DEG),
-     "park", "dog_park", "Test Dog Run"),
-    ("lu-reserve", _bbox(CENTER_LAT, CENTER_LAT + _DEG, CENTER_LON - _DEG, CENTER_LON),
-     "protected", "state_park", "Test State Park"),
+    (
+        "lu-play-unnamed",
+        _bbox(CENTER_LAT, CENTER_LAT + 2 * _DEG, CENTER_LON, CENTER_LON + 2 * _DEG),
+        "recreation",
+        "playground",
+        None,
+    ),
+    (
+        "lu-park",
+        _bbox(CENTER_LAT - 2 * _DEG, CENTER_LAT, CENTER_LON - 2 * _DEG, CENTER_LON),
+        "park",
+        "park",
+        "Test Park",
+    ),
+    (
+        "lu-dog-park",
+        _bbox(CENTER_LAT, CENTER_LAT + _DEG, CENTER_LON, CENTER_LON + _DEG),
+        "park",
+        "dog_park",
+        "Test Dog Run",
+    ),
+    (
+        "lu-reserve",
+        _bbox(CENTER_LAT, CENTER_LAT + _DEG, CENTER_LON - _DEG, CENTER_LON),
+        "protected",
+        "state_park",
+        "Test State Park",
+    ),
     # Excluded by the class map: a pitch is part of a facility, not a
     # destination, and there are thousands of them in a city.
-    ("lu-pitch", _bbox(CENTER_LAT, CENTER_LAT + _DEG, CENTER_LON, CENTER_LON + _DEG),
-     "recreation", "pitch", "Excluded Pitch"),
-    ("lu-garden", _bbox(CENTER_LAT, CENTER_LAT + _DEG, CENTER_LON, CENTER_LON + _DEG),
-     "horticulture", "garden", "Excluded Garden"),
+    (
+        "lu-pitch",
+        _bbox(CENTER_LAT, CENTER_LAT + _DEG, CENTER_LON, CENTER_LON + _DEG),
+        "recreation",
+        "pitch",
+        "Excluded Pitch",
+    ),
+    (
+        "lu-garden",
+        _bbox(CENTER_LAT, CENTER_LAT + _DEG, CENTER_LON, CENTER_LON + _DEG),
+        "horticulture",
+        "garden",
+        "Excluded Garden",
+    ),
 ]
 
 _LAND_ROWS = [
-    ("land-beach", _bbox(CENTER_LAT, CENTER_LAT + _DEG, CENTER_LON, CENTER_LON + _DEG),
-     "sand", "beach", "Test Beach"),
-    ("land-tree", _bbox(CENTER_LAT, CENTER_LAT + _DEG, CENTER_LON, CENTER_LON + _DEG),
-     "wood", "tree", None),
+    (
+        "land-beach",
+        _bbox(CENTER_LAT, CENTER_LAT + _DEG, CENTER_LON, CENTER_LON + _DEG),
+        "sand",
+        "beach",
+        "Test Beach",
+    ),
+    (
+        "land-tree",
+        _bbox(CENTER_LAT, CENTER_LAT + _DEG, CENTER_LON, CENTER_LON + _DEG),
+        "wood",
+        "tree",
+        None,
+    ),
 ]
 
 
@@ -158,12 +201,23 @@ def test_the_layer_is_on_by_default(monkeypatch):
 
 @pytest.mark.parametrize(
     "value,expected",
-    [("0", False), ("false", False), ("FALSE", False), ("no", False), ("off", False),
-     (" off ", False),
-     ("1", True), ("true", True), ("yes", True), ("on", True), ("maybe", True),
-     # An empty value is a shell accident (`FOO= placeroot`), not a
-     # considered "no", so it reads as the default rather than as off.
-     ("", True), ("  ", True)],
+    [
+        ("0", False),
+        ("false", False),
+        ("FALSE", False),
+        ("no", False),
+        ("off", False),
+        (" off ", False),
+        ("1", True),
+        ("true", True),
+        ("yes", True),
+        ("on", True),
+        ("maybe", True),
+        # An empty value is a shell accident (`FOO= placeroot`), not a
+        # considered "no", so it reads as the default rather than as off.
+        ("", True),
+        ("  ", True),
+    ],
 )
 def test_env_var_parsing(monkeypatch, value, expected):
     monkeypatch.setenv(recreation.ENV_VAR, value)
@@ -183,8 +237,9 @@ def test_set_enabled_none_restores_env(monkeypatch):
 
 
 def test_find_places_returns_base_theme_playgrounds(layer_on):
-    rows = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000,
-                                category="playground", limit=25)
+    rows = overture.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000, category="playground", limit=25
+    )
     assert _ids(rows) == {"lu-play-named", "lu-play-unnamed"}
     assert all(r["category"] == "playground" for r in rows)
 
@@ -253,7 +308,8 @@ def test_distance_is_measured_from_the_polygon_centre(layer_on):
     ~169 m at this latitude — while its corner would read ~85 m.
     """
     (row,) = [
-        r for r in overture.find_places(CENTER_LAT, CENTER_LON, category="playground", limit=25)
+        r
+        for r in overture.find_places(CENTER_LAT, CENTER_LON, category="playground", limit=25)
         if r["id"] == "lu-play-named"
     ]
     assert row["distance_m"] == pytest.approx(169, abs=8)
@@ -263,8 +319,9 @@ def test_distance_is_measured_from_the_polygon_centre(layer_on):
 
 def test_radius_still_bounds_the_layer(layer_on):
     """A layer row outside the radius is dropped like any other row."""
-    rows = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=50,
-                                category="playground", limit=25)
+    rows = overture.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=50, category="playground", limit=25
+    )
     assert "lu-play-named" not in _ids(rows)
 
 
@@ -283,7 +340,8 @@ def test_summarize_area_counts_the_layer(layer_on):
 def test_find_places_in_bbox_includes_the_layer(layer_on):
     rows, _capped = overture.find_places_in_bbox(
         (CENTER_LON - 0.01, CENTER_LAT - 0.01, CENTER_LON + 0.01, CENTER_LAT + 0.01),
-        category="playground", limit=25,
+        category="playground",
+        limit=25,
     )
     assert _ids(rows) == {"lu-play-named", "lu-play-unnamed"}
 
@@ -352,13 +410,13 @@ def test_the_unreadable_warning_fires_once_per_glob(layer_on, tmp_path, caplog):
             recreation.union_branches((-74.0, 40.0, -73.0, 41.0))
             recreation.degraded_types()
         recreation_warnings = [
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if r.name == "placeroot.recreation" and "is unreadable at" in r.getMessage()
         ]
         assert len(recreation_warnings) == 1
     finally:
-        overture.set_data_path(str(layer_on / "land_use.parquet"),
-                               theme="base", type_="land_use")
+        overture.set_data_path(str(layer_on / "land_use.parquet"), theme="base", type_="land_use")
 
 
 def test_an_unreadable_upstream_serves_from_cached_tiles(layer_on, tmp_path, monkeypatch):
@@ -374,21 +432,22 @@ def test_an_unreadable_upstream_serves_from_cached_tiles(layer_on, tmp_path, mon
     upstream.write_bytes((layer_on / "land_use.parquet").read_bytes())
     overture.set_data_path(str(upstream), theme="base", type_="land_use")
     try:
-        warmed = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000,
-                                      category="playground", limit=25)
+        warmed = overture.find_places(
+            CENTER_LAT, CENTER_LON, radius_m=1000, category="playground", limit=25
+        )
         assert "lu-play-named" in _ids(warmed)
 
         upstream.unlink()
         db._probe_schema_cached.cache_clear()  # a fresh process facing the dead glob
 
-        rows = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000,
-                                    category="playground", limit=25)
+        rows = overture.find_places(
+            CENTER_LAT, CENTER_LON, radius_m=1000, category="playground", limit=25
+        )
         assert "lu-play-named" in _ids(rows)
         assert "land_use" in recreation.degraded_types()
     finally:
         db._probe_schema_cached.cache_clear()
-        overture.set_data_path(str(layer_on / "land_use.parquet"),
-                               theme="base", type_="land_use")
+        overture.set_data_path(str(layer_on / "land_use.parquet"), theme="base", type_="land_use")
 
 
 def test_an_unreadable_base_dataset_drops_the_branch(layer_on, tmp_path, caplog):
@@ -396,8 +455,7 @@ def test_an_unreadable_base_dataset_drops_the_branch(layer_on, tmp_path, caplog)
     there. Before the probe check this passed 'assume nothing missing' and
     failed every places query at scan time; now the branch drops, the query
     answers, and data_version names the gap."""
-    overture.set_data_path(str(tmp_path / "does_not_exist.parquet"),
-                           theme="base", type_="land_use")
+    overture.set_data_path(str(tmp_path / "does_not_exist.parquet"), theme="base", type_="land_use")
     try:
         with caplog.at_level("WARNING"):
             rows = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000, limit=25)
@@ -409,8 +467,7 @@ def test_an_unreadable_base_dataset_drops_the_branch(layer_on, tmp_path, caplog)
         }
         assert recreation.degraded_types() == ["land_use"]
     finally:
-        overture.set_data_path(str(layer_on / "land_use.parquet"),
-                               theme="base", type_="land_use")
+        overture.set_data_path(str(layer_on / "land_use.parquet"), theme="base", type_="land_use")
 
 
 # --- one real-world place, one row ------------------------------------------
@@ -453,8 +510,7 @@ def places_with_duplicate_playground(tmp_path):
     a base-theme playground — the both-themes overlap dedup exists for."""
     dup = tmp_path / "places_dup.parquet"
     _write_places_fixture_plus(
-        dup, [("places-dup-playground", "Fixture Playground", "playground",
-               _DUP_LAT, _DUP_LON)]
+        dup, [("places-dup-playground", "Fixture Playground", "playground", _DUP_LAT, _DUP_LON)]
     )
     overture.set_data_path(str(dup))
     try:
@@ -466,8 +522,9 @@ def places_with_duplicate_playground(tmp_path):
 def test_a_place_in_both_themes_returns_once(layer_on, places_with_duplicate_playground):
     """The places row wins (it is the richer one); a base row past
     DEDUP_RADIUS_M is a distinct real-world place and survives."""
-    rows = overture.find_places(CENTER_LAT, CENTER_LON, radius_m=1000,
-                                category="playground", limit=25)
+    rows = overture.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000, category="playground", limit=25
+    )
     ids = _ids(rows)
     assert "places-dup-playground" in ids
     assert "lu-play-unnamed" not in ids
@@ -477,7 +534,8 @@ def test_a_place_in_both_themes_returns_once(layer_on, places_with_duplicate_pla
 def test_bbox_queries_dedup_too(layer_on, places_with_duplicate_playground):
     rows, _capped = overture.find_places_in_bbox(
         (CENTER_LON - 0.01, CENTER_LAT - 0.01, CENTER_LON + 0.01, CENTER_LAT + 0.01),
-        category="playground", limit=25,
+        category="playground",
+        limit=25,
     )
     assert "lu-play-unnamed" not in _ids(rows)
     assert {"places-dup-playground", "lu-play-named"} <= _ids(rows)
@@ -490,8 +548,7 @@ def test_summarize_area_counts_a_duplicated_place_once(layer_on, tmp_path):
     before = overture.summarize_area(CENTER_LAT, CENTER_LON, radius_m=1000)["total_places"]
     dup = tmp_path / "places_dup.parquet"
     _write_places_fixture_plus(
-        dup, [("places-dup-playground", "Fixture Playground", "playground",
-               _DUP_LAT, _DUP_LON)]
+        dup, [("places-dup-playground", "Fixture Playground", "playground", _DUP_LAT, _DUP_LON)]
     )
     overture.set_data_path(str(dup))
     try:
@@ -512,13 +569,14 @@ def test_place_details_by_name_prefers_the_places_row(layer_on, tmp_path):
     dup = tmp_path / "places_dup_named.parquet"
     near_lat, near_lon = CENTER_LAT + 0.2 * _DEG, CENTER_LON + 2.2 * _DEG
     _write_places_fixture_plus(
-        dup, [("places-dup-named", "Riverside Playground", "playground",
-               near_lat, near_lon)]
+        dup, [("places-dup-named", "Riverside Playground", "playground", near_lat, near_lon)]
     )
     overture.set_data_path(str(dup))
     try:
         row = overture.place_details(
-            name="Riverside Playground", lat=CENTER_LAT, lon=CENTER_LON + 2 * _DEG,
+            name="Riverside Playground",
+            lat=CENTER_LAT,
+            lon=CENTER_LON + 2 * _DEG,
             radius_m=200,
         )
     finally:
@@ -537,9 +595,11 @@ def _local_probe(glob: str):
     from placeroot import db
 
     try:
-        desc = duckdb.connect().execute(
-            f"SELECT * FROM read_parquet({db._sql_str(glob)}) LIMIT 0"
-        ).description
+        desc = (
+            duckdb.connect()
+            .execute(f"SELECT * FROM read_parquet({db._sql_str(glob)}) LIMIT 0")
+            .description
+        )
     except duckdb.Error:
         return None
     return frozenset(c[0] for c in desc)
@@ -556,10 +616,20 @@ def test_a_polygon_straddling_a_tile_edge_is_returned_once(tmp_path, monkeypatch
     monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "placeroot-cache"))
     monkeypatch.setattr(db, "probe_schema", _local_probe)
     rows = [
-        ("lu-straddle", _bbox(40.65, 40.66, -74.001, -73.999),
-         "recreation", "playground", "Edge Playground"),
-        ("lu-inside", _bbox(40.65, 40.66, -73.95, -73.94),
-         "recreation", "playground", "Inside Playground"),
+        (
+            "lu-straddle",
+            _bbox(40.65, 40.66, -74.001, -73.999),
+            "recreation",
+            "playground",
+            "Edge Playground",
+        ),
+        (
+            "lu-inside",
+            _bbox(40.65, 40.66, -73.95, -73.94),
+            "recreation",
+            "playground",
+            "Inside Playground",
+        ),
     ]
     src = tmp_path / "land_use.parquet"
     _write_base_fixture(src, rows)
@@ -567,13 +637,11 @@ def test_a_polygon_straddling_a_tile_edge_is_returned_once(tmp_path, monkeypatch
     theme = recreation._cache_theme("land_use")
     fingerprint = cache.resolve_fingerprint("2026-07-22.0", theme, str(src))
     tiles = [(-75, 40), (-74, 40)]
-    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint)
-             for t in tiles]
+    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint) for t in tiles]
     # The premise: the straddling polygon really is in both tiles.
     for p in paths:
         (n,) = con.execute(
-            f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) "
-            "WHERE id = 'lu-straddle'"
+            f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) WHERE id = 'lu-straddle'"
         ).fetchone()
         assert n == 1
     source = f"read_parquet([{', '.join(db._sql_str(str(p)) for p in paths)}])"
@@ -596,14 +664,16 @@ def test_a_polygon_straddling_a_tile_edge_is_returned_once(tmp_path, monkeypatch
 
 def test_min_confidence_excludes_the_layer(layer_on):
     """Documented in docs/RECREATION.md: these rows carry no confidence."""
-    rows = overture.find_places(CENTER_LAT, CENTER_LON, category="playground",
-                                min_confidence=0.1, limit=25)
+    rows = overture.find_places(
+        CENTER_LAT, CENTER_LON, category="playground", min_confidence=0.1, limit=25
+    )
     assert rows == []
 
 
 def test_operating_status_excludes_the_layer(layer_on):
-    rows = overture.find_places(CENTER_LAT, CENTER_LON, category="playground",
-                                operating_status="in business", limit=25)
+    rows = overture.find_places(
+        CENTER_LAT, CENTER_LON, category="playground", operating_status="in business", limit=25
+    )
     assert rows == []
 
 
@@ -662,8 +732,9 @@ def test_places_tiles_never_hold_base_theme_rows(layer_on):
     reads are keyed under land_use.py's existing base_<type> tiles."""
     assert recreation._cache_theme("land_use") == "base_land_use"
     assert recreation._cache_theme("land") == "base_land"
-    source, active = overture._places_source((CENTER_LON - 0.01, CENTER_LAT - 0.01,
-                                              CENTER_LON + 0.01, CENTER_LAT + 0.01))
+    source, active = overture._places_source(
+        (CENTER_LON - 0.01, CENTER_LAT - 0.01, CENTER_LON + 0.01, CENTER_LAT + 0.01)
+    )
     assert active is True
     # The places branch reads the places dataset and nothing else; the base
     # datasets appear only in the unioned branches after it.
@@ -734,8 +805,7 @@ def test_an_anchored_name_search_bounds_the_layer_too(layer_on):
     to the layer's own reads instead of being discarded (review finding)."""
     from placeroot import geocode
 
-    rows = geocode._query_places_fallback("Riverside Playground",
-                                          anchor=(CENTER_LAT, CENTER_LON))
+    rows = geocode._query_places_fallback("Riverside Playground", anchor=(CENTER_LAT, CENTER_LON))
     assert "lu-play-named" in {r["id"] for r in rows}
 
 
@@ -798,8 +868,9 @@ def test_live_union_of_the_two_real_themes():
     """
     recreation.set_enabled(True)
     try:
-        rows = overture.find_places(40.7359, -73.9911, radius_m=500,
-                                    category="playground", limit=10)
+        rows = overture.find_places(
+            40.7359, -73.9911, radius_m=500, category="playground", limit=10
+        )
     finally:
         recreation.set_enabled(False)
     assert rows, "no playgrounds within 500 m of Union Square is itself a red flag"

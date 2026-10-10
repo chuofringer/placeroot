@@ -76,9 +76,10 @@ see [docs/PIN.md](docs/PIN.md) and `scripts/bump_pin.py`.
   `placeroot.geocode` rather than a submodule, and see the docstring's note on
   `monkeypatch` before patching a helper in a test.
 
-Ruff format is not yet enforced in CI: CI runs `ruff check` only. A
-`ruff format` sweep of the tree is planned, so do not reformat unrelated code
-in a PR.
+CI enforces both `uv run ruff check .` and `uv run ruff format --check .`;
+run `uv run ruff format .` before committing. The one-time sweep that made the
+tree format-clean is listed in `.git-blame-ignore-revs`, so
+`git config blame.ignoreRevsFile .git-blame-ignore-revs` keeps blame useful.
 
 ## Design rules
 

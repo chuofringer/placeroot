@@ -284,8 +284,7 @@ MODE_CONFIG = {
 # cap (half the span), kept because route()'s extraction radius is derived
 # from it: enclosing_radius_m * RADIUS_BUFFER + SNAP_RADIUS_M <= max_radius_m.
 ROUTE_MAX_ENCLOSING_RADIUS_M = {
-    mode: (cfg["max_radius_m"] - SNAP_RADIUS_M) / RADIUS_BUFFER
-    for mode, cfg in MODE_CONFIG.items()
+    mode: (cfg["max_radius_m"] - SNAP_RADIUS_M) / RADIUS_BUFFER for mode, cfg in MODE_CONFIG.items()
 }
 ROUTE_MAX_STRAIGHT_LINE_M = {
     mode: 2.0 * radius_m for mode, radius_m in ROUTE_MAX_ENCLOSING_RADIUS_M.items()
@@ -579,7 +578,11 @@ class SchemaDegraded(errors.SchemaDegraded):
 
 class NoGraphNearby(Exception):
     def __init__(
-        self, lat: float, lon: float, radius_m: float, label: str | None = None,
+        self,
+        lat: float,
+        lon: float,
+        radius_m: float,
+        label: str | None = None,
         mode: str | None = None,
     ):
         """`label` names which input point failed, when the caller has more
@@ -590,11 +593,11 @@ class NoGraphNearby(Exception):
         reported a walking problem and sent the reader looking in the wrong
         place."""
         segments = {
-            "walk": "walkable", "cycle": "cyclable", "drive": "drivable",
+            "walk": "walkable",
+            "cycle": "cyclable",
+            "drive": "drivable",
         }.get(mode or "", "routable")
-        detail = (
-            f"no {segments} segments found within {radius_m:.0f}m of ({lat}, {lon})"
-        )
+        detail = f"no {segments} segments found within {radius_m:.0f}m of ({lat}, {lon})"
         if label:
             detail = f"{label}: {detail}"
         super().__init__(detail)
@@ -624,10 +627,7 @@ class RouteTooLong(Exception):
         max_distance_m: float,
         label: str = "straight-line distance",
     ):
-        detail = (
-            f"{label} {distance_m:.0f}m exceeds the "
-            f"{max_distance_m:.0f}m cap for this mode"
-        )
+        detail = f"{label} {distance_m:.0f}m exceeds the {max_distance_m:.0f}m cap for this mode"
         super().__init__(detail)
         self.detail = detail
         self.distance_m = distance_m
@@ -754,7 +754,7 @@ def _edge_shape(
 
 
 def _parse_linestring_wkt(wkt: str) -> list[tuple[float, float]]:
-    """"LINESTRING (lon1 lat1, lon2 lat2, ...)" -> [(lon, lat), ...]."""
+    """ "LINESTRING (lon1 lat1, lon2 lat2, ...)" -> [(lon, lat), ...]."""
     inner = wkt.strip()
     inner = inner[inner.index("(") + 1 : inner.rindex(")")]
     points = []
@@ -1444,7 +1444,10 @@ def build_graph(
         logger.warning(
             "build_graph: segment extraction hit MAX_GRAPH_SEGMENTS=%d within "
             "%.0fm of (%s, %s); graph is truncated",
-            MAX_GRAPH_SEGMENTS, radius_m, lat, lon,
+            MAX_GRAPH_SEGMENTS,
+            radius_m,
+            lat,
+            lon,
         )
 
     graph = Graph()
@@ -1540,23 +1543,39 @@ def build_graph(
             # nodes that is shorter than the length the router charges for
             # it (#161 sweep: a Conzelman Rd switchback came back as a
             # 2-point line 851 m short of its own distance_m).
-            shape, dropped_m = (
-                _edge_shape(points, cum, at_a, at_b) if want_shapes else ([], 0.0)
-            )
+            shape, dropped_m = _edge_shape(points, cum, at_a, at_b) if want_shapes else ([], 0.0)
             if forward_allowed and backward_allowed:
                 graph.add_edge(
-                    id_a, id_b, weight, edge_length_m, directed=False,
-                    shape=shape, shape_dropped_m=dropped_m, name=primary_name,
+                    id_a,
+                    id_b,
+                    weight,
+                    edge_length_m,
+                    directed=False,
+                    shape=shape,
+                    shape_dropped_m=dropped_m,
+                    name=primary_name,
                 )
             elif forward_allowed:
                 graph.add_edge(
-                    id_a, id_b, weight, edge_length_m, directed=True,
-                    shape=shape, shape_dropped_m=dropped_m, name=primary_name,
+                    id_a,
+                    id_b,
+                    weight,
+                    edge_length_m,
+                    directed=True,
+                    shape=shape,
+                    shape_dropped_m=dropped_m,
+                    name=primary_name,
                 )
             else:
                 graph.add_edge(
-                    id_b, id_a, weight, edge_length_m, directed=True,
-                    shape=list(reversed(shape)), shape_dropped_m=dropped_m, name=primary_name,
+                    id_b,
+                    id_a,
+                    weight,
+                    edge_length_m,
+                    directed=True,
+                    shape=list(reversed(shape)),
+                    shape_dropped_m=dropped_m,
+                    name=primary_name,
                 )
 
     return graph
@@ -1644,8 +1663,12 @@ def snap_to_graph(
                     "snap_to_graph: nearest node %s is %.1fm away in an isolated "
                     "%d-node fragment; snapping to %s (%.1fm away, %d-node "
                     "component) instead",
-                    nearest_id, nearest_d, len(nearest_component),
-                    node_id, d, len(component),
+                    nearest_id,
+                    nearest_d,
+                    len(nearest_component),
+                    node_id,
+                    d,
+                    len(component),
                 )
                 return node_id
 
@@ -1664,7 +1687,12 @@ def snap_to_graph(
             logger.info(
                 "snap_to_graph: nothing usable within %.0fm of (%.5f, %.5f); "
                 "snapping to %s %.1fm out (%d-node component)",
-                snap_radius_m, lat, lon, node_id, d, len(component),
+                snap_radius_m,
+                lat,
+                lon,
+                node_id,
+                d,
+                len(component),
             )
             return node_id
 
@@ -1947,9 +1975,7 @@ def concave_boundary(
     loop = _trace_cell_boundary(occupied)
     if not loop:
         return None
-    return [
-        (origin_lon + px * cell_lon_deg, origin_lat + py * cell_lat_deg) for px, py in loop
-    ]
+    return [(origin_lon + px * cell_lon_deg, origin_lat + py * cell_lat_deg) for px, py in loop]
 
 
 def _build_polygon(
@@ -2247,9 +2273,7 @@ def _load_one_graph_file(path: Path) -> tuple[tuple[float, float, float, float],
             # the file read (no swap between the two).
             reason = _graph_file_is_trusted(path, os.fstat(fh.fileno()))
             if reason is not None:
-                logger.warning(
-                    "graph cache file %s refused (%s); will rebuild", path, reason
-                )
+                logger.warning("graph cache file %s refused (%s); will rebuild", path, reason)
                 return None
             payload = pickle.load(fh)
     except Exception:  # noqa: BLE001 - corrupt/unreadable file: rebuild
@@ -2295,7 +2319,8 @@ def _load_graph_from_disk(
     tile = _graph_cache_tile(lat, lon)
     cap_m = MODE_CONFIG[mode]["max_radius_m"]
     preferred = [
-        root / _graph_disk_name(
+        root
+        / _graph_disk_name(
             mode, speed_tag, tile, min(r * GRAPH_CACHE_MARGIN, cap_m), shapes, avoid_tag
         )
         for r in (WALK_MAX_RADIUS_M, 5000.0, 8000.0)
@@ -2371,15 +2396,13 @@ def _store_graph_in_memory(
         for existing_key, entry in _graph_cache.items():
             if existing_key[: len(key_prefix)] != key_prefix:
                 continue
-            if (
-                _bbox_contains(entry.bbox, extraction_bbox)
-                and (entry.graph.has_shapes or not graph.has_shapes)
+            if _bbox_contains(entry.bbox, extraction_bbox) and (
+                entry.graph.has_shapes or not graph.has_shapes
             ):
                 _graph_cache.move_to_end(existing_key)
                 return
-            if (
-                _bbox_contains(extraction_bbox, entry.bbox)
-                and (graph.has_shapes or not entry.graph.has_shapes)
+            if _bbox_contains(extraction_bbox, entry.bbox) and (
+                graph.has_shapes or not entry.graph.has_shapes
             ):
                 subsumed.append(existing_key)
         for existing_key in subsumed:
@@ -2625,9 +2648,7 @@ def route_graph_is_cached(
     if straight_line_m > ROUTE_MAX_STRAIGHT_LINE_M[mode]:
         return False
     center_lat, center_lon = _midpoint(from_lat, from_lon, to_lat, to_lon)
-    base_radius_m = max(
-        straight_line_m / 2.0 * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M
-    )
+    base_radius_m = max(straight_line_m / 2.0 * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M)
     return graph_is_cached(
         center_lat,
         center_lon,
@@ -2799,9 +2820,7 @@ def _get_or_build_graph(
         # (build_graph already released it). Memory insert is a short dict
         # write, and it happens before the in-flight event fires (finally)
         # so a waiter always finds the result.
-        _persist_graph_to_disk(
-            key_prefix, lat, lon, padded_radius_m, extraction_bbox, graph
-        )
+        _persist_graph_to_disk(key_prefix, lat, lon, padded_radius_m, extraction_bbox, graph)
         _store_graph_in_memory(key_prefix, lat, lon, extraction_bbox, graph)
         return graph
     finally:
@@ -3233,9 +3252,7 @@ PATH_MIN_TOKENS = 30
 # doesn't fit, and the bare "path_omitted" flag is all that's left. Kept
 # terse for exactly that reason: a note that costs more than the path it is
 # apologizing for can only ever be dropped.
-PATH_OMITTED_NOTE = (
-    "omitted (not truncated) to fit the token budget; raise PLACEROOT_TOKEN_BUDGET"
-)
+PATH_OMITTED_NOTE = "omitted (not truncated) to fit the token budget; raise PLACEROOT_TOKEN_BUDGET"
 
 
 def _path_linestring(
@@ -3394,9 +3411,7 @@ def _route_elevation_profile(
     covered = sum(1 for e in elevations if e is not None)
     profile: dict = {}
     if covered == 0:
-        profile["note"] = (
-            f"{elevation._NO_COVERAGE_NOTE}; climb/descent/grade cannot be computed"
-        )
+        profile["note"] = f"{elevation._NO_COVERAGE_NOTE}; climb/descent/grade cannot be computed"
     else:
         total_climb_m = 0.0
         total_descent_m = 0.0
@@ -3768,9 +3783,7 @@ def _shortest_path(
         raise RouteTooLong(straight_line_m, cap_m)
 
     center_lat, center_lon = _midpoint(from_lat, from_lon, to_lat, to_lon)
-    base_radius_m = max(
-        straight_line_m / 2.0 * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M
-    )
+    base_radius_m = max(straight_line_m / 2.0 * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M)
     if base_radius_m > max_radius_m:
         # ROUTE_MAX_STRAIGHT_LINE_M is derived directly from max_radius_m
         # (see its definition above), so this should essentially never fire
@@ -3881,9 +3894,7 @@ def _sample_evenly(items: list, count: int) -> list:
     return [items[round(i * step)] for i in range(count)]
 
 
-def _subsample_path(
-    path: list[tuple[str, float]], max_nodes: int
-) -> list[tuple[str, float]]:
+def _subsample_path(path: list[tuple[str, float]], max_nodes: int) -> list[tuple[str, float]]:
     """Evenly thin a node path to at most max_nodes entries, keeping both ends.
 
     The last node is pinned (via _sample_evenly) since the corridor's
@@ -4002,8 +4013,7 @@ def _path_chunks(
     segments = len(path_points) - 1
     count = max(1, min(chunks, segments))
     return [
-        path_points[i * segments // count : (i + 1) * segments // count + 1]
-        for i in range(count)
+        path_points[i * segments // count : (i + 1) * segments // count + 1] for i in range(count)
     ]
 
 
@@ -4099,8 +4109,7 @@ def places_along_route(
         raise ValueError("max_detour_m must be a positive number")
     if max_detour_m > CORRIDOR_MAX_DETOUR_M:
         raise ValueError(
-            f"max_detour_m={max_detour_m:.0f} exceeds the "
-            f"{CORRIDOR_MAX_DETOUR_M:.0f}m cap"
+            f"max_detour_m={max_detour_m:.0f} exceeds the {CORRIDOR_MAX_DETOUR_M:.0f}m cap"
         )
     limit = max(0, min(int(limit), overture.MAX_ROWS))
 
@@ -4116,13 +4125,12 @@ def places_along_route(
 
     rows = []
     for place in candidates:
-        nearest_m, nearest_along_m = _nearest_on_path(
-            place["lat"], place["lon"], path_points
-        )
+        nearest_m, nearest_along_m = _nearest_on_path(place["lat"], place["lon"], path_points)
         if nearest_m > max_detour_m:
             continue
-        rows.append({**place, "detour_m": round(2 * nearest_m, 1),
-                     "along_m": round(nearest_along_m, 1)})
+        rows.append(
+            {**place, "detour_m": round(2 * nearest_m, 1), "along_m": round(nearest_along_m, 1)}
+        )
 
     # Route order first (the itinerary reading), then the cheaper detour and
     # finally the id, so equal-position ties are still deterministic.
@@ -4341,9 +4349,7 @@ def _stops_extraction_geometry(
         # diameter larger than any real separation.
         if len(points) == 2:
             raise RouteTooLong(span_m, cap_m)
-        raise RouteTooLong(
-            span_m, cap_m, label="the widest pair of stops' straight-line distance"
-        )
+        raise RouteTooLong(span_m, cap_m, label="the widest pair of stops' straight-line distance")
 
     if len(points) == 2:
         # Two stops are route()'s own case: take its expression verbatim
@@ -4359,17 +4365,13 @@ def _stops_extraction_geometry(
             _haversine_m(center_lat, center_lon, lat, lon) for lat, lon in points
         )
 
-    base_radius_m = max(
-        enclosing_radius_m * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M
-    )
+    base_radius_m = max(enclosing_radius_m * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M)
     if base_radius_m > _stops_radius_cap_m(points, mode):
         # Redundant safety net, exactly as in _shortest_path: the extraction
         # cap is derived from the span cap through this very relation (via
         # Jung's bound for n >= 3), so only floating-point / projection edge
         # cases can land here. Report the honest, advertised span cap.
-        raise RouteTooLong(
-            span_m, cap_m, label="the widest pair of stops' straight-line distance"
-        )
+        raise RouteTooLong(span_m, cap_m, label="the widest pair of stops' straight-line distance")
     return center_lat, center_lon, base_radius_m
 
 
@@ -4466,9 +4468,7 @@ def _snap_and_cost_stops(
         if failed_idx is not None:
             if is_last and best is None:
                 flat, flon = points[failed_idx]
-                raise NoGraphNearby(
-                    flat, flon, radius_m, label=f"stops[{failed_idx}]", mode=mode
-                )
+                raise NoGraphNearby(flat, flon, radius_m, label=f"stops[{failed_idx}]", mode=mode)
             continue
         time_m, dist_m, estimated = _cost_matrices(graph, nodes, points, mode)
         if not estimated:
@@ -4534,9 +4534,7 @@ def _cost_matrices(
     return time_m, dist_m, estimated
 
 
-def solve_tsp(
-    cost: list[list[float]], start_index: int = 0, roundtrip: bool = True
-) -> list[int]:
+def solve_tsp(cost: list[list[float]], start_index: int = 0, roundtrip: bool = True) -> list[int]:
     """Exact minimum-cost visiting order over an asymmetric cost matrix.
 
     Held-Karp dynamic programming: state (visited set, current stop) ->
@@ -4686,9 +4684,7 @@ def optimize_route(
     if not isinstance(start_index, int) or isinstance(start_index, bool):
         raise ValueError("start_index must be an integer")
     if not 0 <= start_index < len(stops):
-        raise ValueError(
-            f"start_index={start_index} is out of range for {len(stops)} stops"
-        )
+        raise ValueError(f"start_index={start_index} is out of range for {len(stops)} stops")
     if keep_order and start_index != 0:
         raise ValueError(
             "keep_order=True visits the stops as given, so start_index must be 0, "
@@ -4839,9 +4835,7 @@ def _od_matrix(
             unroutable += len(dest_nodes)
             grid.append(row)
             continue
-        reached = (
-            _dijkstra_costs_to_targets(graph, src, targets_all, speed) if targets_all else {}
-        )
+        reached = _dijkstra_costs_to_targets(graph, src, targets_all, speed) if targets_all else {}
         for j, dst in enumerate(dest_nodes):
             if dst is None:
                 unroutable += 1
@@ -4914,9 +4908,7 @@ def _travel_time_matrix_shared_graph(
         enclosing_radius_m = max(
             _haversine_m(center_lat, center_lon, lat, lon) for lat, lon in combined
         )
-        base_radius_m = max(
-            enclosing_radius_m * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M
-        )
+        base_radius_m = max(enclosing_radius_m * RADIUS_BUFFER + SNAP_RADIUS_M, ROUTE_MIN_RADIUS_M)
         if base_radius_m > _stops_radius_cap_m(combined, mode):
             return None
 
@@ -4930,7 +4922,12 @@ def _travel_time_matrix_shared_graph(
     for i, radius_m in enumerate(radii_m):
         is_last = i == len(radii_m) - 1
         graph = _get_or_build_graph(
-            center_lat, center_lon, radius_m, mode, speed_m_s=None, radius_cap_m=max_radius_m,
+            center_lat,
+            center_lon,
+            radius_m,
+            mode,
+            speed_m_s=None,
+            radius_cap_m=max_radius_m,
             pad=i == 0,  # the retry is already widened; see ROUTE_RADIUS_RETRY_FACTOR
         )
         if graph.node_count() == 0:

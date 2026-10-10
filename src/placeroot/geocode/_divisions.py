@@ -18,10 +18,7 @@ _pkg = _sys.modules["placeroot.geocode"]
 NearConstraint = tuple[float, float, float]
 
 
-
-def _near_filter_sql(
-    near: NearConstraint | None, lat_col: str, lon_col: str, params: dict
-) -> str:
+def _near_filter_sql(near: NearConstraint | None, lat_col: str, lon_col: str, params: dict) -> str:
     """AND-clause keeping rows whose point lies in `near`'s bounding box, or
     "" when there is no constraint. Adds its parameters to `params`.
 
@@ -43,7 +40,6 @@ def _near_filter_sql(
     params["near_xmin"] = xmin + 360.0 if xmin < -180.0 else xmin
     params["near_xmax"] = xmax - 360.0 if xmax > 180.0 else xmax
     return f"{lat_clause} AND ({lon_col} >= $near_xmin OR {lon_col} <= $near_xmax)"
-
 
 
 def _query_divisions_from_local(
@@ -95,14 +91,20 @@ def _query_divisions_from_local(
         raise _pkg.overture.UpstreamUnavailable(str(e)) from e
     result = []
     for r in rows:
-        result.append({
-            "id": r[0], "name": r[1], "subtype": r[2], "country": r[3], "region": r[4],
-            "lat": round(r[5], 6), "lon": round(r[6], 6),
-            "admin_context": _pkg._admin_chain_context(r[7], self_name=r[1]),
-            "population": r[8],
-        })
+        result.append(
+            {
+                "id": r[0],
+                "name": r[1],
+                "subtype": r[2],
+                "country": r[3],
+                "region": r[4],
+                "lat": round(r[5], 6),
+                "lon": round(r[6], 6),
+                "admin_context": _pkg._admin_chain_context(r[7], self_name=r[1]),
+                "population": r[8],
+            }
+        )
     return result
-
 
 
 def _query_divisions_from_upstream(
@@ -151,21 +153,29 @@ def _query_divisions_from_upstream(
     try:
         # Unbounded by construction: a name search over the divisions theme
         # has no bbox to prune by. That is exactly why the callers gate it.
-        with trace.scan("divisions name scan (upstream)", bounded=False, source=glob), \
-                _pkg.overture._conn_lock:
+        with (
+            trace.scan("divisions name scan (upstream)", bounded=False, source=glob),
+            _pkg.overture._conn_lock,
+        ):
             rows = _pkg.overture.conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise _pkg.overture.UpstreamUnavailable(str(e)) from e
     result = []
     for r in rows:
-        result.append({
-            "id": r[0], "name": r[1], "subtype": r[2], "country": r[3], "region": r[4],
-            "lat": round(r[5], 6), "lon": round(r[6], 6),
-            "admin_context": _pkg._admin_context(r[7], self_name=r[1]),
-            "population": r[8],
-        })
+        result.append(
+            {
+                "id": r[0],
+                "name": r[1],
+                "subtype": r[2],
+                "country": r[3],
+                "region": r[4],
+                "lat": round(r[5], 6),
+                "lon": round(r[6], 6),
+                "admin_context": _pkg._admin_context(r[7], self_name=r[1]),
+                "population": r[8],
+            }
+        )
     return result
-
 
 
 def _query_alt_names(
@@ -245,17 +255,23 @@ def _query_alt_names(
         raise _pkg.overture.UpstreamUnavailable(str(e)) from e
     result = []
     for r in rows:
-        result.append({
-            "id": r[0], "name": r[1], "subtype": r[2], "country": r[3], "region": r[4],
-            "lat": round(r[5], 6), "lon": round(r[6], 6),
-            "admin_context": _pkg._admin_chain_context(r[7], self_name=r[1]),
-            "population": r[8],
-            "_variant": True,
-            "_tier": _pkg._match_tier(r[9], folded),
-            "_matched_name": r[10] or r[9],
-        })
+        result.append(
+            {
+                "id": r[0],
+                "name": r[1],
+                "subtype": r[2],
+                "country": r[3],
+                "region": r[4],
+                "lat": round(r[5], 6),
+                "lon": round(r[6], 6),
+                "admin_context": _pkg._admin_chain_context(r[7], self_name=r[1]),
+                "population": r[8],
+                "_variant": True,
+                "_tier": _pkg._match_tier(r[9], folded),
+                "_matched_name": r[10] or r[9],
+            }
+        )
     return result
-
 
 
 def _alt_rows_not_already_found(
@@ -279,13 +295,15 @@ def _alt_rows_not_already_found(
     spellings.
     """
     try:
-        rows = _pkg._query_alt_names(alt_table, table_path, query, region_code, country_code, near=near)  # noqa: E501
+        rows = _pkg._query_alt_names(
+            alt_table, table_path, query, region_code, country_code, near=near
+        )  # noqa: E501
     except _pkg.overture.UpstreamUnavailable:
         if Path(alt_table).exists():
             raise
         _pkg.logger.warning(
-            "alternate-name table vanished mid-query (%s); answering from "
-            "primary names only", alt_table,
+            "alternate-name table vanished mid-query (%s); answering from primary names only",
+            alt_table,
         )
         return []
     # A division already found literally keeps its literal row — but it must
@@ -310,7 +328,6 @@ def _alt_rows_not_already_found(
             prior["_tier"] = r["_tier"]
             prior.setdefault("_matched_name", r.get("_matched_name"))
     return fresh
-
 
 
 def _query_divisions(
@@ -356,7 +373,8 @@ def _query_divisions(
             # upstream scan, same as if the table had never materialized.
             _pkg.logger.warning(
                 "local divisions table vanished mid-query (%s); falling back "
-                "to a direct upstream scan", local_table,
+                "to a direct upstream scan",
+                local_table,
             )
         else:
             if alt_table is not None:
@@ -365,8 +383,9 @@ def _query_divisions(
                 )
             return rows
     name_expr = "strip_accents(names.primary)" if fold_diacritics else "names.primary"
-    return _pkg._query_divisions_from_upstream(query, region_code, name_expr, country_code, near=near)  # noqa: E501
-
+    return _pkg._query_divisions_from_upstream(
+        query, region_code, name_expr, country_code, near=near
+    )  # noqa: E501
 
 
 # --- #215: fuzzy fallback tier ------------------------------------------
@@ -393,7 +412,6 @@ _FUZZY_SIMILARITY_THRESHOLD = 0.92
 _FOLDED_NAME_SQL = "lower(strip_accents(name))"
 
 
-
 def _has_like_metacharacter(query: str) -> bool:
     """True if `query` contains an ILIKE wildcard character.
 
@@ -405,7 +423,6 @@ def _has_like_metacharacter(query: str) -> bool:
     these costs nothing and keeps that guarantee legible.
     """
     return "%" in query or "_" in query
-
 
 
 def _query_divisions_fuzzy(
@@ -498,15 +515,23 @@ def _query_divisions_fuzzy(
         raise _pkg.overture.UpstreamUnavailable(str(e)) from e
     result = []
     for r in rows:
-        result.append({
-            "id": r[0], "name": r[1], "subtype": r[2], "country": r[3], "region": r[4],
-            "lat": round(r[5], 6), "lon": round(r[6], 6),
-            "admin_context": _pkg._admin_chain_context(r[7], self_name=r[1]),
-            "population": r[8],
-            "_fuzzy": True, "_similarity": r[9], "_tier": 1,
-        })
+        result.append(
+            {
+                "id": r[0],
+                "name": r[1],
+                "subtype": r[2],
+                "country": r[3],
+                "region": r[4],
+                "lat": round(r[5], 6),
+                "lon": round(r[6], 6),
+                "admin_context": _pkg._admin_chain_context(r[7], self_name=r[1]),
+                "population": r[8],
+                "_fuzzy": True,
+                "_similarity": r[9],
+                "_tier": 1,
+            }
+        )
     return result
-
 
 
 def _fuzzy_correction_note(rows: list[dict], query: str) -> str:

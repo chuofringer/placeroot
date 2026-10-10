@@ -110,9 +110,7 @@ def test_runner_help_exposes_gate_flags():
 
 
 def test_p95_is_nearest_rank_not_a_pass():
-    spec = importlib.util.spec_from_file_location(
-        "run_query_corpus", BENCH / "run_query_corpus.py"
-    )
+    spec = importlib.util.spec_from_file_location("run_query_corpus", BENCH / "run_query_corpus.py")
     # Importing the module does not run main. No network.
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -124,18 +122,24 @@ def test_p95_is_nearest_rank_not_a_pass():
 
 
 def test_missing_warm_leg_is_a_fail():
-    spec = importlib.util.spec_from_file_location(
-        "run_query_corpus", BENCH / "run_query_corpus.py"
-    )
+    spec = importlib.util.spec_from_file_location("run_query_corpus", BENCH / "run_query_corpus.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     q = {"id": "r01", "tool": "resolve_place", "question": "Where is X?"}
-    cold_only = [{"id": "r01", "tool": "resolve_place", "q": "Where is X?",
-                  "leg": "cold", "s": 1.2, "ok": True, "detail": "ok"}]
+    cold_only = [
+        {
+            "id": "r01",
+            "tool": "resolve_place",
+            "q": "Where is X?",
+            "leg": "cold",
+            "s": 1.2,
+            "ok": True,
+            "detail": "ok",
+        }
+    ]
     out = mod._ensure_warm_leg(list(cold_only), q)
     assert any(r["leg"] == "warm" and r["ok"] is False for r in out)
-    both = cold_only + [{"id": "r01", "leg": "warm", "s": 0.2, "ok": True,
-                         "detail": "ok"}]
+    both = cold_only + [{"id": "r01", "leg": "warm", "s": 0.2, "ok": True, "detail": "ok"}]
     kept = mod._ensure_warm_leg(list(both), q)
     assert sum(1 for r in kept if r["leg"] == "warm") == 1
     assert kept[-1]["ok"] is True
@@ -143,6 +147,7 @@ def test_missing_warm_leg_is_a_fail():
 
 def test_score_routed_result_ask_is_not_wrong():
     import sys
+
     sys.path.insert(0, str(BENCH))
     import query_corpus
 
@@ -159,7 +164,8 @@ def test_score_routed_result_ask_is_not_wrong():
     assert ok is False
     assert detail.startswith("ASK ON CONFIRM")
     ok, detail = query_corpus._score_routed_result(
-        {"distance_m": 1200.0}, confirm=True,
+        {"distance_m": 1200.0},
+        confirm=True,
     )
     assert ok is True
     assert detail.startswith("CONFIRMED ")
@@ -167,6 +173,7 @@ def test_score_routed_result_ask_is_not_wrong():
 
 def test_invoke_maybe_confirm_skips_unknown_kwarg():
     import sys
+
     sys.path.insert(0, str(BENCH))
     import query_corpus
 
@@ -184,38 +191,41 @@ def test_invoke_maybe_confirm_skips_unknown_kwarg():
 
 
 def test_annotate_row_ask_is_not_slow_or_wrong():
-    spec = importlib.util.spec_from_file_location(
-        "run_query_corpus", BENCH / "run_query_corpus.py"
-    )
+    spec = importlib.util.spec_from_file_location("run_query_corpus", BENCH / "run_query_corpus.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     ask = mod._annotate_row(
-        {"ok": True, "s": 0.2, "tool": "route", "detail": "ASK peek",
-         "outcome": "ask"},
-        15.0, 10.0,
+        {"ok": True, "s": 0.2, "tool": "route", "detail": "ASK peek", "outcome": "ask"},
+        15.0,
+        10.0,
     )
     assert ask["ok"] is True
     assert ask["over_budget"] is False
     assert ask["outcome"] == "ask"
     slow_peek = mod._annotate_row(
-        {"ok": True, "s": 0.8, "tool": "route", "detail": "ASK peek",
-         "outcome": "ask"},
-        15.0, 10.0,
+        {"ok": True, "s": 0.8, "tool": "route", "detail": "ASK peek", "outcome": "ask"},
+        15.0,
+        10.0,
     )
     assert slow_peek["ok"] is False
     assert "ASK TOO SLOW" in slow_peek["detail"]
     confirmed = mod._annotate_row(
-        {"ok": True, "s": 22.0, "tool": "route", "detail": "CONFIRMED 1200m",
-         "outcome": "confirmed"},
-        15.0, 10.0,
+        {
+            "ok": True,
+            "s": 22.0,
+            "tool": "route",
+            "detail": "CONFIRMED 1200m",
+            "outcome": "confirmed",
+        },
+        15.0,
+        10.0,
     )
     assert confirmed["ok"] is True
     assert confirmed["over_budget"] is False
     flow_ask = mod._annotate_row(
-        {"ok": True, "s": 2.4, "tool": "flow", "detail": "ASK peek",
-         "outcome": "ask"},
-        15.0, 10.0,
+        {"ok": True, "s": 2.4, "tool": "flow", "detail": "ASK peek", "outcome": "ask"},
+        15.0,
+        10.0,
     )
     assert flow_ask["ok"] is True
     assert flow_ask["over_budget"] is False
-

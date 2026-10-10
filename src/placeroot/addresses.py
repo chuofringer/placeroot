@@ -134,7 +134,13 @@ _OMIT_IF_NULL = ("unit", "postcode", "postal_city", "address_levels")
 # Attribute columns selected, in the order _row_to_result unpacks them
 # (distance_m is appended by the query itself and is not a source column).
 _SELECT_COLUMNS = (
-    "number", "street", "unit", "postcode", "postal_city", "address_levels", "country",
+    "number",
+    "street",
+    "unit",
+    "postcode",
+    "postal_city",
+    "address_levels",
+    "country",
 )
 
 # ISO 3166-1 alpha-2 codes of the countries the addresses theme actually
@@ -143,12 +149,49 @@ _SELECT_COLUMNS = (
 # country is not necessarily complete — Overture flags the US, Germany and
 # Taiwan as partial — so membership here means "this theme has data for this
 # country", not "every doorway in it is present".
-COVERED_COUNTRIES = frozenset({
-    "AT", "AU", "BE", "BR", "CA", "CH", "CL", "CO", "CZ", "DE",
-    "DK", "EE", "ES", "FI", "FO", "FR", "GL", "HK", "HR", "IS",
-    "IT", "JP", "LI", "LT", "LU", "LV", "MX", "NL", "NO", "NZ",
-    "PL", "PT", "RS", "SG", "SI", "SK", "TW", "US", "UY",
-})
+COVERED_COUNTRIES = frozenset(
+    {
+        "AT",
+        "AU",
+        "BE",
+        "BR",
+        "CA",
+        "CH",
+        "CL",
+        "CO",
+        "CZ",
+        "DE",
+        "DK",
+        "EE",
+        "ES",
+        "FI",
+        "FO",
+        "FR",
+        "GL",
+        "HK",
+        "HR",
+        "IS",
+        "IT",
+        "JP",
+        "LI",
+        "LT",
+        "LU",
+        "LV",
+        "MX",
+        "NL",
+        "NO",
+        "NZ",
+        "PL",
+        "PT",
+        "RS",
+        "SG",
+        "SI",
+        "SK",
+        "TW",
+        "US",
+        "UY",
+    }
+)
 
 # Dependent territories that Overture's divisions theme labels with their own
 # ISO 3166-1 code, but whose address points are carried in the *parent*
@@ -168,8 +211,16 @@ COVERED_COUNTRIES = frozenset({
 # empty list. The territory's own code and name are still what the response
 # reports; this mapping only decides which coverage sentence is true.
 _TERRITORY_PARENT = {
-    "MQ": "FR", "GP": "FR", "RE": "FR", "GF": "FR", "YT": "FR",
-    "NC": "FR", "PF": "FR", "PM": "FR", "BL": "FR", "MF": "FR",
+    "MQ": "FR",
+    "GP": "FR",
+    "RE": "FR",
+    "GF": "FR",
+    "YT": "FR",
+    "NC": "FR",
+    "PF": "FR",
+    "PM": "FR",
+    "BL": "FR",
+    "MF": "FR",
     "AX": "FI",
     "NF": "AU",
 }
@@ -264,9 +315,7 @@ def _row_to_result(row: tuple) -> dict:
     return result
 
 
-def _scan_addresses(
-    columns: str, lat: float, lon: float, radius_m: int, limit: int
-) -> list[tuple]:
+def _scan_addresses(columns: str, lat: float, lon: float, radius_m: int, limit: int) -> list[tuple]:
     """One radius pass: the `limit` nearest address rows within radius_m.
 
     Split out of the widening loop so the loop can decide, between passes,
@@ -277,9 +326,7 @@ def _scan_addresses(
     is exactly the case where the second pass should reuse what the first
     materialized.
     """
-    bbox_filter, distance_filter, params, bbox, _radius = overture.area_geometry(
-        lat, lon, radius_m
-    )
+    bbox_filter, distance_filter, params, bbox, _radius = overture.area_geometry(lat, lon, radius_m)
     sql = f"""
         SELECT {columns},
                round({overture.DISTANCE_EXPR}, 1) AS distance_m
@@ -362,8 +409,7 @@ def _country_by_containment(lat: float, lon: float) -> Country:
     name_expr = "NULL" if "names" in missing else "names.primary"
     subtype_expr = "NULL" if "subtype" in missing else "subtype"
     bbox_prefilter = (
-        "bbox.xmin <= $lon AND bbox.xmax >= $lon"
-        " AND bbox.ymin <= $lat AND bbox.ymax >= $lat AND "
+        "bbox.xmin <= $lon AND bbox.xmax >= $lon AND bbox.ymin <= $lat AND bbox.ymax >= $lat AND "
         if "bbox" not in missing
         else ""
     )

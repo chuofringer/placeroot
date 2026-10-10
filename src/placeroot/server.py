@@ -164,19 +164,19 @@ BASE_INSTRUCTIONS = (
     "the query (smaller radius, a category or name filter) instead of "
     "raising limit.\n\n"
     "TELL THIS SERVER WHERE. You know things it cannot: that "
-    "\"san jose airport\" means San Jose, California, that the Eiffel "
+    '"san jose airport" means San Jose, California, that the Eiffel '
     "Tower is in Paris, that a question about a school names a place in "
     "some particular suburb. This server knows only what exists at which "
     "coordinates in the current Overture release — it has no world "
     "knowledge to fall back on. So pass the location separately from the "
     "thing being looked for: near_lat/near_lon when you have "
-    "coordinates, otherwise city (\"San Jose, CA\"). Sending one "
+    'coordinates, otherwise city ("San Jose, CA"). Sending one '
     "combined string forces the server to guess which words are the "
-    "place, and it guesses from map data alone, where \"san\" names a "
+    'place, and it guesses from map data alone, where "san" names a '
     "division in Henan.\n"
     "A hint only bounds where the search looks; every row returned still "
     "comes from the data, so a wrong hint costs a retry, never a wrong "
-    "answer. When a reply carries need: \"location\" it could not bound "
+    'answer. When a reply carries need: "location" it could not bound '
     "the search at all — retry with the city rather than rephrasing.\n"
     "Actionable place rows carry trust_note, a calibrated before-you-go "
     "clause from confidence and operating status. Composed itineraries add "
@@ -188,7 +188,7 @@ BASE_INSTRUCTIONS = (
     "not a built street graph — the first walk still builds or loads "
     "the graph; later walks reuse it. Optional warmup_city pays the "
     "tile cost inline if you want to wait.\n\n"
-    "Named walks and \"X near Y\" are one hop each: from_to() "
+    'Named walks and "X near Y" are one hop each: from_to() '
     "and find_near() accept place names. Do not chain "
     "geocode + route or resolve + find_places for those questions."
 )
@@ -325,7 +325,7 @@ def _tool(
     if not isinstance(title, str) or not title.strip():
         # Catches the bare `@_tool` (no call) mistake, which would otherwise
         # bind the tool name to this decorator instead of to the function.
-        raise TypeError("@_tool requires a non-empty display title, e.g. @_tool(\"Find places\")")
+        raise TypeError('@_tool requires a non-empty display title, e.g. @_tool("Find places")')
 
     def register(fn: Callable) -> Callable:
         (_META_TOOL_FUNCS if meta else _TOOL_FUNCS)[fn.__name__] = fn
@@ -515,7 +515,8 @@ def _with_name_fallback_note(
     fallback = next((r for r in rows if r.get("matched_by")), None)
     if fallback is not None:
         via = (
-            "an alternate spelling" if fallback["matched_by"] == "alt_name"
+            "an alternate spelling"
+            if fallback["matched_by"] == "alt_name"
             else "the closest spelling match"
         )
         hint = f"no exact match for name {name!r}; showing {fallback['name']!r} via {via}."
@@ -769,8 +770,7 @@ def find_places(
     if detail is not None and detail not in _DETAIL_ENUM:
         return {
             "error": "bad_request",
-            "detail": f"unrecognized detail {detail!r}; accepted values: "
-            f"{', '.join(_DETAIL_ENUM)}",
+            "detail": f"unrecognized detail {detail!r}; accepted values: {', '.join(_DETAIL_ENUM)}",
         }
     effective_detail = detail or "compact"
     categories = categories or None
@@ -904,12 +904,16 @@ def find_places(
         "lat": float(lat) if lat is not None else None,
         "lon": float(lon) if lon is not None else None,
         "radius_m": float(radius_m) if radius_m is not None else None,
-        "category": category, "name": name,
+        "category": category,
+        "name": name,
         "categories": sorted(categories) if categories else None,
         "min_confidence": float(min_confidence) if min_confidence is not None else None,
-        "operating_status": operating_status, "brand": brand,
-        "has_website": has_website, "has_phone": has_phone,
-        "division_id": division_id, "area": area,
+        "operating_status": operating_status,
+        "brand": brand,
+        "has_website": has_website,
+        "has_phone": has_phone,
+        "division_id": division_id,
+        "area": area,
         "within": within_canonical,
     }
     current_release = release.resolve_release()
@@ -924,9 +928,12 @@ def find_places(
     within_polygon = None
     within_note = None
     if within is not None:
-        if not routing.isochrone_graph_is_cached(
-            within_of_lat, within_of_lon, within_minutes, within_mode
-        ) and not confirm:
+        if (
+            not routing.isochrone_graph_is_cached(
+                within_of_lat, within_of_lon, within_minutes, within_mode
+            )
+            and not confirm
+        ):
             return _needs_confirm_graph(within_mode)
         try:
             iso = routing.isochrone(
@@ -952,8 +959,7 @@ def find_places(
             return {"error": "bad_request", "detail": str(e)}
         within_polygon = iso["polygon"]
         within_note = (
-            f"reachability-filtered against the street graph "
-            f"({within_minutes:g} min {within_mode})"
+            f"reachability-filtered against the street graph ({within_minutes:g} min {within_mode})"
         )
 
     # area is sugar over the division_id path: resolve the name to a
@@ -987,8 +993,14 @@ def find_places(
         if group_by_category:
             try:
                 grouped = overture.find_places_in_division_grouped_by_category(
-                    division_id, categories, name,
-                    min_confidence, operating_status, brand, has_website, has_phone,
+                    division_id,
+                    categories,
+                    name,
+                    min_confidence,
+                    operating_status,
+                    brand,
+                    has_website,
+                    has_phone,
                     effective_limit,
                     within_polygon=within_polygon,
                 )
@@ -1005,17 +1017,22 @@ def find_places(
             )
             if resolved_area is not None:
                 payload["area"] = resolved_area
-            payload = _with_categories_hint(
-                payload, categories, widen_hint="try a larger division"
-            )
+            payload = _with_categories_hint(payload, categories, widen_hint="try a larger division")
             payload = _with_detail_legend(payload, effective_detail)
             payload = _with_within_extras(payload, within_resolved_echo, within_note)
             return payload
         try:
             rows = overture.find_places_in_division(
-                division_id, category, name,
-                min_confidence, operating_status, brand, has_website, has_phone,
-                effective_limit + 1, offset=start_offset,
+                division_id,
+                category,
+                name,
+                min_confidence,
+                operating_status,
+                brand,
+                has_website,
+                has_phone,
+                effective_limit + 1,
+                offset=start_offset,
                 categories=categories,
                 within_polygon=within_polygon,
             )
@@ -1053,8 +1070,16 @@ def find_places(
     if group_by_category:
         try:
             grouped = overture.find_places_grouped_by_category(
-                lat, lon, radius_m, categories, name,
-                min_confidence, operating_status, brand, has_website, has_phone,
+                lat,
+                lon,
+                radius_m,
+                categories,
+                name,
+                min_confidence,
+                operating_status,
+                brand,
+                has_website,
+                has_phone,
                 effective_limit,
                 within_polygon=within_polygon,
             )
@@ -1071,9 +1096,18 @@ def find_places(
         return payload
     try:
         rows = overture.find_places(
-            lat, lon, radius_m, category, name,
-            min_confidence, operating_status, brand, has_website, has_phone,
-            effective_limit + 1, offset=start_offset,
+            lat,
+            lon,
+            radius_m,
+            category,
+            name,
+            min_confidence,
+            operating_status,
+            brand,
+            has_website,
+            has_phone,
+            effective_limit + 1,
+            offset=start_offset,
             categories=categories,
             within_polygon=within_polygon,
         )
@@ -1205,7 +1239,14 @@ def place_details(
     lang = preference_store.resolve_lang(lang)
     try:
         result = overture.place_details(
-            id, name, lat, lon, radius_m, near_lat, near_lon, lang=lang,
+            id,
+            name,
+            lat,
+            lon,
+            radius_m,
+            near_lat,
+            near_lon,
+            lang=lang,
         )
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
@@ -1424,6 +1465,8 @@ def _normalize_priorities(priorities: list[dict]) -> list[dict]:
         }
         for p in priorities
     ]
+
+
 # meeting_point's bounded radius around its computed center for candidate
 # venues — wide enough to usually find something without turning into an
 # unbounded scan; category narrows it further, same as find_places.
@@ -1612,8 +1655,11 @@ def meeting_point(
     fetch_n = min(2 * limit + 2, max_candidates)
     try:
         rows = overture.find_places(
-            center_lat, center_lon, radius_m=_MEETING_SEARCH_RADIUS_M,
-            category=category, limit=fetch_n,
+            center_lat,
+            center_lon,
+            radius_m=_MEETING_SEARCH_RADIUS_M,
+            category=category,
+            limit=fetch_n,
         )
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
@@ -1653,9 +1699,7 @@ def meeting_point(
                     > routing.ROUTE_MAX_STRAIGHT_LINE_M[mode]
                 ):
                     continue
-                if not routing.route_graph_is_cached(
-                    olat, olon, row["lat"], row["lon"], mode
-                ):
+                if not routing.route_graph_is_cached(olat, olon, row["lat"], row["lon"], mode):
                     return _needs_confirm_graph(mode)
 
     candidates = []
@@ -1706,8 +1750,7 @@ def meeting_point(
             )
         if drop_reasons - {"route_too_long"}:
             reasons.append(
-                "no street graph nearby, or genuinely disconnected, for at "
-                "least one origin"
+                "no street graph nearby, or genuinely disconnected, for at least one origin"
             )
         payload["note"] = (
             "found candidate venues near the fair meeting point, but none could "
@@ -1726,6 +1769,8 @@ def meeting_point(
     if map_payload is not None:
         payload["map"] = map_payload
     return payload
+
+
 @_tool("Travel time matrix")
 def travel_time_matrix(
     origins: list[dict | str], destinations: list[dict | str], mode: _ModeArgWalkDefault = None
@@ -1996,8 +2041,7 @@ def suggest_areas(
     anchor_payload = [_anchor_summary(a) for a in parsed_anchors]
     if not parts:
         note = (
-            "anchors' reachable sheds do not overlap at all within their given "
-            "time budgets"
+            "anchors' reachable sheds do not overlap at all within their given time budgets"
             if len(parsed_anchors) > 1
             else "the reachable shed has no area to search"
         )
@@ -2026,9 +2070,9 @@ def suggest_areas(
             "note": "no neighborhood/locality divisions intersect the reachable area",
         }
 
-    candidates = sorted(
-        by_id.values(), key=lambda r: r["overlap_fraction"], reverse=True
-    )[:candidate_fetch]
+    candidates = sorted(by_id.values(), key=lambda r: r["overlap_fraction"], reverse=True)[
+        :candidate_fetch
+    ]
 
     near_lat = sum(a["lat"] for a in parsed_anchors) / len(parsed_anchors)
     near_lon = sum(a["lon"] for a in parsed_anchors) / len(parsed_anchors)
@@ -2037,7 +2081,10 @@ def suggest_areas(
     for cand in candidates:
         try:
             score = area_score.score_locality(
-                requirements, division_id=cand["id"], near_lat=near_lat, near_lon=near_lon,
+                requirements,
+                division_id=cand["id"],
+                near_lat=near_lat,
+                near_lon=near_lon,
             )
         except area_score.LocalityNotFound:
             continue
@@ -2059,18 +2106,20 @@ def suggest_areas(
                 entry.update(leg)
             travel.append(entry)
 
-        scored.append({
-            "division_id": cand["id"],
-            "name": cand["name"],
-            "subtype": cand["subtype"],
-            "overlap_fraction": cand["overlap_fraction"],
-            "lat": loc["lat"],
-            "lon": loc["lon"],
-            "travel": travel,
-            "requirements": score["requirements"],
-            "overall_score": score["overall_score"],
-            "reason": area_suggest.build_reason(score["requirements"]),
-        })
+        scored.append(
+            {
+                "division_id": cand["id"],
+                "name": cand["name"],
+                "subtype": cand["subtype"],
+                "overlap_fraction": cand["overlap_fraction"],
+                "lat": loc["lat"],
+                "lon": loc["lon"],
+                "travel": travel,
+                "requirements": score["requirements"],
+                "overall_score": score["overall_score"],
+                "reason": area_suggest.build_reason(score["requirements"]),
+            }
+        )
 
     scored.sort(
         key=lambda r: (
@@ -2794,8 +2843,8 @@ def _water_notes(
         notes.append(
             "a subtype filter matching only 'ocean' cannot return distance rows: "
             "Overture ships the ocean as generalized 1-degree tiles whose landward "
-            "edge covers dry land, so oceans are reported through \"on_water\" and "
-            "\"water_body\" instead. Drop the filter to see the nearest real water "
+            'edge covers dry land, so oceans are reported through "on_water" and '
+            '"water_body" instead. Drop the filter to see the nearest real water '
             "features, or use water_class='bay' for a named coastal body."
         )
     if containing is not None:
@@ -2908,11 +2957,12 @@ def water_near(
     # only fires when the subtype column exists: under a degraded schema
     # the filter is a no-op and real distance rows come back, so claiming
     # the call "cannot return distance rows" would contradict the payload.
-    ocean_only = (
-        water._ocean_only_filter(subtype, water_class) and "subtype" not in degraded
-    )
+    ocean_only = water._ocean_only_filter(subtype, water_class) and "subtype" not in degraded
     result = _water_notes(
-        result, in_range_count, containing, effective_radius_m,
+        result,
+        in_range_count,
+        containing,
+        effective_radius_m,
         ocean_only_filter=ocean_only,
         filtered=bool(subtype or water_class),
     )
@@ -2923,7 +2973,10 @@ def water_near(
 
 @_tool("Geocode a place name")
 def geocode(
-    query: str, limit: int = 5, lang: _LangArg = None, country: str | None = None,
+    query: str,
+    limit: int = 5,
+    lang: _LangArg = None,
+    country: str | None = None,
 ) -> dict:
     """Free-text place name -> ranked candidate locations, from Overture divisions and places.
 
@@ -3008,7 +3061,9 @@ def geocode(
 
 @_tool("Geocode names in batch")
 def geocode_batch(
-    queries: list[str], limit_per_query: int = 3, country: str | None = None,
+    queries: list[str],
+    limit_per_query: int = 3,
+    country: str | None = None,
 ) -> dict:
     """Geocode up to 20 free-text queries in one call, one best match each.
 
@@ -3153,7 +3208,13 @@ def resolve_place(
     lang = preference_store.resolve_lang(lang)
     try:
         rows = geocoding.resolve_place(
-            query, near_lat, near_lon, limit, city=city, lang=lang, country=country,
+            query,
+            near_lat,
+            near_lon,
+            limit,
+            city=city,
+            lang=lang,
+            country=country,
         )
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
@@ -3206,11 +3267,13 @@ def resolve_place_batch(gers_ids: list[str]) -> dict:
         for gers_id in gers_ids:
             place = overture.place_details(id=gers_id)
             if place is None:
-                rows.append({
-                    "gers_id": gers_id,
-                    "error": "not_found",
-                    "detail": f"no place matched GERS id {gers_id!r}",
-                })
+                rows.append(
+                    {
+                        "gers_id": gers_id,
+                        "error": "not_found",
+                        "detail": f"no place matched GERS id {gers_id!r}",
+                    }
+                )
                 continue
             rows.append(
                 {
@@ -3409,9 +3472,7 @@ def geocode_address(
     country is uncovered or the street simply wasn't found.
     """
     try:
-        result = geocoding.geocode_address(
-            query, limit, number=number, street=street, city=city
-        )
+        result = geocoding.geocode_address(query, limit, number=number, street=street, city=city)
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
@@ -3446,9 +3507,7 @@ def geocode_intersection(
     true means the street graph hit its size cap and may be missing some.
     """
     try:
-        result = geocoding.geocode_intersection(
-            street_a=street_a, street_b=street_b, city=city
-        )
+        result = geocoding.geocode_intersection(street_a=street_a, street_b=street_b, city=city)
     except overture.UpstreamUnavailable as e:
         return _upstream_error(e)
     except overture.SchemaDegraded as e:
@@ -3573,12 +3632,14 @@ def reverse_geocode_batch(points: list[dict]) -> dict:
                 continue
             coord_error = _invalid_coord(lat, lon)
             if coord_error is not None:
-                rows.append({
-                    "lat": lat,
-                    "lon": lon,
-                    "error": "bad_request",
-                    "detail": coord_error["detail"],
-                })
+                rows.append(
+                    {
+                        "lat": lat,
+                        "lon": lon,
+                        "error": "bad_request",
+                        "detail": coord_error["detail"],
+                    }
+                )
                 continue
             rows.append(geocoding.reverse_geocode(lat, lon))
     except overture.UpstreamUnavailable as e:
@@ -3786,6 +3847,7 @@ def render_map(
     return mapview.write_artifact(
         result, title=title, inline=inline, summary=summary, legend=legend
     )
+
 
 @_tool("Reachable area (isochrone)")
 def isochrone(
@@ -3999,7 +4061,7 @@ def route(
     Ends that resolve a city apart return {"error": "too_far"} with both
     ends and the mode cap, before any graph is built. from_to is this same
     routing with a walk default.
-    """
+    """  # fmt: skip
     have_ref = from_ is not None or to is not None
     have_scalar = any(v is not None for v in (from_lat, from_lon, to_lat, to_lon))
     if have_ref and have_scalar:
@@ -4048,8 +4110,7 @@ def route(
         return {
             "error": "bad_request",
             "detail": (
-                f"unsupported prefer={prefer!r}; supported: "
-                f"{sorted(routing.SUPPORTED_PREFERENCES)}"
+                f"unsupported prefer={prefer!r}; supported: {sorted(routing.SUPPORTED_PREFERENCES)}"
             ),
         }
     if prefer == routing.PREFER_FLAT and mode not in routing.FLAT_PREFERENCE_MODES:
@@ -4088,9 +4149,15 @@ def route(
         progress.report(f"Routing a {mode}…")
     try:
         result = _run_route(
-            from_lat, from_lon, to_lat, to_lon,
-            mode=mode, include_path=include_path,
-            include_elevation=include_elevation, prefer=prefer, avoid=avoid_classes,
+            from_lat,
+            from_lon,
+            to_lat,
+            to_lon,
+            mode=mode,
+            include_path=include_path,
+            include_elevation=include_elevation,
+            prefer=prefer,
+            avoid=avoid_classes,
             cap_confirm_build=confirm and not cached,
         )
     except routing.UnsupportedMode as e:
@@ -4237,8 +4304,7 @@ def map_match(points: list[dict], mode: _ModeArgWalkDefault = None) -> dict:
         return {
             "error": "bad_request",
             "detail": (
-                f"points must hold at most {mapmatch.MAX_TRACE_POINTS} points, "
-                f"got {len(points)}"
+                f"points must hold at most {mapmatch.MAX_TRACE_POINTS} points, got {len(points)}"
             ),
         }
     parsed_points: list[dict] = []
@@ -4458,9 +4524,16 @@ def _route_between_refs(
             "mode": mode,
         }
     result = route(
-        origin["lat"], origin["lon"], dest["lat"], dest["lon"], mode=mode,
-        include_path=include_path, include_elevation=include_elevation, prefer=prefer,
-        avoid=avoid, confirm=confirm,
+        origin["lat"],
+        origin["lon"],
+        dest["lat"],
+        dest["lon"],
+        mode=mode,
+        include_path=include_path,
+        include_elevation=include_elevation,
+        prefer=prefer,
+        avoid=avoid,
+        confirm=confirm,
     )
     for key, place in (("from", origin), ("to", dest)):
         point = result.get(key)
@@ -4482,13 +4555,26 @@ _COMPARE_MODES_VERB = {"walk": "walking", "cycle": "cycling", "drive": "driving"
 # geometry, export, endpoint echoes (the call carries one from/to), and the
 # progress middleware's per-call status lines.
 _COMPARE_MODES_DROP = frozenset(
-    {"from", "to", "export", "path", "path_max_deviation_m", "path_omitted",
-     "elevation", "elevation_omitted", "progress", "status", "timing", "mode"}
+    {
+        "from",
+        "to",
+        "export",
+        "path",
+        "path_max_deviation_m",
+        "path_omitted",
+        "elevation",
+        "elevation_omitted",
+        "progress",
+        "status",
+        "timing",
+        "mode",
+    }
 )
 
 
-def _compare_modes_row(mode: str, origin: dict, dest: dict, *, include_elevation: bool,
-                       confirm: bool) -> dict:
+def _compare_modes_row(
+    mode: str, origin: dict, dest: dict, *, include_elevation: bool, confirm: bool
+) -> dict:
     """One compact per-mode row for compare_modes; failures stay inline."""
     straight_m = geo.haversine_m(origin["lat"], origin["lon"], dest["lat"], dest["lon"])
     cap_m = routing.ROUTE_MAX_STRAIGHT_LINE_M[mode]
@@ -4505,8 +4591,13 @@ def _compare_modes_row(mode: str, origin: dict, dest: dict, *, include_elevation
             "max_distance_m": cap_m,
         }
     result = route(
-        origin["lat"], origin["lon"], dest["lat"], dest["lon"], mode=mode,
-        include_elevation=include_elevation, confirm=confirm,
+        origin["lat"],
+        origin["lon"],
+        dest["lat"],
+        dest["lon"],
+        mode=mode,
+        include_elevation=include_elevation,
+        confirm=confirm,
     )
     if "error" in result:
         row = {"mode": mode}
@@ -4640,9 +4731,7 @@ def compare_modes(
     if end_error is not None:
         return end_error
     rows = [
-        _compare_modes_row(
-            mode, origin, dest, include_elevation=include_elevation, confirm=confirm
-        )
+        _compare_modes_row(mode, origin, dest, include_elevation=include_elevation, confirm=confirm)
         for mode in wanted
     ]
     ok = [r for r in rows if "error" not in r]
@@ -4893,9 +4982,15 @@ def places_along_route(
     mode = preference_store.resolve_mode(mode, preference_store.DEFAULT_MODE_ROUTE)
     try:
         result = routing.places_along_route(
-            from_lat, from_lon, to_lat, to_lon,
-            mode=mode, category=category, name=name,
-            max_detour_m=max_detour_m, limit=limit,
+            from_lat,
+            from_lon,
+            to_lat,
+            to_lon,
+            mode=mode,
+            category=category,
+            name=name,
+            max_detour_m=max_detour_m,
+            limit=limit,
         )
     except routing.UnsupportedMode as e:
         return {
@@ -4961,8 +5056,12 @@ def neighborhood_verdict(
         return coord_error
     try:
         result = verdict.neighborhood_verdict(
-            lat, lon, context=context or "",
-            radius_m=radius_m, minutes=minutes, mode=mode,
+            lat,
+            lon,
+            context=context or "",
+            radius_m=radius_m,
+            minutes=minutes,
+            mode=mode,
         )
     except routing.UnsupportedMode as e:
         return {
@@ -5293,7 +5392,11 @@ def preferences(
                     "detail": f"lang={lang!r} must be 2-3 lowercase letters",
                 }
             return preference_store.update(
-                mode=mode, pace=pace, household=household, note=note, lang=lang,
+                mode=mode,
+                pace=pace,
+                household=household,
+                note=note,
+                lang=lang,
             )
         return preference_store.payload()
     except preference_store.PreferencesError as exc:
@@ -5405,12 +5508,12 @@ def data_version() -> dict:
 def _arg_summary(fn: Callable) -> str:
     """A tool's parameters as `required,optional?` — the catalog's arg column.
 
-    Names only, no types: the catalog's budget is the whole point (48 tools
-have to fit in about 1.1k tokens), and the names here are already
-    self-describing (lat, radius_m, limit, category). A caller that guesses
-    a type wrong gets placeroot_call's bad_request naming what the tool
-    accepts, which is cheaper than paying for the types on every catalog
-    read.
+        Names only, no types: the catalog's budget is the whole point (48 tools
+    have to fit in about 1.1k tokens), and the names here are already
+        self-describing (lat, radius_m, limit, category). A caller that guesses
+        a type wrong gets placeroot_call's bad_request naming what the tool
+        accepts, which is cheaper than paying for the types on every catalog
+        read.
     """
     summary = ",".join(
         name if param.default is inspect.Parameter.empty else f"{name}?"
@@ -5564,8 +5667,10 @@ def build_server(spec=_UNSET) -> MCPServer:
         # an empty version is what clients saw before this was wired at all.
         version = ""
     server = MCPServer(
-        "placeroot", version=version,
-        instructions=BASE_INSTRUCTIONS, cache_hints=CACHE_HINTS,
+        "placeroot",
+        version=version,
+        instructions=BASE_INSTRUCTIONS,
+        cache_hints=CACHE_HINTS,
         middleware=[_session_middleware, _progress_middleware, _trace_middleware],
     )
     # One registry for the loop: `progressive` selects meta-tool names, every

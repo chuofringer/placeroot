@@ -102,11 +102,17 @@ def _fallback_anchor_candidates(
     prefix of the United States' Min Nan name is not the caller naming
     Kansas.
     """
-    return [(d["lat"], d["lon"], d["name_query"]) for d in _pkg._fallback_anchor_details(
-        search_query, divisions, region_code, local_table,
-        alt_table=alt_table, region_population=region_population,
-    )]
-
+    return [
+        (d["lat"], d["lon"], d["name_query"])
+        for d in _pkg._fallback_anchor_details(
+            search_query,
+            divisions,
+            region_code,
+            local_table,
+            alt_table=alt_table,
+            region_population=region_population,
+        )
+    ]
 
 
 # Memo for _fallback_anchor_details' split-derived anchors, keyed on its
@@ -119,7 +125,6 @@ _ANCHOR_MEMO_MAX = 128
 _anchor_memo: OrderedDict[tuple, list[dict]] = OrderedDict()
 
 _anchor_memo_lock = threading.Lock()
-
 
 
 def _anchor_memo_key(
@@ -135,7 +140,6 @@ def _anchor_memo_key(
     home_key = (home.get("lat"), home.get("lon")) if home else None
     pop_key = frozenset(region_population.items()) if region_population else None
     return (search_query, region_code, local_table, alt_table, pop_key, home_key)
-
 
 
 def _fallback_anchor_details(
@@ -161,10 +165,16 @@ def _fallback_anchor_details(
     """
     if divisions:
         top = divisions[0]
-        return [{
-            "lat": top["lat"], "lon": top["lon"], "name_query": search_query,
-            "candidate": "", "split": False, "strong": True,
-        }]
+        return [
+            {
+                "lat": top["lat"],
+                "lon": top["lon"],
+                "name_query": search_query,
+                "candidate": "",
+                "split": False,
+                "strong": True,
+            }
+        ]
     memo_key = _anchor_memo_key(
         search_query, region_code, local_table, alt_table, region_population
     )
@@ -182,7 +192,6 @@ def _fallback_anchor_details(
         while len(_anchor_memo) > _ANCHOR_MEMO_MAX:
             _anchor_memo.popitem(last=False)
     return out
-
 
 
 def _derive_split_anchors(
@@ -223,14 +232,14 @@ def _derive_split_anchors(
                 and not _pkg._nothing_but_generic(token)
                 and token.lower().strip(".,") not in _pkg._NAME_PREFIX_WORDS
             ):
-                splits.append((token, " ".join(tokens[:i] + tokens[i + 1:]).strip(), True))
+                splits.append((token, " ".join(tokens[:i] + tokens[i + 1 :]).strip(), True))
             # ...and the pair starting here, because a place name's location
             # half is usually two words ("San Jose", "New York", "Santa
             # Clara") and neither word locates anything alone. Only leading
             # pairs: the trailing ones are already covered above.
             if i + 2 <= len(tokens) - 1:
-                pair = " ".join(tokens[i:i + 2])
-                splits.append((pair, " ".join(tokens[:i] + tokens[i + 2:]).strip(), True))
+                pair = " ".join(tokens[i : i + 2])
+                splits.append((pair, " ".join(tokens[:i] + tokens[i + 2 :]).strip(), True))
 
     # alt_table is the load-bearing part of these lookups: the location token
     # is a *city name as the user writes it*, and for many big cities that is
@@ -273,12 +282,16 @@ def _derive_split_anchors(
             # "Tradiations of America" does not make "Mall of America" a
             # query about Virginia. Not a location word; not an anchor.
             continue
-        contenders.append({
-            "row": row, "candidate": candidate, "base": base,
-            "precedence": precedence,
-            "broad": _pkg._SUBTYPE_WEIGHT.get(row.get("subtype"), 2) <= 1,
-            "leading": is_leading,
-        })
+        contenders.append(
+            {
+                "row": row,
+                "candidate": candidate,
+                "base": base,
+                "precedence": precedence,
+                "broad": _pkg._SUBTYPE_WEIGHT.get(row.get("subtype"), 2) <= 1,
+                "leading": is_leading,
+            }
+        )
         # The same word's next two cities, as lower-precedence contenders:
         # ambiguous city names lose coin flips — "cambridge" is the UK's,
         # Ontario's and Massachusetts's, and the answer to "harvard square
@@ -289,21 +302,22 @@ def _derive_split_anchors(
         seen_regions = {(row.get("country"), row.get("region"))}
         alt_rank = 0
         for _ in range(2):
-            alt_rows = [
-                r for r in rows
-                if (r.get("country"), r.get("region")) not in seen_regions
-            ]
+            alt_rows = [r for r in rows if (r.get("country"), r.get("region")) not in seen_regions]
             if not alt_rows:
                 break
             alt = _pick_anchor_row(alt_rows, candidate, pop)
             seen_regions.add((alt.get("country"), alt.get("region")))
             alt_rank += 1
-            contenders.append({
-                "row": alt, "candidate": candidate, "base": base,
-                "precedence": precedence + 100 * alt_rank,
-                "broad": _pkg._SUBTYPE_WEIGHT.get(alt.get("subtype"), 2) <= 1,
-                "leading": is_leading,
-            })
+            contenders.append(
+                {
+                    "row": alt,
+                    "candidate": candidate,
+                    "base": base,
+                    "precedence": precedence + 100 * alt_rank,
+                    "broad": _pkg._SUBTYPE_WEIGHT.get(alt.get("subtype"), 2) <= 1,
+                    "leading": is_leading,
+                }
+            )
     ranked = _rank_anchor_contenders(contenders)
     if not ranked:
         return []
@@ -312,21 +326,25 @@ def _derive_split_anchors(
         # #472: "Station" left over from "Shibuya Station" is as empty a
         # thing to search for as "the" -- see _nothing_but_generic.
         name_query = None if _pkg._nothing_but_generic(c["base"]) else c["base"]
-        out.append({
-            "lat": c["row"]["lat"], "lon": c["row"]["lon"], "name_query": name_query,
-            "candidate": c["candidate"], "split": True,
-            # #464: see _fallback_anchor_candidates. Trailing, city-level,
-            # and the caller typed the division's name (exact/prefix, or
-            # the whole matched name sits in the query): the anchor words
-            # are a location, not part of the place's name.
-            "strong": (
-                not c["leading"]
-                and not c["broad"]
-                and not _anchor_is_weak(c["row"], c["candidate"], search_query)
-            ),
-        })
+        out.append(
+            {
+                "lat": c["row"]["lat"],
+                "lon": c["row"]["lon"],
+                "name_query": name_query,
+                "candidate": c["candidate"],
+                "split": True,
+                # #464: see _fallback_anchor_candidates. Trailing, city-level,
+                # and the caller typed the division's name (exact/prefix, or
+                # the whole matched name sits in the query): the anchor words
+                # are a location, not part of the place's name.
+                "strong": (
+                    not c["leading"]
+                    and not c["broad"]
+                    and not _anchor_is_weak(c["row"], c["candidate"], search_query)
+                ),
+            }
+        )
     return out
-
 
 
 def _anchor_is_weak(row: dict, candidate: str, search_query: str) -> bool:
@@ -349,7 +367,6 @@ def _anchor_is_weak(row: dict, candidate: str, search_query: str) -> bool:
     return True
 
 
-
 # When two splits disagree on which word is the location, more of the query
 # matching is stronger evidence — but only between comparably prominent
 # places. "palo alto caltrain" offers "Palo Alto" (68k) and "Palo" (Leyte,
@@ -360,7 +377,6 @@ def _anchor_is_weak(row: dict, candidate: str, search_query: str) -> bool:
 # generous, because the longer reading is usually right when it exists at
 # all.
 _ANCHOR_LONGER_MATCH_POP_RATIO = 50
-
 
 
 def _anchor_contender_better(challenger: dict, incumbent: dict) -> bool:
@@ -377,9 +393,7 @@ def _anchor_contender_better(challenger: dict, incumbent: dict) -> bool:
     ch_pop = challenger["row"].get("population") or 0
     in_pop = incumbent["row"].get("population") or 0
     if ch_len != in_len:
-        longer, shorter = (
-            (challenger, incumbent) if ch_len > in_len else (incumbent, challenger)
-        )
+        longer, shorter = (challenger, incumbent) if ch_len > in_len else (incumbent, challenger)
         longer_pop = longer["row"].get("population") or 0
         shorter_pop = shorter["row"].get("population") or 0
         longer_wins = shorter_pop <= max(longer_pop, 1) * _ANCHOR_LONGER_MATCH_POP_RATIO
@@ -387,7 +401,6 @@ def _anchor_contender_better(challenger: dict, incumbent: dict) -> bool:
     if ch_pop != in_pop:
         return ch_pop > in_pop
     return challenger["precedence"] < incumbent["precedence"]
-
 
 
 def _rank_anchor_contenders(contenders: list[dict]) -> list[dict]:
@@ -407,7 +420,6 @@ def _rank_anchor_contenders(contenders: list[dict]) -> list[dict]:
     return ranked
 
 
-
 def _fallback_anchor(*args, **kwargs):
     """The best anchor candidate, or None — the shape every existing caller
     takes. _fallback_anchor_candidates carries the full ranked list for the
@@ -418,14 +430,12 @@ def _fallback_anchor(*args, **kwargs):
     return candidates[0] if candidates else None
 
 
-
 def _names_a_feature(query: str) -> bool:
     """Whether the query names a *thing* — a tower, a terminal, a museum —
     rather than a populated place. Divisions are never called these, so a
     lookup against the divisions theme can only come back empty."""
     words = {w.strip(".,").lower() for w in query.split()}
     return bool(words & _pkg._GENERIC_PLACE_WORDS)
-
 
 
 def _pick_anchor_row(rows: list[dict], query: str, region_population: dict[str, int]) -> dict:
@@ -446,6 +456,7 @@ def _pick_anchor_row(rows: list[dict], query: str, region_population: dict[str, 
     for "Tokyo"). _ANCHOR_SPECIFIC_SHARE is what separates New York City's
     43% of its state from a 0.04% coincidence.
     """
+
     def _best(group):
         return min(group, key=lambda r: _pkg._rank_key(r, query, region_population), default=None)
 
@@ -458,10 +469,11 @@ def _pick_anchor_row(rows: list[dict], query: str, region_population: dict[str, 
         return broad
     if broad is None:
         return specific
-    if (specific.get("population") or 0) >= _pkg._ANCHOR_SPECIFIC_SHARE * (broad.get("population") or 0):  # noqa: E501
+    if (specific.get("population") or 0) >= _pkg._ANCHOR_SPECIFIC_SHARE * (
+        broad.get("population") or 0
+    ):  # noqa: E501
         return specific
     return broad
-
 
 
 def _query_places_multi_anchor(
@@ -500,9 +512,9 @@ def _query_places_multi_anchor(
         for i, token in enumerate(tokens):
             params[f"tok{i}"] = f"%{_pkg.overture._like_escape(token)}%"
         name_filters.append(
-            "(" + " AND ".join(
-                f"names.primary ILIKE $tok{i} ESCAPE '\\'" for i in range(len(tokens))
-            ) + ")"
+            "("
+            + " AND ".join(f"names.primary ILIKE $tok{i} ESCAPE '\\'" for i in range(len(tokens)))
+            + ")"
         )
     name_clause = "(" + " OR ".join(name_filters) + ")"
     category_expr = "taxonomy.primary" if cols is not None and "taxonomy" in cols else "NULL"
@@ -519,8 +531,7 @@ def _query_places_multi_anchor(
             dist_f = dist_f.replace(f"${key}", f"${key}_a{n}")
             params[f"{key}_a{n}"] = value
         from_source = (
-            manifest.pruned_source_sql(glob, bbox)
-            or f"read_parquet('{glob}', hive_partitioning=1)"
+            manifest.pruned_source_sql(glob, bbox) or f"read_parquet('{glob}', hive_partitioning=1)"
         )
         branches.append(f"""
             SELECT id, names.primary AS name, bbox.ymin AS lat, bbox.xmin AS lon,
@@ -534,20 +545,34 @@ def _query_places_multi_anchor(
         LIMIT {_pkg.DIVISION_OVERFETCH}
     """
     try:
-        with trace.scan(
-            "places name scan (multi-anchor)", bounded=True,
-            source=f"places/place x{len(branches)} cities", anchors=len(branches),
-        ), _pkg.overture._conn_lock:
+        with (
+            trace.scan(
+                "places name scan (multi-anchor)",
+                bounded=True,
+                source=f"places/place x{len(branches)} cities",
+                anchors=len(branches),
+            ),
+            _pkg.overture._conn_lock,
+        ):
             rows = _pkg.overture.conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise _pkg.overture.UpstreamUnavailable(str(e)) from e
-    result = [{
-        "id": r[0], "name": r[1], "subtype": "place",
-        "country": None, "region": None,
-        "lat": round(r[2], 6), "lon": round(r[3], 6),
-        "admin_context": [], "population": None,
-        "_confidence": r[4], "category": r[5],
-    } for r in rows]
+    result = [
+        {
+            "id": r[0],
+            "name": r[1],
+            "subtype": "place",
+            "country": None,
+            "region": None,
+            "lat": round(r[2], 6),
+            "lon": round(r[3], 6),
+            "admin_context": [],
+            "population": None,
+            "_confidence": r[4],
+            "category": r[5],
+        }
+        for r in rows
+    ]
     if not result:
         return [], None
     best = max(result, key=lambda r: r["_confidence"])
@@ -556,7 +581,6 @@ def _query_places_multi_anchor(
         key=lambda a: geo.haversine_m(a[0], a[1], best["lat"], best["lon"]),
     )
     return result, winner
-
 
 
 def _schedule_places_tiles_near(anchor: tuple[float, float]) -> None:
@@ -578,9 +602,10 @@ def _schedule_places_tiles_near(anchor: tuple[float, float]) -> None:
         _pkg.logger.debug("post-hoc tile scheduling failed for a fallback anchor", exc_info=True)
 
 
-
 def _query_places_fallback(
-    query: str, anchor: tuple[float, float] | None = None, also: str | None = None,
+    query: str,
+    anchor: tuple[float, float] | None = None,
+    also: str | None = None,
     schedule_tiles: bool = True,
 ) -> list[dict]:
     """Supplement divisions with named places when divisions alone don't fill limit.
@@ -654,16 +679,18 @@ def _query_places_fallback(
         for i, token in enumerate(tokens):
             params[f"tok{i}"] = f"%{_pkg.overture._like_escape(token)}%"
         alternatives.append(
-            "(" + " AND ".join(
-                f"names.primary ILIKE $tok{i} ESCAPE '\\'" for i in range(len(tokens))
-            ) + ")"
+            "("
+            + " AND ".join(f"names.primary ILIKE $tok{i} ESCAPE '\\'" for i in range(len(tokens)))
+            + ")"
         )
     filters = ["(" + " OR ".join(alternatives) + ")"]
     anchor_bbox = None
     if anchor is not None:
         lat, lon = anchor
-        bbox_filter, distance_filter, geo_params, anchor_bbox, _radius_m = _pkg.overture.area_geometry(  # noqa: E501
-            lat, lon, _pkg._PLACES_FALLBACK_RADIUS_M
+        bbox_filter, distance_filter, geo_params, anchor_bbox, _radius_m = (
+            _pkg.overture.area_geometry(  # noqa: E501
+                lat, lon, _pkg._PLACES_FALLBACK_RADIUS_M
+            )
         )
         filters += [bbox_filter, distance_filter]
         params.update(geo_params)
@@ -696,27 +723,39 @@ def _query_places_fallback(
                coalesce(confidence, 0) AS confidence,
                {category_expr} AS category
         FROM {from_source}
-        WHERE {' AND '.join(filters)}
+        WHERE {" AND ".join(filters)}
         ORDER BY confidence DESC
         LIMIT {_pkg.DIVISION_OVERFETCH}
     """
     try:
         # Bounded exactly when an anchor gave us a box to search inside; the
         # unanchored case is the planet-wide name scan #105 gates against.
-        with trace.scan(
-            "places name scan", bounded=anchor_bbox is not None, source=from_source,
-            anchored=anchor is not None,
-        ), _pkg.overture._conn_lock:
+        with (
+            trace.scan(
+                "places name scan",
+                bounded=anchor_bbox is not None,
+                source=from_source,
+                anchored=anchor is not None,
+            ),
+            _pkg.overture._conn_lock,
+        ):
             rows = _pkg.overture.conn().execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise _pkg.overture.UpstreamUnavailable(str(e)) from e
     result = []
     for r in rows:
-        result.append({
-            "id": r[0], "name": r[1], "subtype": "place",
-            "country": None, "region": None,
-            "lat": round(r[2], 6), "lon": round(r[3], 6),
-            "admin_context": [], "_confidence": r[4],
-            "_category": r[5],
-        })
+        result.append(
+            {
+                "id": r[0],
+                "name": r[1],
+                "subtype": "place",
+                "country": None,
+                "region": None,
+                "lat": round(r[2], 6),
+                "lon": round(r[3], 6),
+                "admin_context": [],
+                "_confidence": r[4],
+                "_category": r[5],
+            }
+        )
     return result

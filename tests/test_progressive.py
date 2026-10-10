@@ -197,9 +197,7 @@ def test_every_catalog_entry_carries_a_summary_and_an_arg_list():
 
 def test_catalog_summaries_match_the_tools_own_descriptions():
     """One source of truth: the docstring the full surface advertises."""
-    descriptions = {
-        t.name: " ".join((t.description or "").split()) for t in _tools(None)
-    }
+    descriptions = {t.name: " ".join((t.description or "").split()) for t in _tools(None)}
     for entry in server.placeroot_capabilities()["tools"]:
         name, _, rest = entry.partition("(")
         summary = rest.partition(")")[2].strip()

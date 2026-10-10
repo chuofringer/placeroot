@@ -58,17 +58,51 @@ SATURATION_COUNT = 5
 # grocery store" or "good schools" never gets silently scored off whatever
 # noun happens to sit in it. Deliberately small and literal (word-boundary
 # matched, not substring) so it never eats an unrelated category word.
-SUBJECTIVE_MARKERS = frozenset({
-    "quiet", "quieter", "quietest",
-    "safe", "safer", "safest", "safety", "unsafe", "crime", "sketchy",
-    "good", "great", "best", "top", "quality", "reputable", "excellent",
-    "nice", "pleasant", "clean", "cleaner", "tidy",
-    "friendly", "welcoming", "family-friendly",
-    "affordable", "cheap", "cheaper", "inexpensive",
-    "expensive", "pricey", "upscale", "trendy", "hip",
-    "diverse", "vibrant", "up-and-coming", "gentrifying", "gentrified",
-    "walkable", "walkability",
-})
+SUBJECTIVE_MARKERS = frozenset(
+    {
+        "quiet",
+        "quieter",
+        "quietest",
+        "safe",
+        "safer",
+        "safest",
+        "safety",
+        "unsafe",
+        "crime",
+        "sketchy",
+        "good",
+        "great",
+        "best",
+        "top",
+        "quality",
+        "reputable",
+        "excellent",
+        "nice",
+        "pleasant",
+        "clean",
+        "cleaner",
+        "tidy",
+        "friendly",
+        "welcoming",
+        "family-friendly",
+        "affordable",
+        "cheap",
+        "cheaper",
+        "inexpensive",
+        "expensive",
+        "pricey",
+        "upscale",
+        "trendy",
+        "hip",
+        "diverse",
+        "vibrant",
+        "up-and-coming",
+        "gentrifying",
+        "gentrified",
+        "walkable",
+        "walkability",
+    }
+)
 
 HONESTY = (
     "Requirement scores are open-data place counts and nearest-distance "
@@ -193,22 +227,27 @@ def _requirement_score(count: int, nearest_distance_m: float | None, radius_m: f
 
 
 def _requirement_reason(
-    label: str, measurable: bool, count: int | None, nearest_distance_m: float | None,
-    score: float | None, note: str | None,
+    label: str,
+    measurable: bool,
+    count: int | None,
+    nearest_distance_m: float | None,
+    score: float | None,
+    note: str | None,
 ) -> str:
     if not measurable:
         return f"{label}: not measurable — {note}"
     if count == 0:
         return f"{label}: none found within the search radius (score 0.0)."
-    nearest_bit = (
-        f", nearest {nearest_distance_m:.0f}m" if nearest_distance_m is not None else ""
-    )
+    nearest_bit = f", nearest {nearest_distance_m:.0f}m" if nearest_distance_m is not None else ""
     return f"{label}: {count} within the search radius{nearest_bit} (score {score})."
 
 
 def _locate(
-    division_id: str | None, lat: float | None, lon: float | None,
-    near_lat: float | None, near_lon: float | None,
+    division_id: str | None,
+    lat: float | None,
+    lon: float | None,
+    near_lat: float | None,
+    near_lon: float | None,
 ) -> tuple[float, float, dict]:
     """Resolve the locality's scoring center, and a compact locality descriptor.
 
@@ -231,12 +270,16 @@ def _locate(
         rlat, rlon = entity.get("lat"), entity.get("lon")
         if rlat is None or rlon is None:
             raise LocalityNotFound(division_id)
-        return float(rlat), float(rlon), {
-            "division_id": division_id,
-            "name": entity.get("name"),
-            "lat": round(float(rlat), 6),
-            "lon": round(float(rlon), 6),
-        }
+        return (
+            float(rlat),
+            float(rlon),
+            {
+                "division_id": division_id,
+                "name": entity.get("name"),
+                "lat": round(float(rlat), 6),
+                "lon": round(float(rlon), 6),
+            },
+        )
     if lat is None or lon is None:
         raise ValueError("pass exactly one of division_id or both lat and lon")
     _check_coord(lat, lon)
@@ -303,14 +346,16 @@ def score_locality(
             continue
         match = _resolve_category(label)
         if match is None:
-            resolved.append({
-                "label": label,
-                "measurable": False,
-                "note": (
-                    "no matching category in the Overture taxonomy — "
-                    "try search_categories to find a phrasing it recognizes"
-                ),
-            })
+            resolved.append(
+                {
+                    "label": label,
+                    "measurable": False,
+                    "note": (
+                        "no matching category in the Overture taxonomy — "
+                        "try search_categories to find a phrasing it recognizes"
+                    ),
+                }
+            )
             continue
         resolved.append({"label": label, "measurable": True, "category": match["slug"]})
 
@@ -336,9 +381,7 @@ def score_locality(
     measurable_scores: list[float] = []
     for row in resolved:
         if not row["measurable"]:
-            row["reason"] = _requirement_reason(
-                row["label"], False, None, None, None, row["note"]
-            )
+            row["reason"] = _requirement_reason(row["label"], False, None, None, None, row["note"])
             scored.append(row)
             continue
         slug = row["category"]
@@ -350,19 +393,21 @@ def score_locality(
                 nearest_distance_m = float(nearest[0]["distance_m"])
         score = _requirement_score(count, nearest_distance_m, radius_m)
         measurable_scores.append(score)
-        scored.append({
-            "label": row["label"],
-            "measurable": True,
-            "category": slug,
-            "count": count,
-            "nearest_distance_m": (
-                round(nearest_distance_m, 1) if nearest_distance_m is not None else None
-            ),
-            "score": score,
-            "reason": _requirement_reason(
-                row["label"], True, count, nearest_distance_m, score, None
-            ),
-        })
+        scored.append(
+            {
+                "label": row["label"],
+                "measurable": True,
+                "category": slug,
+                "count": count,
+                "nearest_distance_m": (
+                    round(nearest_distance_m, 1) if nearest_distance_m is not None else None
+                ),
+                "score": score,
+                "reason": _requirement_reason(
+                    row["label"], True, count, nearest_distance_m, score, None
+                ),
+            }
+        )
 
     overall_score = (
         round(sum(measurable_scores) / len(measurable_scores), 3) if measurable_scores else None

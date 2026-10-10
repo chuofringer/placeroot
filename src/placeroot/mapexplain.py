@@ -195,9 +195,7 @@ def from_compare_areas_result(
             callout = f"score {scores[idx]:g} · {role}"
         else:
             callout = "score unavailable"
-        features.append(
-            _circle_feature(alat, alon, circle_radius, label=label, callout=callout)
-        )
+        features.append(_circle_feature(alat, alon, circle_radius, label=label, callout=callout))
 
     if not features:
         return None

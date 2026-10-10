@@ -119,7 +119,14 @@ def resolve_place(
     with a country/region qualifier parsed off `query` itself.
     """
     rows, commit = _resolve_place_impl(
-        query, near_lat, near_lon, limit, city, lang, country, defer=False,
+        query,
+        near_lat,
+        near_lon,
+        limit,
+        city,
+        lang,
+        country,
+        defer=False,
     )
     commit()
     return rows
@@ -199,13 +206,26 @@ def _resolve_place_impl(
 
     cache_city, cache_lat, cache_lon = city, near_lat, near_lon
     cached = _pkg._resolve_cache_get(
-        query, cache_city, cache_lat, cache_lon, lang, country, touch=not defer,
+        query,
+        cache_city,
+        cache_lat,
+        cache_lon,
+        lang,
+        country,
+        touch=not defer,
     )
     if cached is not None:
         if defer:
-            writes.append(lambda: _pkg._resolve_cache_get(
-                query, cache_city, cache_lat, cache_lon, lang, country,
-            ))
+            writes.append(
+                lambda: _pkg._resolve_cache_get(
+                    query,
+                    cache_city,
+                    cache_lat,
+                    cache_lon,
+                    lang,
+                    country,
+                )
+            )
         return cached[:limit], _commit
 
     # #271: a caller-supplied (or now inferred) city is the location half
@@ -259,15 +279,21 @@ def _resolve_place_impl(
         # city-hint radius are never candidates, and geocode anchors its
         # places search on the pin instead of guessing from the words.
         geocode_hits = _pkg.geocode(
-            search_query, limit=_pkg._RESOLVE_OVERFETCH, lang=lang,
-            near=(near_lat, near_lon, _pkg._CITY_HINT_RADIUS_M), **country_kw,
+            search_query,
+            limit=_pkg._RESOLVE_OVERFETCH,
+            lang=lang,
+            near=(near_lat, near_lon, _pkg._CITY_HINT_RADIUS_M),
+            **country_kw,
         )
         geocode_hits = [
-            r for r in geocode_hits
+            r
+            for r in geocode_hits
             if geo.haversine_m(near_lat, near_lon, r["lat"], r["lon"]) <= _pkg._CITY_HINT_RADIUS_M
         ]
     else:
-        geocode_hits = _pkg.geocode(search_query, limit=_pkg._RESOLVE_OVERFETCH, lang=lang, **country_kw)  # noqa: E501
+        geocode_hits = _pkg.geocode(
+            search_query, limit=_pkg._RESOLVE_OVERFETCH, lang=lang, **country_kw
+        )  # noqa: E501
     division_hits = [r for r in geocode_hits if r["type"] != "place"]
 
     # #464: None unless the reference below is a split-derived guess; then
@@ -286,7 +312,10 @@ def _resolve_place_impl(
         # a Plaza Mayor 25 km out of town (#272). One local-index lookup.
         local_table = _pkg._local_divisions_table()
         options = _pkg._fallback_anchor_details(
-            query, [], None, local_table,
+            query,
+            [],
+            None,
+            local_table,
             alt_table=_pkg._local_alt_names_table(local_table),
             region_population=_pkg._region_population_lookup(local_table),
         )
@@ -308,9 +337,11 @@ def _resolve_place_impl(
             # anchor's words named. Same containment-or-typo-close test as
             # #374's cover rule, over the whole query rather than a
             # residual.
-            exempt = set(_pkg.overture._fold_poi_name(options[0]["candidate"]).split()) if (
-                options[0]["strong"]
-            ) else set()
+            exempt = (
+                set(_pkg.overture._fold_poi_name(options[0]["candidate"]).split())
+                if (options[0]["strong"])
+                else set()
+            )
             split_cover_full = _pkg._significant_tokens(query)
             split_cover_tokens = [
                 t for t in split_cover_full if _pkg.overture._fold_poi_name(t) not in exempt
@@ -323,9 +354,9 @@ def _resolve_place_impl(
     )
     # #469: the city words split off the query — location context for the
     # gate to set aside, not a word a candidate can be related through.
-    context_words = frozenset(
-        t.lower() for t in _pkg._significant_tokens(query)
-    ) - frozenset(t.lower() for t in _pkg._significant_tokens(search_query))
+    context_words = frozenset(t.lower() for t in _pkg._significant_tokens(query)) - frozenset(
+        t.lower() for t in _pkg._significant_tokens(search_query)
+    )
     # #469: what each of geocode()'s place-kind rows earns from the gate,
     # decided once here — both for the coverage count just below (a row the
     # gate will drop as unrelated is not coverage: before this, ten
@@ -349,7 +380,8 @@ def _resolve_place_impl(
     # as place hits. Counting those as coverage skipped the one search that
     # would have found the actual dam 200m from the caller's reference.
     geocode_places = sum(
-        1 for r in geocode_hits
+        1
+        for r in geocode_hits
         if r["type"] == "place"
         and reference is not None
         and geocode_place_labels.get(r["id"]) is not None
@@ -367,7 +399,8 @@ def _resolve_place_impl(
         # "harvard square cambridge" token-by-token means searching
         # "harvard": the one word that distinguishes the place.
         tokens = [
-            t for t in _pkg._significant_tokens(search_query)
+            t
+            for t in _pkg._significant_tokens(search_query)
             if t.lower().strip(".,") not in _pkg._GENERIC_PLACE_WORDS
         ]
         # Phrase first: "harvard square" as one name, not just "harvard"
@@ -378,10 +411,7 @@ def _resolve_place_impl(
         alias_tokens: set[str] = set()
         for alias_name in _pkg._alias_names_for(search_query):
             for tok in alias_name.split():
-                if (
-                    tok not in tokens
-                    and tok.lower().strip(".,") not in _pkg._GENERIC_PLACE_WORDS
-                ):
+                if tok not in tokens and tok.lower().strip(".,") not in _pkg._GENERIC_PLACE_WORDS:
                     tokens.append(tok)
                     alias_tokens.add(tok)
         if len(tokens) > 1:
@@ -430,8 +460,11 @@ def _resolve_place_impl(
 
         def _name_scan(token: str, fuzzy: bool) -> Callable[[], list[dict]]:
             return lambda: _pkg.overture.find_places(
-                ref_lat, ref_lon, radius_m=_pkg._RESOLVE_PLACE_RADIUS_M,
-                name=token, limit=_pkg._RESOLVE_OVERFETCH,
+                ref_lat,
+                ref_lon,
+                radius_m=_pkg._RESOLVE_PLACE_RADIUS_M,
+                name=token,
+                limit=_pkg._RESOLVE_OVERFETCH,
                 **({} if fuzzy else _pkg._find_places_kwargs(fuzzy_fallback=False)),
             )
 
@@ -439,20 +472,27 @@ def _resolve_place_impl(
         if phrase is not None:
             first_round.append(_name_scan(phrase, fuzzy=True))
         if type_token is not None:
-            first_round.append(lambda: _pkg._type_scan_rows(ref_lat, ref_lon, type_slugs, type_token))  # noqa: E501
+            first_round.append(
+                lambda: _pkg._type_scan_rows(ref_lat, ref_lon, type_slugs, type_token)
+            )  # noqa: E501
         first_rows = _pkg._run_place_scans(first_round)
         phrase_rows = first_rows.pop(0) if phrase is not None else []
         type_rows = first_rows.pop(0) if type_token is not None else []
-        confident = alias_pin is None and split_cover_tokens is None and (
-            any(
-                r["name"] and not r.get("matched_by")
-                and _pkg._best_place_label(r["name"], query, query_alternates, context_words)
-                == _pkg._CONFIDENT_PLACE_LABEL
-                for r in phrase_rows
-            )
-            or any(
-                r["name"] and _pkg._fuzzy_place_covers_query(r["name"], gate_tokens)
-                for r in type_rows
+        confident = (
+            alias_pin is None
+            and split_cover_tokens is None
+            and (
+                any(
+                    r["name"]
+                    and not r.get("matched_by")
+                    and _pkg._best_place_label(r["name"], query, query_alternates, context_words)
+                    == _pkg._CONFIDENT_PLACE_LABEL
+                    for r in phrase_rows
+                )
+                or any(
+                    r["name"] and _pkg._fuzzy_place_covers_query(r["name"], gate_tokens)
+                    for r in type_rows
+                )
             )
         )
         word_tokens = [] if confident else [t for t in name_tokens if t != phrase]
@@ -494,7 +534,9 @@ def _resolve_place_impl(
     if alias_pin is not None:
         pinned_ids = {r["id"] for r in place_rows}
         for row in _pkg.overture.find_places(
-            alias_pin[0], alias_pin[1], radius_m=_pkg._ALIAS_PIN_RADIUS_M,
+            alias_pin[0],
+            alias_pin[1],
+            radius_m=_pkg._ALIAS_PIN_RADIUS_M,
             limit=_pkg._ALIAS_PIN_SCAN_LIMIT,
         ):
             if row["id"] and row["id"] not in pinned_ids:
@@ -508,8 +550,11 @@ def _resolve_place_impl(
             continue
         seen_ids.add(r["id"])
         candidate = {
-            "id": r["id"], "kind": "division", "name": r["name"],
-            "lat": r["lat"], "lon": r["lon"],
+            "id": r["id"],
+            "kind": "division",
+            "name": r["name"],
+            "lat": r["lat"],
+            "lon": r["lon"],
             "type": r.get("type"),
             "admin_context": r["admin_context"],
             # #410: label (and therefore rank) off the primary name — the
@@ -564,8 +609,11 @@ def _resolve_place_impl(
             continue  # #464: shares a word with the query, near a guessed anchor
         seen_ids.add(r["id"])
         candidate = {
-            "id": r["id"], "kind": "place", "name": r["name"],
-            "lat": r["lat"], "lon": r["lon"],
+            "id": r["id"],
+            "kind": "place",
+            "name": r["name"],
+            "lat": r["lat"],
+            "lon": r["lon"],
             "category": r["category"],
             "match": label,
             "_prominence": r.get("confidence") or 0.0,
@@ -606,13 +654,18 @@ def _resolve_place_impl(
             if not _pkg._fuzzy_place_covers_query(r["name"], required):
                 continue
         seen_ids.add(r["id"])
-        candidates.append({
-            "id": r["id"], "kind": "place", "name": r["name"],
-            "lat": r["lat"], "lon": r["lon"],
-            "category": r.get("category"),
-            "match": label,
-            "_prominence": r.get("rank_score") or 0.0,
-        })
+        candidates.append(
+            {
+                "id": r["id"],
+                "kind": "place",
+                "name": r["name"],
+                "lat": r["lat"],
+                "lon": r["lon"],
+                "category": r.get("category"),
+                "match": label,
+                "_prominence": r.get("rank_score") or 0.0,
+            }
+        )
 
     if split_cover_tokens is not None and not candidates:
         # #464: the guessed anchor explained nothing — the query is a bare
@@ -635,13 +688,18 @@ def _resolve_place_impl(
                 if tier < _pkg._STRONG_TIER:
                     continue
                 seen_ids.add(r["id"])
-                candidates.append({
-                    "id": r["id"], "kind": "place", "name": r["name"],
-                    "lat": r["lat"], "lon": r["lon"],
-                    "category": r.get("_category"),
-                    "match": _pkg._MATCH_TIER_LABELS[tier],
-                    "_prominence": r.get("_confidence") or 0.0,
-                })
+                candidates.append(
+                    {
+                        "id": r["id"],
+                        "kind": "place",
+                        "name": r["name"],
+                        "lat": r["lat"],
+                        "lon": r["lon"],
+                        "category": r.get("_category"),
+                        "match": _pkg._MATCH_TIER_LABELS[tier],
+                        "_prominence": r.get("_confidence") or 0.0,
+                    }
+                )
 
     # Distance to the reference before prominence (#272): the reference is
     # the caller's own statement of where they mean (their near-hint, city
@@ -660,12 +718,17 @@ def _resolve_place_impl(
     # relative to one another.
     typed = [c for c in candidates if c.get("_type_scan")]
     for c in candidates:
-        c["_support"] = sum(
-            1 for other in typed
-            if other is not c
-            and geo.haversine_m(c["lat"], c["lon"], other["lat"], other["lon"])
-            <= _pkg._TYPE_SCAN_SUPPORT_RADIUS_M
-        ) if c.get("_type_scan") else 0
+        c["_support"] = (
+            sum(
+                1
+                for other in typed
+                if other is not c
+                and geo.haversine_m(c["lat"], c["lon"], other["lat"], other["lon"])
+                <= _pkg._TYPE_SCAN_SUPPORT_RADIUS_M
+            )
+            if c.get("_type_scan")
+            else 0
+        )
 
     # #481: when the pin came from the bundled alias table, that pin is a
     # curated landmark coordinate — the strongest evidence the server has
@@ -711,9 +774,17 @@ def _resolve_place_impl(
     out = candidates[:limit]
     # The whole ranked list, not `out`: the key carries no limit, and a
     # later call with a larger limit slices the cached list on read.
-    _write(lambda: _pkg._resolve_cache_put(
-        query, cache_city, cache_lat, cache_lon, candidates, lang, country,
-    ))
+    _write(
+        lambda: _pkg._resolve_cache_put(
+            query,
+            cache_city,
+            cache_lat,
+            cache_lon,
+            candidates,
+            lang,
+            country,
+        )
+    )
     if out:
         _write(lambda: _pkg._remember_last_city(city, out[0]))
         _write(lambda: _pkg._kick_autowarm(out[0]))

@@ -171,6 +171,7 @@ def offline_data(request, monkeypatch):
     routing.clear_graph_cache()
     autowarm.clear_autowarm_state()
     from placeroot import geocode as geocode_mod
+
     geocode_mod.clear_resolve_session()
     progress.clear()
     # gers.py's negative cache is keyed by (release, id), and the release is
@@ -192,10 +193,7 @@ def offline_data(request, monkeypatch):
 
 
 def _live_autowarm_threads() -> list[threading.Thread]:
-    return [
-        t for t in threading.enumerate()
-        if t.name.startswith("placeroot-autowarm-")
-    ]
+    return [t for t in threading.enumerate() if t.name.startswith("placeroot-autowarm-")]
 
 
 @pytest.fixture(autouse=True)

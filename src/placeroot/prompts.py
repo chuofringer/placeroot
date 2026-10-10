@@ -220,7 +220,6 @@ one-pager the user can send as a local file.
 {_COMPACT}"""
 
 
-
 SHOULD_I_LIVE_HERE_TOOLS = (
     "geocode",
     "neighborhood_verdict",
@@ -450,8 +449,7 @@ PROMPTS: dict[str, tuple[Callable[..., str], str, tuple[str, ...]]] = {
     ),
     "compare_neighborhoods": (
         _compare_neighborhoods,
-        "Compare two neighborhoods side by side on amenity mix, density, "
-        "and building stock.",
+        "Compare two neighborhoods side by side on amenity mix, density, and building stock.",
         COMPARE_NEIGHBORHOODS_TOOLS,
     ),
     "plan_errands": (
@@ -501,13 +499,9 @@ def register(server: MCPServer, selected: set[str]) -> None:
 
     @server.prompt(name="site_selection", description=PROMPTS["site_selection"][1])
     def site_selection(business_type: str, area: str) -> str:
-        return _site_selection(business_type, area) + _profile_note(
-            SITE_SELECTION_TOOLS, selected
-        )
+        return _site_selection(business_type, area) + _profile_note(SITE_SELECTION_TOOLS, selected)
 
-    @server.prompt(
-        name="compare_neighborhoods", description=PROMPTS["compare_neighborhoods"][1]
-    )
+    @server.prompt(name="compare_neighborhoods", description=PROMPTS["compare_neighborhoods"][1])
     def compare_neighborhoods(area_a: str, area_b: str) -> str:
         return _compare_neighborhoods(area_a, area_b) + _profile_note(
             COMPARE_NEIGHBORHOODS_TOOLS, selected
@@ -517,25 +511,17 @@ def register(server: MCPServer, selected: set[str]) -> None:
     def plan_errands(stops: str, start: str = "") -> str:
         return _plan_errands(stops, start) + _profile_note(PLAN_ERRANDS_TOOLS, selected)
 
-    @server.prompt(
-        name="should_i_live_here", description=PROMPTS["should_i_live_here"][1]
-    )
+    @server.prompt(name="should_i_live_here", description=PROMPTS["should_i_live_here"][1])
     def should_i_live_here(location: str, context: str = "") -> str:
         return _should_i_live_here(location, context) + _profile_note(
             SHOULD_I_LIVE_HERE_TOOLS, selected
         )
 
-    @server.prompt(
-        name="get_to_know_my_city", description=PROMPTS["get_to_know_my_city"][1]
-    )
+    @server.prompt(name="get_to_know_my_city", description=PROMPTS["get_to_know_my_city"][1])
     def get_to_know_my_city(city: str = "") -> str:
-        return _get_to_know_my_city(city) + _profile_note(
-            GET_TO_KNOW_MY_CITY_TOOLS, selected
-        )
+        return _get_to_know_my_city(city) + _profile_note(GET_TO_KNOW_MY_CITY_TOOLS, selected)
 
-    @server.prompt(
-        name="verify_listing_claims", description=PROMPTS["verify_listing_claims"][1]
-    )
+    @server.prompt(name="verify_listing_claims", description=PROMPTS["verify_listing_claims"][1])
     def verify_listing_claims(location: str, claims: str) -> str:
         return _verify_listing_claims(location, claims) + _profile_note(
             VERIFY_LISTING_CLAIMS_TOOLS, selected

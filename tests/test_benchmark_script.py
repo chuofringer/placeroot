@@ -78,6 +78,4 @@ def test_committed_doc_carries_the_generated_markers():
     text = (REPO_ROOT / "docs" / "benchmarks.md").read_text()
     assert token_efficiency.GENERATED_BEGIN in text
     assert token_efficiency.GENERATED_END in text
-    assert text.index(token_efficiency.GENERATED_BEGIN) < text.index(
-        token_efficiency.GENERATED_END
-    )
+    assert text.index(token_efficiency.GENERATED_BEGIN) < text.index(token_efficiency.GENERATED_END)

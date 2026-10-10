@@ -31,8 +31,7 @@ def test_default_upstream_base_is_the_public_overture_bucket(monkeypatch):
     monkeypatch.delenv("PLACEROOT_UPSTREAM_BASE", raising=False)
     glob = overture._upstream_glob("places", "place")
     assert glob == (
-        f"s3://overturemaps-us-west-2/release/{release.PINNED_RELEASE}"
-        "/theme=places/type=place/*"
+        f"s3://overturemaps-us-west-2/release/{release.PINNED_RELEASE}/theme=places/type=place/*"
     )
 
 

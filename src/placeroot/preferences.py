@@ -67,6 +67,7 @@ def is_valid_lang(value: str) -> bool:
     it checks mode against MODES."""
     return bool(_LANG_PATTERN.match(str(value).strip().lower()))
 
+
 _THREAD_LOCK = threading.Lock()
 
 # Per-session overlays for --http (see the module docstring). Keyed by
@@ -186,15 +187,11 @@ def _file_doc() -> dict[str, Any]:
     except OSError as exc:
         raise PreferencesError("io_error", str(exc)) from exc
     except UnicodeError as exc:
-        raise PreferencesError(
-            "corrupt", "preferences file is not valid UTF-8"
-        ) from exc
+        raise PreferencesError("corrupt", "preferences file is not valid UTF-8") from exc
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise PreferencesError(
-            "corrupt", "preferences file is not valid JSON"
-        ) from exc
+        raise PreferencesError("corrupt", "preferences file is not valid JSON") from exc
     if not isinstance(data, dict):
         raise PreferencesError("corrupt", "preferences file is not a JSON object")
     return _normalize(data)
@@ -266,8 +263,11 @@ def update(
     given = {
         key: value
         for key, value in (
-            ("mode", mode), ("pace", pace), ("household", household),
-            ("note", note), ("lang", lang),
+            ("mode", mode),
+            ("pace", pace),
+            ("household", household),
+            ("note", note),
+            ("lang", lang),
         )
         if value is not None
     }

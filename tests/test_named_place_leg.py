@@ -142,17 +142,31 @@ def test_same_tier_candidates_order_by_prominence():
 
 def _tokyo_geocode(query, limit=5, lang=None, **kw):
     if query.strip().lower() == "tokyo":
-        return [{
-            "name": "Tokyo", "type": "locality", "lat": 35.68, "lon": 139.76,
-            "id": "div-tokyo", "admin_context": ["Japan"], "rank_score": 0.9,
-        }]
+        return [
+            {
+                "name": "Tokyo",
+                "type": "locality",
+                "lat": 35.68,
+                "lon": 139.76,
+                "id": "div-tokyo",
+                "admin_context": ["Japan"],
+                "rank_score": 0.9,
+            }
+        ]
     # geocode()'s own places half for the whole string: a row *named* for
     # the query, pinned 7 km from the station, ranked first.
-    return [{
-        "name": "Shibuya Station Tokyo. Japan", "type": "place", "lat": 35.6882,
-        "lon": 139.7815, "id": "p-lone", "rank_score": 0.9,
-        "category": "train_station", "admin_context": [],
-    }]
+    return [
+        {
+            "name": "Shibuya Station Tokyo. Japan",
+            "type": "place",
+            "lat": 35.6882,
+            "lon": 139.7815,
+            "id": "p-lone",
+            "rank_score": 0.9,
+            "category": "train_station",
+            "admin_context": [],
+        }
+    ]
 
 
 def test_trailing_city_counts_as_extra_context():
@@ -165,17 +179,34 @@ def test_trailing_city_counts_as_extra_context():
 def test_named_place_resolver_takes_resolve_places_station(monkeypatch):
     """from_to's end for "Shibuya Station Tokyo" is what resolve_place says
     it is — the station complex — not geocode's lone top row (#469)."""
-    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10,
-                         categories=None):
+
+    def fake_find_places(
+        lat, lon, radius_m=1000, category=None, name=None, limit=10, categories=None
+    ):
         if categories:
             return [
-                {"id": "p-gare", "name": "Gare de Shibuya", "category": "train_station",
-                 "basic_category": "train_station", "operating_status": "open",
-                 "confidence": 0.84, "lat": 35.6585, "lon": 139.7013, "distance_m": 100},
-                {"id": "p-keio", "name": "Inokashira Line Shibuya Sta.",
-                 "category": "train_station", "basic_category": "train_station",
-                 "operating_status": "open", "confidence": 0.77, "lat": 35.6581,
-                 "lon": 139.6984, "distance_m": 100},
+                {
+                    "id": "p-gare",
+                    "name": "Gare de Shibuya",
+                    "category": "train_station",
+                    "basic_category": "train_station",
+                    "operating_status": "open",
+                    "confidence": 0.84,
+                    "lat": 35.6585,
+                    "lon": 139.7013,
+                    "distance_m": 100,
+                },
+                {
+                    "id": "p-keio",
+                    "name": "Inokashira Line Shibuya Sta.",
+                    "category": "train_station",
+                    "basic_category": "train_station",
+                    "operating_status": "open",
+                    "confidence": 0.77,
+                    "lat": 35.6581,
+                    "lon": 139.6984,
+                    "distance_m": 100,
+                },
             ]
         return []
 

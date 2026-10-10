@@ -31,7 +31,9 @@ def test_a_comma_qualifier_still_splits():
 
 def test_a_bare_region_after_a_real_name_still_splits():
     assert geocode._parse_region_suffix("Portland Oregon", None) == (
-        "Portland", "US-OR", "Oregon",
+        "Portland",
+        "US-OR",
+        "Oregon",
     )
     assert geocode._parse_country_suffix("Portland Jersey", None) == ("Portland", "JE", "Jersey")
 
@@ -47,10 +49,14 @@ def test_a_query_that_names_a_division_exactly_is_not_split(monkeypatch):
 
     monkeypatch.setattr(geocode, "_division_named_exactly", fake_probe)
     assert geocode._parse_region_suffix("Lake Charles Louisiana", "t.parquet") == (
-        "Lake Charles Louisiana", None, None,
+        "Lake Charles Louisiana",
+        None,
+        None,
     )
     assert geocode._parse_region_suffix("Baton Rouge Louisiana", "t.parquet") == (
-        "Baton Rouge", "US-LA", "Louisiana",
+        "Baton Rouge",
+        "US-LA",
+        "Louisiana",
     )
     # Only reached for the bare reading, and only once the suffix resolved
     # and the head passed gate 1 — never for a comma, never for "West".
@@ -79,8 +85,8 @@ def test_the_exact_name_probe_is_cached_but_not_its_failures(monkeypatch):
 
     monkeypatch.setattr(overture, "conn", lambda: FakeConn())
     assert geocode._division_named_exactly("Oregon", "t.parquet") is False  # failed probe
-    assert geocode._division_named_exactly("Oregon", "t.parquet") is True   # re-probed
-    assert geocode._division_named_exactly("oregon", "t.parquet") is True   # cached
+    assert geocode._division_named_exactly("Oregon", "t.parquet") is True  # re-probed
+    assert geocode._division_named_exactly("oregon", "t.parquet") is True  # cached
     assert geocode._division_named_exactly("Nowhere", "t.parquet") is False
     assert calls == ["oregon", "oregon", "nowhere"]
     assert geocode._division_named_exactly("Oregon", None) is False
@@ -94,9 +100,15 @@ def test_the_exact_name_probe_is_cached_but_not_its_failures(monkeypatch):
 def _three_places(lat, lon, radius_m=1000, category=None, name=None, limit=10):
     return [
         {
-            "id": f"place-{i}", "name": f"Example {i}", "category": "cafe",
-            "basic_category": "cafe", "operating_status": "open",
-            "confidence": 0.5, "lat": 1.0, "lon": 2.0, "distance_m": 10 * i,
+            "id": f"place-{i}",
+            "name": f"Example {i}",
+            "category": "cafe",
+            "basic_category": "cafe",
+            "operating_status": "open",
+            "confidence": 0.5,
+            "lat": 1.0,
+            "lon": 2.0,
+            "distance_m": 10 * i,
         }
         for i in range(3)
     ]
@@ -193,7 +205,8 @@ def test_fuzzy_retry_keeps_the_explicit_country(monkeypatch, tmp_path):
 
 
 def test_fuzzy_retry_is_skipped_when_only_the_explicit_country_could_be_dropped(
-    monkeypatch, tmp_path,
+    monkeypatch,
+    tmp_path,
 ):
     calls = []
     _record_division_queries(monkeypatch, calls)
@@ -201,7 +214,8 @@ def test_fuzzy_retry_is_skipped_when_only_the_explicit_country_could_be_dropped(
     monkeypatch.setattr(geocode, "_local_divisions_table", lambda: table)
     fuzzy = []
     monkeypatch.setattr(
-        geocode, "_query_divisions_fuzzy",
+        geocode,
+        "_query_divisions_fuzzy",
         lambda t, q, r=None, c=None, **kw: fuzzy.append((q, r, c)) or [],
     )
 
@@ -279,8 +293,14 @@ def test_region_population_lookup_scans_once_per_table(monkeypatch):
 
 def test_fallback_anchor_details_is_memoized_per_inputs(monkeypatch):
     brooklyn = {
-        "id": "div-brooklyn", "name": "Brooklyn", "subtype": "locality", "country": "US",
-        "region": "US-NY", "lat": 40.65, "lon": -73.95, "admin_context": ["United States"],
+        "id": "div-brooklyn",
+        "name": "Brooklyn",
+        "subtype": "locality",
+        "country": "US",
+        "region": "US-NY",
+        "lat": 40.65,
+        "lon": -73.95,
+        "admin_context": ["United States"],
         "population": 2_600_000,
     }
     lookups = []
@@ -348,9 +368,7 @@ def test_alt_table_build_is_attempted_once_across_threads(monkeypatch, tmp_path)
 def test_lang_table_build_is_attempted_once(monkeypatch, tmp_path):
     builds = []
     monkeypatch.setattr(geocode, "_LANG_BUILD_ATTEMPTED", set())
-    monkeypatch.setattr(
-        geocode, "_try_materialize_lang_names_table", lambda p, g: builds.append(p)
-    )
+    monkeypatch.setattr(geocode, "_try_materialize_lang_names_table", lambda p, g: builds.append(p))
     monkeypatch.setattr(overture, "upstream_glob", lambda **kw: "divisions-glob")
     table = str(tmp_path / "divisions.parquet")
     assert geocode._local_lang_names_table(table) is None
@@ -383,8 +401,8 @@ def test_geom_expr_reprobes_after_a_failed_probe(monkeypatch):
 
     monkeypatch.setattr(db, "shared_conn", lambda: FakeConn())
     glob = "s3://bucket/theme=places/*.parquet"
-    assert geo.geom_expr(glob) == "ST_GeomFromWKB(geometry)"   # degraded, not cached
-    assert geo.geom_expr(glob) == "geometry"                   # re-probed
+    assert geo.geom_expr(glob) == "ST_GeomFromWKB(geometry)"  # degraded, not cached
+    assert geo.geom_expr(glob) == "geometry"  # re-probed
     assert geo.geom_expr(glob, as_wkt=True) == "ST_AsText(geometry)"  # cached
     assert len(probes) == 2
     geo.clear_geom_expr_cache()

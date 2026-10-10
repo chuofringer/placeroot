@@ -118,59 +118,63 @@ _EXPORT = {
 # First wave: precise properties (roadmap §5.3).
 # ---------------------------------------------------------------------------
 
-FIND_PLACES_SCHEMA = _anyof({
-    "type": "object",
-    "required": ["results"],
-    "properties": {
-        # group_by_category=True answers {category: [rows...]} instead of
-        # a flat list — both shapes are real, so "results" is a union type.
-        "results": {"type": ["array", "object"], "items": _PLACE_ROW},
-        "area": {"type": "object"},
-        "truncated": {"type": "boolean"},
-        "omitted_count": {"type": "integer"},
-        "cursor": {"type": "string"},
-        "note": {"type": "string"},
-        "degraded_fields": {"type": "array"},
-        "trust_legend": {"type": "string"},
-        "category_resolved_from": {"type": "string"},
-        "resolved": {"type": "object"},
-    },
-    "additionalProperties": True,
-})
-
-FIND_NEAR_SCHEMA = _anyof({
-    "type": "object",
-    "required": ["near", "category", "results"],
-    "properties": {
-        "near": {"type": "object"},
-        "category": {"type": "string"},
-        "results": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "required": ["id"],
-                "properties": {
-                    "id": {"type": ["string", "null"]},
-                    "name": {"type": ["string", "null"]},
-                    "category": {"type": ["string", "null"]},
-                    "distance_m": {"type": "number"},
-                    "lat": {"type": "number"},
-                    "lon": {"type": "number"},
-                    "trust_note": {"type": "string"},
-                    "operating_status": {"type": ["string", "null"]},
-                },
-                "additionalProperties": True,
-            },
+FIND_PLACES_SCHEMA = _anyof(
+    {
+        "type": "object",
+        "required": ["results"],
+        "properties": {
+            # group_by_category=True answers {category: [rows...]} instead of
+            # a flat list — both shapes are real, so "results" is a union type.
+            "results": {"type": ["array", "object"], "items": _PLACE_ROW},
+            "area": {"type": "object"},
+            "truncated": {"type": "boolean"},
+            "omitted_count": {"type": "integer"},
+            "cursor": {"type": "string"},
+            "note": {"type": "string"},
+            "degraded_fields": {"type": "array"},
+            "trust_legend": {"type": "string"},
+            "category_resolved_from": {"type": "string"},
+            "resolved": {"type": "object"},
         },
-        "category_resolved_from": {"type": "string"},
-        "truncated": {"type": "boolean"},
-        "omitted_count": {"type": "integer"},
-        "note": {"type": "string"},
-        "degraded_fields": {"type": "array"},
-        "cursor": {"type": "string"},
-    },
-    "additionalProperties": True,
-})
+        "additionalProperties": True,
+    }
+)
+
+FIND_NEAR_SCHEMA = _anyof(
+    {
+        "type": "object",
+        "required": ["near", "category", "results"],
+        "properties": {
+            "near": {"type": "object"},
+            "category": {"type": "string"},
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {
+                        "id": {"type": ["string", "null"]},
+                        "name": {"type": ["string", "null"]},
+                        "category": {"type": ["string", "null"]},
+                        "distance_m": {"type": "number"},
+                        "lat": {"type": "number"},
+                        "lon": {"type": "number"},
+                        "trust_note": {"type": "string"},
+                        "operating_status": {"type": ["string", "null"]},
+                    },
+                    "additionalProperties": True,
+                },
+            },
+            "category_resolved_from": {"type": "string"},
+            "truncated": {"type": "boolean"},
+            "omitted_count": {"type": "integer"},
+            "note": {"type": "string"},
+            "degraded_fields": {"type": "array"},
+            "cursor": {"type": "string"},
+        },
+        "additionalProperties": True,
+    }
+)
 
 _GEOCODE_ROW = {
     "type": "object",
@@ -190,64 +194,70 @@ _GEOCODE_ROW = {
     "additionalProperties": True,
 }
 
-GEOCODE_SCHEMA = _anyof({
-    "type": "object",
-    "required": ["results"],
-    "properties": {
-        "results": {"type": "array", "items": _GEOCODE_ROW},
-        "note": {"type": "string"},
-        "truncated": {"type": "boolean"},
-        "omitted_count": {"type": "integer"},
-    },
-    "additionalProperties": True,
-})
-
-GEOCODE_BATCH_SCHEMA = _anyof({
-    "type": "object",
-    "required": ["results"],
-    "properties": {
-        # One row per input query, in order — either a geocode match row
-        # or {"query", "error": "not_found", "detail"} for a miss; a
-        # per-row miss does not fail the batch, so it lives inside this
-        # success envelope rather than the top-level error arm.
-        "results": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
-        "truncated": {"type": "boolean"},
-        "omitted_count": {"type": "integer"},
-    },
-    "additionalProperties": True,
-})
-
-RESOLVE_PLACE_SCHEMA = _anyof({
-    "type": "object",
-    "required": ["results"],
-    "properties": {
-        "results": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "required": ["id", "kind", "name"],
-                "properties": {
-                    "id": {"type": ["string", "null"]},
-                    "kind": {"type": "string", "enum": ["division", "place"]},
-                    "name": {"type": "string"},
-                    "lat": {"type": "number"},
-                    "lon": {"type": "number"},
-                    "match": {"type": "string"},
-                    "admin_context": {"type": "array", "items": {"type": "string"}},
-                    "category": {"type": "string"},
-                    "matched_by": {"type": "string"},
-                },
-                "additionalProperties": True,
-            },
+GEOCODE_SCHEMA = _anyof(
+    {
+        "type": "object",
+        "required": ["results"],
+        "properties": {
+            "results": {"type": "array", "items": _GEOCODE_ROW},
+            "note": {"type": "string"},
+            "truncated": {"type": "boolean"},
+            "omitted_count": {"type": "integer"},
         },
-        "need": {"type": "string"},
-        "retry_with": {"type": "object"},
-        "note": {"type": "string"},
-        "truncated": {"type": "boolean"},
-        "omitted_count": {"type": "integer"},
-    },
-    "additionalProperties": True,
-})
+        "additionalProperties": True,
+    }
+)
+
+GEOCODE_BATCH_SCHEMA = _anyof(
+    {
+        "type": "object",
+        "required": ["results"],
+        "properties": {
+            # One row per input query, in order — either a geocode match row
+            # or {"query", "error": "not_found", "detail"} for a miss; a
+            # per-row miss does not fail the batch, so it lives inside this
+            # success envelope rather than the top-level error arm.
+            "results": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "truncated": {"type": "boolean"},
+            "omitted_count": {"type": "integer"},
+        },
+        "additionalProperties": True,
+    }
+)
+
+RESOLVE_PLACE_SCHEMA = _anyof(
+    {
+        "type": "object",
+        "required": ["results"],
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["id", "kind", "name"],
+                    "properties": {
+                        "id": {"type": ["string", "null"]},
+                        "kind": {"type": "string", "enum": ["division", "place"]},
+                        "name": {"type": "string"},
+                        "lat": {"type": "number"},
+                        "lon": {"type": "number"},
+                        "match": {"type": "string"},
+                        "admin_context": {"type": "array", "items": {"type": "string"}},
+                        "category": {"type": "string"},
+                        "matched_by": {"type": "string"},
+                    },
+                    "additionalProperties": True,
+                },
+            },
+            "need": {"type": "string"},
+            "retry_with": {"type": "object"},
+            "note": {"type": "string"},
+            "truncated": {"type": "boolean"},
+            "omitted_count": {"type": "integer"},
+        },
+        "additionalProperties": True,
+    }
+)
 
 # route() and from_to() share one success shape: from_to wraps route() and
 # only adds name/id/type/admin_context onto the same "from"/"to" points.
@@ -278,125 +288,140 @@ _ROUTE_SUCCESS = {
 ROUTE_SCHEMA = _anyof(_ROUTE_SUCCESS)
 FROM_TO_SCHEMA = _anyof(_ROUTE_SUCCESS)
 
-ISOCHRONE_SCHEMA = _anyof({
-    "type": "object",
-    "required": ["polygon", "stats"],
-    "properties": {
-        "polygon": {"type": "object"},
-        "stats": {
-            "type": "object",
-            "properties": {
-                "reachable_nodes": {"type": "integer"},
-                "max_radius_m": {"type": "number"},
-                "area_km2": {"type": "number"},
-            },
-            "additionalProperties": True,
-        },
-        "resolved": {"type": "object"},
-        "truncated": {"type": "boolean"},
-    },
-    "additionalProperties": True,
-})
-
-TRAVEL_TIME_MATRIX_SCHEMA = _anyof({
-    "type": "object",
-    "required": ["elements"],
-    "properties": {
-        "mode": {"type": "string"},
-        "elements": {
-            "type": "array",
-            "items": {
+ISOCHRONE_SCHEMA = _anyof(
+    {
+        "type": "object",
+        "required": ["polygon", "stats"],
+        "properties": {
+            "polygon": {"type": "object"},
+            "stats": {
                 "type": "object",
-                "required": ["origin_idx", "dest_idx"],
                 "properties": {
-                    "origin_idx": {"type": "integer"},
-                    "dest_idx": {"type": "integer"},
-                    "duration_min": {"type": ["number", "null"]},
-                    "distance_m": {"type": ["number", "null"]},
-                    "note": {"type": "string"},
+                    "reachable_nodes": {"type": "integer"},
+                    "max_radius_m": {"type": "number"},
+                    "area_km2": {"type": "number"},
                 },
                 "additionalProperties": True,
             },
+            "resolved": {"type": "object"},
+            "truncated": {"type": "boolean"},
         },
-        "durations_note": {"type": "string"},
-        "note": {"type": "string"},
-        "truncated": {"type": "boolean"},
-        "resolved": {"type": "object"},
-    },
-    "additionalProperties": True,
-})
+        "additionalProperties": True,
+    }
+)
 
-DISTANCE_MATRIX_SCHEMA = _anyof({
-    "type": "object",
-    "required": ["elements"],
-    "properties": {
-        "elements": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "required": ["origin_idx", "dest_idx", "distance_m"],
-                "properties": {
-                    "origin_idx": {"type": "integer"},
-                    "dest_idx": {"type": "integer"},
-                    "distance_m": {"type": "number"},
+TRAVEL_TIME_MATRIX_SCHEMA = _anyof(
+    {
+        "type": "object",
+        "required": ["elements"],
+        "properties": {
+            "mode": {"type": "string"},
+            "elements": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["origin_idx", "dest_idx"],
+                    "properties": {
+                        "origin_idx": {"type": "integer"},
+                        "dest_idx": {"type": "integer"},
+                        "duration_min": {"type": ["number", "null"]},
+                        "distance_m": {"type": ["number", "null"]},
+                        "note": {"type": "string"},
+                    },
+                    "additionalProperties": True,
                 },
-                "additionalProperties": True,
             },
+            "durations_note": {"type": "string"},
+            "note": {"type": "string"},
+            "truncated": {"type": "boolean"},
+            "resolved": {"type": "object"},
         },
-        "resolved": {"type": "object"},
-        "truncated": {"type": "boolean"},
-    },
-    "additionalProperties": True,
-})
+        "additionalProperties": True,
+    }
+)
 
-OPTIMIZE_ROUTE_SCHEMA = _anyof({
-    "type": "object",
-    "required": [
-        "order", "legs", "total_distance_m", "total_duration_s", "mode", "roundtrip",
-    ],
-    "properties": {
-        "order": {"type": "array", "items": {"type": "integer"}},
-        "legs": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "from_idx": {"type": "integer"},
-                    "to_idx": {"type": "integer"},
-                    "distance_m": {"type": "number"},
-                    "duration_s": {"type": "number"},
-                    "estimated": {"type": "boolean"},
+DISTANCE_MATRIX_SCHEMA = _anyof(
+    {
+        "type": "object",
+        "required": ["elements"],
+        "properties": {
+            "elements": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["origin_idx", "dest_idx", "distance_m"],
+                    "properties": {
+                        "origin_idx": {"type": "integer"},
+                        "dest_idx": {"type": "integer"},
+                        "distance_m": {"type": "number"},
+                    },
+                    "additionalProperties": True,
                 },
-                "additionalProperties": True,
             },
+            "resolved": {"type": "object"},
+            "truncated": {"type": "boolean"},
         },
-        "total_distance_m": {"type": "number"},
-        "total_duration_s": {"type": "number"},
-        "mode": {"type": "string"},
-        "roundtrip": {"type": "boolean"},
-        "export": _EXPORT,
-        "estimated": {"type": "boolean"},
-        "note": {"type": "string"},
-        "verify_before_going": {"type": "string"},
-        "resolved": {"type": "array", "items": _RESOLVED_ECHO},
-    },
-    "additionalProperties": True,
-})
+        "additionalProperties": True,
+    }
+)
 
-DATA_VERSION_SCHEMA = _anyof({
-    "type": "object",
-    "required": ["release", "release_date", "source"],
-    "properties": {
-        "release": {"type": "string"},
-        "release_date": {"type": "string"},
-        "source": {"type": "string"},
-        "age_days": {"type": "number"},
-        "note": {"type": "string"},
-        "artifacts": {"type": "string"},
-        "recreation_layer": {"type": "object"},
-    },
-    "additionalProperties": True,
-})
+OPTIMIZE_ROUTE_SCHEMA = _anyof(
+    {
+        "type": "object",
+        "required": [
+            "order",
+            "legs",
+            "total_distance_m",
+            "total_duration_s",
+            "mode",
+            "roundtrip",
+        ],
+        "properties": {
+            "order": {"type": "array", "items": {"type": "integer"}},
+            "legs": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "from_idx": {"type": "integer"},
+                        "to_idx": {"type": "integer"},
+                        "distance_m": {"type": "number"},
+                        "duration_s": {"type": "number"},
+                        "estimated": {"type": "boolean"},
+                    },
+                    "additionalProperties": True,
+                },
+            },
+            "total_distance_m": {"type": "number"},
+            "total_duration_s": {"type": "number"},
+            "mode": {"type": "string"},
+            "roundtrip": {"type": "boolean"},
+            "export": _EXPORT,
+            "estimated": {"type": "boolean"},
+            "note": {"type": "string"},
+            "verify_before_going": {"type": "string"},
+            "resolved": {"type": "array", "items": _RESOLVED_ECHO},
+        },
+        "additionalProperties": True,
+    }
+)
+
+DATA_VERSION_SCHEMA = _anyof(
+    {
+        "type": "object",
+        "required": ["release", "release_date", "source"],
+        "properties": {
+            "release": {"type": "string"},
+            "release_date": {"type": "string"},
+            "source": {"type": "string"},
+            "age_days": {"type": "number"},
+            "note": {"type": "string"},
+            "artifacts": {"type": "string"},
+            "recreation_layer": {"type": "object"},
+        },
+        "additionalProperties": True,
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Every remaining tool: the generic honest envelope — cheap (~20 tokens),

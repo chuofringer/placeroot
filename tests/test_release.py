@@ -36,7 +36,10 @@ def clear_cache():
 
 def test_parse_listing_extracts_release_names_in_document_order():
     assert release.parse_listing(CANNED_LISTING) == [
-        "2026-05-21.0", "2026-06-25.0", "2026-07-22.0", "2026-07-22.1",
+        "2026-05-21.0",
+        "2026-06-25.0",
+        "2026-07-22.0",
+        "2026-07-22.1",
     ]
 
 
@@ -122,7 +125,8 @@ def test_resolve_release_info_env_override(monkeypatch):
     monkeypatch.setenv("PLACEROOT_OVERTURE_RELEASE", "1999-01-01.0")
     monkeypatch.setattr(release, "_discover", lambda: "2026-07-22.1")
     assert release.resolve_release_info() == {
-        "release": "1999-01-01.0", "source": "env-override",
+        "release": "1999-01-01.0",
+        "source": "env-override",
     }
     # resolve_release() must delegate to the same resolution, not re-derive.
     assert release.resolve_release() == "1999-01-01.0"
@@ -137,7 +141,8 @@ def test_resolve_release_info_discovered(monkeypatch):
     release.resolve_release_info()  # pin-first; kicks background discovery
     assert release._first_discovery_done.wait(2)
     assert release.resolve_release_info() == {
-        "release": "2026-08-01.0", "source": "discovered",
+        "release": "2026-08-01.0",
+        "source": "discovered",
     }
     assert release.resolve_release() == "2026-08-01.0"
 
@@ -146,7 +151,8 @@ def test_resolve_release_info_pinned_fallback(monkeypatch):
     monkeypatch.delenv("PLACEROOT_OVERTURE_RELEASE", raising=False)
     monkeypatch.setattr(release, "_discover", lambda: None)
     assert release.resolve_release_info() == {
-        "release": release.PINNED_RELEASE, "source": "pinned-fallback",
+        "release": release.PINNED_RELEASE,
+        "source": "pinned-fallback",
     }
     assert release.resolve_release() == release.PINNED_RELEASE
 
@@ -218,7 +224,8 @@ def test_failed_recheck_keeps_the_previous_release_not_the_pin(monkeypatch):
     release.resolve_release_info()  # pin-first
     assert release._first_discovery_done.wait(2)
     assert release.resolve_release_info() == {
-        "release": "2026-08-01.0", "source": "discovered",
+        "release": "2026-08-01.0",
+        "source": "discovered",
     }
     # Discovery now fails; a release that worked a moment ago beats the pin.
     info = release.resolve_release_info()
@@ -627,9 +634,7 @@ def test_bundled_artifact_release_requires_every_set_to_agree(monkeypatch, tmp_p
 
     from importlib import resources
 
-    monkeypatch.setattr(
-        resources, "files", lambda _pkg: tmp_path, raising=True
-    )
+    monkeypatch.setattr(resources, "files", lambda _pkg: tmp_path, raising=True)
 
     # manifests and the grid have the newer release; the geocode index does
     # not — so the newer one is not claimed.

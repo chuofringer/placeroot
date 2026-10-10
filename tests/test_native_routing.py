@@ -227,9 +227,11 @@ def test_python_straight_segment_with_interior_connector(build_synthetic, python
 
 def test_python_one_way_and_point_ids(build_synthetic, python_path):
     rows = [
-        _row("ow", _wkt([(-73.9, 40.7), (-73.9, 40.71)]), access=[
-            {"access_type": "denied", "when": {"heading": "backward"}}
-        ]),
+        _row(
+            "ow",
+            _wkt([(-73.9, 40.7), (-73.9, 40.71)]),
+            access=[{"access_type": "denied", "when": {"heading": "backward"}}],
+        ),
         _row("bad", "LINESTRING (1 2)"),
     ]
     graph = build_synthetic(rows, native_on=False, mode="drive")
@@ -249,7 +251,9 @@ def test_python_dijkstra_known_answer_and_cutoff(python_path):
     graph.add_edge("a", "c", 5.0, 5.0)
     graph.add_edge("c", "d", 1.0, 1.0, directed=True)
     assert routing._dijkstra_path_to_target(graph, "a", "c", 1.0) == (
-        2.0, 2.0, [("a", 0.0), ("b", 1.0), ("c", 2.0)]
+        2.0,
+        2.0,
+        [("a", 0.0), ("b", 1.0), ("c", 2.0)],
     )
     assert routing._dijkstra_path_to_target(graph, "a", "c", 1.0, max_cost=1.5) is None
     assert routing._dijkstra_path_to_target(graph, "a", "c", 1.0, max_cost=2.0) is not None
@@ -302,8 +306,21 @@ def test_native_point_ids_match_python_round6_repr():
     """pt_ node ids are f-strings of round(x, 6); exercise the repr edge cases."""
     rng = random.Random(11)
     values = [
-        0.0, -0.0, 1e-5, 5e-5, 5e-7, -5e-7, 1.5e-5, 0.0078125, -0.0000004,
-        123456.7891235, -179.9999999, 179.9999999, 89.1234565, 1e-4, 9.99e-5,
+        0.0,
+        -0.0,
+        1e-5,
+        5e-5,
+        5e-7,
+        -5e-7,
+        1.5e-5,
+        0.0078125,
+        -0.0000004,
+        123456.7891235,
+        -179.9999999,
+        179.9999999,
+        89.1234565,
+        1e-4,
+        9.99e-5,
     ]
     values += [rng.uniform(-180, 180) for _ in range(400)]
     values += [rng.uniform(-1e-4, 1e-4) for _ in range(200)]
@@ -354,9 +371,10 @@ def test_native_dijkstra_matches_python_on_random_graphs(monkeypatch, eager_nati
                 monkeypatch.setattr(native, "AVAILABLE", False)
                 expected = routing._dijkstra_path_to_target(graph, source, target, 1.0, max_cost)
                 monkeypatch.setattr(native, "AVAILABLE", True)
-                assert routing._dijkstra_path_to_target(
-                    graph, source, target, 1.0, max_cost
-                ) == expected
+                assert (
+                    routing._dijkstra_path_to_target(graph, source, target, 1.0, max_cost)
+                    == expected
+                )
 
 
 @requires_native

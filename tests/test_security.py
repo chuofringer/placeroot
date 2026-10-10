@@ -46,9 +46,7 @@ def test_oversized_query_bbox_skips_tile_cache_without_fanout(cache_on, monkeypa
     # the upstream schema probe.
     monkeypatch.setattr(cache, "resolve_fingerprint", lambda *a, **k: "testfp")
     spawned = []
-    monkeypatch.setattr(
-        cache, "_materialize_in_background", lambda *a, **k: spawned.append(a)
-    )
+    monkeypatch.setattr(cache, "_materialize_in_background", lambda *a, **k: spawned.append(a))
     # ~200 x 100 degrees -> ~20000 one-degree tiles, well over the cap.
     big_bbox = (-100.0, -50.0, 100.0, 50.0)
     assert len(cache.tiles_for_bbox(*big_bbox)) > cache.MAX_TILES_PER_QUERY
@@ -119,9 +117,7 @@ def test_server_tool_structured_error_on_oversized_geometry():
 
 def test_geometry_at_the_cap_is_still_accepted():
     at_cap = [[i * 1e-6, 0.0] for i in range(simplify.MAX_INPUT_POINTS)]
-    out = simplify.simplify_geometry(
-        {"type": "LineString", "coordinates": at_cap}, max_tokens=500
-    )
+    out = simplify.simplify_geometry({"type": "LineString", "coordinates": at_cap}, max_tokens=500)
     assert out["original_points"] == simplify.MAX_INPUT_POINTS
     assert out["kept_points"] <= out["original_points"]
 

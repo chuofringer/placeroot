@@ -62,9 +62,7 @@ def test_prefer_fewer_all_zero_measures_share_full_credit():
         {"center": {"lat": 78.0, "lon": 15.0}, "density_per_km2": 1.59, "category_counts": {}},
     ]
     priorities = [{"label": "gyms", "category": "gym", "prefer": "fewer", "weight": 1}]
-    verdict = overture._build_verdict(
-        [(78.0, 15.0), (78.0, 15.0)], per_area, 1000, priorities
-    )
+    verdict = overture._build_verdict([(78.0, 15.0), (78.0, 15.0)], per_area, 1000, priorities)
     assert verdict["scores"] == [1.0, 1.0]
     assert verdict["winner_idx"] is None
 
@@ -92,9 +90,7 @@ def test_priority_count_is_exact_not_substring(tmp_path):
         result = overture.compare_areas(
             CENTERS,
             radius_m=1000,
-            priorities=[
-                {"label": "banks", "category": "bank", "prefer": "more", "weight": 1}
-            ],
+            priorities=[{"label": "banks", "category": "bank", "prefer": "more", "weight": 1}],
         )
         assert "area 0=0" in result["verdict"]["reasons"][0]
         assert "area 1=0" in result["verdict"]["reasons"][0]
@@ -122,9 +118,7 @@ def test_priority_count_includes_unnamed_places(tmp_path):
         result = overture.compare_areas(
             CENTERS,
             radius_m=1000,
-            priorities=[
-                {"label": "banks", "category": "bank", "prefer": "more", "weight": 1}
-            ],
+            priorities=[{"label": "banks", "category": "bank", "prefer": "more", "weight": 1}],
         )
         assert "area 0=23" in result["verdict"]["reasons"][0]
     finally:
@@ -146,9 +140,7 @@ def test_degraded_category_columns_mean_degraded_verdict_not_fabrication(tmp_pat
         result = overture.compare_areas(
             CENTERS,
             radius_m=1000,
-            priorities=[
-                {"label": "banks", "category": "bank", "prefer": "more", "weight": 1}
-            ],
+            priorities=[{"label": "banks", "category": "bank", "prefer": "more", "weight": 1}],
         )
         verdict = result["verdict"]
         assert verdict["degraded"] is True

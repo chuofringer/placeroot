@@ -194,16 +194,19 @@ def test_multi_word_stopword_residual_is_rejected_too(monkeypatch):
     assert result["results"] == []
 
 
-@pytest.mark.parametrize("query, residual", [
-    # Names made entirely of words too short for _significant_tokens' >=3
-    # rule, which the gate must NOT borrow: rejecting here returns nothing
-    # at all, and these are real, distinctive things to search names for.
-    ("H&M Brooklyn", "H&M"),
-    ("Q&A Brooklyn", "Q&A"),
-    # Two characters is a whole word in Chinese/Japanese/Korean -- the
-    # common case for those names, not an edge case. ("Forbidden City")
-    ("故宫 Brooklyn", "故宫"),
-])
+@pytest.mark.parametrize(
+    "query, residual",
+    [
+        # Names made entirely of words too short for _significant_tokens' >=3
+        # rule, which the gate must NOT borrow: rejecting here returns nothing
+        # at all, and these are real, distinctive things to search names for.
+        ("H&M Brooklyn", "H&M"),
+        ("Q&A Brooklyn", "Q&A"),
+        # Two characters is a whole word in Chinese/Japanese/Korean -- the
+        # common case for those names, not an edge case. ("Forbidden City")
+        ("故宫 Brooklyn", "故宫"),
+    ],
+)
 def test_short_but_meaningful_residual_still_scans_places(monkeypatch, query, residual):
     calls = _count_places_fallback(monkeypatch)
 
@@ -382,7 +385,8 @@ def test_no_fuzzy_tier_without_a_local_table(monkeypatch):
     # similarity scan.
     calls = []
     monkeypatch.setattr(
-        geocode, "_query_divisions_fuzzy",
+        geocode,
+        "_query_divisions_fuzzy",
         lambda *a, **k: calls.append(a) or [],
     )
     assert geocode.geocode("Berekley", limit=5) == []
@@ -399,7 +403,8 @@ def test_literal_matches_are_untouched_by_the_fuzzy_tier(geocode_cache, monkeypa
     monkeypatch.setattr(geocode, "_query_divisions_fuzzy", fail)
 
     assert [r["name"] for r in geocode.geocode("Springfield", limit=10)] == [
-        "Springfield", "Springfield",
+        "Springfield",
+        "Springfield",
     ]
     assert geocode.geocode("Brooklyn", limit=5)[0]["name"] == "Brooklyn"
     # A substring-only match ("Brook" -> "Brooklyn"/"Downtown Brooklyn") is
@@ -414,19 +419,26 @@ def test_fuzzy_hits_rank_below_every_literal_tier(geocode_cache):
     # tier) and would fuzzy-match another: the literal row must come first
     # and score higher, whatever the fuzzy row's population.
     fuzzy_row = {
-        "id": "z", "name": "Berkeley", "subtype": "locality", "population": 10_000_000,
-        "admin_context": [], "_fuzzy": True, "_similarity": 0.99, "_tier": 1,
+        "id": "z",
+        "name": "Berkeley",
+        "subtype": "locality",
+        "population": 10_000_000,
+        "admin_context": [],
+        "_fuzzy": True,
+        "_similarity": 0.99,
+        "_tier": 1,
     }
     literal_row = {
-        "id": "a", "name": "Downtown Brooklyn", "subtype": "neighborhood",
-        "population": None, "admin_context": [],
+        "id": "a",
+        "name": "Downtown Brooklyn",
+        "subtype": "neighborhood",
+        "population": None,
+        "admin_context": [],
     }
     assert geocode._rank_key(literal_row, "Brooklyn", {}) < geocode._rank_key(
         fuzzy_row, "Brooklyn", {}
     )
-    assert geocode._rank_score(fuzzy_row, "Brooklyn") < geocode._rank_score(
-        literal_row, "Brooklyn"
-    )
+    assert geocode._rank_score(fuzzy_row, "Brooklyn") < geocode._rank_score(literal_row, "Brooklyn")
     assert geocode._rank_score(fuzzy_row, "Brooklyn") < 0.4
 
 
@@ -535,11 +547,42 @@ def test_alt_match_folds_letters_strip_accents_leaves_alone(geocode_cache):
 # titlecase digraphs, compatibility ligatures, fullwidth forms, and
 # non-Latin scripts that must pass through untouched.
 _FOLD_CORPUS = [
-    "Preßburg", "Łódź", "Malmø", "München", "Ísafjörður", "Straße", "STRAẞE", "ẞ",
-    "İstanbul", "İzmir", "ı", "I", "Kœnigsberg", "Ærøskøbing", "Þingvellir", "Đakovo",
-    "Ħamrun", "Ðurđevac", "ǅakovo", "ǇUBLJANA", "ﬁrenze", "Ｔｏｋｙｏ", "ØSTERBRO",
-    "ŁÓDŹ", "ÆRØ", "ÞÓRSHÖFN", "Nürnberg", "Reykjavík", "Kraków", "Aš", "Ḥalab",
-    "Αθήνα", "ΑΘΗΝΑ", "Москва", "東京都", "São Paulo",
+    "Preßburg",
+    "Łódź",
+    "Malmø",
+    "München",
+    "Ísafjörður",
+    "Straße",
+    "STRAẞE",
+    "ẞ",
+    "İstanbul",
+    "İzmir",
+    "ı",
+    "I",
+    "Kœnigsberg",
+    "Ærøskøbing",
+    "Þingvellir",
+    "Đakovo",
+    "Ħamrun",
+    "Ðurđevac",
+    "ǅakovo",
+    "ǇUBLJANA",
+    "ﬁrenze",
+    "Ｔｏｋｙｏ",
+    "ØSTERBRO",
+    "ŁÓDŹ",
+    "ÆRØ",
+    "ÞÓRSHÖFN",
+    "Nürnberg",
+    "Reykjavík",
+    "Kraków",
+    "Aš",
+    "Ḥalab",
+    "Αθήνα",
+    "ΑΘΗΝΑ",
+    "Москва",
+    "東京都",
+    "São Paulo",
 ]
 
 
@@ -613,9 +656,11 @@ def test_alt_table_is_materialized_beside_the_divisions_table(geocode_cache):
     geocode.geocode("Brooklyn", limit=1)
     alt = _alt_table_path(geocode_cache)
     assert alt.exists()
-    rows = duckdb.connect().execute(
-        f"SELECT alt_name, alt_display FROM read_parquet('{alt}') ORDER BY alt_name"
-    ).fetchall()
+    rows = (
+        duckdb.connect()
+        .execute(f"SELECT alt_name, alt_display FROM read_parquet('{alt}') ORDER BY alt_name")
+        .fetchall()
+    )
     assert ("munich", "Munich") in rows
     # Folded, so one row for the several languages that spell it "Munich",
     # and none at all for an alternate that folds to the primary name.
@@ -684,13 +729,23 @@ def test_alt_hits_rank_like_variant_hits_not_above_literal_ones(geocode_cache):
     # An alt row is tagged _variant, so against a same-tier literal row with
     # the same prominence the literal one wins — the #53 tiebreak, unchanged.
     literal = {
-        "id": "a", "name": "Vienna", "subtype": "locality", "region": "US-IL",
-        "admin_context": ["a", "b"], "population": 5_000,
+        "id": "a",
+        "name": "Vienna",
+        "subtype": "locality",
+        "region": "US-IL",
+        "admin_context": ["a", "b"],
+        "population": 5_000,
     }
     alt = {
-        "id": "b", "name": "Wien", "subtype": "locality", "region": "AT-9",
-        "admin_context": ["a", "b"], "population": 5_000,
-        "_variant": True, "_tier": 3, "_matched_name": "Vienna",
+        "id": "b",
+        "name": "Wien",
+        "subtype": "locality",
+        "region": "AT-9",
+        "admin_context": ["a", "b"],
+        "population": 5_000,
+        "_variant": True,
+        "_tier": 3,
+        "_matched_name": "Vienna",
     }
     ranked = sorted([alt, literal], key=lambda r: geocode._rank_key(r, "Vienna", {}))
     assert [r["id"] for r in ranked] == ["a", "b"]
@@ -787,6 +842,7 @@ def test_resolve_area_accepts_a_corrected_spelling(geocode_cache):
     # An area that isn't a typo of anything still resolves to nothing.
     assert geocode.resolve_area("Nonexistentplacexyz123") is None
 
+
 # --- #224: internal bbox columns on the divisions table -------------------
 
 
@@ -798,9 +854,7 @@ def _divisions_table_path(cache_dir):
 def _strip_bbox_columns(table):
     """Rewrite the materialized table as a pre-#224 one: same rows, no bbox
     columns. The realistic shape of a cache directory written before #224."""
-    kept = ", ".join(
-        c for c in _column_names(table) if c not in geocode._DIVISIONS_BBOX_COLUMNS
-    )
+    kept = ", ".join(c for c in _column_names(table) if c not in geocode._DIVISIONS_BBOX_COLUMNS)
     con = duckdb.connect()
     con.execute(f"CREATE TABLE t AS SELECT {kept} FROM read_parquet('{table}')")
     con.execute(f"COPY t TO '{table}' (FORMAT PARQUET, COMPRESSION ZSTD)")
@@ -819,10 +873,14 @@ def test_divisions_table_carries_bbox_columns(geocode_cache):
     geocode.geocode("Brooklyn", limit=1)
     table = _divisions_table_path(geocode_cache)
     assert all(c in _column_names(table) for c in geocode._DIVISIONS_BBOX_COLUMNS)
-    row = duckdb.connect().execute(
-        f"""SELECT bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, lon, lat
+    row = (
+        duckdb.connect()
+        .execute(
+            f"""SELECT bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax, lon, lat
             FROM read_parquet('{table}') WHERE id = 'gers-div-brooklyn'"""
-    ).fetchone()
+        )
+        .fetchone()
+    )
     # lat/lon are still bbox.ymin/bbox.xmin, unchanged since #43 — the new
     # columns sit beside them rather than redefining them.
     assert row[0] == row[4]
@@ -851,7 +909,10 @@ def test_division_bbox_returns_a_real_extent_when_the_row_has_one(tmp_path):
         TO '{table}' (FORMAT PARQUET)
     """)
     assert geocode._division_bbox(str(table), "gers-div-mv") == (
-        -122.1176, 37.3542, -122.0449, 37.4711,
+        -122.1176,
+        37.3542,
+        -122.0449,
+        37.4711,
     )
     assert geocode._division_bbox(str(table), "gers-div-nope") is None
 
@@ -904,9 +965,7 @@ def test_division_bbox_on_a_pre_224_table_is_none(geocode_cache):
     assert geocode._division_bbox(str(table), "gers-div-brooklyn") is None
 
 
-def test_pre_224_divisions_table_degrades_and_rebuilds_once_per_process(
-    geocode_cache, monkeypatch
-):
+def test_pre_224_divisions_table_degrades_and_rebuilds_once_per_process(geocode_cache, monkeypatch):
     # Mirrors the #214 alt-table story: a cache directory written before this
     # feature keeps answering from its existing name table, gets exactly one
     # rebuild attempt per process even when that attempt fails, and picks the
@@ -950,8 +1009,13 @@ def test_bbox_columns_are_never_exposed_in_a_tool_response(geocode_cache):
 
 def _row(id_, name, tier, population=None, **kw):
     row = {
-        "id": id_, "name": name, "subtype": "locality", "region": None,
-        "population": population, "admin_context": [], "_tier": tier,
+        "id": id_,
+        "name": name,
+        "subtype": "locality",
+        "region": None,
+        "population": population,
+        "admin_context": [],
+        "_tier": tier,
     }
     row.update(kw)
     return row
@@ -1362,8 +1426,7 @@ def test_city_comma_country_resolves_correct_country(suffix):
     assert cambridges[0].get("matched_by") != "fuzzy"
     # The US Cambridge must be excluded entirely, not merely ranked below.
     assert not any(
-        r["name"] == "Cambridge" and r["admin_context"][0] == "United States"
-        for r in results
+        r["name"] == "Cambridge" and r["admin_context"][0] == "United States" for r in results
     )
 
 
@@ -1386,7 +1449,8 @@ def test_unrecognized_comma_qualifier_never_returns_empty():
     result = geocode.geocode_detailed("Cambridge, Narnia", limit=5)
     assert result["results"]
     assert {r["admin_context"][0] for r in result["results"]} == {
-        "United Kingdom", "United States",
+        "United Kingdom",
+        "United States",
     }
     assert "note" in result
     assert "Narnia" in result["note"]
@@ -1530,12 +1594,21 @@ def test_variant_sourced_row_ranks_below_literal_only_as_a_last_resort_tie():
     # depth, region population) is otherwise tied.
     region_population: dict[str, int] = {}
     literal_row = {
-        "id": "z-literal", "name": "Example", "subtype": "locality",
-        "region": None, "population": None, "admin_context": [],
+        "id": "z-literal",
+        "name": "Example",
+        "subtype": "locality",
+        "region": None,
+        "population": None,
+        "admin_context": [],
     }
     variant_row = {
-        "id": "a-variant", "name": "Example", "subtype": "locality",
-        "region": None, "population": None, "admin_context": [], "_variant": True,
+        "id": "a-variant",
+        "name": "Example",
+        "subtype": "locality",
+        "region": None,
+        "population": None,
+        "admin_context": [],
+        "_variant": True,
     }
     rows = [variant_row, literal_row]
     rows.sort(key=lambda r: geocode._rank_key(r, "Example", region_population))
@@ -1551,12 +1624,21 @@ def test_variant_sourced_row_still_wins_on_real_prominence():
     # literally-named village vs. the famous city found only via variant).
     region_population: dict[str, int] = {}
     literal_row = {
-        "id": "z-tiny-village", "name": "Example", "subtype": "locality",
-        "region": None, "population": None, "admin_context": [],
+        "id": "z-tiny-village",
+        "name": "Example",
+        "subtype": "locality",
+        "region": None,
+        "population": None,
+        "admin_context": [],
     }
     variant_row = {
-        "id": "a-famous-city", "name": "Example", "subtype": "locality",
-        "region": None, "population": 1_000_000, "admin_context": [], "_variant": True,
+        "id": "a-famous-city",
+        "name": "Example",
+        "subtype": "locality",
+        "region": None,
+        "population": 1_000_000,
+        "admin_context": [],
+        "_variant": True,
     }
     rows = [literal_row, variant_row]
     rows.sort(key=lambda r: geocode._rank_key(r, "Example", region_population))
@@ -1570,9 +1652,7 @@ def test_abbreviation_variant_queries_are_bidirectional_and_leading_only():
     assert "Fort Worth" in geocode._abbreviation_variant_queries("Ft. Worth")
     assert "N. Hollywood" in geocode._abbreviation_variant_queries("North Hollywood")
     # Cardinal expansion only applies to the leading token.
-    assert not any(
-        "West" in v for v in geocode._abbreviation_variant_queries("Fort W")
-    )
+    assert not any("West" in v for v in geocode._abbreviation_variant_queries("Fort W"))
 
 
 # --- #105: the anchorless places scan is skipped against a REMOTE dataset ---
@@ -1631,7 +1711,8 @@ def test_anchored_query_still_searches_places_when_upstream_is_remote(monkeypatc
     # Record the anchor rather than running the query: the glob above is a
     # stand-in for S3 and isn't readable from a test.
     monkeypatch.setattr(
-        geocode, "_query_places_fallback",
+        geocode,
+        "_query_places_fallback",
         lambda q, anchor=None, also=None, schedule_tiles=True: called.append(anchor) or [],
     )
     # "Brooklyn" matches a division, so an anchor is derivable.
@@ -1747,24 +1828,39 @@ def test_geocode_batch_takes_the_top_postcode_row():
     assert result["results"][0]["id"] is None
 
 
-@pytest.mark.parametrize("query", ["94110", "1011AB", "1011 AB", "sw1a 1aa", "M5V 3L9",
-                                   "1011", "94110-1234", "1000-001", "123456"])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "94110",
+        "1011AB",
+        "1011 AB",
+        "sw1a 1aa",
+        "M5V 3L9",
+        "1011",
+        "94110-1234",
+        "1000-001",
+        "123456",
+    ],
+)
 def test_postcode_shapes_are_detected(query):
     assert geocode._postcode_variants(query) is not None
 
 
-@pytest.mark.parametrize("query", [
-    "10 Downing Street",   # a number and words is an address, not a postcode
-    "SW1A",                # a bare outward code is also how names abbreviate
-    "Springfield",
-    "London, Ontario",
-    "94110 San Francisco",
-    "Route 66",
-    "1011 AB Amsterdam",
-    "A1",
-    "M5V",
-    "",
-])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "10 Downing Street",  # a number and words is an address, not a postcode
+        "SW1A",  # a bare outward code is also how names abbreviate
+        "Springfield",
+        "London, Ontario",
+        "94110 San Francisco",
+        "Route 66",
+        "1011 AB Amsterdam",
+        "A1",
+        "M5V",
+        "",
+    ],
+)
 def test_name_shaped_queries_never_enter_the_postcode_path(query):
     assert geocode._postcode_variants(query) is None
 
@@ -1772,6 +1868,7 @@ def test_name_shaped_queries_never_enter_the_postcode_path(query):
 def test_name_queries_never_run_the_postcode_aggregate(monkeypatch):
     """The detector is the gate, and it is checked here end-to-end: a name
     query must not pay for an addresses-theme scan at all."""
+
     def boom(variants):
         raise AssertionError(f"the postcode aggregate ran for a name query: {variants}")
 
@@ -1798,8 +1895,7 @@ def test_postcode_shaped_query_with_no_match_still_runs_the_name_search(tmp_path
     try:
         result = geocode.geocode_detailed("1000", limit=5)
     finally:
-        overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions",
-                               type_="division")
+        overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions", type_="division")
     assert [r["name"] for r in result["results"]] == ["1000"]
     assert result["results"][0]["type"] == "locality"
     assert "note" not in result, "a real match answers plainly, postcode note or not"
@@ -1808,6 +1904,7 @@ def test_postcode_shaped_query_with_no_match_still_runs_the_name_search(tmp_path
 def test_covering_locality_comes_from_the_local_divisions_table(geocode_cache, monkeypatch):
     """The #43 table is the 60ms path the postcode join is designed around;
     the upstream nearest-division scan is only the cache-off degrade."""
+
     def boom(lat, lon):
         raise AssertionError("upstream division scan ran with a local table available")
 
@@ -1824,6 +1921,7 @@ def test_a_centroid_with_nothing_named_nearby_reports_no_locality(geocode_cache)
 def test_the_aggregate_does_not_go_through_the_tile_cache(monkeypatch):
     """A postcode aggregate has no bbox, so a tile-sliced answer would be
     wrong rather than partial — it reads upstream directly."""
+
     def boom(bbox):
         raise AssertionError("the tile cache was consulted for a global aggregate")
 
@@ -1859,7 +1957,8 @@ def test_a_dataset_without_a_postcode_column_degrades_to_the_name_search(tmp_pat
 def test_the_cold_scan_warning_only_appears_for_a_remote_read(monkeypatch):
     assert "~12s" not in geocode.geocode_detailed("94110", limit=5)["note"]
     monkeypatch.setattr(
-        geocode.addresses, "_upstream_glob",
+        geocode.addresses,
+        "_upstream_glob",
         lambda: str(ADDRESSES_FIXTURE_PATH),
     )
     monkeypatch.setattr(geocode, "_is_remote", lambda glob: True)
@@ -1886,8 +1985,7 @@ def test_a_country_whose_rows_all_lack_a_bbox_is_reported_as_no_data(tmp_path):
     try:
         result = geocode.geocode_detailed("94110", limit=5)
     finally:
-        overture.set_data_path(str(ADDRESSES_FIXTURE_PATH), theme="addresses",
-                               type_="address")
+        overture.set_data_path(str(ADDRESSES_FIXTURE_PATH), theme="addresses", type_="address")
     assert result["results"] == []
     assert "postcode-shaped" in result["note"]
 
@@ -1910,8 +2008,7 @@ def test_address_count_and_centroid_are_measured_over_the_same_rows(tmp_path):
     try:
         rows = geocode.geocode("94110", limit=5)
     finally:
-        overture.set_data_path(str(ADDRESSES_FIXTURE_PATH), theme="addresses",
-                               type_="address")
+        overture.set_data_path(str(ADDRESSES_FIXTURE_PATH), theme="addresses", type_="address")
     us = next(r for r in rows if r["country"] == "US")
     assert us["address_count"] == 10, "the two bbox-less points are out of both"
     assert us["lat"] is not None and us["lon"] is not None
@@ -1945,8 +2042,7 @@ def test_the_covering_locality_is_looked_up_in_the_rows_own_country(tmp_path):
     try:
         rows = geocode.geocode("94110", limit=5)
     finally:
-        overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions",
-                               type_="division")
+        overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions", type_="division")
     us = next(r for r in rows if r["country"] == "US")
     assert us["admin_context"][-1] == "Mission District"
     assert "Border Town" not in us["admin_context"]
@@ -1986,8 +2082,7 @@ def test_postcodes_match_regardless_of_case_and_padding(tmp_path):
         rows = geocode.geocode("94110", limit=5)
         dutch = geocode.geocode("1011 AB", limit=5)
     finally:
-        overture.set_data_path(str(ADDRESSES_FIXTURE_PATH), theme="addresses",
-                               type_="address")
+        overture.set_data_path(str(ADDRESSES_FIXTURE_PATH), theme="addresses", type_="address")
     assert [r["country"] for r in rows] == ["US", "SK", "FR"]
     assert dutch[0]["country"] == "NL"
 
@@ -2010,8 +2105,7 @@ def test_the_postcode_aggregate_is_memoized_for_the_process(geocode_cache, monke
     distinguish from four-digit postcodes."""
     geocode._POSTCODE_AGGREGATE_CACHE.clear()
     first = geocode.geocode("94110", limit=5)
-    assert (geocode.addresses._upstream_glob(), ("94110",)) \
-        in geocode._POSTCODE_AGGREGATE_CACHE
+    assert (geocode.addresses._upstream_glob(), ("94110",)) in geocode._POSTCODE_AGGREGATE_CACHE
 
     def boom(glob):
         raise AssertionError("the addresses theme was re-scanned for a cached postcode")
@@ -2038,8 +2132,7 @@ def test_a_postcode_hit_short_circuits_the_name_search(tmp_path):
     try:
         result = geocode.geocode_detailed("94110", limit=5)
     finally:
-        overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions",
-                               type_="division")
+        overture.set_data_path(str(DIVISIONS_FIXTURE_PATH), theme="divisions", type_="division")
     assert all(r["type"] == "postcode" for r in result["results"])
     assert "gers-div-94110" not in [r["id"] for r in result["results"]]
 
@@ -2053,11 +2146,13 @@ def test_remote_build_stages_and_defers_hierarchies(geocode_cache, monkeypatch):
     answers meanwhile with admin_context []."""
     spawned = []
     monkeypatch.setattr(geocode, "_is_remote_glob", lambda g: True)
-    monkeypatch.setattr(geocode, "_spawn_divisions_upgrade",
-                        lambda path, glob: spawned.append((path, glob)))
+    monkeypatch.setattr(
+        geocode, "_spawn_divisions_upgrade", lambda path, glob: spawned.append((path, glob))
+    )
     table = geocode._local_divisions_table()
     assert table is not None
     from pathlib import Path
+
     assert geocode._stage1_sentinel(Path(table)).exists()
     assert len(spawned) == 1
     rows = geocode.geocode("Brooklyn", limit=3)
@@ -2068,10 +2163,12 @@ def test_remote_build_stages_and_defers_hierarchies(geocode_cache, monkeypatch):
 def test_upgrade_fills_admin_chains_and_clears_the_sentinel(geocode_cache, monkeypatch):
     spawned = []
     monkeypatch.setattr(geocode, "_is_remote_glob", lambda g: True)
-    monkeypatch.setattr(geocode, "_spawn_divisions_upgrade",
-                        lambda path, glob: spawned.append((path, glob)))
+    monkeypatch.setattr(
+        geocode, "_spawn_divisions_upgrade", lambda path, glob: spawned.append((path, glob))
+    )
     table = geocode._local_divisions_table()
     from pathlib import Path
+
     geocode._upgrade_divisions_table(
         Path(table), overture.upstream_glob(theme="divisions", type_="division")
     )
@@ -2084,10 +2181,10 @@ def test_local_datasets_build_in_one_pass(geocode_cache, monkeypatch):
     """Pinned/local datasets (fixtures, on-disk mirrors) keep the old
     single-pass full build — staging exists for the network."""
     called = []
-    monkeypatch.setattr(geocode, "_spawn_divisions_upgrade",
-                        lambda *a: called.append(a))
+    monkeypatch.setattr(geocode, "_spawn_divisions_upgrade", lambda *a: called.append(a))
     table = geocode._local_divisions_table()
     from pathlib import Path
+
     assert not geocode._stage1_sentinel(Path(table)).exists()
     assert called == []
     assert geocode.geocode("Brooklyn", limit=3)[0]["admin_context"]
@@ -2099,8 +2196,9 @@ def test_a_stranded_stage1_sentinel_resumes_the_upgrade(geocode_cache, monkeypat
     table = geocode._local_divisions_table()
     # New process, sentinel still there: the next lookup must re-kick it.
     resumed = []
-    monkeypatch.setattr(geocode, "_spawn_divisions_upgrade",
-                        lambda path, glob: resumed.append(path))
+    monkeypatch.setattr(
+        geocode, "_spawn_divisions_upgrade", lambda path, glob: resumed.append(path)
+    )
     assert geocode._local_divisions_table() == table
     assert len(resumed) == 1
 
@@ -2124,17 +2222,18 @@ def _stub_divisions(monkeypatch, by_query):
 
 
 def test_a_leading_word_can_anchor_when_the_tail_belongs_to_the_name(monkeypatch):
-    """"Stanford Shopping Center" has no city suffix at all: its tail is part
+    """ "Stanford Shopping Center" has no city suffix at all: its tail is part
     of the mall's own name. Anchoring on "Center" found Center, Pennsylvania
     and aimed a Palo Alto query at Pittsburgh — 61s to answer nothing."""
-    _stub_divisions(monkeypatch, {
-        "Center": [{"name": "Center", "population": 11795, "lat": 40.66, "lon": -80.29}],
-        "Stanford": [{"name": "Stanford", "population": 13809, "lat": 37.43, "lon": -122.17}],
-    })
-
-    anchor = geocode._fallback_anchor(
-        "Stanford Shopping Center", [], None, "/divisions.parquet"
+    _stub_divisions(
+        monkeypatch,
+        {
+            "Center": [{"name": "Center", "population": 11795, "lat": 40.66, "lon": -80.29}],
+            "Stanford": [{"name": "Stanford", "population": 13809, "lat": 37.43, "lon": -122.17}],
+        },
     )
+
+    anchor = geocode._fallback_anchor("Stanford Shopping Center", [], None, "/divisions.parquet")
 
     assert anchor == (37.43, -122.17, "Shopping Center")
 
@@ -2142,10 +2241,15 @@ def test_a_leading_word_can_anchor_when_the_tail_belongs_to_the_name(monkeypatch
 def test_a_trailing_city_still_beats_a_leading_namesake(monkeypatch):
     """The trailing-suffix reading stays the default. It loses only to a
     genuinely more prominent division, never merely to a leading-word hit."""
-    _stub_divisions(monkeypatch, {
-        "Brooklyn": [{"name": "Brooklyn", "population": 2_700_000, "lat": 40.68, "lon": -73.94}],
-        "Blue": [{"name": "Blue", "population": 900, "lat": 44.0, "lon": -117.0}],
-    })
+    _stub_divisions(
+        monkeypatch,
+        {
+            "Brooklyn": [
+                {"name": "Brooklyn", "population": 2_700_000, "lat": 40.68, "lon": -73.94}
+            ],
+            "Blue": [{"name": "Blue", "population": 900, "lat": 44.0, "lon": -117.0}],
+        },
+    )
 
     anchor = geocode._fallback_anchor("Blue Bottle Brooklyn", [], None, "/divisions.parquet")
 
@@ -2153,11 +2257,14 @@ def test_a_trailing_city_still_beats_a_leading_namesake(monkeypatch):
 
 
 def test_a_stopword_head_is_never_tried_as_an_anchor(monkeypatch):
-    """"the Met" must keep resolving through its trailing token; "the" is not
+    """ "the Met" must keep resolving through its trailing token; "the" is not
     a location word however many divisions happen to contain the letters."""
-    asked = _stub_divisions(monkeypatch, {
-        "Met": [{"name": "Metropolis", "population": 90_000, "lat": 40.7, "lon": -73.9}],
-    })
+    asked = _stub_divisions(
+        monkeypatch,
+        {
+            "Met": [{"name": "Metropolis", "population": 90_000, "lat": 40.7, "lon": -73.9}],
+        },
+    )
 
     anchor = geocode._fallback_anchor("the Met", [], None, "/divisions.parquet")
 
@@ -2177,20 +2284,28 @@ def test_remote_divisions_never_pay_for_leading_word_lookups(monkeypatch):
     assert asked == ["Shopping Center"]
 
 
-@pytest.mark.parametrize("query, refused", [
-    ("Eiffel Tower", "Tower"),
-    ("Times Square", "Square"),
-    ("Heathrow Airport", "Airport"),
-    ("Griffith Observatory", "Observatory"),
-])
+@pytest.mark.parametrize(
+    "query, refused",
+    [
+        ("Eiffel Tower", "Tower"),
+        ("Times Square", "Square"),
+        ("Heathrow Airport", "Airport"),
+        ("Griffith Observatory", "Observatory"),
+    ],
+)
 def test_a_feature_noun_is_never_the_anchor(monkeypatch, query, refused):
     """#268: _query_divisions matches substrings, so every feature noun finds
     a division somewhere — "Tower" found Tower Grove in St. Louis and sent a
     Paris query 7,000 km away to scan Missouri for 33s. These words say what
     a place is, not where it is."""
-    asked = _stub_divisions(monkeypatch, {
-        refused: [{"name": f"{refused} Grove", "population": 15_000, "lat": 38.6, "lon": -90.2}],
-    })
+    asked = _stub_divisions(
+        monkeypatch,
+        {
+            refused: [
+                {"name": f"{refused} Grove", "population": 15_000, "lat": 38.6, "lon": -90.2}
+            ],
+        },
+    )
 
     anchor = geocode._fallback_anchor(query, [], None, "/divisions.parquet")
 
@@ -2224,7 +2339,7 @@ def test_every_token_present_finds_a_name_the_user_shortened(monkeypatch):
 
 
 def test_a_school_query_runs_no_upstream_divisions_scan(monkeypatch):
-    """"school" is a feature noun: no division is called one, so the recall
+    """ "school" is a feature noun: no division is called one, so the recall
     scan can only come back empty. It was 15.2s of a 21s call before this."""
     assert geocode._names_a_feature("BASIS Silicon Valley Lower School Sunnyvale")
     for word in ("school", "academy", "clinic", "campus", "institute"):
@@ -2235,15 +2350,32 @@ def test_a_school_query_runs_no_upstream_divisions_scan(monkeypatch):
 
 
 def test_a_longer_match_yields_to_a_vastly_more_prominent_city(monkeypatch):
-    """"notre dame paris": the two-word "Notre Dame" (an Indiana CDP) must
+    """ "notre dame paris": the two-word "Notre Dame" (an Indiana CDP) must
     not outrank Paris on match length alone — a 2-token coincidence at 8k
     people is not stronger evidence than a world city at 2.1M."""
-    _stub_divisions(monkeypatch, {
-        "notre dame": [{"name": "Notre Dame", "population": 8_000,
-                        "lat": 41.70, "lon": -86.24, "subtype": "locality"}],
-        "paris": [{"name": "Paris", "population": 2_100_000,
-                   "lat": 48.85, "lon": 2.35, "subtype": "locality"}],
-    })
+    _stub_divisions(
+        monkeypatch,
+        {
+            "notre dame": [
+                {
+                    "name": "Notre Dame",
+                    "population": 8_000,
+                    "lat": 41.70,
+                    "lon": -86.24,
+                    "subtype": "locality",
+                }
+            ],
+            "paris": [
+                {
+                    "name": "Paris",
+                    "population": 2_100_000,
+                    "lat": 48.85,
+                    "lon": 2.35,
+                    "subtype": "locality",
+                }
+            ],
+        },
+    )
 
     anchor = geocode._fallback_anchor("notre dame paris", [], None, "/divisions.parquet")
 
@@ -2253,12 +2385,29 @@ def test_a_longer_match_yields_to_a_vastly_more_prominent_city(monkeypatch):
 def test_a_longer_match_beats_a_comparably_prominent_shorter_one(monkeypatch):
     """The other side of the ratio: "palo alto caltrain" keeps Palo Alto over
     Palo (Leyte) even though Leyte's Palo has slightly more people."""
-    _stub_divisions(monkeypatch, {
-        "palo alto": [{"name": "Palo Alto", "population": 68_000,
-                       "lat": 37.44, "lon": -122.16, "subtype": "locality"}],
-        "palo": [{"name": "Palo", "population": 70_000,
-                  "lat": 11.16, "lon": 124.99, "subtype": "locality"}],
-    })
+    _stub_divisions(
+        monkeypatch,
+        {
+            "palo alto": [
+                {
+                    "name": "Palo Alto",
+                    "population": 68_000,
+                    "lat": 37.44,
+                    "lon": -122.16,
+                    "subtype": "locality",
+                }
+            ],
+            "palo": [
+                {
+                    "name": "Palo",
+                    "population": 70_000,
+                    "lat": 11.16,
+                    "lon": 124.99,
+                    "subtype": "locality",
+                }
+            ],
+        },
+    )
 
     anchor = geocode._fallback_anchor("palo alto caltrain", [], None, "/divisions.parquet")
 
@@ -2266,18 +2415,42 @@ def test_a_longer_match_beats_a_comparably_prominent_shorter_one(monkeypatch):
 
 
 def test_an_ambiguous_city_offers_its_namesakes_as_alternates(monkeypatch):
-    """"cambridge" is the UK's, Ontario's and Massachusetts's; the retry
+    """ "cambridge" is the UK's, Ontario's and Massachusetts's; the retry
     path can only try cities that exist in the candidate list at all."""
-    _stub_divisions(monkeypatch, {
-        "cambridge": [
-            {"name": "Cambridge", "population": 145_000, "lat": 52.21, "lon": 0.12,
-             "country": "GB", "region": "GB-CAM", "subtype": "locality"},
-            {"name": "Cambridge", "population": 140_000, "lat": 43.36, "lon": -80.31,
-             "country": "CA", "region": "CA-ON", "subtype": "locality"},
-            {"name": "Cambridge", "population": 118_000, "lat": 42.37, "lon": -71.11,
-             "country": "US", "region": "US-MA", "subtype": "locality"},
-        ],
-    })
+    _stub_divisions(
+        monkeypatch,
+        {
+            "cambridge": [
+                {
+                    "name": "Cambridge",
+                    "population": 145_000,
+                    "lat": 52.21,
+                    "lon": 0.12,
+                    "country": "GB",
+                    "region": "GB-CAM",
+                    "subtype": "locality",
+                },
+                {
+                    "name": "Cambridge",
+                    "population": 140_000,
+                    "lat": 43.36,
+                    "lon": -80.31,
+                    "country": "CA",
+                    "region": "CA-ON",
+                    "subtype": "locality",
+                },
+                {
+                    "name": "Cambridge",
+                    "population": 118_000,
+                    "lat": 42.37,
+                    "lon": -71.11,
+                    "country": "US",
+                    "region": "US-MA",
+                    "subtype": "locality",
+                },
+            ],
+        },
+    )
 
     options = geocode._fallback_anchor_candidates(
         "harvard square cambridge", [], None, "/divisions.parquet"
@@ -2293,7 +2466,7 @@ def test_an_ambiguous_city_offers_its_namesakes_as_alternates(monkeypatch):
 
 
 def test_near_constraint_bounds_the_fuzzy_tier(geocode_cache):
-    """"Marina Bay Sands", pinned to Singapore, was corrected by spelling to
+    """ "Marina Bay Sands", pinned to Singapore, was corrected by spelling to
     five "Marina Bay" neighbourhoods in the US. Under a pin the typo tier
     only sees the pin's box: Berkeley is a correction for "Berekley" from
     Berkeley, not from Singapore."""
@@ -2313,9 +2486,8 @@ def test_near_constraint_bounds_the_literal_pass(geocode_cache):
 
 
 def test_no_near_constraint_leaves_geocode_unchanged(geocode_cache):
-    assert (
-        geocode.geocode("Springfield", limit=5)
-        == geocode.geocode("Springfield", limit=5, near=None)
+    assert geocode.geocode("Springfield", limit=5) == geocode.geocode(
+        "Springfield", limit=5, near=None
     )
     assert len(geocode.geocode("Springfield", limit=5)) == 2
 

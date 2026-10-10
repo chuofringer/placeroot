@@ -84,7 +84,6 @@ conn_lock = _ThreadAwareRLock()
 _loaded_extensions: set[str] = set()
 
 
-
 # Region the public Overture bucket lives in — the default unless
 # PLACEROOT_S3_REGION overrides it (issue #20's switchover: a mirror on a
 # different S3-compatible service almost always has its own region name).
@@ -145,9 +144,7 @@ def _cache_dir() -> str:
     """The placeroot cache directory, resolved the way cache.cache_dir()
     does (PLACEROOT_CACHE_DIR, else ~/.cache/placeroot) without importing
     cache.py — it imports this module, and _configure runs early."""
-    return os.environ.get("PLACEROOT_CACHE_DIR") or os.path.expanduser(
-        "~/.cache/placeroot"
-    )
+    return os.environ.get("PLACEROOT_CACHE_DIR") or os.path.expanduser("~/.cache/placeroot")
 
 
 # httpfs' http_timeout is in SECONDS (DuckDB >= 1.1; default 30). An earlier
@@ -163,7 +160,8 @@ def _http_timeout_s() -> int:
     except ValueError:
         logger.warning(
             "Ignoring PLACEROOT_HTTP_TIMEOUT_S=%r (not an integer); using %ds",
-            raw, DEFAULT_HTTP_TIMEOUT_S,
+            raw,
+            DEFAULT_HTTP_TIMEOUT_S,
         )
         return DEFAULT_HTTP_TIMEOUT_S
 
@@ -213,9 +211,7 @@ def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
         try:
             con.execute(f"SET memory_limit={_sql_str(memory_limit)};")
         except duckdb.Error as e:
-            logger.warning(
-                "Ignoring PLACEROOT_DUCKDB_MEMORY_LIMIT=%r: %s", memory_limit, e
-            )
+            logger.warning("Ignoring PLACEROOT_DUCKDB_MEMORY_LIMIT=%r: %s", memory_limit, e)
     try:
         temp_dir = os.path.join(_cache_dir(), "duckdb_tmp")
         con.execute(f"SET temp_directory={_sql_str(temp_dir)};")
@@ -340,8 +336,9 @@ def _read_cursor_cap() -> int:
     try:
         return max(1, int(raw))
     except ValueError:
-        logger.warning("Ignoring %s=%r (not an integer); using %d",
-                       READ_CURSORS_ENV, raw, DEFAULT_READ_CURSORS)
+        logger.warning(
+            "Ignoring %s=%r (not an integer); using %d", READ_CURSORS_ENV, raw, DEFAULT_READ_CURSORS
+        )
         return DEFAULT_READ_CURSORS
 
 
@@ -364,8 +361,7 @@ def _snapshot_settings(instance) -> dict:
     global _settings_snapshot
     values = {
         name: value
-        for name, value in instance.execute(
-            "SELECT name, value FROM duckdb_settings()").fetchall()
+        for name, value in instance.execute("SELECT name, value FROM duckdb_settings()").fetchall()
     }
     _settings_snapshot = (instance, values)
     return values
@@ -431,8 +427,7 @@ class CursorPool:
     nothing needs re-applying per cursor.
     """
 
-    def __init__(self, instance: duckdb.DuckDBPyConnection, cap: int,
-                 settings: dict | None = None):
+    def __init__(self, instance: duckdb.DuckDBPyConnection, cap: int, settings: dict | None = None):
         self.instance = instance
         self.cap = cap
         # Taken here, outside any lease, so cursor creation never reads the instance.
@@ -441,8 +436,8 @@ class CursorPool:
         self._guard = threading.Lock()
         self._idle: list[duckdb.DuckDBPyConnection] = []
         self._closed = False
-        self.live = 0      # cursors created and not yet closed
-        self.created = 0   # lifetime total (diagnostics and tests)
+        self.live = 0  # cursors created and not yet closed
+        self.created = 0  # lifetime total (diagnostics and tests)
 
     @contextlib.contextmanager
     def lease(self):
@@ -622,9 +617,7 @@ def _probe_schema_cached(glob: str) -> frozenset:
     while cheap, isn't free to redo on every query.
     """
     with read_conn() as con:
-        cols = con.execute(
-            f"SELECT * FROM read_parquet('{glob}') LIMIT 0"
-        ).description
+        cols = con.execute(f"SELECT * FROM read_parquet('{glob}') LIMIT 0").description
     return frozenset(c[0] for c in cols)
 
 
@@ -669,8 +662,9 @@ def probe_schema(glob: str) -> frozenset | None:
         result = _probe_schema_cached(glob)
     except duckdb.Error as e:
         _probe_failed_at[glob] = time.monotonic()
-        logger.warning("Schema probe failed for %s (not retried for %.0fs): %s",
-                       glob, PROBE_FAILURE_RETRY_S, e)
+        logger.warning(
+            "Schema probe failed for %s (not retried for %.0fs): %s", glob, PROBE_FAILURE_RETRY_S, e
+        )
         return None
     _probe_failed_at.pop(glob, None)
     return result

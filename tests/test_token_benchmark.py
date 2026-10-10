@@ -59,8 +59,11 @@ def test_nearest_poi_offline_fixture_task_records_a_real_miss_honestly():
     counted, not dropped" path with an actual miss rather than a synthetic
     always-pass stand-in."""
     task = token_benchmark._nearest_poi_top3_task(
-        "offline_coffee", CENTER_LAT, CENTER_LON,
-        category="coffee_shop", expected_names=["Starbucks"],
+        "offline_coffee",
+        CENTER_LAT,
+        CENTER_LON,
+        category="coffee_shop",
+        expected_names=["Starbucks"],
     )
     run = token_benchmark.run_task(task)
     assert run.outcome.error is None

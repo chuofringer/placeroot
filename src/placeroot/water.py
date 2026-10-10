@@ -116,7 +116,14 @@ TYPE_ = "water"
 # reported, but it keys the multi-tile dedupe (_dedupe_clause), so its
 # absence has to be knowable.
 REQUIRED_COLUMNS = [
-    "id", "geometry", "bbox", "subtype", "class", "names", "is_salt", "is_intermittent",
+    "id",
+    "geometry",
+    "bbox",
+    "subtype",
+    "class",
+    "names",
+    "is_salt",
+    "is_intermittent",
 ]
 ESSENTIAL_COLUMNS = {"geometry", "bbox"}
 
@@ -160,8 +167,18 @@ _OCEAN_CLASSES = ("sea", "strait")
 # _ocean_only_filter. A value missing from this list simply means no
 # short-circuit, never a dropped row.
 _KNOWN_SUBTYPES = (
-    "canal", "human_made", "lake", "ocean", "physical", "pond", "reservoir",
-    "river", "spring", "stream", "wastewater", "water",
+    "canal",
+    "human_made",
+    "lake",
+    "ocean",
+    "physical",
+    "pond",
+    "reservoir",
+    "river",
+    "spring",
+    "stream",
+    "wastewater",
+    "water",
 )
 
 # How many containing polygons to pull back, smallest-area first. Only the
@@ -486,7 +503,7 @@ def water_near(
                 {nlon_expr} AS nlon,
                 {nlat_expr} AS nlat
             FROM {_from_source(bbox)}
-            WHERE {' AND '.join(filters)}
+            WHERE {" AND ".join(filters)}
             {_dedupe_clause(missing)}
         ),
         in_range AS (

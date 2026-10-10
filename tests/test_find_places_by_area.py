@@ -162,8 +162,13 @@ def linked_area_fixtures(tmp_path):
     """)
     con.execute(
         "INSERT INTO division_areas VALUES (?, ?, ?, ?, ?)",
-        ["area-notchville-1", {"primary": "Notchville"}, "locality",
-         _wkb(con, AREA_WKT), AREA_DIVISION_ID],
+        [
+            "area-notchville-1",
+            {"primary": "Notchville"},
+            "locality",
+            _wkb(con, AREA_WKT),
+            AREA_DIVISION_ID,
+        ],
     )
     division_areas_path = tmp_path / "division_areas.parquet"
     con.execute(f"COPY division_areas TO '{division_areas_path}' (FORMAT PARQUET)")
@@ -191,14 +196,41 @@ def linked_area_fixtures(tmp_path):
     con.executemany(
         "INSERT INTO places VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            ("place-in", {"xmin": INSIDE_LON, "ymin": INSIDE_LAT,
-                          "xmax": INSIDE_LON, "ymax": INSIDE_LAT},
-             {"primary": "Inside Cafe"}, {"primary": "coffee_shop", "alternates": []},
-             "coffee_shop", "open", 0.9, [], [], [], [], None, []),
-            ("place-out", {"xmin": OUTSIDE_LON, "ymin": OUTSIDE_LAT,
-                           "xmax": OUTSIDE_LON, "ymax": OUTSIDE_LAT},
-             {"primary": "Outside Cafe"}, {"primary": "coffee_shop", "alternates": []},
-             "coffee_shop", "open", 0.9, [], [], [], [], None, []),
+            (
+                "place-in",
+                {"xmin": INSIDE_LON, "ymin": INSIDE_LAT, "xmax": INSIDE_LON, "ymax": INSIDE_LAT},
+                {"primary": "Inside Cafe"},
+                {"primary": "coffee_shop", "alternates": []},
+                "coffee_shop",
+                "open",
+                0.9,
+                [],
+                [],
+                [],
+                [],
+                None,
+                [],
+            ),
+            (
+                "place-out",
+                {
+                    "xmin": OUTSIDE_LON,
+                    "ymin": OUTSIDE_LAT,
+                    "xmax": OUTSIDE_LON,
+                    "ymax": OUTSIDE_LAT,
+                },
+                {"primary": "Outside Cafe"},
+                {"primary": "coffee_shop", "alternates": []},
+                "coffee_shop",
+                "open",
+                0.9,
+                [],
+                [],
+                [],
+                [],
+                None,
+                [],
+            ),
         ],
     )
     places_path = tmp_path / "places.parquet"
@@ -251,12 +283,27 @@ def test_resolve_area_skips_divisions_without_an_id(monkeypatch):
     """A degraded dataset can yield a division row with no id; it can't be
     passed to the polygon search, so it must not become the chosen area."""
     monkeypatch.setattr(
-        geocode, "geocode",
+        geocode,
+        "geocode",
         lambda q, limit=None: [
-            {"id": None, "name": "Ghost", "type": "locality",
-             "admin_context": [], "rank_score": 0.99, "lat": 0.0, "lon": 0.0},
-            {"id": "gers-real", "name": "Ghost", "type": "locality",
-             "admin_context": ["Somewhere"], "rank_score": 0.5, "lat": 0.0, "lon": 0.0},
+            {
+                "id": None,
+                "name": "Ghost",
+                "type": "locality",
+                "admin_context": [],
+                "rank_score": 0.99,
+                "lat": 0.0,
+                "lon": 0.0,
+            },
+            {
+                "id": "gers-real",
+                "name": "Ghost",
+                "type": "locality",
+                "admin_context": ["Somewhere"],
+                "rank_score": 0.5,
+                "lat": 0.0,
+                "lon": 0.0,
+            },
         ],
     )
     assert geocode.resolve_area("Ghost")["division_id"] == "gers-real"

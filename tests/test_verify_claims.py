@@ -67,9 +67,7 @@ def _patch_find_places(monkeypatch, rows_by_call=None, rows=None):
         return fake
 
     monkeypatch.setattr(overture, "find_places", _fake("find_places"))
-    monkeypatch.setattr(
-        overture, "find_places_for_categories", _fake("find_places_for_categories")
-    )
+    monkeypatch.setattr(overture, "find_places_for_categories", _fake("find_places_for_categories"))
     return calls
 
 

@@ -32,16 +32,15 @@ def test_cold_route_without_confirm_is_needs_confirm_and_fast():
 
 def test_cold_route_with_confirm_runs():
     routing.clear_graph_cache()
-    result = server.route(
-        FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", confirm=True
-    )
+    result = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", confirm=True)
     assert "error" not in result
     assert result["distance_m"] > 0
     assert result["mode"] == "walk"
     assert "status" in result
     assert result["progress"]
-    assert any("street graph" in line.lower() or "routing a" in line.lower()
-               for line in result["progress"])
+    assert any(
+        "street graph" in line.lower() or "routing a" in line.lower() for line in result["progress"]
+    )
 
 
 def test_warm_graph_never_asks(monkeypatch):
@@ -201,9 +200,7 @@ def test_disk_graph_after_restart_never_asks(tmp_path, monkeypatch):
     assert routing._graph_cache, "disk peek must populate the in-memory LRU"
     n_after_peek = len(loads)
     assert n_after_peek >= 1
-    assert routing.route_graph_is_cached(
-        FROM_LAT, FROM_LON, TO_LAT, TO_LON, "walk"
-    )
+    assert routing.route_graph_is_cached(FROM_LAT, FROM_LON, TO_LAT, TO_LON, "walk")
     result = server.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk")
     assert result.get("error") != "needs_confirm"
     assert "error" not in result

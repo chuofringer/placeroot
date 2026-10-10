@@ -124,7 +124,10 @@ def test_features_come_back_nearest_first(water_fixture):
     rows, radius_m, in_range_count, containing = water.water_near(CENTER_LAT, CENTER_LON)
     assert radius_m == water.DEFAULT_RADIUS_M
     assert [r["name"] for r in rows] == [
-        "Test Spring", "Test Canal", "Test Pond", "Test Lagoon",
+        "Test Spring",
+        "Test Canal",
+        "Test Pond",
+        "Test Lagoon",
     ]
     assert in_range_count == 4
     assert containing is None
@@ -170,7 +173,12 @@ def test_rows_carry_no_geometry(water_fixture):
     rows, _, _, _ = water.water_near(CENTER_LAT, CENTER_LON)
     for row in rows:
         assert set(row) <= {
-            "name", "subtype", "class", "distance_m", "is_salt", "is_intermittent",
+            "name",
+            "subtype",
+            "class",
+            "distance_m",
+            "is_salt",
+            "is_intermittent",
         }
         assert {"subtype", "class", "distance_m"} <= set(row)
 
@@ -192,17 +200,13 @@ def test_limit_zero_still_answers_with_the_nearest(water_fixture):
     over the returned rows, so LIMIT 0 would report ([], 0) with water all
     around — the confident wrong "nothing here" this tool exists to avoid."""
     for bad_limit in (0, -3):
-        rows, _, in_range_count, _ = water.water_near(
-            CENTER_LAT, CENTER_LON, limit=bad_limit
-        )
+        rows, _, in_range_count, _ = water.water_near(CENTER_LAT, CENTER_LON, limit=bad_limit)
         assert [r["name"] for r in rows] == ["Test Spring"]
         assert in_range_count == 4
 
 
 def test_class_filter_matches_the_class_column(water_fixture):
-    rows, _, in_range_count, _ = water.water_near(
-        CENTER_LAT, CENTER_LON, water_class="lagoon"
-    )
+    rows, _, in_range_count, _ = water.water_near(CENTER_LAT, CENTER_LON, water_class="lagoon")
     assert [r["name"] for r in rows] == ["Test Lagoon"]
     assert in_range_count == 1
 
@@ -384,8 +388,7 @@ _BIG_LAKE_FEATURES = [
     ("lake-big", _BIG_LAKE_WKT, "lake", "lake", "Lake Michigan", False, False),
     (
         "creek-1",
-        f"LINESTRING({CENTER_LON - 0.001} {_north(376)}, "
-        f"{CENTER_LON + 0.001} {_north(376)})",
+        f"LINESTRING({CENTER_LON - 0.001} {_north(376)}, {CENTER_LON + 0.001} {_north(376)})",
         "stream",
         "stream",
         "Torrente Cosia",
@@ -706,9 +709,7 @@ def test_oversized_radius_is_clamped_and_reported(water_fixture):
 
 
 def test_non_finite_radius_clamps_to_zero(water_fixture):
-    rows, radius_m, _, _ = water.water_near(
-        CENTER_LAT, CENTER_LON, radius_m=float("nan")
-    )
+    rows, radius_m, _, _ = water.water_near(CENTER_LAT, CENTER_LON, radius_m=float("nan"))
     assert radius_m == 0.0
     assert rows == []
 
@@ -771,7 +772,7 @@ def test_missing_geometry_raises_schema_degraded(tmp_path):
 def test_cache_theme_is_a_portable_path_component():
     theme = water._cache_theme()
     assert theme == "base_water"
-    assert not any(c in theme for c in ':\\/'), theme
+    assert not any(c in theme for c in ":\\/"), theme
 
 
 # --- server wiring ----------------------------------------------------------
@@ -783,7 +784,10 @@ def test_server_water_near_happy_path(water_fixture):
     assert result["center"] == {"lat": CENTER_LAT, "lon": CENTER_LON}
     assert result["radius_m"] == water.DEFAULT_RADIUS_M
     assert [r["name"] for r in result["results"]] == [
-        "Test Spring", "Test Canal", "Test Pond", "Test Lagoon",
+        "Test Spring",
+        "Test Canal",
+        "Test Pond",
+        "Test Lagoon",
     ]
 
 
@@ -883,12 +887,10 @@ def straddling_water(tmp_path, monkeypatch):
     ty = int(40.65 // deg)
     tiles = [(round(-74.0 / deg) - 1, ty), (round(-74.0 / deg), ty)]
     fingerprint = cache.resolve_fingerprint("2026-07-22.0", theme, str(src))
-    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint)
-             for t in tiles]
+    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint) for t in tiles]
     for p in paths:
         (n,) = con.execute(
-            f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) "
-            "WHERE id = 'water-straddle'"
+            f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) WHERE id = 'water-straddle'"
         ).fetchone()
         assert n == 1
     source = f"read_parquet([{', '.join(db._sql_str(str(p)) for p in paths)}])"

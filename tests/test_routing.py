@@ -34,8 +34,7 @@ def test_bbox_filter_sql_unchanged_for_non_crossing_box():
     must stay byte-identical to the filter build_graph used before."""
     filter_sql, params = routing._bbox_filter_sql(-74.0, 40.0, -73.0, 41.0)
     assert filter_sql == (
-        "bbox.xmax >= $xmin AND bbox.xmin <= $xmax"
-        " AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
+        "bbox.xmax >= $xmin AND bbox.xmin <= $xmax AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
     )
     assert params == {"xmin": -74.0, "ymin": 40.0, "xmax": -73.0, "ymax": 41.0}
 
@@ -109,9 +108,7 @@ def test_isochrone_excludes_across_river_nodes_except_via_bridge():
     source = fx.node_id(9, 5)
     dest_across = fx.node_id(10, 5)
 
-    detour_m = _path_length(
-        (9, 5), (9, fx.BRIDGE_J), (10, fx.BRIDGE_J), (10, 5)
-    )
+    detour_m = _path_length((9, 5), (9, fx.BRIDGE_J), (10, fx.BRIDGE_J), (10, 5))
     direct_m = _path_length((9, 5), (10, 5))
     assert detour_m > direct_m * 5  # sanity: the detour is much longer than "next door"
 
@@ -218,7 +215,11 @@ def test_isochrone_where_name_adds_resolved(monkeypatch):
     result = server.isochrone(where="Grid Center", minutes=15)
     assert "error" not in result
     assert result["resolved"] == {
-        "name": "Grid Center", "id": "gers-grid", "lat": lat, "lon": lon, "matched_by": "name",
+        "name": "Grid Center",
+        "id": "gers-grid",
+        "lat": lat,
+        "lon": lon,
+        "matched_by": "name",
     }
 
 
@@ -441,9 +442,14 @@ def test_build_polygon_concave_ring_is_valid_and_within_reached_bbox():
     "never larger than the old convex hull's bbox" guarantee, since a convex
     hull's bbox is exactly the reached points' bbox."""
     reached_coords = [
-        (40.0000, -73.0000), (40.0010, -73.0000), (40.0020, -73.0000),
-        (40.0000, -73.0010), (40.0000, -73.0020),
-        (40.0010, -73.0010), (40.0020, -73.0020), (40.0030, -73.0030),
+        (40.0000, -73.0000),
+        (40.0010, -73.0000),
+        (40.0020, -73.0000),
+        (40.0000, -73.0010),
+        (40.0000, -73.0020),
+        (40.0010, -73.0010),
+        (40.0020, -73.0020),
+        (40.0030, -73.0030),
     ]
     ring, method, truncated = routing._build_polygon(reached_coords, 40.0, -73.0, 300.0)
     assert len(ring) >= 3
@@ -765,9 +771,7 @@ def test_concurrent_cold_requests_share_one_graph_build(monkeypatch):
     results = []
 
     def worker():
-        results.append(
-            routing._get_or_build_graph(lat, lon, 500.0, "walk", None, want_shapes=True)
-        )
+        results.append(routing._get_or_build_graph(lat, lon, 500.0, "walk", None, want_shapes=True))
 
     first = threading.Thread(target=worker)
     first.start()
@@ -961,17 +965,13 @@ def test_snap_to_graph_computes_components_once_per_graph(monkeypatch):
     assert len(calls) == 2
 
 
-def test_autowarm_skips_walk_graph_build_while_foreground_build_in_flight(
-    monkeypatch, tmp_path
-):
+def test_autowarm_skips_walk_graph_build_while_foreground_build_in_flight(monkeypatch, tmp_path):
     from placeroot import autowarm, server
 
     monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "c"))
     monkeypatch.delenv("PLACEROOT_CACHE", raising=False)
     lat, lon = 51.5, -0.1
-    monkeypatch.setattr(
-        server, "_prewarm_region", lambda la, lo, r: {"status": "already_warm"}
-    )
+    monkeypatch.setattr(server, "_prewarm_region", lambda la, lo, r: {"status": "already_warm"})
     builds = []
     monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: builds.append(1))
     bbox = routing._bbox_around(lat, lon, 500.0)

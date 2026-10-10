@@ -119,7 +119,9 @@ def pruned_source_sql(
     joined = ", ".join("'" + p + "'" for p in keep)
     logger.debug(
         "manifest pruned %s to %d of %d files for bbox %s",
-        upstream_glob, len(keep), len(manifest["files"]), bbox,
+        upstream_glob,
+        len(keep),
+        len(manifest["files"]),
+        bbox,
     )
     return f"read_parquet([{joined}], hive_partitioning=1)"
-

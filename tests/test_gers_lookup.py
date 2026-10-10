@@ -17,16 +17,16 @@ from placeroot import gers, overture, server
 
 # A place, a division and a building that all exist in the fixtures, all
 # within the Downtown polygon (-73.905..-73.895, 40.695..40.705).
-PLACE_ID = "41b764a2b9ea71e97088d733d7f5898c"       # "Cluster Place 000"
-DIVISION_ID = "gers-div-brooklyn"                    # locality, US-NY
-BUILDING_ID = "394aca62078e6fb90fe1879e6e78e990"     # residential house
+PLACE_ID = "41b764a2b9ea71e97088d733d7f5898c"  # "Cluster Place 000"
+DIVISION_ID = "gers-div-brooklyn"  # locality, US-NY
+BUILDING_ID = "394aca62078e6fb90fe1879e6e78e990"  # residential house
 
 # The containment chain over the fixture centre, smallest first. Downtown and
 # Metropolis exist as division *entities* as well as division_area polygons,
 # sharing one GERS id across the two fixtures the way real Overture data does
 # — which is what lets a division's own entry appear in its own chain.
-DOWNTOWN_ID = "2835be088c8011a4aee3dff5cabbcf13"     # neighborhood
-METROPOLIS_ID = "9e34d836dceb18e1254bed9c0a40d455"   # locality, contains Downtown
+DOWNTOWN_ID = "2835be088c8011a4aee3dff5cabbcf13"  # neighborhood
+METROPOLIS_ID = "9e34d836dceb18e1254bed9c0a40d455"  # locality, contains Downtown
 FRANKLIN_COUNTY_ID = "e54421a2777c4e19bee68decbc66e8ee"  # county, contains Metropolis
 
 NEAR_LAT, NEAR_LON = 40.6996, -73.9006
@@ -101,9 +101,13 @@ def test_division_absent_from_the_containment_chain_has_no_related_division():
 
 def test_top_of_the_chain_has_no_related_division(monkeypatch):
     """A country is the last chain entry; nothing contains it."""
-    monkeypatch.setattr(gers.divisions, "admin_lookup", lambda lat, lon, con=None: {
-        "chain": [{"id": DOWNTOWN_ID, "name": "Downtown", "type": "neighborhood"}]
-    })
+    monkeypatch.setattr(
+        gers.divisions,
+        "admin_lookup",
+        lambda lat, lon, con=None: {
+            "chain": [{"id": DOWNTOWN_ID, "name": "Downtown", "type": "neighborhood"}]
+        },
+    )
     assert gers.gers_lookup(DOWNTOWN_ID)["related"] == {}
 
 
@@ -171,12 +175,28 @@ def _count_unbounded_scans(monkeypatch) -> list[str]:
 
     real_place_query = overture._run_place_details_query
 
-    def place_query_spy(from_source, filters, order_expr, params, missing,
-                        has_recreation=False, with_clause="", lang=None):
+    def place_query_spy(
+        from_source,
+        filters,
+        order_expr,
+        params,
+        missing,
+        has_recreation=False,
+        with_clause="",
+        lang=None,
+    ):
         if not any("bbox" in f for f in filters):
             unbounded.append(from_source)
-        return real_place_query(from_source, filters, order_expr, params, missing,
-                                has_recreation, with_clause, lang=lang)
+        return real_place_query(
+            from_source,
+            filters,
+            order_expr,
+            params,
+            missing,
+            has_recreation,
+            with_clause,
+            lang=lang,
+        )
 
     monkeypatch.setattr(gers, "_run_id_query", id_query_spy)
     monkeypatch.setattr(overture, "_run_place_details_query", place_query_spy)
@@ -210,13 +230,16 @@ def test_malformed_id_raises_value_error(bad):
         gers.gers_lookup(bad)
 
 
-@pytest.mark.parametrize("bad", [
-    "not an id",                      # whitespace inside
-    "41b764a2b9ea71e97088d733d7f5898c'; DROP TABLE",
-    "s3://bucket/places/*.parquet",   # a path, not an id
-    "café",                           # non-ASCII
-    "id.with.dots",
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "not an id",  # whitespace inside
+        "41b764a2b9ea71e97088d733d7f5898c'; DROP TABLE",
+        "s3://bucket/places/*.parquet",  # a path, not an id
+        "café",  # non-ASCII
+        "id.with.dots",
+    ],
+)
 def test_id_that_cannot_be_a_gers_id_raises_value_error(bad):
     with pytest.raises(ValueError, match="not a GERS id"):
         gers.gers_lookup(bad)
@@ -244,11 +267,12 @@ def test_place_probe_runs_before_the_building_probe(monkeypatch):
         def wrapper(id, near_lat, near_lon):
             probed.append(name)
             return fn(id, near_lat, near_lon)
+
         return wrapper
 
-    monkeypatch.setattr(gers, "_PROBES", tuple(
-        (theme, record(theme, fn)) for theme, fn in gers._PROBES
-    ))
+    monkeypatch.setattr(
+        gers, "_PROBES", tuple((theme, record(theme, fn)) for theme, fn in gers._PROBES)
+    )
     gers.gers_lookup(PLACE_ID)
     assert probed == ["places"]
 
@@ -259,6 +283,7 @@ def test_place_probe_runs_before_the_building_probe(monkeypatch):
 
 def test_related_joins_degrade_instead_of_failing_the_lookup(monkeypatch):
     """An outage in a related join costs the join, not the entity."""
+
     def boom(lat, lon, con=None):
         raise overture.UpstreamUnavailable("divisions theme down")
 
@@ -282,10 +307,9 @@ def test_a_broken_building_join_notes_itself_without_losing_the_division(monkeyp
     # contract rather than the routing.
     monkeypatch.setattr(gers, "_lean_nearest_building", boom)
     monkeypatch.setattr(
-        gers.buildings, "buildings_at",
-        lambda *a, **k: (_ for _ in ()).throw(
-            overture.UpstreamUnavailable("buildings theme down")
-        ),
+        gers.buildings,
+        "buildings_at",
+        lambda *a, **k: (_ for _ in ()).throw(overture.UpstreamUnavailable("buildings theme down")),
     )
     related = gers.gers_lookup(PLACE_ID)["related"]
     assert related["division_id"] == DOWNTOWN_ID
@@ -294,12 +318,15 @@ def test_a_broken_building_join_notes_itself_without_losing_the_division(monkeyp
 
 def test_one_theme_being_down_does_not_stop_a_later_theme_resolving(monkeypatch):
     """Probe 1 failing must not mask an id probe 2 would have resolved."""
+
     def boom(id, near_lat, near_lon):
         raise overture.UpstreamUnavailable("places theme down")
 
-    monkeypatch.setattr(gers, "_PROBES", tuple(
-        (theme, boom if theme == "places" else fn) for theme, fn in gers._PROBES
-    ))
+    monkeypatch.setattr(
+        gers,
+        "_PROBES",
+        tuple((theme, boom if theme == "places" else fn) for theme, fn in gers._PROBES),
+    )
     result = gers.gers_lookup(DIVISION_ID)
     assert result["theme"] == "divisions"
     assert result["name"] == "Brooklyn"
@@ -307,24 +334,30 @@ def test_one_theme_being_down_does_not_stop_a_later_theme_resolving(monkeypatch)
 
 def test_a_miss_plus_a_failure_is_upstream_unavailable_not_not_found(monkeypatch):
     """An unchecked theme might have owned the id — that is not a not_found."""
+
     def boom(id, near_lat, near_lon):
         raise overture.UpstreamUnavailable("buildings theme down")
 
-    monkeypatch.setattr(gers, "_PROBES", tuple(
-        (theme, boom if theme == "buildings" else fn) for theme, fn in gers._PROBES
-    ))
+    monkeypatch.setattr(
+        gers,
+        "_PROBES",
+        tuple((theme, boom if theme == "buildings" else fn) for theme, fn in gers._PROBES),
+    )
     with pytest.raises(overture.UpstreamUnavailable, match="buildings"):
         gers.gers_lookup("00000000000000000000000000000000")
 
 
 def test_a_failed_lookup_is_not_negatively_cached(monkeypatch):
     """A miss we could not confirm must not answer the retry."""
+
     def boom(id, near_lat, near_lon):
         raise overture.UpstreamUnavailable("buildings theme down")
 
-    monkeypatch.setattr(gers, "_PROBES", tuple(
-        (theme, boom if theme == "buildings" else fn) for theme, fn in gers._PROBES
-    ))
+    monkeypatch.setattr(
+        gers,
+        "_PROBES",
+        tuple((theme, boom if theme == "buildings" else fn) for theme, fn in gers._PROBES),
+    )
     with pytest.raises(overture.UpstreamUnavailable):
         gers.gers_lookup(BUILDING_ID)
     monkeypatch.undo()
@@ -345,8 +378,14 @@ def test_a_degraded_theme_does_not_mask_another_themes_answer(monkeypatch):
         raise overture.SchemaDegraded(["id"])
 
     def finds_it(id, near_lat, near_lon):
-        return {"theme": "divisions", "type": "division", "name": "X", "lat": None,
-                "lon": None, "summary": {}}
+        return {
+            "theme": "divisions",
+            "type": "division",
+            "name": "X",
+            "lat": None,
+            "lon": None,
+            "summary": {},
+        }
 
     monkeypatch.setattr(gers, "_PROBES", (("places", degraded), ("divisions", finds_it)))
     assert gers.gers_lookup(PLACE_ID)["name"] == "X"
@@ -360,12 +399,15 @@ def test_a_miss_plus_a_degraded_theme_is_schema_degraded_not_not_found(monkeypat
     """The exact twin of the miss-plus-failure rule: a theme too degraded to
     check might have owned the id, so a miss elsewhere must not read as a
     confident not_found — and the error names the unchecked theme."""
+
     def degraded(id, near_lat, near_lon):
         raise overture.SchemaDegraded(["id"])
 
-    monkeypatch.setattr(gers, "_PROBES", tuple(
-        (theme, degraded if theme == "places" else fn) for theme, fn in gers._PROBES
-    ))
+    monkeypatch.setattr(
+        gers,
+        "_PROBES",
+        tuple((theme, degraded if theme == "places" else fn) for theme, fn in gers._PROBES),
+    )
     with pytest.raises(overture.SchemaDegraded, match="places"):
         gers.gers_lookup("00000000000000000000000000000000")
 
@@ -373,12 +415,15 @@ def test_a_miss_plus_a_degraded_theme_is_schema_degraded_not_not_found(monkeypat
 def test_a_degraded_miss_is_not_negatively_cached(monkeypatch):
     """A miss we could not confirm must not answer the retry (degraded twin
     of test_a_failed_lookup_is_not_negatively_cached)."""
+
     def degraded(id, near_lat, near_lon):
         raise overture.SchemaDegraded(["id"])
 
-    monkeypatch.setattr(gers, "_PROBES", tuple(
-        (theme, degraded if theme == "buildings" else fn) for theme, fn in gers._PROBES
-    ))
+    monkeypatch.setattr(
+        gers,
+        "_PROBES",
+        tuple((theme, degraded if theme == "buildings" else fn) for theme, fn in gers._PROBES),
+    )
     with pytest.raises(overture.SchemaDegraded):
         gers.gers_lookup(BUILDING_ID)
     monkeypatch.undo()

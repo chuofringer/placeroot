@@ -7,7 +7,8 @@ from .test_gers_lookup import PLACE_ID
 
 def _within(radius_m):
     return [
-        row for row in raw_rows()
+        row
+        for row in raw_rows()
         if haversine_m(CENTER_LAT, CENTER_LON, row["lat"], row["lon"]) <= radius_m
     ]
 
@@ -98,16 +99,22 @@ def test_summarize_area_where_name_adds_resolved(monkeypatch):
     def fake_resolve(query):
         assert query == "Cluster Place 000"
         return {
-            "name": query, "lat": CENTER_LAT, "lon": CENTER_LON,
-            "id": "gers-cluster", "type": "place",
+            "name": query,
+            "lat": CENTER_LAT,
+            "lon": CENTER_LON,
+            "id": "gers-cluster",
+            "type": "place",
         }
 
     monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)
     result = server.summarize_area(where="Cluster Place 000", radius_m=1000)
     assert "error" not in result
     assert result["resolved"] == {
-        "name": "Cluster Place 000", "id": "gers-cluster",
-        "lat": CENTER_LAT, "lon": CENTER_LON, "matched_by": "name",
+        "name": "Cluster Place 000",
+        "id": "gers-cluster",
+        "lat": CENTER_LAT,
+        "lon": CENTER_LON,
+        "matched_by": "name",
     }
 
 

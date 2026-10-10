@@ -22,7 +22,8 @@ def synthetic(monkeypatch):
         "part-nostats.parquet": [-180.0, -90.0, 180.0, 90.0],  # world extent: never pruned
     }
     monkeypatch.setattr(
-        manifest, "_load",
+        manifest,
+        "_load",
         lambda r, t, ty: {"release": r, "theme": t, "type": ty, "files": dict(files)},
     )
     return files
@@ -40,7 +41,7 @@ def test_prunes_to_intersecting_files_plus_conservative_ones(synthetic):
 
 
 def test_gets_out_of_the_way_when_it_cannot_help(synthetic):
-    assert manifest.pruned_source_sql(GLOB, None) is None            # no bbox
+    assert manifest.pruned_source_sql(GLOB, None) is None  # no bbox
     assert manifest.pruned_source_sql(GLOB, (179.9, 0, 180.4, 1)) is None  # seam
     assert manifest.pruned_source_sql("/local/fixture.parquet", BOX) is None  # pinned
     # Every file intersects -> the plain glob is simpler.
@@ -52,11 +53,14 @@ def test_zero_intersections_fall_back_to_the_glob(monkeypatch):
     file's extent touches falls back to the glob — the real scan gets to be
     the one that says "no rows"."""
     monkeypatch.setattr(
-        manifest, "_load",
-        lambda r, t, ty: {"files": {
-            "part-japan.parquet": [128.0, 30.0, 146.0, 46.0],
-            "part-europe.parquet": [-11.0, 35.0, 32.0, 61.0],
-        }},
+        manifest,
+        "_load",
+        lambda r, t, ty: {
+            "files": {
+                "part-japan.parquet": [128.0, 30.0, 146.0, 46.0],
+                "part-europe.parquet": [-11.0, 35.0, 32.0, 61.0],
+            }
+        },
     )
     assert manifest.pruned_source_sql(GLOB, (60.0, -50.0, 61.0, -49.0)) is None
 

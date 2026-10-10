@@ -94,8 +94,12 @@ def test_schedule_autowarm_returns_without_waiting(monkeypatch, tmp_path):
         entered.set()
         release.wait(timeout=2)
         return {
-            "lat": lat, "lon": lon, "radius_m": radius_m,
-            "status": "warmed", "themes": [], "note": "ok",
+            "lat": lat,
+            "lon": lon,
+            "radius_m": radius_m,
+            "status": "warmed",
+            "themes": [],
+            "note": "ok",
         }
 
     monkeypatch.setattr(server, "_prewarm_region", slow)
@@ -140,8 +144,12 @@ def test_autowarm_reuses_prewarm_region(monkeypatch, tmp_path):
     def spy(lat, lon, radius_m):
         calls.append((lat, lon, radius_m))
         return {
-            "lat": lat, "lon": lon, "radius_m": radius_m,
-            "status": "already_warm", "themes": [], "note": "ok",
+            "lat": lat,
+            "lon": lon,
+            "radius_m": radius_m,
+            "status": "already_warm",
+            "themes": [],
+            "note": "ok",
         }
 
     monkeypatch.setattr(server, "_prewarm_region", spy)
@@ -211,6 +219,7 @@ def test_tiles_vs_graph_honesty_in_copy():
     # The warmup tool itself still does not build the graph.
     assert "does not build the routing graph" in (server.warmup_city.__doc__ or "").lower()
 
+
 def test_failed_prewarm_does_not_write_marker(monkeypatch, tmp_path):
     """Transient S3/upstream fail must stay retryable — no disk marker."""
     monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "c"))
@@ -219,8 +228,12 @@ def test_failed_prewarm_does_not_write_marker(monkeypatch, tmp_path):
 
     def fail(lat, lon, radius_m):
         return {
-            "lat": lat, "lon": lon, "radius_m": radius_m,
-            "status": "failed", "themes": [], "note": "upstream_unavailable",
+            "lat": lat,
+            "lon": lon,
+            "radius_m": radius_m,
+            "status": "failed",
+            "themes": [],
+            "note": "upstream_unavailable",
         }
 
     monkeypatch.setattr(server, "_prewarm_region", fail)
@@ -237,8 +250,12 @@ def test_partial_prewarm_does_not_write_marker(monkeypatch, tmp_path):
 
     def partial(lat, lon, radius_m):
         return {
-            "lat": lat, "lon": lon, "radius_m": radius_m,
-            "status": "partial", "themes": [], "note": "mixed",
+            "lat": lat,
+            "lon": lon,
+            "radius_m": radius_m,
+            "status": "partial",
+            "themes": [],
+            "note": "mixed",
         }
 
     monkeypatch.setattr(server, "_prewarm_region", partial)
@@ -258,7 +275,9 @@ def test_preferred_disk_name_uses_padded_radius():
     raw_name = routing._graph_disk_name(mode, "default", tile, raw, True)
     padded_name = routing._graph_disk_name(mode, "default", tile, padded, True)
     persist_name = routing._graph_disk_name(
-        mode, "default", tile,
+        mode,
+        "default",
+        tile,
         min(raw * routing.GRAPH_CACHE_MARGIN, cap_m),
         True,
     )
@@ -267,4 +286,3 @@ def test_preferred_disk_name_uses_padded_radius():
     # unless the cap already clamped them equal.
     if padded != raw:
         assert raw_name != persist_name
-

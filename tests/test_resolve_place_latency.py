@@ -47,31 +47,62 @@ def _needs_readable_places_fixture():
     if overture.probe_schema(str(FIXTURE_PATH)) is None:
         pytest.skip("places fixture unreadable here (httpfs unavailable)")
 
+
 TOKYO = {
-    "id": "div-tokyo", "name": "Tokyo", "subtype": "locality", "country": "JP",
-    "region": "JP-13", "lat": 35.6895, "lon": 139.6917, "admin_context": ["Japan"],
+    "id": "div-tokyo",
+    "name": "Tokyo",
+    "subtype": "locality",
+    "country": "JP",
+    "region": "JP-13",
+    "lat": 35.6895,
+    "lon": 139.6917,
+    "admin_context": ["Japan"],
     "population": 13_960_000,
 }
 # What Overture actually holds (see geocode._TYPE_WORD_CATEGORIES): the
 # station is filed under its category with a non-English primary name, and
 # no row anywhere is named "Shibuya Station".
 GARE_DE_SHIBUYA = {
-    "id": "pl-gare-shibuya", "name": "Gare de Shibuya", "category": "train_station",
-    "basic_category": "train_station", "operating_status": "open", "confidence": 0.9,
-    "brand": None, "has_website": None, "has_phone": None,
-    "lat": 35.658, "lon": 139.7016, "distance_m": 100,
+    "id": "pl-gare-shibuya",
+    "name": "Gare de Shibuya",
+    "category": "train_station",
+    "basic_category": "train_station",
+    "operating_status": "open",
+    "confidence": 0.9,
+    "brand": None,
+    "has_website": None,
+    "has_phone": None,
+    "lat": 35.658,
+    "lon": 139.7016,
+    "distance_m": 100,
 }
 SHIBUYA_SHOP = {
-    "id": "pl-shibuya-shop", "name": "Shibuya Mark City", "category": "shopping_center",
-    "basic_category": "shopping_center", "operating_status": "open", "confidence": 0.95,
-    "brand": None, "has_website": None, "has_phone": None,
-    "lat": 35.6585, "lon": 139.7005, "distance_m": 120,
+    "id": "pl-shibuya-shop",
+    "name": "Shibuya Mark City",
+    "category": "shopping_center",
+    "basic_category": "shopping_center",
+    "operating_status": "open",
+    "confidence": 0.95,
+    "brand": None,
+    "has_website": None,
+    "has_phone": None,
+    "lat": 35.6585,
+    "lon": 139.7005,
+    "distance_m": 120,
 }
 YOYOGI = {
-    "id": "pl-yoyogi", "name": "Yoyogi Park", "category": "park",
-    "basic_category": "park", "operating_status": "open", "confidence": 0.9,
-    "brand": None, "has_website": None, "has_phone": None,
-    "lat": 35.6717, "lon": 139.6949, "distance_m": 100,
+    "id": "pl-yoyogi",
+    "name": "Yoyogi Park",
+    "category": "park",
+    "basic_category": "park",
+    "operating_status": "open",
+    "confidence": 0.9,
+    "brand": None,
+    "has_website": None,
+    "has_phone": None,
+    "lat": 35.6717,
+    "lon": 139.6949,
+    "distance_m": 100,
 }
 
 
@@ -89,10 +120,18 @@ def recorder(monkeypatch):
     """
     calls: list[tuple] = []
 
-    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10,
-                         categories=None, **kw):
-        calls.append(("find_places", name, tuple(categories or ()),
-                      kw.get("fuzzy_fallback", True), threading.get_ident()))
+    def fake_find_places(
+        lat, lon, radius_m=1000, category=None, name=None, limit=10, categories=None, **kw
+    ):
+        calls.append(
+            (
+                "find_places",
+                name,
+                tuple(categories or ()),
+                kw.get("fuzzy_fallback", True),
+                threading.get_ident(),
+            )
+        )
         if categories:
             return _place_match(name, [GARE_DE_SHIBUYA, YOYOGI])
         return _place_match(name, [SHIBUYA_SHOP, YOYOGI])
@@ -140,27 +179,34 @@ def test_c15_cold_half_scan_counts(recorder, query, top):
     results = geocode.resolve_place(query)
     assert results and results[0]["id"] == top and results[0]["match"] == "exact"
     assert _counts(recorder) == {
-        "_query_divisions": 3, "_query_places_fallback": 1, "find_places": 2,
+        "_query_divisions": 3,
+        "_query_places_fallback": 1,
+        "find_places": 2,
     }
     scans = [c for c in recorder if c[0] == "find_places"]
     # First round only: the whole phrase (all tiers) and the type scan
     # (fuzzy tier off) — no single-word scan after a confident hit.
     # Round 1 runs these two in parallel, so the recorder sees them in
     # completion order: compare as a set, not a sequence.
-    assert sorted((c[1], bool(c[2]), c[3]) for c in scans) == sorted([
-        (query.rsplit(" ", 1)[0], False, True),
-        (query.split(" ", 1)[0], True, False),
-    ])
+    assert sorted((c[1], bool(c[2]), c[3]) for c in scans) == sorted(
+        [
+            (query.rsplit(" ", 1)[0], False, True),
+            (query.split(" ", 1)[0], True, False),
+        ]
+    )
 
 
 def test_word_scans_still_run_when_the_first_round_is_not_confident(recorder, monkeypatch):
     """A phrase that only finds substring rows and a type scan that finds
     nothing: every single-word scan runs, with the fuzzy tier off, and the
     rows merge in the serial loop's order."""
-    def fake_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10,
-                         categories=None, **kw):
-        recorder.append(("find_places", name, tuple(categories or ()),
-                         kw.get("fuzzy_fallback", True)))
+
+    def fake_find_places(
+        lat, lon, radius_m=1000, category=None, name=None, limit=10, categories=None, **kw
+    ):
+        recorder.append(
+            ("find_places", name, tuple(categories or ()), kw.get("fuzzy_fallback", True))
+        )
         if categories:
             return []
         return _place_match(name, [SHIBUYA_SHOP])
@@ -192,10 +238,18 @@ def test_word_scans_run_in_parallel_on_their_own_cursors(recorder, monkeypatch):
         entered.append(threading.get_ident())
         yield
 
-    def slow_find_places(lat, lon, radius_m=1000, category=None, name=None, limit=10,
-                         categories=None, **kw):
-        recorder.append(("find_places", name, tuple(categories or ()),
-                         kw.get("fuzzy_fallback", True), threading.get_ident()))
+    def slow_find_places(
+        lat, lon, radius_m=1000, category=None, name=None, limit=10, categories=None, **kw
+    ):
+        recorder.append(
+            (
+                "find_places",
+                name,
+                tuple(categories or ()),
+                kw.get("fuzzy_fallback", True),
+                threading.get_ident(),
+            )
+        )
         with lock:
             active["now"] += 1
             active["peak"] = max(active["peak"], active["now"])
@@ -229,7 +283,11 @@ def test_run_place_scans_keeps_order_and_reraises_the_first_failure():
     assert geocode._run_place_scans([]) == []
     assert geocode._run_place_scans([ok(1)]) == [[1]]
     assert geocode._run_place_scans([ok(1), ok(2), ok(3), ok(4), ok(5)]) == [
-        [1], [2], [3], [4], [5],
+        [1],
+        [2],
+        [3],
+        [4],
+        [5],
     ]
     with pytest.raises(overture.UpstreamUnavailable):
         geocode._run_place_scans([ok(1), boom, ok(3)])
@@ -239,7 +297,8 @@ def test_find_places_kwargs_matches_the_installed_double(monkeypatch):
     """The six-parameter doubles the suite uses must keep working: a newer
     keyword is passed only when the callee can take it."""
     monkeypatch.setattr(
-        overture, "find_places",
+        overture,
+        "find_places",
         lambda lat, lon, radius_m=1000, category=None, name=None, limit=10: [],
     )
     assert geocode._find_places_kwargs(fuzzy_fallback=False) == {}
@@ -258,7 +317,8 @@ def test_fuzzy_tier_is_skipped_for_single_word_scans(monkeypatch):
     after the alt-name tier: 7 reads, no fuzzy tier on either."""
     _needs_readable_places_fixture()
     monkeypatch.setattr(
-        geocode, "_query_divisions",
+        geocode,
+        "_query_divisions",
         lambda query, region_code, local_table, **kw: (
             [dict(TOKYO)] if query.strip().lower() == "tokyo" else []
         ),
@@ -298,7 +358,12 @@ def test_fuzzy_fallback_keyword_defaults_to_every_tier():
     token = trace.start()
     try:
         overture.find_places(
-            35.66, 139.70, radius_m=500, name="Nosuchplace", limit=3, fuzzy_fallback=False,
+            35.66,
+            139.70,
+            radius_m=500,
+            name="Nosuchplace",
+            limit=3,
+            fuzzy_fallback=False,
         )
         gated = [r.name for r in trace.records() if r.kind == "scan"]
     finally:

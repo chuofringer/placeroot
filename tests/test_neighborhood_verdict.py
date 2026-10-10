@@ -149,14 +149,17 @@ def test_no_car_wins_over_bare_car_substring():
     assert verdict.parse_context("no car")["mobility"] == "walk"
 
 
-@pytest.mark.parametrize("phrase", [
-    "I don't have a car",
-    "we do not have a car",
-    "dont have a car, two kids",
-    "car-free household",
-    "no vehicle, we walk",
-    "I don't own a car",
-])
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "I don't have a car",
+        "we do not have a car",
+        "dont have a car, two kids",
+        "car-free household",
+        "no vehicle, we walk",
+        "I don't own a car",
+    ],
+)
 def test_car_ownership_negations_read_as_walk(phrase):
     """Regression: 'don't have a car' contains 'car', and only 'no car' /
     'without a car' were negations — so it was parsed as drive."""
@@ -513,13 +516,9 @@ def test_derive_budget_rejects_nan_and_inf():
 
 
 def test_nan_minutes_override_is_bad_request():
-    result = server.neighborhood_verdict(
-        CENTER_LAT, CENTER_LON, "", minutes=float("nan")
-    )
+    result = server.neighborhood_verdict(CENTER_LAT, CENTER_LON, "", minutes=float("nan"))
     assert result["error"] == "bad_request"
-    result = server.neighborhood_verdict(
-        CENTER_LAT, CENTER_LON, "", radius_m=float("nan")
-    )
+    result = server.neighborhood_verdict(CENTER_LAT, CENTER_LON, "", radius_m=float("nan"))
     assert result["error"] == "bad_request"
 
 
@@ -532,4 +531,3 @@ def test_iso_max_downgrades_covered_place_beyond_reach(monkeypatch):
     assert grocery["status"] == "weak"
     assert grocery["nearest"]["distance_m"] == 336
     assert "200" in grocery["detail"] and "reach" in grocery["detail"]
-

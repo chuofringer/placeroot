@@ -48,7 +48,7 @@ def read_pinned_release(text: str) -> str:
     match = _PIN_RE.search(text)
     if not match:
         raise BumpPinError(
-            f"{RELEASE_PY.relative_to(REPO_ROOT)}: no `PINNED_RELEASE = \"...\"` line found"
+            f'{RELEASE_PY.relative_to(REPO_ROOT)}: no `PINNED_RELEASE = "..."` line found'
         )
     return match.group(2)
 

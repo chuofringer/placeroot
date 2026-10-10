@@ -41,6 +41,7 @@ def test_read_conn_does_not_take_conn_lock(instance):
     """A reader proceeds while another thread holds the global lock."""
     got = {}
     with db.conn_lock:
+
         def reader():
             with db.read_conn() as con:
                 got["v"] = con.execute("SELECT 41 + 1").fetchone()[0]
@@ -289,8 +290,7 @@ def test_settings_set_before_creation_are_seen_by_pooled_cursors(instance):
     with db.read_conn() as con:
         rows = dict(
             con.execute(
-                "SELECT name, value FROM duckdb_settings() "
-                "WHERE name IN ('threads', 'TimeZone')"
+                "SELECT name, value FROM duckdb_settings() WHERE name IN ('threads', 'TimeZone')"
             ).fetchall()
         )
         tz = con.execute("SELECT current_setting('TimeZone')").fetchone()[0]
@@ -307,10 +307,19 @@ def test_cursor_settings_match_the_instance_after_configure(instance):
         db._configure(instance)
     except duckdb.Error as e:
         pytest.skip(f"httpfs unavailable offline: {str(e).splitlines()[0]}")
-    names = ("threads", "enable_progress_bar", "temp_directory",
-             "enable_http_metadata_cache", "s3_region", "http_timeout")
-    query = "SELECT name, value FROM duckdb_settings() WHERE name IN (" + \
-        ", ".join(f"'{n}'" for n in names) + ")"
+    names = (
+        "threads",
+        "enable_progress_bar",
+        "temp_directory",
+        "enable_http_metadata_cache",
+        "s3_region",
+        "http_timeout",
+    )
+    query = (
+        "SELECT name, value FROM duckdb_settings() WHERE name IN ("
+        + ", ".join(f"'{n}'" for n in names)
+        + ")"
+    )
     want = dict(instance.execute(query).fetchall())
     with db.read_conn() as con:
         got = dict(con.execute(query).fetchall())
@@ -435,6 +444,7 @@ def test_probe_schema_runs_on_the_read_path(instance, monkeypatch, tmp_path):
     db._probe_schema_cached.cache_clear()
     got = {}
     with db.conn_lock:
+
         def probe():
             got["cols"] = db._probe_schema_cached(str(path))
 

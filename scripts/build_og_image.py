@@ -42,12 +42,22 @@ WIDTH, HEIGHT = 1280, 540
 # Same palette as site/index.html — pulled here as named constants so a theme
 # change is one edit in each place rather than a hunt through hex literals.
 LIGHT = {
-    "bg": "#fbfaf5", "panel": "#f3f1e7", "ink": "#171c17", "muted": "#5f6a5c",
-    "accent": "#5c8a63", "chip_bg": "#e9e6d8", "chip_ink": "#2c342b",
+    "bg": "#fbfaf5",
+    "panel": "#f3f1e7",
+    "ink": "#171c17",
+    "muted": "#5f6a5c",
+    "accent": "#5c8a63",
+    "chip_bg": "#e9e6d8",
+    "chip_ink": "#2c342b",
 }
 DARK = {
-    "bg": "#141714", "panel": "#1b201b", "ink": "#f4f3ec", "muted": "#a8b3a4",
-    "accent": "#9ec6a3", "chip_bg": "#232a22", "chip_ink": "#e8ece6",
+    "bg": "#141714",
+    "panel": "#1b201b",
+    "ink": "#f4f3ec",
+    "muted": "#a8b3a4",
+    "accent": "#9ec6a3",
+    "chip_bg": "#232a22",
+    "chip_ink": "#e8ece6",
 }
 
 TEMPLATE = """<!doctype html>

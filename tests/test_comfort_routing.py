@@ -59,9 +59,7 @@ def test_dijkstra_flat_ignores_penalty_when_elevations_unknown():
 def test_dijkstra_flat_trades_distance_for_climb():
     g = _manual_graph()
     node_elev = {"a": 0.0, "b": 50.0, "c": 0.0, "d": 0.0}
-    result = routing._dijkstra_path_to_target_flat(
-        g, "a", "d", speed_m_s=1.0, node_elev=node_elev
-    )
+    result = routing._dijkstra_path_to_target_flat(g, "a", "d", speed_m_s=1.0, node_elev=node_elev)
     assert result is not None
     _time_s, distance_m, path = result
     # The flat path (a-c-d, 250m) is chosen over the steep-but-shorter one
@@ -77,9 +75,7 @@ def test_dijkstra_flat_descent_is_free():
     is about avoiding climbs, not avoiding grade in general."""
     g = _manual_graph()
     node_elev = {"a": 50.0, "b": 0.0, "c": 50.0, "d": 50.0}
-    result = routing._dijkstra_path_to_target_flat(
-        g, "a", "d", speed_m_s=1.0, node_elev=node_elev
-    )
+    result = routing._dijkstra_path_to_target_flat(g, "a", "d", speed_m_s=1.0, node_elev=node_elev)
     assert result is not None
     _time_s, distance_m, path = result
     # b is 50m below a (free) then 50m back up to d (penalized) — the net
@@ -339,9 +335,7 @@ def _install_linear_elevation(monkeypatch, scale: float = 100000.0) -> None:
 
 def test_route_include_elevation_totals_on_a_monotonic_climb(monkeypatch):
     _install_linear_elevation(monkeypatch)
-    result = routing.route(
-        FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", include_elevation=True
-    )
+    result = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", include_elevation=True)
     assert "error" not in result
     profile = result["elevation"]
     assert "note" not in profile
@@ -367,9 +361,7 @@ def test_route_include_elevation_no_coverage_is_honest_not_zero(monkeypatch):
         return [{"elevation_m": None} for _ in points]
 
     monkeypatch.setattr(elevation, "elevations_at", fake_elevations_at)
-    result = routing.route(
-        FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", include_elevation=True
-    )
+    result = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", include_elevation=True)
     profile = result["elevation"]
     assert "note" in profile
     assert "total_climb_m" not in profile
@@ -393,9 +385,7 @@ def test_route_include_elevation_partial_coverage_notes_the_gap(monkeypatch):
         return out
 
     monkeypatch.setattr(elevation, "elevations_at", fake_elevations_at)
-    result = routing.route(
-        FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", include_elevation=True
-    )
+    result = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", include_elevation=True)
     profile = result["elevation"]
     assert "note" in profile
     assert "coverage missing" in profile["note"]
@@ -409,9 +399,7 @@ def test_route_include_elevation_upstream_unavailable_note_only(monkeypatch):
         raise errors.UpstreamUnavailable("simulated network failure")
 
     monkeypatch.setattr(elevation, "elevations_at", fake_elevations_at)
-    result = routing.route(
-        FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", include_elevation=True
-    )
+    result = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", include_elevation=True)
     profile = result["elevation"]
     assert "simulated network failure" in profile["note"]
     assert "samples" not in profile
@@ -421,9 +409,7 @@ def test_route_include_elevation_upstream_unavailable_note_only(monkeypatch):
 def test_route_include_elevation_omitted_when_budget_too_small(monkeypatch):
     _install_linear_elevation(monkeypatch)
     monkeypatch.setenv("PLACEROOT_TOKEN_BUDGET", "70")
-    result = routing.route(
-        FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", include_elevation=True
-    )
+    result = routing.route(FROM_LAT, FROM_LON, TO_LAT, TO_LON, mode="walk", include_elevation=True)
     assert result.get("elevation_omitted") is True
     assert "elevation" not in result
 
@@ -476,11 +462,21 @@ def test_from_to_passes_through_include_elevation_and_prefer(monkeypatch):
 
     def fake_resolve(query):
         if query == "Origin Place":
-            return {"name": "Origin Place", "lat": FROM_LAT, "lon": FROM_LON, "id": "gers-a",
-                    "type": "place"}
+            return {
+                "name": "Origin Place",
+                "lat": FROM_LAT,
+                "lon": FROM_LON,
+                "id": "gers-a",
+                "type": "place",
+            }
         if query == "Destination Place":
-            return {"name": "Destination Place", "lat": TO_LAT, "lon": TO_LON, "id": "gers-b",
-                    "type": "place"}
+            return {
+                "name": "Destination Place",
+                "lat": TO_LAT,
+                "lon": TO_LON,
+                "id": "gers-b",
+                "type": "place",
+            }
         raise AssertionError(f"unexpected resolve {query!r}")
 
     monkeypatch.setattr(geocode, "resolve_named_place", fake_resolve)

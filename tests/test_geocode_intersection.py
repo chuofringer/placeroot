@@ -160,8 +160,7 @@ def test_multiple_crossings_ordered_by_distance_and_capped(monkeypatch):
 
     # Check ordering: increasing distance from anchor center
     distances = [
-        math.hypot(r["lat"] - center_lat, r["lon"] - center_lon)
-        for r in result["results"]
+        math.hypot(r["lat"] - center_lat, r["lon"] - center_lon) for r in result["results"]
     ]
     assert distances == sorted(distances)
 
@@ -173,6 +172,7 @@ def test_search_profile_contains_geocode_intersection():
 
 def test_server_upstream_error_handling(monkeypatch):
     """UpstreamUnavailable is converted to standard structured error."""
+
     def fail(*_a, **_k):
         raise overture.UpstreamUnavailable("S3 down")
 
@@ -183,6 +183,7 @@ def test_server_upstream_error_handling(monkeypatch):
 
 def test_server_schema_error_handling(monkeypatch):
     """SchemaDegraded is converted to standard structured error."""
+
     def fail(*_a, **_k):
         raise overture.SchemaDegraded("missing column")
 
@@ -323,7 +324,6 @@ def test_want_shapes_false_in_graph_extraction(monkeypatch):
     assert captured_args.get("radius_m") <= routing.WALK_MAX_RADIUS_M
 
 
-
 # --- Second review round ----------------------------------------------------
 
 CENTER_LAT, CENTER_LON = 40.74, -73.99
@@ -335,8 +335,11 @@ def _fake_grid_city_anchor(monkeypatch, bbox=GRID_CITY_BBOX):
     """Resolve "Grid City" without DuckDB, so a test that also swaps the graph
     exercises the node loop alone."""
     anchor = {
-        "name": "Grid City", "id": "gers-div-grid-city", "country": "US",
-        "lat": CENTER_LAT, "lon": CENTER_LON,
+        "name": "Grid City",
+        "id": "gers-div-grid-city",
+        "country": "US",
+        "lat": CENTER_LAT,
+        "lon": CENTER_LON,
         "admin_context": ["United States", "New York"],
     }
 
@@ -368,7 +371,9 @@ def test_anchor_is_top_level_and_not_repeated_per_row(monkeypatch):
 
     res = geocode.geocode_intersection("Main St", "Cross Ave", "Grid City")
     assert res["anchor"] == {
-        "name": "Grid City", "id": "gers-div-grid-city", "country": "US",
+        "name": "Grid City",
+        "id": "gers-div-grid-city",
+        "country": "US",
         "admin_context": ["United States", "New York"],
     }
     assert res["results"] == [
@@ -594,7 +599,7 @@ def test_fifth_and_42nd_resolves_through_the_east_west_divide(monkeypatch):
     monkeypatch.setattr(routing, "_get_or_build_graph", lambda *a, **k: g2)
     miss = geocode.geocode_intersection("5th Ave", "East 42nd St", "Grid City")
     assert miss["results"] == []
-    assert "\"East 42nd St\" did not resolve" in miss["note"]
+    assert '"East 42nd St" did not resolve' in miss["note"]
     both = geocode.geocode_intersection("5th Ave", "42nd St", "Grid City")
     assert both["results"][0]["streets"] == ["5th Avenue", "West 42nd Street"]
 

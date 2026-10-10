@@ -72,24 +72,34 @@ def build_divisions() -> list[tuple]:
     rows = []
 
     def add(
-        division_id, name, subtype, country, region, lat, lon, hierarchies,
-        population=None, common=None,
+        division_id,
+        name,
+        subtype,
+        country,
+        region,
+        lat,
+        lon,
+        hierarchies,
+        population=None,
+        common=None,
     ):
         # #214: `common` mirrors Overture's names.common — a language-code ->
         # localized-name map. Written for every row (empty when there are no
         # alternates) so the fixture's `names` struct has the same shape the
         # real theme does and geocode's alt-name materialization runs against
         # it unchanged.
-        rows.append((
-            division_id,
-            _point_bbox(lat, lon),
-            {"primary": name, "common": common or {}},
-            subtype,
-            country,
-            region,
-            hierarchies,
-            population,
-        ))
+        rows.append(
+            (
+                division_id,
+                _point_bbox(lat, lon),
+                {"primary": name, "common": common or {}},
+                subtype,
+                country,
+                region,
+                hierarchies,
+                population,
+            )
+        )
 
     add("gers-div-us", "United States", "country", "US", None, 39.8, -98.5, _chain("United States"))
     # #457: country-subtype rows for the fixture's other countries, so
@@ -98,55 +108,119 @@ def build_divisions() -> list[tuple]:
     # "Canada"/CA, but geocode() also has to answer a country name/exonym
     # this table alone carries — see _resolve_country_from_table).
     add(
-        "gers-div-gb", "United Kingdom", "country", "GB", None, 54.0, -2.0,
+        "gers-div-gb",
+        "United Kingdom",
+        "country",
+        "GB",
+        None,
+        54.0,
+        -2.0,
         _chain("United Kingdom"),
     )
     add("gers-div-ca", "Canada", "country", "CA", None, 56.0, -106.0, _chain("Canada"))
     add("gers-div-fr", "France", "country", "FR", None, 46.6, 2.2, _chain("France"))
     add(
-        "gers-div-ny", "New York", "region", "US", "US-NY", 43.0, -75.0,
-        _chain("United States", "New York"), population=19_571_216,
+        "gers-div-ny",
+        "New York",
+        "region",
+        "US",
+        "US-NY",
+        43.0,
+        -75.0,
+        _chain("United States", "New York"),
+        population=19_571_216,
     )
     # Illinois deliberately outweighs Massachusetts in region population so
     # a same-named-pair test (Fairview, below) can exercise the "presence in
     # a more populous region" prominence proxy (#47) when neither candidate
     # carries its own population.
     add(
-        "gers-div-il", "Illinois", "region", "US", "US-IL", 40.0, -89.0,
-        _chain("United States", "Illinois"), population=12_582_032,
+        "gers-div-il",
+        "Illinois",
+        "region",
+        "US",
+        "US-IL",
+        40.0,
+        -89.0,
+        _chain("United States", "Illinois"),
+        population=12_582_032,
     )
     add(
-        "gers-div-ma", "Massachusetts", "region", "US", "US-MA",
-        42.4, -71.4, _chain("United States", "Massachusetts"), population=6_981_974,
+        "gers-div-ma",
+        "Massachusetts",
+        "region",
+        "US",
+        "US-MA",
+        42.4,
+        -71.4,
+        _chain("United States", "Massachusetts"),
+        population=6_981_974,
     )
     add(
-        "gers-div-oh", "Ohio", "region", "US", "US-OH", 40.4, -82.9,
-        _chain("United States", "Ohio"), population=11_785_935,
+        "gers-div-oh",
+        "Ohio",
+        "region",
+        "US",
+        "US-OH",
+        40.4,
+        -82.9,
+        _chain("United States", "Ohio"),
+        population=11_785_935,
     )
     # A non-US region, so parsing "London, Ontario" has to hit the general
     # region-subtype-name lookup rather than the embedded US state map (#46).
     add(
-        "gers-div-ontario", "Ontario", "region", "CA", "CA-ON", 51.25, -85.32,
+        "gers-div-ontario",
+        "Ontario",
+        "region",
+        "CA",
+        "CA-ON",
+        51.25,
+        -85.32,
         _chain("Canada", "Ontario"),
     )
     # Real-world Springfield populations (MA > IL) so the population tiebreak
     # (#47) has a clear, honest answer to check against.
     add(
-        "gers-div-springfield-il", "Springfield", "locality", "US", "US-IL",
-        39.78, -89.65, _chain("United States", "Illinois", "Springfield"), population=114_230,
+        "gers-div-springfield-il",
+        "Springfield",
+        "locality",
+        "US",
+        "US-IL",
+        39.78,
+        -89.65,
+        _chain("United States", "Illinois", "Springfield"),
+        population=114_230,
     )
     add(
-        "gers-div-springfield-ma", "Springfield", "locality", "US", "US-MA",
-        42.10, -72.59, _chain("United States", "Massachusetts", "Springfield"),
+        "gers-div-springfield-ma",
+        "Springfield",
+        "locality",
+        "US",
+        "US-MA",
+        42.10,
+        -72.59,
+        _chain("United States", "Massachusetts", "Springfield"),
         population=155_929,
     )
     add(
-        "gers-div-brooklyn", "Brooklyn", "locality", "US", "US-NY",
-        CENTER_LAT, CENTER_LON, _chain("United States", "New York", "Brooklyn"),
+        "gers-div-brooklyn",
+        "Brooklyn",
+        "locality",
+        "US",
+        "US-NY",
+        CENTER_LAT,
+        CENTER_LON,
+        _chain("United States", "New York", "Brooklyn"),
     )
     add(
-        "gers-div-downtown-brooklyn", "Downtown Brooklyn", "neighborhood", "US", "US-NY",
-        CENTER_LAT + 0.001, CENTER_LON - 0.001,
+        "gers-div-downtown-brooklyn",
+        "Downtown Brooklyn",
+        "neighborhood",
+        "US",
+        "US-NY",
+        CENTER_LAT + 0.001,
+        CENTER_LON - 0.001,
         _chain("United States", "New York", "Brooklyn", "Downtown Brooklyn"),
     )
     # The entity twin of division_areas.parquet's "Downtown" polygon, sharing
@@ -154,29 +228,57 @@ def build_divisions() -> list[tuple]:
     # it is contained by its own polygon and gers_lookup resolving this id
     # gets a chain whose first entry is itself.
     add(
-        DOWNTOWN_DIVISION_ID, "Downtown", "neighborhood", "US", "US-NY",
-        CENTER_LAT, CENTER_LON,
+        DOWNTOWN_DIVISION_ID,
+        "Downtown",
+        "neighborhood",
+        "US",
+        "US-NY",
+        CENTER_LAT,
+        CENTER_LON,
         _chain("United States", "New York", "Brooklyn", "Downtown"),
     )
     add(
-        METROPOLIS_DIVISION_ID, "Metropolis", "locality", "US", "US-NY",
-        CENTER_LAT, CENTER_LON,
+        METROPOLIS_DIVISION_ID,
+        "Metropolis",
+        "locality",
+        "US",
+        "US-NY",
+        CENTER_LAT,
+        CENTER_LON,
         _chain("United States", "New York", "Metropolis"),
     )
     add(
-        "gers-div-riverside", "Riverside", "neighborhood", "US", "US-IL",
-        39.79, -89.64, _chain("United States", "Illinois", "Springfield", "Riverside"),
+        "gers-div-riverside",
+        "Riverside",
+        "neighborhood",
+        "US",
+        "US-IL",
+        39.79,
+        -89.64,
+        _chain("United States", "Illinois", "Springfield", "Riverside"),
     )
     # Same name, two real Ohio/Ontario cities named "London" — exercises
     # "City, ST" (US abbreviation) and "City, Region" (general region-name)
     # parsing (#46) resolving to two different, correct candidates.
     add(
-        "gers-div-london-oh", "London", "locality", "US", "US-OH",
-        39.89, -83.45, _chain("United States", "Ohio", "London"),
+        "gers-div-london-oh",
+        "London",
+        "locality",
+        "US",
+        "US-OH",
+        39.89,
+        -83.45,
+        _chain("United States", "Ohio", "London"),
     )
     add(
-        "gers-div-london-on", "London", "locality", "CA", "CA-ON",
-        42.98, -81.25, _chain("Canada", "Ontario", "London"),
+        "gers-div-london-on",
+        "London",
+        "locality",
+        "CA",
+        "CA-ON",
+        42.98,
+        -81.25,
+        _chain("Canada", "Ontario", "London"),
     )
     # Same name, same subtype, neither carries a population value: exercises
     # the hierarchy-depth/region-population proxy chain (#47) rather than
@@ -187,32 +289,61 @@ def build_divisions() -> list[tuple]:
     # region-population proxy actually ran — id is the last tiebreak, not
     # a coincidental first one.
     add(
-        "gers-div-zz-fairview-il", "Fairview", "locality", "US", "US-IL",
-        39.5, -89.0, _chain("United States", "Illinois", "Fairview"),
+        "gers-div-zz-fairview-il",
+        "Fairview",
+        "locality",
+        "US",
+        "US-IL",
+        39.5,
+        -89.0,
+        _chain("United States", "Illinois", "Fairview"),
     )
     add(
-        "gers-div-fairview-ma", "Fairview", "locality", "US", "US-MA",
-        42.3, -71.8, _chain("United States", "Massachusetts", "Fairview"),
+        "gers-div-fairview-ma",
+        "Fairview",
+        "locality",
+        "US",
+        "US-MA",
+        42.3,
+        -71.8,
+        _chain("United States", "Massachusetts", "Fairview"),
     )
     # Same name, different subtype, neither carries population: exercises
     # the subtype-rank step of the proxy chain (#47) ahead of hierarchy
     # depth/region population. IDs again deliberately inverted vs. the
     # wanted order for the same reason as Fairview above.
     add(
-        "gers-div-zz-hilltop-loc", "Hilltop", "locality", "US", "US-IL",
-        39.6, -89.2, _chain("United States", "Illinois", "Hilltop"),
+        "gers-div-zz-hilltop-loc",
+        "Hilltop",
+        "locality",
+        "US",
+        "US-IL",
+        39.6,
+        -89.2,
+        _chain("United States", "Illinois", "Hilltop"),
     )
     add(
-        "gers-div-hilltop-nbhd", "Hilltop", "neighborhood", "US", "US-NY",
-        CENTER_LAT + 0.002, CENTER_LON + 0.002,
+        "gers-div-hilltop-nbhd",
+        "Hilltop",
+        "neighborhood",
+        "US",
+        "US-NY",
+        CENTER_LAT + 0.002,
+        CENTER_LON + 0.002,
         _chain("United States", "New York", "Brooklyn", "Hilltop"),
     )
     # #53: Overture's canonical name uses the expanded "Saint" spelling —
     # a literal query for "St. Louis" (or "St Louis") must not find it
     # without the abbreviation-variant retry.
     add(
-        "gers-div-saint-louis", "Saint Louis", "locality", "US", "US-MO",
-        38.63, -90.20, _chain("United States", "Missouri", "Saint Louis"),
+        "gers-div-saint-louis",
+        "Saint Louis",
+        "locality",
+        "US",
+        "US-MO",
+        38.63,
+        -90.20,
+        _chain("United States", "Missouri", "Saint Louis"),
         population=301_578,
     )
     # #53: a tiny, unpopulated village that happens to be literally spelled
@@ -220,14 +351,26 @@ def build_divisions() -> list[tuple]:
     # query must not stop at this exact-tier-but-unpopulated match; the
     # populated "Saint Louis" variant above has to win on prominence.
     add(
-        "gers-div-st-louis-tiny", "St. Louis", "locality", "FR", "FR-ARA",
-        45.5, 4.8, _chain("France", "Auvergne-Rhone-Alpes", "St. Louis"),
+        "gers-div-st-louis-tiny",
+        "St. Louis",
+        "locality",
+        "FR",
+        "FR-ARA",
+        45.5,
+        4.8,
+        _chain("France", "Auvergne-Rhone-Alpes", "St. Louis"),
     )
     # #53: canonical name carries a diacritic — a plain-ASCII query for
     # "Sao Paulo" must not find it without the diacritic-folded retry.
     add(
-        "gers-div-sao-paulo", "São Paulo", "locality", "BR", "BR-SP",
-        -23.55, -46.63, _chain("Brazil", "São Paulo"),
+        "gers-div-sao-paulo",
+        "São Paulo",
+        "locality",
+        "BR",
+        "BR-SP",
+        -23.55,
+        -46.63,
+        _chain("Brazil", "São Paulo"),
         population=12_300_000,
     )
     # #215: the three live-verified typo probes ("Berekley", "Cinncinati",
@@ -236,18 +379,36 @@ def build_divisions() -> list[tuple]:
     # three carry a population, like the well-known places they are, so the
     # fuzzy pass's population ordering is exercised on real-shaped rows.
     add(
-        "gers-div-berkeley", "Berkeley", "locality", "US", "US-CA",
-        37.87, -122.27, _chain("United States", "California", "Berkeley"),
+        "gers-div-berkeley",
+        "Berkeley",
+        "locality",
+        "US",
+        "US-CA",
+        37.87,
+        -122.27,
+        _chain("United States", "California", "Berkeley"),
         population=124_321,
     )
     add(
-        "gers-div-cincinnati", "Cincinnati", "locality", "US", "US-OH",
-        39.10, -84.51, _chain("United States", "Ohio", "Cincinnati"),
+        "gers-div-cincinnati",
+        "Cincinnati",
+        "locality",
+        "US",
+        "US-OH",
+        39.10,
+        -84.51,
+        _chain("United States", "Ohio", "Cincinnati"),
         population=309_317,
     )
     add(
-        "gers-div-san-francisco", "San Francisco", "locality", "US", "US-CA",
-        37.77, -122.42, _chain("United States", "California", "San Francisco"),
+        "gers-div-san-francisco",
+        "San Francisco",
+        "locality",
+        "US",
+        "US-CA",
+        37.77,
+        -122.42,
+        _chain("United States", "California", "San Francisco"),
         population=808_437,
     )
     # #214: exonyms. Each of these four cities is stored under its endonym in
@@ -258,52 +419,106 @@ def build_divisions() -> list[tuple]:
     # prominence beats a population-less literal namesake) and not merely
     # "the alternate matched something".
     add(
-        "gers-div-munchen", "München", "locality", "DE", "DE-BY",
-        48.14, 11.58, _chain("Germany", "Bavaria", "München"),
+        "gers-div-munchen",
+        "München",
+        "locality",
+        "DE",
+        "DE-BY",
+        48.14,
+        11.58,
+        _chain("Germany", "Bavaria", "München"),
         population=1_512_491,
         common={"en": "Munich", "fr": "Munich", "it": "Monaco di Baviera", "es": "Múnich"},
     )
     add(
-        "gers-div-munich-nd", "Munich", "locality", "US", "US-ND",
-        48.67, -98.83, _chain("United States", "North Dakota", "Munich"),
+        "gers-div-munich-nd",
+        "Munich",
+        "locality",
+        "US",
+        "US-ND",
+        48.67,
+        -98.83,
+        _chain("United States", "North Dakota", "Munich"),
     )
     add(
-        "gers-div-tokyo-jp", "東京都", "locality", "JP", "JP-13",
-        35.68, 139.69, _chain("Japan", "東京都"),
+        "gers-div-tokyo-jp",
+        "東京都",
+        "locality",
+        "JP",
+        "JP-13",
+        35.68,
+        139.69,
+        _chain("Japan", "東京都"),
         population=13_929_286,
         common={"en": "Tokyo", "de": "Tokio", "fr": "Tokyo"},
     )
     add(
-        "gers-div-tokyo-pg", "Tokyo", "locality", "PG", "PG-EBR",
-        -4.35, 152.26, _chain("Papua New Guinea", "East New Britain", "Tokyo"),
+        "gers-div-tokyo-pg",
+        "Tokyo",
+        "locality",
+        "PG",
+        "PG-EBR",
+        -4.35,
+        152.26,
+        _chain("Papua New Guinea", "East New Britain", "Tokyo"),
     )
     add(
-        "gers-div-moskva-ru", "Москва", "locality", "RU", "RU-MOW",
-        55.75, 37.62, _chain("Russia", "Москва"),
+        "gers-div-moskva-ru",
+        "Москва",
+        "locality",
+        "RU",
+        "RU-MOW",
+        55.75,
+        37.62,
+        _chain("Russia", "Москва"),
         population=13_010_112,
         common={"en": "Moscow", "de": "Moskau", "cs": "Moskva", "pl": "Moskwa"},
     )
     add(
-        "gers-div-moskva-tj", "Moskva", "locality", "TJ", "TJ-KT",
-        37.60, 68.79, _chain("Tajikistan", "Khatlon", "Moskva"),
+        "gers-div-moskva-tj",
+        "Moskva",
+        "locality",
+        "TJ",
+        "TJ-KT",
+        37.60,
+        68.79,
+        _chain("Tajikistan", "Khatlon", "Moskva"),
     )
     add(
-        "gers-div-wien", "Wien", "locality", "AT", "AT-9",
-        48.21, 16.37, _chain("Austria", "Wien"),
+        "gers-div-wien",
+        "Wien",
+        "locality",
+        "AT",
+        "AT-9",
+        48.21,
+        16.37,
+        _chain("Austria", "Wien"),
         population=1_982_097,
         common={"en": "Vienna", "it": "Vienna", "fr": "Vienne", "cs": "Vídeň"},
     )
     add(
-        "gers-div-vienna-il", "Vienna", "locality", "US", "US-IL",
-        37.41, -88.89, _chain("United States", "Illinois", "Vienna"),
+        "gers-div-vienna-il",
+        "Vienna",
+        "locality",
+        "US",
+        "US-IL",
+        37.41,
+        -88.89,
+        _chain("United States", "Illinois", "Vienna"),
     )
     # #214: an alternate whose only obstacle is a letter strip_accents leaves
     # alone (duckdb#15706) — "Preßburg" is the German exonym for Bratislava,
     # and a plain-ASCII "Pressburg" query only reaches it through the
     # explicit _UNFOLDED_LETTERS map on both sides of the comparison.
     add(
-        "gers-div-bratislava", "Bratislava", "locality", "SK", "SK-BL",
-        48.15, 17.11, _chain("Slovakia", "Bratislava"),
+        "gers-div-bratislava",
+        "Bratislava",
+        "locality",
+        "SK",
+        "SK-BL",
+        48.15,
+        17.11,
+        _chain("Slovakia", "Bratislava"),
         population=475_503,
         common={"de": "Preßburg", "hu": "Pozsony"},
     )
@@ -317,44 +532,86 @@ def build_divisions() -> list[tuple]:
     # match "Zürich"). The fold now runs ungated whenever there is a local
     # table to run it against, and ranking decides.
     add(
-        "gers-div-zurich-ch", "Zürich", "locality", "CH", "CH-ZH",
-        47.37, 8.54, _chain("Switzerland", "Zürich"),
+        "gers-div-zurich-ch",
+        "Zürich",
+        "locality",
+        "CH",
+        "CH-ZH",
+        47.37,
+        8.54,
+        _chain("Switzerland", "Zürich"),
         population=443_037,
     )
     add(
-        "gers-div-zurich-nl", "Zurich", "locality", "NL", "NL-FR",
-        53.13, 5.38, _chain("Netherlands", "Friesland", "Zurich"),
+        "gers-div-zurich-nl",
+        "Zurich",
+        "locality",
+        "NL",
+        "NL-FR",
+        53.13,
+        5.38,
+        _chain("Netherlands", "Friesland", "Zurich"),
         population=190,
     )
     # "東京" is only a *prefix* of 東京都 (13.9M) but an *exact* match for this
     # population-less Nagano neighborhood, which is what tier-dominates-
     # prominence ranking put first. 東京都 already exists above.
     add(
-        "gers-div-tokyo-nagano", "東京", "neighborhood", "JP", "JP-20",
-        36.65, 138.18, _chain("Japan", "長野県", "東京"),
+        "gers-div-tokyo-nagano",
+        "東京",
+        "neighborhood",
+        "JP",
+        "JP-20",
+        36.65,
+        138.18,
+        _chain("Japan", "長野県", "東京"),
     )
     # #221 regression corpus: two same-named pairs where *both* sides carry a
     # population, so they pin that populated-vs-populated ordering is
     # untouched by the prominence rescue — Cambridge UK over Cambridge MA,
     # Portland OR over Portland ME (real figures, both directions checkable).
     add(
-        "gers-div-cambridge-gb", "Cambridge", "locality", "GB", "GB-ENG",
-        52.21, 0.12, _chain("United Kingdom", "England", "Cambridge"),
+        "gers-div-cambridge-gb",
+        "Cambridge",
+        "locality",
+        "GB",
+        "GB-ENG",
+        52.21,
+        0.12,
+        _chain("United Kingdom", "England", "Cambridge"),
         population=145_700,
     )
     add(
-        "gers-div-cambridge-ma", "Cambridge", "locality", "US", "US-MA",
-        42.37, -71.11, _chain("United States", "Massachusetts", "Cambridge"),
+        "gers-div-cambridge-ma",
+        "Cambridge",
+        "locality",
+        "US",
+        "US-MA",
+        42.37,
+        -71.11,
+        _chain("United States", "Massachusetts", "Cambridge"),
         population=118_403,
     )
     add(
-        "gers-div-portland-or", "Portland", "locality", "US", "US-OR",
-        45.52, -122.68, _chain("United States", "Oregon", "Portland"),
+        "gers-div-portland-or",
+        "Portland",
+        "locality",
+        "US",
+        "US-OR",
+        45.52,
+        -122.68,
+        _chain("United States", "Oregon", "Portland"),
         population=652_503,
     )
     add(
-        "gers-div-portland-me", "Portland", "locality", "US", "US-ME",
-        43.66, -70.26, _chain("United States", "Maine", "Portland"),
+        "gers-div-portland-me",
+        "Portland",
+        "locality",
+        "US",
+        "US-ME",
+        43.66,
+        -70.26,
+        _chain("United States", "Maine", "Portland"),
         population=68_408,
     )
     # #223: the divisions the postcode answer names. "Mission District" is the
@@ -364,13 +621,24 @@ def build_divisions() -> list[tuple]:
     # centroid in the Mission in San Francisco. Amsterdam does the same job
     # for the NL "1011AB" cluster.
     add(
-        "gers-div-mission-district", "Mission District", "neighborhood", "US", "US-CA",
-        37.7599, -122.4148,
+        "gers-div-mission-district",
+        "Mission District",
+        "neighborhood",
+        "US",
+        "US-CA",
+        37.7599,
+        -122.4148,
         _chain("United States", "California", "San Francisco", "Mission District"),
     )
     add(
-        "gers-div-amsterdam", "Amsterdam", "locality", "NL", "NL-NH",
-        52.3728, 4.8936, _chain("Netherlands", "North Holland", "Amsterdam"),
+        "gers-div-amsterdam",
+        "Amsterdam",
+        "locality",
+        "NL",
+        "NL-NH",
+        52.3728,
+        4.8936,
+        _chain("Netherlands", "North Holland", "Amsterdam"),
         population=921_402,
     )
     # #188: a division in a country the addresses theme does NOT cover (GB is
@@ -379,8 +647,13 @@ def build_divisions() -> list[tuple]:
     # not named "London" — the two fixture Londons above are load-bearing for
     # the ambiguity tests, and a third would change what they assert.
     add(
-        "gers-div-kensington-gb", "Kensington", "locality", "GB", "GB-ENG",
-        UNCOVERED_LAT, UNCOVERED_LON,
+        "gers-div-kensington-gb",
+        "Kensington",
+        "locality",
+        "GB",
+        "GB-ENG",
+        UNCOVERED_LAT,
+        UNCOVERED_LON,
         _chain("United Kingdom", "England", "Kensington"),
     )
     # Everything below is appended at the very end of build_divisions on
@@ -399,13 +672,25 @@ def build_divisions() -> list[tuple]:
     # their id -- without it there is no extent and geocode_address declines
     # to scan, which is its own test.
     add(
-        "gers-div-mountain-view", "Mountain View", "locality", "US", "US-CA",
-        37.3861, -122.0839, _chain("United States", "California", "Mountain View"),
+        "gers-div-mountain-view",
+        "Mountain View",
+        "locality",
+        "US",
+        "US-CA",
+        37.3861,
+        -122.0839,
+        _chain("United States", "California", "Mountain View"),
         population=82_376,
     )
     add(
-        "gers-div-berlin", "Berlin", "locality", "DE", "DE-BE",
-        52.52, 13.405, _chain("Germany", "Berlin"),
+        "gers-div-berlin",
+        "Berlin",
+        "locality",
+        "DE",
+        "DE-BE",
+        52.52,
+        13.405,
+        _chain("Germany", "Berlin"),
         population=3_677_472,
     )
     # #229: the quadrant case. Washington's streets carry NW/NE/SW/SE as
@@ -413,23 +698,41 @@ def build_divisions() -> list[tuple]:
     # "Pennsylvania Avenue NW" only matches through the quadrant variant map,
     # and a bare "Pennsylvania Avenue" only through a prefix match.
     add(
-        "gers-div-washington-dc", "Washington", "locality", "US", "US-DC",
-        38.9072, -77.0369, _chain("United States", "District of Columbia", "Washington"),
+        "gers-div-washington-dc",
+        "Washington",
+        "locality",
+        "US",
+        "US-DC",
+        38.9072,
+        -77.0369,
+        _chain("United States", "District of Columbia", "Washington"),
         population=689_545,
     )
     # #229: the house-number parse case. "Calle 8" is the *street*; a
     # rule that strips a trailing integer searches for a street named
     # "Calle" and finds nothing.
     add(
-        "gers-div-miami", "Miami", "locality", "US", "US-FL",
-        25.7617, -80.1918, _chain("United States", "Florida", "Miami"),
+        "gers-div-miami",
+        "Miami",
+        "locality",
+        "US",
+        "US-FL",
+        25.7617,
+        -80.1918,
+        _chain("United States", "Florida", "Miami"),
         population=442_241,
     )
     # the English numbered-route parse case, the twin of Miami's
     # "Calle 8" above -- Flagstaff is where Route 66 is a street name.
     add(
-        "gers-div-flagstaff", "Flagstaff", "locality", "US", "US-AZ",
-        35.1983, -111.6513, _chain("United States", "Arizona", "Flagstaff"),
+        "gers-div-flagstaff",
+        "Flagstaff",
+        "locality",
+        "US",
+        "US-AZ",
+        35.1983,
+        -111.6513,
+        _chain("United States", "Arizona", "Flagstaff"),
         population=76_831,
     )
     # a division whose boundary is a *state*, so geocode_address has a
@@ -440,14 +743,27 @@ def build_divisions() -> list[tuple]:
     # this fixture carries no division_area at all, so none of them can reach
     # the check.
     add(
-        "gers-div-tx", "Texas", "region", "US", "US-TX", 31.0, -100.0,
-        _chain("United States", "Texas"), population=30_503_301,
+        "gers-div-tx",
+        "Texas",
+        "region",
+        "US",
+        "US-TX",
+        31.0,
+        -100.0,
+        _chain("United States", "Texas"),
+        population=30_503_301,
     )
     # #448: the city anchor for geocode_intersection fixture tests over the
     # 20x20 named street grid (scripts/build_routing_fixture.py's ORIGIN_LAT/LON).
     add(
-        "gers-div-grid-city", "Grid City", "locality", "US", "US-NY",
-        40.74, -73.99, _chain("United States", "New York", "Grid City"),
+        "gers-div-grid-city",
+        "Grid City",
+        "locality",
+        "US",
+        "US-NY",
+        40.74,
+        -73.99,
+        _chain("United States", "New York", "Grid City"),
         population=100_000,
     )
     return rows
@@ -486,17 +802,19 @@ def build_addresses() -> list[tuple]:
                 number, unit = "74B", "Apt 3"
             elif n == CENTER_ADDRESS_INDEX + 1:
                 postcode, postal_city, address_levels = None, None, None
-            rows.append((
-                f"gers-addr-{n:05d}",
-                _point_bbox(lat, lon),
-                "US",
-                number,
-                street,
-                unit,
-                postcode,
-                postal_city,
-                address_levels,
-            ))
+            rows.append(
+                (
+                    f"gers-addr-{n:05d}",
+                    _point_bbox(lat, lon),
+                    "US",
+                    number,
+                    street,
+                    unit,
+                    postcode,
+                    postal_city,
+                    address_levels,
+                )
+            )
             n += 1
     rows += build_postcode_addresses()
     rows += build_street_addresses()
@@ -519,33 +837,56 @@ def build_addresses() -> list[tuple]:
 # reproduce that shape at fixture scale, and an undeduplicated top-5 would
 # return one doorway five times.
 STREET_CLUSTERS = (
-    ("MARKET ST", "US", "94103", "San Francisco", "CA", 37.7749, -122.4194,
-     tuple(str(n) for n in range(1, 13)), 3),
-    ("AMPHITHEATRE PKWY", "US", "94043", "Mountain View", "CA", 37.4220, -122.0841,
-     ("1600", "1601", "1900"), 1),
+    (
+        "MARKET ST",
+        "US",
+        "94103",
+        "San Francisco",
+        "CA",
+        37.7749,
+        -122.4194,
+        tuple(str(n) for n in range(1, 13)),
+        3,
+    ),
+    (
+        "AMPHITHEATRE PKWY",
+        "US",
+        "94043",
+        "Mountain View",
+        "CA",
+        37.4220,
+        -122.0841,
+        ("1600", "1601", "1900"),
+        1,
+    ),
     # No transformation needed for DE (verified against the live release): "Hauptstraße" is one
     # token in the query and one in the data, so this cluster only exercises
     # the trailing-house-number parse ("Hauptstraße 5").
-    ("Hauptstraße", "DE", "10827", "Berlin", None, 52.5200, 13.4050,
-     ("5", "7", "9"), 1),
+    ("Hauptstraße", "DE", "10827", "Berlin", None, 52.5200, 13.4050, ("5", "7", "9"), 1),
     # #229: one street name, two quadrants -- different streets, and
     # neither is reachable from "Pennsylvania Avenue NW" without the
     # quadrant variant map or from "Pennsylvania Avenue" without a prefix
     # match. They stay separate rows in the answer, which is the point.
-    ("PENNSYLVANIA AVE NW", "US", "20500", "Washington", "DC", 38.8977, -77.0365,
-     ("1600", "1700"), 1),
-    ("PENNSYLVANIA AVE SE", "US", "20003", "Washington", "DC", 38.8810, -76.9900,
-     ("1600",), 1),
+    (
+        "PENNSYLVANIA AVE NW",
+        "US",
+        "20500",
+        "Washington",
+        "DC",
+        38.8977,
+        -77.0365,
+        ("1600", "1700"),
+        1,
+    ),
+    ("PENNSYLVANIA AVE SE", "US", "20003", "Washington", "DC", 38.8810, -76.9900, ("1600",), 1),
     # #229: Calle Ocho. The street name ends in the digit.
-    ("CALLE 8", "US", "33135", "Miami", "FL", 25.7650, -80.2200,
-     ("1", "3", "5"), 1),
+    ("CALLE 8", "US", "33135", "Miami", "FL", 25.7650, -80.2200, ("1", "3", "5"), 1),
     # the English twin of Calle 8. "ROUTE 66" is the street's whole
     # name, and the Romance-only leading-type list split the 66 off it and
     # searched for a street called "Route". Numbers are even so the
     # doorway-on-a-numbered-route case ("4 Route 66") has something to land
     # on -- that query must still split, because the number leads.
-    ("ROUTE 66", "US", "86001", "Flagstaff", "AZ", 35.1980, -111.6510,
-     ("2", "4", "6"), 1),
+    ("ROUTE 66", "US", "86001", "Flagstaff", "AZ", 35.1980, -111.6510, ("2", "4", "6"), 1),
 )
 
 # Spacing between consecutive house numbers along a street, and between the
@@ -562,20 +903,22 @@ def build_street_addresses() -> list[tuple]:
     for street, country, postcode, city, level, lat, lon, numbers, copies in STREET_CLUSTERS:
         for i, number in enumerate(numbers):
             for copy in range(copies):
-                rows.append((
-                    f"gers-addr-st-{street.lower().replace(' ', '-')}-{number}-{copy}",
-                    _point_bbox(
-                        lat + i * STREET_NUMBER_STEP_DEG + copy * STREET_DUPLICATE_OFFSET_DEG,
-                        lon + i * STREET_NUMBER_STEP_DEG,
-                    ),
-                    country,
-                    number,
-                    street,
-                    None,
-                    postcode,
-                    city,
-                    [{"value": level}] if level else None,
-                ))
+                rows.append(
+                    (
+                        f"gers-addr-st-{street.lower().replace(' ', '-')}-{number}-{copy}",
+                        _point_bbox(
+                            lat + i * STREET_NUMBER_STEP_DEG + copy * STREET_DUPLICATE_OFFSET_DEG,
+                            lon + i * STREET_NUMBER_STEP_DEG,
+                        ),
+                        country,
+                        number,
+                        street,
+                        None,
+                        postcode,
+                        city,
+                        [{"value": level}] if level else None,
+                    )
+                )
     return rows
 
 
@@ -607,17 +950,19 @@ SHARED_BBOX_ADDRESSES = (
 def build_shared_bbox_addresses() -> list[tuple]:
     rows = []
     for i, (number, street, postcode, city, lat, lon, unit) in enumerate(SHARED_BBOX_ADDRESSES):
-        rows.append((
-            f"gers-addr-shared-{i:02d}",
-            _point_bbox(lat, lon),
-            "US",
-            number,
-            street,
-            unit,
-            postcode,
-            city,
-            [{"value": "CA"}],
-        ))
+        rows.append(
+            (
+                f"gers-addr-shared-{i:02d}",
+                _point_bbox(lat, lon),
+                "US",
+                number,
+                street,
+                unit,
+                postcode,
+                city,
+                [{"value": "CA"}],
+            )
+        )
     return rows
 
 
@@ -662,17 +1007,19 @@ def build_postcode_addresses() -> list[tuple]:
             # Symmetric around 0: for count points, offsets are
             # (i - (count-1)/2) steps out, which sums to zero.
             step = (i - (count - 1) / 2) * POSTCODE_SPREAD_DEG
-            rows.append((
-                f"gers-addr-pc-{country.lower()}-{postcode.lower()}-{i:02d}",
-                _point_bbox(lat + step, lon - step),
-                country,
-                str(1 + i),
-                STREET_NAMES[i % len(STREET_NAMES)],
-                None,
-                postcode,
-                city,
-                [{"value": level}] if level else None,
-            ))
+            rows.append(
+                (
+                    f"gers-addr-pc-{country.lower()}-{postcode.lower()}-{i:02d}",
+                    _point_bbox(lat + step, lon - step),
+                    country,
+                    str(1 + i),
+                    STREET_NAMES[i % len(STREET_NAMES)],
+                    None,
+                    postcode,
+                    city,
+                    [{"value": level}] if level else None,
+                )
+            )
     return rows
 
 

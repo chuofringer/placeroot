@@ -68,7 +68,9 @@ def main() -> int:
     # is NULL like a stage-1 build (hierarchies are 145MB of the build cost);
     # the bbox corner columns come from the row's own (point) bbox, which
     # #224 treats as degenerate and falls back past — exactly right here.
-    _copy_verified(con, f"""
+    _copy_verified(
+        con,
+        f"""
         COPY (
             SELECT id, names.primary AS name, subtype, country, region,
                    bbox.ymin AS lat, bbox.xmin AS lon, population,
@@ -80,7 +82,9 @@ def main() -> int:
             ORDER BY population DESC
             LIMIT {_INDEX_ROWS}
         ) TO '{out}' (FORMAT PARQUET, COMPRESSION ZSTD)
-    """, out)
+    """,
+        out,
+    )
     size_mb = out.stat().st_size / 1048576
     n = con.execute(f"SELECT count(*) FROM read_parquet('{out}')").fetchone()[0]
     print(f"{n:,} rows -> {out.relative_to(ROOT)} ({size_mb:.1f} MB)")
@@ -95,7 +99,9 @@ def main() -> int:
 
     alt_out = out_dir / "alt_names.parquet"
     fold = geocode_mod._fold_alt_name_sql
-    _copy_verified(con, f"""
+    _copy_verified(
+        con,
+        f"""
         COPY (
             SELECT id, alt_name, min(alt) AS alt_display
             FROM (
@@ -112,7 +118,9 @@ def main() -> int:
             WHERE alt_name IS NOT NULL AND alt_name <> '' AND alt_name <> primary_folded
             GROUP BY id, alt_name
         ) TO '{alt_out}' (FORMAT PARQUET, COMPRESSION ZSTD)
-    """, alt_out)
+    """,
+        alt_out,
+    )
     alt_mb = alt_out.stat().st_size / 1048576
     alt_n = con.execute(f"SELECT count(*) FROM read_parquet('{alt_out}')").fetchone()[0]
     print(f"{alt_n:,} alt rows -> {alt_out.relative_to(ROOT)} ({alt_mb:.1f} MB)")

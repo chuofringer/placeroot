@@ -58,8 +58,7 @@ def test_bbox_filter_sql_unchanged_for_non_crossing_box():
     byte-identical SQL to before the fix — no perf regression."""
     filter_sql, params = overture._bbox_filter_sql(-74.0, 40.0, -73.0, 41.0)
     assert filter_sql == (
-        "bbox.xmax >= $xmin AND bbox.xmin <= $xmax"
-        " AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
+        "bbox.xmax >= $xmin AND bbox.xmin <= $xmax AND bbox.ymax >= $ymin AND bbox.ymin <= $ymax"
     )
     assert params == {"xmin": -74.0, "ymin": 40.0, "xmax": -73.0, "ymax": 41.0}
 

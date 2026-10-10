@@ -174,6 +174,7 @@ def type_for_category(slug: str | None) -> str | None:
             return type_
     return None
 
+
 # Marker column distinguishing this layer's rows from Overture places rows
 # inside the union. find_places reads it to relax its "named places only"
 # filter for these rows (see the module docstring). overture._with_recreation
@@ -237,7 +238,8 @@ def _cache_theme(type_: str) -> str:
 
 
 def _from_source(
-    bbox: tuple[float, float, float, float] | None, type_: str,
+    bbox: tuple[float, float, float, float] | None,
+    type_: str,
     upstream_readable: bool = True,
     schedule_missing: bool = True,
 ) -> str | None:
@@ -269,7 +271,10 @@ def _from_source(
     )
     try:
         return cache.source_sql(
-            _cache_theme(type_), upstream, bbox, upstream_fallback=fallback_ok,
+            _cache_theme(type_),
+            upstream,
+            bbox,
+            upstream_fallback=fallback_ok,
             schedule_missing=schedule_missing,
         )
     except duckdb.Error as e:
@@ -332,7 +337,9 @@ def _basic_category_expr(class_map: dict[str, str]) -> str:
 
 
 def _projection(
-    source: str, type_: str, missing: set[str],
+    source: str,
+    type_: str,
+    missing: set[str],
     bbox: tuple[float, float, float, float] | None,
 ) -> str:
     """One base-theme dataset, projected into the places row shape.
@@ -379,7 +386,8 @@ def _projection(
     """
     id_expr = "NULL" if "id" in missing else "id"
     dedupe = (
-        "" if "id" in missing
+        ""
+        if "id" in missing
         else "\n        QUALIFY id IS NULL OR row_number() OVER (PARTITION BY id) = 1"
     )
     names_expr = "NULL" if "names" in missing else "names"
@@ -496,17 +504,23 @@ def _branch_missing(type_: str) -> tuple[set[str] | None, bool]:
     if present is None:
         tiles = (
             cache.cached_tile_paths(release.resolve_release(), _cache_theme(type_), glob)
-            if cache.enabled() else []
+            if cache.enabled()
+            else []
         )
         if not tiles:
             _warn_once(
-                "unreadable", type_, glob,
+                "unreadable",
+                type_,
+                glob,
                 "recreation layer: theme=%s/type=%s is unreadable at %s and nothing is "
                 "cached for it — skipping that branch; places results will be "
                 "Overture-places-only for its categories. A mirror that carries only "
                 "theme=places causes this: mirror theme=base too (scripts/mirror_theme.py) "
                 "or set %s=0.",
-                THEME, type_, glob, ENV_VAR,
+                THEME,
+                type_,
+                glob,
+                ENV_VAR,
             )
             return None, False
         # The tiles' own schema decides `missing`, not an assumption that
@@ -535,36 +549,50 @@ def _branch_missing(type_: str) -> tuple[set[str] | None, bool]:
                 break
         missing = (
             {c for c in REQUIRED_COLUMNS if c not in tile_schema}
-            if tile_schema is not None else set(REQUIRED_COLUMNS)
+            if tile_schema is not None
+            else set(REQUIRED_COLUMNS)
         )
         if tile_schema is None or missing & ESSENTIAL_COLUMNS:
             _warn_once(
-                "unreadable-tiles-unusable", type_, glob,
+                "unreadable-tiles-unusable",
+                type_,
+                glob,
                 "recreation layer: theme=%s/type=%s is unreadable at %s and its "
                 "cached tiles cannot serve either (unreadable tile, or a schema "
                 "missing an essential column) — skipping that branch; places "
                 "results will be Overture-places-only for its categories.",
-                THEME, type_, glob,
+                THEME,
+                type_,
+                glob,
             )
             return None, False
         _warn_once(
-            "unreadable-cached", type_, glob,
+            "unreadable-cached",
+            type_,
+            glob,
             "recreation layer: theme=%s/type=%s is unreadable at %s — serving "
             "that branch from already-cached tiles only; queries outside their "
             "coverage will be Overture-places-only for its categories. A mirror "
             "that carries only theme=places causes this: mirror theme=base too "
             "(scripts/mirror_theme.py) or set %s=0.",
-            THEME, type_, glob, ENV_VAR,
+            THEME,
+            type_,
+            glob,
+            ENV_VAR,
         )
         return missing, False
     missing = {c for c in REQUIRED_COLUMNS if c not in present}
     essential_missing = sorted(missing & ESSENTIAL_COLUMNS)
     if essential_missing:
         _warn_once(
-            "schema-drift", type_, glob,
+            "schema-drift",
+            type_,
+            glob,
             "recreation layer: theme=%s/type=%s is missing %s — skipping that branch; "
             "places results will be Overture-places-only for its categories",
-            THEME, type_, ", ".join(essential_missing),
+            THEME,
+            type_,
+            ", ".join(essential_missing),
         )
         return None, True
     return missing, True
@@ -593,12 +621,16 @@ def _reaches_past_a_pinned_deployment(type_: str) -> bool:
     if overture.dataset_is_pinned(THEME, type_):
         return False
     _warn_once(
-        "pinned", type_, overture._upstream_glob(overture.THEME, "place"),
+        "pinned",
+        type_,
+        overture._upstream_glob(overture.THEME, "place"),
         "recreation layer: theme=places is pinned to a local dataset but "
         "theme=%s/type=%s is not, so reading it would mean a live S3 scan this "
         "deployment did not ask for — skipping that branch. Set "
         "PLACEROOT_DATA_PATH_BASE to include it, or %s=0 to silence this.",
-        THEME, type_, ENV_VAR,
+        THEME,
+        type_,
+        ENV_VAR,
     )
     return True
 

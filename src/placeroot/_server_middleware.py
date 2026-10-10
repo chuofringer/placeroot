@@ -66,8 +66,10 @@ def _amend_tool_payload(result, amend: Callable[[dict], dict]):
     content = result.get("content")
     text_block = (
         content[0]
-        if isinstance(content, list) and len(content) == 1
-        and isinstance(content[0], dict) and content[0].get("type") == "text"
+        if isinstance(content, list)
+        and len(content) == 1
+        and isinstance(content[0], dict)
+        and content[0].get("type") == "text"
         else None
     )
     if not isinstance(payload, dict):
@@ -206,7 +208,11 @@ async def _progress_middleware(ctx, call_next):
             seq += 1
             future = asyncio.run_coroutine_threadsafe(
                 session.send_progress_notification(
-                    token, seq, None, message, related_request_id=request_id,
+                    token,
+                    seq,
+                    None,
+                    message,
+                    related_request_id=request_id,
                 ),
                 loop,
             )

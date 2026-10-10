@@ -92,8 +92,12 @@ def test_mixed_areas_list_with_a_named_area(monkeypatch):
     assert "error" not in result
     assert result["resolved"] == [
         {
-            "index": 1, "name": "Arctic Base", "id": "gers-arctic",
-            "lat": 78.0, "lon": 15.0, "matched_by": "name",
+            "index": 1,
+            "name": "Arctic Base",
+            "id": "gers-arctic",
+            "lat": 78.0,
+            "lon": 15.0,
+            "matched_by": "name",
         }
     ]
 
