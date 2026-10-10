@@ -67,6 +67,17 @@ fixing behavior is patch.
   challenge` (the "Just a moment..." page) is treated as a false outage only
   when the same path still serves real HTML from `placeroot.pages.dev`; a
   plain origin `403` still fails the check. Package version remains 0.10.0.
+- Per-client session state in `--http` mode (#508): the geocoder's last-city
+  memory is kept per MCP session (bounded LRU), and preferences over HTTP are a
+  per-session overlay on the host file. stdio behaviour is unchanged.
+- `land_use`, `water`, `infrastructure`, `transit` and `buildings` return a
+  feature that straddles a tile edge once, not once per tile, so totals and
+  building summaries no longer double-count it (#509).
+- First macOS/Windows CI run fixes (#512): geocode's local-table publish no
+  longer fsyncs a read-only handle, which had broken every Windows divisions,
+  alt-name and lang build since #505; `timezone_at` works on Windows, where
+  `tzdata` is now a Windows-only dependency; the tile writer's `os.replace` no
+  longer has a `PermissionError` window.
 
 ### Added
 - Listed on [punkpeye/awesome-mcp-servers](https://github.com/punkpeye/awesome-mcp-servers)
@@ -253,6 +264,32 @@ fixing behavior is patch.
   the mode's cap, an unresolvable stop) still reports its own structured
   error rather than asking the user to confirm a build that would never
   happen.
+- Heavy-theme first touch reads upstream directly with bbox pushdown and
+  warms the tiles in the background, instead of COPYing a whole 0.125-degree
+  tile inline under `conn_lock` (#510). `PLACEROOT_INLINE_TILE_COPY=1`
+  restores the old inline COPY. The route widen-and-retry no longer re-pads
+  an already padded radius.
+- Named-place resolve runs fewer, parallel places scans: 3 instead of 4 per
+  named-place query, 7 instead of 9 on an all-miss; top results are unchanged
+  (#511).
+- A route whose ends mix a name and a GERS id resolves both ends side by side,
+  as plain-name pairs already did (#513).
+- Read-only queries lease pooled DuckDB cursors instead of serializing on
+  `conn_lock`, so concurrent read-only calls no longer queue behind one slow
+  S3 scan. `PLACEROOT_DUCKDB_CURSORS` sets the pool size (default 8) (#514).
+- Optional Rust accelerator `placeroot_native` for the routing graph build and
+  Dijkstra (#515). Results are identical by construction, since the Python
+  graph stays the source of truth. Pure Python is the default, and
+  `PLACEROOT_NATIVE=0` disables an installed extension.
+- Internal layout, public surfaces unchanged: `server.py`'s errors, reference
+  resolution, middleware, confirm gating, schema patches and CLI moved into
+  `_server_*` modules (#516), and `geocode.py` became the `geocode/` package
+  (#517). `placeroot.server:main` and every `placeroot.geocode.<name>` still
+  resolve.
+- Build and CI: the test job runs on macOS and Windows as well as Ubuntu
+  (#512). `site/placeroot.mcpb` is a build product that the release, deploy
+  and Pages workflows build and verify, not a committed file. `mcp[cli]` is
+  dropped, and `duckdb<2` and `mcp<3` guards are added.
 
 ## [0.10.0] — 2026-08-26
 

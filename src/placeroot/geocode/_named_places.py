@@ -1,8 +1,15 @@
 """resolve_area(), resolve_named_place(), the typo tier and comma-qualified names."""
 
+import contextlib
+import contextvars
+import os
 import sys as _sys
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 
-from placeroot import geo
+import duckdb
+
+from placeroot import db, geo
 from placeroot.errors import AmbiguousArea, AmbiguousPlace, AnchoredNotFound
 
 _pkg = _sys.modules["placeroot.geocode"]
@@ -24,6 +31,7 @@ _AREA_RANK_EPSILON = 1e-6
 # Cap on candidates reported back for an ambiguous area — enough to choose
 # from, not a data dump.
 _AREA_MAX_CANDIDATES = 5
+
 
 
 def resolve_area(area: str) -> dict | None:
@@ -52,8 +60,7 @@ def resolve_area(area: str) -> dict | None:
     # they're dropped here rather than surfacing as a confusing downstream
     # error (id is only ever absent from a degraded dataset).
     divisions = [
-        r
-        for r in _pkg.geocode(area, limit=_pkg._RESOLVE_OVERFETCH)
+        r for r in _pkg.geocode(area, limit=_pkg._RESOLVE_OVERFETCH)
         if r["type"] != "place" and r["id"]
     ]
     if not divisions:
@@ -65,8 +72,7 @@ def resolve_area(area: str) -> dict | None:
     # inside the city you asked for) is not ambiguity, so compare names too.
     top_name = _pkg._normalize_for_match(top["name"])
     tied = [
-        d
-        for d in divisions
+        d for d in divisions
         if _pkg._normalize_for_match(d["name"]) == top_name
         and abs(d["rank_score"] - top["rank_score"]) < _AREA_RANK_EPSILON
     ]
@@ -77,6 +83,7 @@ def resolve_area(area: str) -> dict | None:
     return _area_candidate(top)
 
 
+
 def _area_candidate(row: dict) -> dict:
     """A division row, projected to just what an area choice needs."""
     return {
@@ -84,6 +91,7 @@ def _area_candidate(row: dict) -> dict:
         "name": row["name"],
         "admin_context": row["admin_context"],
     }
+
 
 
 def resolve_named_place(query: str) -> dict | None:
@@ -118,20 +126,31 @@ def resolve_named_place(query: str) -> dict | None:
         if anchor is not None:
             return _resolve_inside_anchor(query, head, anchor)
 
-    rows = [
-        r
-        for r in _pkg.geocode(query, limit=_pkg._RESOLVE_OVERFETCH)
-        if r.get("lat") is not None
-        and r.get("lon") is not None
-        # #431: a fuzzy row that only ever proved itself against part of
-        # what the caller typed is not an answer. See the block below.
-        and not _pkg._fuzzy_row_is_too_weak(query, r)
-    ]
+    # perf: leg 2 is started now, alongside leg 1, rather than after it. It is
+    # only kept when leg 1 finds no division (see _SpeculativeLeg).
+    spec = _speculate_place_leg(query)
+    try:
+        rows = [
+            r for r in _pkg.geocode(query, limit=_pkg._RESOLVE_OVERFETCH)
+            if r.get("lat") is not None and r.get("lon") is not None
+            # #431: a fuzzy row that only ever proved itself against part of
+            # what the caller typed is not an answer. See the block below.
+            and not _pkg._fuzzy_row_is_too_weak(query, r)
+        ]
+    except BaseException:
+        if spec is not None:
+            spec.discard()  # leg 1 failed: the serial path would never have run leg 2
+        raise
     hit = None
-    if not any(r["type"] != "place" for r in rows) and _pkg._has_extra_place_context(query):
+    # A speculative leg exists only when the extra-context gate already passed.
+    if not any(r["type"] != "place" for r in rows) and (
+        spec is not None or _pkg._has_extra_place_context(query)
+    ):
         # #429: no division matched, so this is a places question — and the
         # places resolver is resolve_place, not geocode. See the block below.
-        hit = _resolve_place_leg(query)
+        hit = _resolve_place_leg(query, spec)
+    elif spec is not None:
+        spec.discard()
     if hit is None:
         if not rows:
             return None
@@ -144,6 +163,7 @@ def resolve_named_place(query: str) -> dict | None:
         # if it had been.
         hit["note"] = f"{qualifier!r} did not resolve as a place or region; searched the full text"
     return hit
+
 
 
 # --- #431: the typo tier refuses a match it only half earned ----------------
@@ -216,6 +236,7 @@ def resolve_named_place(query: str) -> dict | None:
 _FUZZY_WHOLE_QUERY_FLOOR = 0.96
 
 
+
 def _fuzzy_row_is_too_weak(query: str, row: dict) -> bool:
     """Whether `row` is a fuzzy match that never accounted for all of `query`."""
     if row.get("matched_by") != "fuzzy":
@@ -236,10 +257,12 @@ def _fuzzy_row_is_too_weak(query: str, row: dict) -> bool:
     return whole < _pkg._FUZZY_WHOLE_QUERY_FLOOR
 
 
+
 def _row_lies_in_region(row: dict, region_name: str) -> bool:
     """Whether `row`'s admin chain names the region a suffix was parsed as."""
     folded = _pkg._normalize_for_match(region_name)
     return any(_pkg._normalize_for_match(ctx) == folded for ctx in (row.get("admin_context") or []))
+
 
 
 def _fuzzy_name_covers_tokens(name: str, tokens: list[str]) -> bool:
@@ -258,13 +281,11 @@ def _fuzzy_name_covers_tokens(name: str, tokens: list[str]) -> bool:
         folded_tok = _pkg._normalize_for_match(tok)
         if not folded_tok or folded_tok in folded_name:
             continue
-        if any(
-            _pkg._jaro_winkler(word, folded_tok) >= _pkg._FUZZY_SIMILARITY_THRESHOLD
-            for word in words
-        ):  # noqa: E501
+        if any(_pkg._jaro_winkler(word, folded_tok) >= _pkg._FUZZY_SIMILARITY_THRESHOLD for word in words):  # noqa: E501
             continue
         return False
     return True
+
 
 
 # --- #429: the places leg of an unqualified name ----------------------------
@@ -325,7 +346,126 @@ def _has_extra_place_context(query: str) -> bool:
     return bool(last_city) and _pkg._query_is_poi_shaped(query)
 
 
-def _resolve_place_leg(query: str) -> dict | None:
+
+# --- perf: leg 2 speculated alongside leg 1 ----------------------------------
+#
+# resolve_named_place's two legs used to run in series: geocode(query) first,
+# then resolve_place(query) only when geocode found no division. For a
+# POI-shaped name leg 1 always misses, so both were paid in full: ~10 round
+# trips, ~2.0 s with 0.2 s scans, the cold half of the c15 walk. Leg 2 now
+# starts on a worker while leg 1 runs. Its writes (resolve LRU, last-city
+# memory, autowarm) are deferred into a commit() that runs only if leg 2's
+# answer is used, so a speculative run that leg 1 makes unnecessary leaves
+# no state behind: rounds become max(leg 1, leg 2) instead of their sum.
+#
+# Rules: a division from leg 1 discards leg 2 without commit (its exception,
+# if any, is logged at debug, not raised). A leg-1 exception discards leg 2
+# and propagates, as the serial path would have. Otherwise leg 2's result is
+# joined and committed, and any exception it raised surfaces exactly as the
+# serial call would have raised it.
+#
+# The pool is bounded: a speculative leg holds one read cursor for its whole
+# run, and the read pool has a fixed cursor cap (db.DEFAULT_READ_CURSORS), so
+# at most _SPECULATE_WORKERS of them are ever held here. A discarded leg is
+# cancelled if it has not started; a running one is not waited for.
+
+SPECULATE_NAMED_RESOLVE = True
+
+SPECULATE_ENV = "PLACEROOT_SPECULATE_RESOLVE"
+
+_SPECULATE_WORKERS = 4
+
+_SPECULATE_POOL = ThreadPoolExecutor(
+    max_workers=_SPECULATE_WORKERS, thread_name_prefix="resolve-speculative",
+)
+
+# Legs submitted and not yet finished. Tests drain it so a discarded leg
+# cannot outlive the monkeypatches of the test that started it.
+_IN_FLIGHT: set[Future] = set()
+_IN_FLIGHT_LOCK = threading.Lock()
+
+
+def wait_for_speculative_legs(timeout: float | None = None) -> None:
+    """Block until every speculative leg started so far has finished."""
+    with _IN_FLIGHT_LOCK:
+        pending = list(_IN_FLIGHT)
+    wait(pending, timeout=timeout)
+
+
+def _speculation_enabled() -> bool:
+    if not SPECULATE_NAMED_RESOLVE:
+        return False
+    raw = os.environ.get(SPECULATE_ENV, "").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+class _SpeculativeLeg:
+    """A leg-2 run in flight: join() commits and returns, discard() abandons."""
+
+    def __init__(self, future: "Future[tuple[list[dict], object]]"):
+        self._future = future
+
+    def join(self) -> list[dict]:
+        rows, commit = self._future.result()  # re-raises the leg's own exception
+        commit()
+        return rows
+
+    def discard(self) -> None:
+        self._future.cancel()  # no-op once running; its result is never committed
+        self._future.add_done_callback(_log_discarded_leg)
+
+
+def _log_discarded_leg(future: "Future") -> None:
+    if not future.cancelled() and future.exception() is not None:
+        _pkg.logger.debug(
+            "speculative resolve_place leg failed (discarded)", exc_info=future.exception(),
+        )
+
+
+def _speculative_leg_worker(query: str):
+    """Leg 2 on a worker thread: reads only; returns (rows, commit)."""
+    from placeroot.geocode import _resolve  # call time: the module is loaded by now
+
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(db.isolated_reads())
+        except duckdb.Error:
+            _pkg.logger.debug(
+                "isolated cursor unavailable; speculative leg unisolated", exc_info=True,
+            )
+        return _resolve._resolve_place_impl(
+            query, None, None, _pkg._RESOLVE_OVERFETCH, None, None, None, defer=True,
+        )
+
+
+def _speculate_place_leg(query: str) -> _SpeculativeLeg | None:
+    """Start leg 2 for `query` now, or None when it must stay serial.
+
+    Serial when speculation is switched off, when the extra-context gate
+    fails (leg 2 would never run), or when resolve_place has been replaced
+    (a test double or caller's own resolver must still be the one called).
+    """
+    if not _speculation_enabled():
+        return None
+    from placeroot.geocode import _resolve
+
+    if _pkg.resolve_place is not _resolve.resolve_place:
+        return None
+    if not _pkg._has_extra_place_context(query):
+        return None
+    future = _SPECULATE_POOL.submit(contextvars.copy_context().run, _speculative_leg_worker, query)
+    with _IN_FLIGHT_LOCK:
+        _IN_FLIGHT.add(future)
+    future.add_done_callback(_forget_leg)
+    return _SpeculativeLeg(future)
+
+
+def _forget_leg(future: Future) -> None:
+    with _IN_FLIGHT_LOCK:
+        _IN_FLIGHT.discard(future)
+
+
+def _resolve_place_leg(query: str, spec: _SpeculativeLeg | None = None) -> dict | None:
     """resolve_place's top place candidate for `query`, or None.
 
     No ambiguity check: same reading as the anchored path in
@@ -338,13 +478,17 @@ def _resolve_place_leg(query: str) -> dict | None:
     resolve: resolve_place raises SchemaDegraded where geocode does not, and
     a caller who used to get geocode's own answer (or an honest None) must
     not start getting an exception because a *supplementary* search failed.
+
+    `spec` is the speculative run started by resolve_named_place; when given,
+    its answer is joined and committed instead of running leg 2 again.
     """
     try:
-        hits = _pkg.resolve_place(query, limit=_pkg._RESOLVE_OVERFETCH)
+        if spec is None:
+            hits = _pkg.resolve_place(query, limit=_pkg._RESOLVE_OVERFETCH)
+        else:
+            hits = spec.join()
     except _pkg.overture.SchemaDegraded as e:
-        _pkg.logger.info(
-            "resolve_named_place: places leg unavailable (%s); using geocode's rows", e
-        )  # noqa: E501
+        _pkg.logger.info("resolve_named_place: places leg unavailable (%s); using geocode's rows", e)  # noqa: E501
         return None
     for hit in hits:
         if hit.get("kind") == "place":
@@ -356,6 +500,7 @@ def _resolve_place_leg(query: str) -> dict | None:
                 "type": "place",
             }
     return None
+
 
 
 # --- #427: comma-qualified names ("Le Marais, Paris") -----------------------
@@ -413,19 +558,20 @@ def _split_qualifier(query: str) -> tuple[str | None, str | None]:
     return head, tail
 
 
+
 def _pick_named_place(query: str, rows: list[dict]) -> dict:
     """The winner among ranked candidates, or AmbiguousPlace on a same-name tie."""
     top = rows[0]
     top_name = _pkg._normalize_for_match(top["name"])
     tied = [
-        r
-        for r in rows
+        r for r in rows
         if _pkg._normalize_for_match(r["name"]) == top_name
         and abs(r.get("rank_score", 0) - top.get("rank_score", 0)) < _AREA_RANK_EPSILON
     ]
     if len(tied) > 1:
         raise AmbiguousPlace(query, [_named_candidate(r) for r in tied[:_AREA_MAX_CANDIDATES]])
     return _named_candidate(top)
+
 
 
 def _resolve_qualifier_anchor(text: str) -> dict | None:
@@ -447,8 +593,7 @@ def _resolve_qualifier_anchor(text: str) -> dict | None:
     for candidate in _qualifier_texts(text):
         folded = _pkg._normalize_for_match(candidate)
         hits = [
-            h
-            for h in _pkg.geocode(candidate, limit=_pkg._ANCHOR_LOOKUP_LIMIT)
+            h for h in _pkg.geocode(candidate, limit=_pkg._ANCHOR_LOOKUP_LIMIT)
             if h.get("type") != "place"
             and h.get("lat") is not None
             and h.get("lon") is not None
@@ -465,10 +610,12 @@ def _resolve_qualifier_anchor(text: str) -> dict | None:
     return None
 
 
+
 def _names_qualifier(row: dict, folded: str) -> bool:
     """Whether `row` is named exactly `folded`, canonically or through a #214 alternate."""
     names = {_pkg._normalize_for_match(n) for n in (row.get("name"), row.get("matched_name")) if n}
     return folded in names
+
 
 
 def _qualifier_texts(text: str):
@@ -476,6 +623,7 @@ def _qualifier_texts(text: str):
     last = text.rsplit(",", 1)[-1].strip()
     if last and last != text:
         yield last
+
 
 
 def _inside_anchor(row: dict, anchor: dict) -> bool:
@@ -496,11 +644,11 @@ def _inside_anchor(row: dict, anchor: dict) -> bool:
     return distance_m <= _pkg._CITY_HINT_RADIUS_M
 
 
+
 def _resolve_inside_anchor(query: str, head: str, anchor: dict) -> dict:
     """The full tier ladder on `head` alone, bounded by a resolved anchor."""
     rows = [
-        r
-        for r in _pkg.geocode(head, limit=_pkg._ANCHORED_OVERFETCH)
+        r for r in _pkg.geocode(head, limit=_pkg._ANCHORED_OVERFETCH)
         if r.get("lat") is not None and r.get("lon") is not None and _inside_anchor(r, anchor)
     ]
     if rows:
@@ -524,6 +672,7 @@ def _resolve_inside_anchor(query: str, head: str, anchor: dict) -> dict:
         "id": top["id"],
         "type": "place",
     }
+
 
 
 def _named_candidate(row: dict) -> dict:
