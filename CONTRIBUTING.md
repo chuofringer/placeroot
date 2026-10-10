@@ -21,10 +21,11 @@ never touches the Overture release. It does need the DuckDB `httpfs` and
 `spatial` extensions to be present locally: the first run on a fresh
 machine downloads them once (a few MB from extensions.duckdb.org, into
 `~/.duckdb/extensions/`), after which the suite is fully offline. The
-runtime only runs `INSTALL` when a plain `LOAD` fails, so an installed
-extension is never re-fetched. To pre-install them on a host without
-network access at test time (or to point DuckDB at a directory you
-populated elsewhere via `PLACEROOT_DUCKDB_EXTENSION_DIR`):
+runtime only runs `INSTALL` when a plain `LOAD` fails, so an extension
+that is already present is loaded without any network access. To
+pre-install them on a host that has no network access at test time (or
+to point DuckDB at a directory you populated elsewhere, set
+`PLACEROOT_DUCKDB_EXTENSION_DIR`):
 
 ```bash
 uv run python -c "import duckdb; duckdb.connect().execute('INSTALL httpfs; INSTALL spatial')"

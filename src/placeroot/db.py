@@ -114,14 +114,14 @@ def _extension_directory() -> str | None:
 def load_extension(con: duckdb.DuckDBPyConnection, name: str) -> None:
     """LOAD a DuckDB extension, installing it first only if LOAD fails.
 
-    `INSTALL x` is not a no-op when x is already installed: it still
-    contacts extensions.duckdb.org (a version check), which on an offline
-    host fails outright and takes the whole connection with it. LOAD alone
-    is purely local, so a machine that has the extension already (an
-    earlier run, a pre-installed PLACEROOT_DUCKDB_EXTENSION_DIR) never
-    touches the network. Only a genuinely missing extension pays the
-    download — and if that fails too, the error is DuckDB's own, naming the
-    extension and URL.
+    `INSTALL x; LOAD x` makes every connection go through INSTALL's
+    install-path logic (a write into extension_directory, and a download
+    from extensions.duckdb.org when the extension isn't there). LOAD alone
+    is purely local: a machine that already has the extension — from an
+    earlier run, or a pre-populated, possibly read-only
+    PLACEROOT_DUCKDB_EXTENSION_DIR — loads it without ever considering the
+    network. Only a genuinely missing extension pays the download, and if
+    that fails too the error is DuckDB's own, naming the extension and URL.
     """
     try:
         con.execute(f"LOAD {name};")
