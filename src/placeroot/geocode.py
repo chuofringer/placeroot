@@ -444,6 +444,7 @@ import logging
 import math
 import os
 import re
+import tempfile
 import threading
 import time
 import unicodedata
@@ -1162,6 +1163,33 @@ def _local_divisions_table_path(active_release: str) -> Path:
     return cache.cache_dir() / active_release / _DIVISIONS_TABLE_SUBDIR / _DIVISIONS_TABLE_FILENAME
 
 
+def _unique_tmp_path(path: Path) -> Path:
+    """A fresh, uniquely named `.tmp` sibling of `path` for a COPY to write.
+
+    Never the same name twice in one directory (tempfile.mkstemp), so two
+    builds that overlap — a background build or stage-2 upgrade beside a
+    foreground #224 rebuild — write separate files and meet only at the
+    atomic os.replace, where the later one wins with identical contents.
+    The shared `table.parquet.tmp` name they used before meant one COPY
+    could overwrite the other's half-written file mid-stream.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    os.close(fd)
+    return Path(name)
+
+
+def _copy_and_publish(con: duckdb.DuckDBPyConnection, sql: str, tmp_path: Path, path: Path) -> None:
+    """Run the COPY in `sql` (which writes `tmp_path`) and publish it as
+    `path`; a failed COPY leaves no orphaned temp file behind."""
+    try:
+        con.execute(sql)
+        _publish_copied_parquet(con, tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def _clear_table_derived_caches() -> None:
     """Drop every in-process memo derived from a local table's contents:
     called when a table is (re)published and from clear_resolve_session."""
@@ -1193,7 +1221,7 @@ def _publish_copied_parquet(con: duckdb.DuckDBPyConnection, tmp_path: Path, path
         os.fsync(fd)
     finally:
         os.close(fd)
-    tmp_path.replace(path)
+    os.replace(tmp_path, path)
     with overture._conn_lock:
         shared = overture.conn()
         shared.execute("SET enable_external_file_cache=false")
@@ -1232,8 +1260,7 @@ def _materialize_alt_names_table(path: Path, glob: str) -> None:
     Raises duckdb.Error if names.common isn't there or isn't a map — the
     caller treats that as "no alt table" and searches primary names only.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".parquet.tmp")
+    tmp_path = _unique_tmp_path(path)
     con = overture._new_connection()
     sql = f"""
         COPY (
@@ -1253,8 +1280,7 @@ def _materialize_alt_names_table(path: Path, glob: str) -> None:
             GROUP BY id, alt_name
         ) TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)
     """
-    con.execute(sql)
-    _publish_copied_parquet(con, tmp_path, path)
+    _copy_and_publish(con, sql, tmp_path, path)
 
 
 def _materialize_lang_names_table(path: Path, glob: str) -> None:
@@ -1274,8 +1300,7 @@ def _materialize_lang_names_table(path: Path, glob: str) -> None:
     convention as _materialize_alt_names_table; the caller treats that as
     "no lang table" and geocode answers with primary names only.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".parquet.tmp")
+    tmp_path = _unique_tmp_path(path)
     con = overture._new_connection()
     sql = f"""
         COPY (
@@ -1288,8 +1313,7 @@ def _materialize_lang_names_table(path: Path, glob: str) -> None:
             WHERE entry.value IS NOT NULL AND entry.value <> ''
         ) TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)
     """
-    con.execute(sql)
-    _publish_copied_parquet(con, tmp_path, path)
+    _copy_and_publish(con, sql, tmp_path, path)
 
 
 def _is_remote_glob(glob: str) -> bool:
@@ -1356,8 +1380,7 @@ def _materialize_divisions_pass(path: Path, glob: str, with_hierarchies: bool) -
         else "NULL::VARCHAR[] AS admin_chain"
     )
     region_expr = "region" if cols is None or "region" in cols else "NULL AS region"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".parquet.tmp")
+    tmp_path = _unique_tmp_path(path)
     con = overture._new_connection()
     sql = f"""
         COPY (
@@ -1370,8 +1393,7 @@ def _materialize_divisions_pass(path: Path, glob: str, with_hierarchies: bool) -
             WHERE names.primary IS NOT NULL
         ) TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)
     """
-    con.execute(sql)
-    _publish_copied_parquet(con, tmp_path, path)
+    _copy_and_publish(con, sql, tmp_path, path)
 
 
 # Upgrade threads already started this process, keyed by table path — one
@@ -1413,9 +1435,15 @@ def _spawn_divisions_build(path: Path, glob: str) -> None:
                 # could follow a background release rollover and materialize
                 # a NEWER release's rows into the pinned release's table
                 # path — wrong-vintage data served for the install's life.
-                if not path.exists():
-                    _materialize_divisions_table(path, glob)
-                    logger.info("full divisions table built behind the bundled index -> %s", path)
+                # Under the blocking-build lock like every other COPY of
+                # this table: a foreground #224 rebuild or an unbundled
+                # first-call build must never run beside this one.
+                with _blocking_build_lock:
+                    if not path.exists():
+                        _materialize_divisions_table(path, glob)
+                        logger.info(
+                            "full divisions table built behind the bundled index -> %s", path
+                        )
         except Exception as e:  # noqa: BLE001 - background build must never surface
             logger.warning("background divisions build failed (next geocode retries): %s", e)
             with _build_lock:
@@ -1442,7 +1470,7 @@ def _spawn_divisions_upgrade(path: Path, glob: str) -> None:
             # 126s vs 26s with the delay — the same self-starvation the
             # tile fetch semaphore exists for, which also gates this).
             time.sleep(_UPGRADE_DELAY_S)
-            with cache._background_fetch_slots:
+            with cache._background_fetch_slots, _blocking_build_lock:
                 _upgrade_divisions_table(path, glob)
         except Exception as e:  # noqa: BLE001 - background upgrade must never surface
             logger.warning(
@@ -1540,7 +1568,14 @@ def _local_lang_names_table(local_table: str | None) -> str | None:
     if path.exists():
         return str(path)
     key = str(path)
-    if key not in _LANG_BUILD_ATTEMPTED:
+    # Check-and-add and the build itself both under _blocking_build_lock:
+    # two parallel resolves (from_to's isolated workers) could otherwise
+    # both see the key missing and run the same COPY side by side.
+    with _blocking_build_lock:
+        if path.exists():
+            return str(path)
+        if key in _LANG_BUILD_ATTEMPTED:
+            return None
         _LANG_BUILD_ATTEMPTED.add(key)
         logger.info("no language-tagged name table at %s (cache predates #410); building it", path)
         _try_materialize_lang_names_table(
@@ -1591,7 +1626,13 @@ def _local_alt_names_table(local_table: str | None) -> str | None:
     if path.exists():
         return str(path)
     key = str(path)
-    if key not in _ALT_BUILD_ATTEMPTED:
+    # Check-and-add and the build itself both under _blocking_build_lock —
+    # see _local_lang_names_table.
+    with _blocking_build_lock:
+        if path.exists():
+            return str(path)
+        if key in _ALT_BUILD_ATTEMPTED:
+            return None
         _ALT_BUILD_ATTEMPTED.add(key)
         logger.info("no alternate-name table at %s (cache predates #214); building it", path)
         _try_materialize_alt_names_table(

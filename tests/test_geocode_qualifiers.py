@@ -4,6 +4,8 @@ per-table memos — all exercised offline against the pure helpers (and, where
 a whole resolve is needed, with the query functions monkeypatched the way
 test_resolve_place.py does)."""
 
+import threading
+
 import duckdb
 import pytest
 
@@ -303,3 +305,54 @@ def test_fallback_anchor_details_is_memoized_per_inputs(monkeypatch):
     # Different inputs are a different question.
     geocode._fallback_anchor_details("Landmark Brooklyn", [], "US-NY", None)
     assert len(lookups) > n
+
+
+# ---------------------------------------------------------------------------
+# build races
+# ---------------------------------------------------------------------------
+
+
+def test_unique_tmp_paths_never_collide(tmp_path):
+    target = tmp_path / "sub" / "table.parquet"
+    paths = {geocode._unique_tmp_path(target) for _ in range(5)}
+    assert len(paths) == 5
+    assert all(p.parent == target.parent and p.name.startswith("table.parquet.") for p in paths)
+    assert all(p.suffix == ".tmp" for p in paths)
+
+
+def test_alt_table_build_is_attempted_once_across_threads(monkeypatch, tmp_path):
+    builds = []
+    started = threading.Barrier(6)
+
+    def fake_build(alt_path, glob):
+        builds.append(alt_path)
+
+    monkeypatch.setattr(geocode, "_ALT_BUILD_ATTEMPTED", set())
+    monkeypatch.setattr(geocode, "_try_materialize_alt_names_table", fake_build)
+    monkeypatch.setattr(overture, "upstream_glob", lambda **kw: "divisions-glob")
+    table = str(tmp_path / "divisions.parquet")
+
+    def worker():
+        started.wait()
+        geocode._local_alt_names_table(table)
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(builds) == 1
+    assert geocode._local_alt_names_table(table) is None  # one attempt per process
+
+
+def test_lang_table_build_is_attempted_once(monkeypatch, tmp_path):
+    builds = []
+    monkeypatch.setattr(geocode, "_LANG_BUILD_ATTEMPTED", set())
+    monkeypatch.setattr(
+        geocode, "_try_materialize_lang_names_table", lambda p, g: builds.append(p)
+    )
+    monkeypatch.setattr(overture, "upstream_glob", lambda **kw: "divisions-glob")
+    table = str(tmp_path / "divisions.parquet")
+    assert geocode._local_lang_names_table(table) is None
+    assert geocode._local_lang_names_table(table) is None
+    assert len(builds) == 1
