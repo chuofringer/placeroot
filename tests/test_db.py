@@ -212,3 +212,9 @@ def test_http_timeout_reaches_the_connection_in_seconds(monkeypatch):
     monkeypatch.setenv("PLACEROOT_HTTP_TIMEOUT_S", "9")
     con = db._configure(duckdb.connect())
     assert int(con.execute("SELECT current_setting('http_timeout')").fetchone()[0]) == 9
+
+
+def test_probe_schema_cache_holds_every_theme_glob_in_use():
+    """Fewer slots than distinct globs a process touches means live globs
+    get evicted and re-probed over the network on every query."""
+    assert db._probe_schema_cached.cache_parameters()["maxsize"] >= 32

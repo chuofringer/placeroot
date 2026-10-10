@@ -350,14 +350,18 @@ def ensure_spatial() -> None:
         _spatial_loaded = True
 
 
-@lru_cache(maxsize=8)
+# Sized above the number of distinct theme/type globs a process touches
+# (a dozen or so across places, divisions, buildings, transportation, base
+# subtypes, plus mirror/override variants): a smaller cache evicted live
+# globs under normal use and re-probed them over the network.
+@lru_cache(maxsize=32)
 def _probe_schema_cached(glob: str) -> frozenset:
     """Column names present in glob's dataset. Raises duckdb.Error if the probe fails.
 
     lru_cache memoizes only successful returns — a raised exception is NOT
     cached — so a transient probe failure is retried on the next call rather
     than poisoning the cache for the process lifetime (#144). Successful
-    schemas stay cached (LRU, maxsize=8) since the LIMIT 0 metadata read,
+    schemas stay cached (LRU, maxsize=32) since the LIMIT 0 metadata read,
     while cheap, isn't free to redo on every query.
     """
     with conn_lock:
