@@ -276,8 +276,8 @@ def summarize_buildings(
         WHERE {_CENTROID_DISTANCE_EXPR} <= $radius_m
     """
     try:
-        with db.conn_lock:
-            rows = db.shared_conn().execute(sql, params).fetchall()
+        with db.read_conn() as rc:
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
 
@@ -388,8 +388,8 @@ def buildings_at(
         LIMIT {limit}
     """
     try:
-        with db.conn_lock:
-            rows = db.shared_conn().execute(sql, params).fetchall()
+        with db.read_conn() as rc:
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
 

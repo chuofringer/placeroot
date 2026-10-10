@@ -36,8 +36,8 @@ def _nearest_address(lat: float, lon: float) -> dict | None:
                 ORDER BY distance_m
                 LIMIT 1
             """
-            with _pkg.overture._conn_lock:
-                row = _pkg.overture.conn().execute(sql, params).fetchone()
+            with _pkg.overture.read_conn() as rc:
+                row = rc.execute(sql, params).fetchone()
         except (duckdb.Error, _pkg.overture.UpstreamUnavailable) as e:
             _pkg.logger.warning("addresses theme query failed, degrading to divisions-only: %s", e)
             return None
@@ -95,8 +95,8 @@ def _nearest_division(lat: float, lon: float, country: str | None = None) -> dic
             LIMIT 1
         """
         try:
-            with _pkg.overture._conn_lock:
-                row = _pkg.overture.conn().execute(sql, params).fetchone()
+            with _pkg.overture.read_conn() as rc:
+                row = rc.execute(sql, params).fetchone()
         except duckdb.Error as e:
             _pkg.logger.warning("divisions theme query failed: %s", e)
             return None

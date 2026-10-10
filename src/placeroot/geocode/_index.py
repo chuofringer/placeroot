@@ -484,8 +484,8 @@ def _lang_variants_for(lang_table: str | None, ids: list[str], lang: str) -> dic
         WHERE lang = $lang AND id IN (SELECT unnest($ids))
     """
     try:
-        with _pkg.overture._conn_lock:
-            rows = _pkg.overture.conn().execute(sql, {"lang": lang, "ids": ids}).fetchall()
+        with _pkg.overture.read_conn() as rc:
+            rows = rc.execute(sql, {"lang": lang, "ids": ids}).fetchall()
     except duckdb.Error:
         return {}
     return dict(rows)
@@ -542,12 +542,8 @@ def _divisions_table_has_bbox(path: Path) -> bool:
     treat bbox lookups as unavailable either way).
     """
     try:
-        with _pkg.overture._conn_lock:
-            cols = (
-                _pkg.overture.conn()
-                .execute(f"SELECT * FROM read_parquet('{path}') LIMIT 0")
-                .description
-            )
+        with _pkg.overture.read_conn() as rc:
+            cols = rc.execute(f"SELECT * FROM read_parquet('{path}') LIMIT 0").description
     except duckdb.Error:
         return False
     names = {c[0] for c in cols or []}
@@ -581,8 +577,8 @@ def _division_bbox(
         FROM read_parquet('{local_table}') WHERE id = $id LIMIT 1
     """
     try:
-        with _pkg.overture._conn_lock:
-            row = _pkg.overture.conn().execute(sql, {"id": division_id}).fetchone()
+        with _pkg.overture.read_conn() as rc:
+            row = rc.execute(sql, {"id": division_id}).fetchone()
     except duckdb.Error:
         # Pre-#224 table (no such columns), or an unreadable one.
         return None
@@ -782,6 +778,6 @@ def _region_population_lookup_cached(local_table: str) -> dict[str, int]:
         SELECT region, population FROM read_parquet('{local_table}')
         WHERE subtype = 'region' AND region IS NOT NULL AND population IS NOT NULL
     """
-    with _pkg.overture._conn_lock:
-        rows = _pkg.overture.conn().execute(sql).fetchall()
+    with _pkg.overture.read_conn() as rc:
+        rows = rc.execute(sql).fetchall()
     return dict(rows)

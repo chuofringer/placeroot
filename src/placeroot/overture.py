@@ -19,6 +19,7 @@ geo.py; _conn/_conn_lock/_probe_schema are thin aliases kept for this
 module's call sites and the tests — import db directly in new code.
 """
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -246,6 +247,26 @@ def conn() -> duckdb.DuckDBPyConnection:
     query themes beyond places but want the same httpfs setup and warm cache.
     Callers must hold _conn_lock around any query they run against it."""
     return db.shared_conn()
+
+
+_CONN_IMPL = conn
+
+
+@contextlib.contextmanager
+def read_conn():
+    """db.read_conn() for the read-only queries of other modules (geocode).
+
+    Same contract as db.read_conn(). A test that stubs this module's conn()
+    (the alias the geocode extent and qualifier lookups used to go through)
+    keeps seeing its stub: when conn is replaced, the stub is yielded instead
+    of a pooled cursor, mirroring how db.read_conn honours a replaced
+    db.shared_conn.
+    """
+    if conn is not _CONN_IMPL:
+        yield conn()
+        return
+    with db.read_conn() as cur:
+        yield cur
 
 
 def probe_schema(glob: str) -> frozenset | None:

@@ -552,9 +552,9 @@ def _query_places_multi_anchor(
                 source=f"places/place x{len(branches)} cities",
                 anchors=len(branches),
             ),
-            _pkg.overture._conn_lock,
+            _pkg.overture.read_conn() as rc,
         ):
-            rows = _pkg.overture.conn().execute(sql, params).fetchall()
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise _pkg.overture.UpstreamUnavailable(str(e)) from e
     result = [
@@ -737,9 +737,9 @@ def _query_places_fallback(
                 source=from_source,
                 anchored=anchor is not None,
             ),
-            _pkg.overture._conn_lock,
+            _pkg.overture.read_conn() as rc,
         ):
-            rows = _pkg.overture.conn().execute(sql, params).fetchall()
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise _pkg.overture.UpstreamUnavailable(str(e)) from e
     result = []

@@ -321,8 +321,8 @@ def _classify(
             # overlap instead of summing (~30s -> max of the two, cold).
             rows = con.execute(sql, {"lat": lat, "lon": lon}).fetchall()
         else:
-            with db.conn_lock:
-                rows = db.shared_conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
+            with db.read_conn() as rc:
+                rows = rc.execute(sql, {"lat": lat, "lon": lon}).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
 

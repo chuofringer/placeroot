@@ -1,3 +1,3 @@
 # Ruff format sweep (style only, no behaviour change). Skip it in blame:
 #   git config blame.ignoreRevsFile .git-blame-ignore-revs
-5a3029d644c7ecb92ef8ca5023076e1f440fc4a4
+1d636517bd4e89c9a439baf920ab2573668ff005
