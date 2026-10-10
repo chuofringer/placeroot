@@ -146,7 +146,7 @@ def test_upstream_examples_are_json_and_all_are_used():
     assert on_disk
     for path in on_disk:
         json.loads(path.read_text())
-        assert str(path.relative_to(REPO_ROOT)) in used, f"{path.name} is vendored but unused"
+        assert path.relative_to(REPO_ROOT).as_posix() in used, f"{path.name} is vendored but unused"
 
 
 def test_placeroot_answers_every_scenario_from_fixtures_without_network():

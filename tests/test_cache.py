@@ -645,7 +645,7 @@ def test_stale_tile_ignored_after_upstream_schema_changes(con, cache_dir, sync_c
     assert paths_a
     fingerprint_a = cache.resolve_fingerprint(RELEASE, THEME, str(FIXTURE_PATH))
     for p in paths_a:
-        assert f"/{fingerprint_a}/" in p
+        assert fingerprint_a in Path(p).parts
 
     # Schema B: same rows/bbox, but missing the "confidence" column — a
     # different upstream dataset (older/newer code, a different fixture
@@ -662,7 +662,7 @@ def test_stale_tile_ignored_after_upstream_schema_changes(con, cache_dir, sync_c
     # it did not (and could not have) read schema A's stale tile.
     assert paths_b != paths_a
     for p in paths_b:
-        assert f"/{fingerprint_b}/" in p
+        assert fingerprint_b in Path(p).parts
     quoted = ", ".join(f"'{p}'" for p in paths_b)
     desc = con.execute(f"SELECT * FROM read_parquet([{quoted}]) LIMIT 0").description
     assert "confidence" not in {c[0] for c in desc}
@@ -761,7 +761,7 @@ def test_tile_key_includes_upstream_source(con, cache_dir, sync_cache, local_pro
     assert paths_b
     assert set(paths_a).isdisjoint(paths_b)
     for p in paths_b:
-        assert f"/{fp_b}/" in p
+        assert fp_b in Path(p).parts
 
 
 def test_offline_fallback_with_no_existing_fingerprint_dir_returns_none(
