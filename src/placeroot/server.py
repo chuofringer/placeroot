@@ -16,13 +16,14 @@ import contextvars
 import functools
 import importlib.metadata
 import inspect
+import json
 import logging
 import math
 import os
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated
 
@@ -6309,6 +6310,86 @@ CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
 }
 
 
+def _tool_name_of(ctx) -> str:
+    """The tool a tools/call request names, from its raw inbound params.
+
+    The middleware context carries the request's unvalidated params as
+    `ctx.params` (a mapping, per mcp.server.context.ServerRequestContext);
+    there is no `tool_name` attribute, so reading one would label every
+    trace "tools/call".
+    """
+    params = getattr(ctx, "params", None)
+    name = params.get("name") if isinstance(params, Mapping) else None
+    return name if isinstance(name, str) and name else "tools/call"
+
+
+def _amend_tool_payload(result, amend: Callable[[dict], dict]):
+    """Apply `amend` to the tool's JSON answer inside a tools/call wire result.
+
+    What `call_next` hands a middleware for tools/call is not the handler's
+    CallToolResult but its *wire form*: the SDK's ServerRunner serializes the
+    handler result inside the chain (runner.py `_inner` returns
+    `self._serialize(...)`), so a middleware sees a dict shaped
+    {"content": [{"type": "text", "text": <json>}], "structuredContent":
+    {...}, "isError": false, ...}. The tool's answer lives in
+    structuredContent (every tool here declares an outputSchema, so a
+    successful call always has it) and, for clients that only read text, as
+    the same JSON in the single text block. A key written onto the envelope
+    itself — which is what `result["timing"] = ...` used to do — is not part
+    of the answer and never reaches the agent.
+
+    So this amends structuredContent and re-renders the text block from it
+    (pydantic_core.to_json, the SDK's own rendering, so the two stay
+    byte-identical — tests/test_output_schemas.py asserts that). Anything
+    else — a non-dict, an isError result whose text is an exception message,
+    a result with no JSON-object payload — is returned untouched.
+    """
+    if not isinstance(result, dict) or result.get("isError"):
+        return result
+    payload = result.get("structuredContent")
+    content = result.get("content")
+    text_block = (
+        content[0]
+        if isinstance(content, list) and len(content) == 1
+        and isinstance(content[0], dict) and content[0].get("type") == "text"
+        else None
+    )
+    if not isinstance(payload, dict):
+        # No structuredContent (a tool without an outputSchema): the text
+        # block is the only copy of the answer, when it is a JSON object.
+        if text_block is None:
+            return result
+        try:
+            payload = json.loads(text_block["text"])
+        except (TypeError, ValueError):
+            return result
+        if not isinstance(payload, dict):
+            return result
+        amended = amend(dict(payload))
+        if amended == payload:
+            return result
+        out = dict(result)
+        out["content"] = [{**text_block, "text": _render_tool_text(amended)}]
+        return out
+    amended = amend(dict(payload))
+    if amended == payload:
+        return result
+    out = dict(result)
+    out["structuredContent"] = amended
+    if text_block is not None:
+        out["content"] = [{**text_block, "text": _render_tool_text(amended)}]
+    return out
+
+
+def _render_tool_text(payload: dict) -> str:
+    """The text block the SDK renders for a dict tool result (func_metadata's
+    _convert_to_content), so an amended answer reads the same as an
+    unamended one."""
+    import pydantic_core
+
+    return pydantic_core.to_json(payload, fallback=str, indent=2).decode()
+
+
 async def _progress_middleware(ctx, call_next):
     """Narrate slow tool calls via MCP progress notifications.
 
@@ -6336,7 +6417,7 @@ async def _progress_middleware(ctx, call_next):
     if token is None:
         try:
             result = await call_next(ctx)
-            return progress.attach(result)
+            return _amend_tool_payload(result, progress.attach)
         finally:
             progress.reset_log(log_token)
 
@@ -6371,7 +6452,7 @@ async def _progress_middleware(ctx, call_next):
     reset_token = progress.set_reporter(reporter)
     try:
         result = await call_next(ctx)
-        return progress.attach(result)
+        return _amend_tool_payload(result, progress.attach)
     finally:
         progress.reset(reset_token)
         progress.reset_log(log_token)
@@ -6388,9 +6469,10 @@ async def _trace_middleware(ctx, call_next):
     PLACEROOT_TRACE_SLOW_S, attaches the breakdown to the response as
     `timing` so the agent that waited gets the explanation with the answer.
 
-    Attached only to dict responses and only when slow: a fast call's
-    payload is unchanged, byte for byte, and a tool returning a list or a
-    scalar is left alone rather than being reshaped to carry telemetry.
+    Attached only to JSON-object answers (see _amend_tool_payload) and only
+    when slow: a fast call's payload is unchanged, byte for byte, and a tool
+    returning a list or a scalar is left alone rather than being reshaped to
+    carry telemetry.
     """
     if ctx.method != "tools/call":
         return await call_next(ctx)
@@ -6399,27 +6481,36 @@ async def _trace_middleware(ctx, call_next):
     started = time.perf_counter()
     try:
         result = await call_next(ctx)
+        # Inside the try: the records are read before `finally` resets them.
+        return _amend_tool_payload(
+            result, functools.partial(_with_timing, elapsed=time.perf_counter() - started)
+        )
     finally:
         elapsed = time.perf_counter() - started
         try:
-            trace.log_summary(getattr(ctx, "tool_name", None) or "tools/call", elapsed)
+            trace.log_summary(_tool_name_of(ctx), elapsed)
         except Exception:  # noqa: BLE001 - telemetry must not fail the call
             logger.debug("trace summary failed", exc_info=True)
+        trace.reset(token)
 
+
+def _with_timing(payload: dict, *, elapsed: float) -> dict:
+    """Add `timing` to a tool answer that took longer than the slow threshold."""
     threshold = trace.slow_threshold_s()
-    if threshold and elapsed >= threshold and isinstance(result, dict) and "timing" not in result:
-        rows = trace.summary()
-        if rows:
-            result["timing"] = {
-                "total_s": round(elapsed, 1),
-                "phases": rows[:8],
-                "note": (
-                    "This call was slow enough to explain itself. Scans marked "
-                    "bounded:false read everything they touch."
-                ),
-            }
-    trace.reset(token)
-    return result
+    if not threshold or elapsed < threshold or "timing" in payload:
+        return payload
+    rows = trace.summary()
+    if not rows:
+        return payload
+    payload["timing"] = {
+        "total_s": round(elapsed, 1),
+        "phases": rows[:8],
+        "note": (
+            "This call was slow enough to explain itself. Scans marked "
+            "bounded:false read everything they touch."
+        ),
+    }
+    return payload
 
 
 def _from_alias_base():
