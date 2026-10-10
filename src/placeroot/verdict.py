@@ -104,6 +104,26 @@ _PRIORITY = (
 _WORD = r"(?<![a-z]){0}(?![a-z])"
 
 
+# Phrases that negate car ownership. Checked before the bare "car"/"drive"
+# keywords, which would otherwise read "I don't have a car" as drive. Kept
+# as a list so a new phrasing is one line here, next to its test.
+_NO_CAR = (
+    "no car",
+    "without a car",
+    "car-free",
+    "carless",
+    "car free",
+    "don't have a car",
+    "dont have a car",
+    "do not have a car",
+    "don't own a car",
+    "dont own a car",
+    "do not own a car",
+    "no vehicle",
+    "without a vehicle",
+)
+
+
 def _has(text: str, *phrases: str) -> bool:
     return any(re.search(_WORD.format(re.escape(p)), text) for p in phrases)
 
@@ -129,7 +149,7 @@ def parse_context(context: str) -> dict:
         if _has(text, needle) and label not in household:
             household.append(label)
 
-    if _has(text, "no car", "without a car", "car-free", "carless", "car free"):
+    if _has(text, *_NO_CAR):
         mobility = "walk"
         mobility_source = "context"
     elif _has(text, "bike", "cycle", "cycling", "bicycle", "biking"):
