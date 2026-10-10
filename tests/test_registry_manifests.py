@@ -120,3 +120,45 @@ def test_every_manifest_tool_carries_a_description():
             f"mcpb/manifest.json tool {tool['name']!r} has no description; "
             "registries show these verbatim."
         )
+
+
+# --- npm launcher -----------------------------------------------------------
+#
+# `npm/index.js` is the third thing that restates the package version: it
+# spawns `uvx placeroot==<version>` so that `npx placeroot@X.Y.Z` runs the
+# matching PyPI release rather than whatever is newest (an unpinned
+# `uvx placeroot` did exactly that). It must read the version from its own
+# package.json at runtime — a literal would be one more place for the bump
+# script to miss.
+
+NPM_INDEX = ROOT / "npm" / "index.js"
+
+
+def _npm_version() -> str:
+    return _load(ROOT / "npm" / "package.json")["version"]
+
+
+def test_npm_package_version_matches_pyproject():
+    assert _npm_version() == _package_version(), (
+        f"npm/package.json is at {_npm_version()} but pyproject.toml says "
+        f"{_package_version()} — the launcher pins the PyPI version it spawns to "
+        "its own, so the pair must agree."
+    )
+
+
+def test_npm_launcher_pins_uvx_to_its_own_version():
+    source = NPM_INDEX.read_text(encoding="utf-8")
+    assert re.search(r'require\(\s*["\']\./package\.json["\']\s*\)', source), (
+        "npm/index.js must read its version from ./package.json at runtime, "
+        "not hard-code it."
+    )
+    assert re.search(r"placeroot==\$\{version\}", source), (
+        "npm/index.js must spawn `uvx placeroot==${version}` — an unpinned "
+        "`uvx placeroot` runs PyPI's latest regardless of the npm version."
+    )
+    assert not re.search(r'spawn\(\s*"uvx",\s*\[\s*"placeroot"', source), (
+        "npm/index.js still spawns an unpinned `uvx placeroot`."
+    )
+    assert not re.search(r"placeroot==\d+\.\d+\.\d+", source), (
+        "npm/index.js hard-codes a version; read it from package.json instead."
+    )

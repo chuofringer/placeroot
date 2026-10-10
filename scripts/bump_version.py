@@ -1,16 +1,22 @@
 """Bump the release version everywhere it is claimed, in one command.
 
-A release version lives in four places that must agree, and until now each
+A release version lives in five places that must agree, and until now each
 was edited by hand:
 
   - pyproject.toml            the Python package version
   - npm/package.json          the launcher package, published as a pair
-  - site/index.html           the developer-section chip + footer byline
-  - site/add-to-your-ai.html  the "latest release" note
+                              (npm/index.js reads this at runtime to pin the
+                              `uvx placeroot==<version>` it spawns)
+  - server.json               the MCP registry manifest (top level + packages[])
+  - mcpb/manifest.json        the MCPB bundle manifest
+  - site/*.html               the developer-section chip + footer byline on
+                              index.html, the "latest release" note on
+                              add-to-your-ai.html, and how-it-works.html
 
-`tests/test_site_version_sync.py` fails when they disagree, which catches the
-mistake but still leaves a human to make four edits. This script makes them
-one edit, so the site ships with the release instead of trailing it.
+`tests/test_site_version_sync.py` and `tests/test_registry_manifests.py` fail
+when they disagree, which catches the mistake but still leaves a human to make
+five edits. This script makes them one edit, so the site and the registry
+manifests ship with the release instead of trailing it.
 
 It also fills the site's "new in this release" chip. By default the tool
 names are derived — the MCP tools registered in the working tree, minus the

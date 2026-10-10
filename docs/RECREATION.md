@@ -27,7 +27,8 @@ queries that theme for `land_use_at` and `infrastructure_at` — keylessly,
 over the same DuckDB + S3 GeoParquet path as everything else. This layer
 points the places tools at it too.
 
-Measured against release `2026-07-22.0` over a box covering New York City
+Measured once against release `2026-07-22.0` (a snapshot, not re-run on
+every pin bump — see `docs/PIN.md`) over a box covering New York City
 (`-74.05,40.55` to `-73.70,40.85`):
 
 | | `theme=places` | `theme=base` |

@@ -9,6 +9,30 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Fixed
+- `npx placeroot@<version>` now runs that exact PyPI version (this release):
+  `npm/index.js` spawns `uvx placeroot==<its own package.json version>` instead
+  of an unpinned `uvx placeroot`, which silently ran PyPI's latest. A guard test
+  fails if the launcher stops reading its version from `package.json`.
+- `pydantic` is declared as a direct dependency (this release); `server.py`
+  imports it directly but it only arrived transitively through `mcp`.
+- Question-gate name check ignores case, accents and punctuation (#500).
+- Routing `mode` tokens are checked against the real mode enum (this release),
+  so an unknown mode is rejected up front instead of failing mid-route.
+- DuckDB `http_timeout` and `parquet_metadata_cache` settings are applied on
+  the shared connection (this release): slow S3 reads time out cleanly and
+  repeated scans of the same files reuse their Parquet metadata.
+- DuckDB extensions already on disk load without reaching the extension
+  repository (this release), so an offline or proxied host no longer fails
+  on the `INSTALL` step.
+- `find_places(limit=0)` no longer returns a cursor for a page it did not
+  serve (this release).
+- The resolve cache key includes `limit` (this release), so a cached
+  small-`limit` answer is not served to a later call asking for more rows.
+- Bare trailing-word qualifier parsing (this release): a query ending in a
+  lone word is no longer mis-split into a qualifier when it is part of the
+  name.
+- Tile cache keys include the data source (this release), so tiles cached
+  from a mirror and from upstream for the same release no longer collide.
 - Quarterly listings check no longer fails on Cloudflare Bot Fight Mode
   interstitials for placeroot.dev (#495). A `403` with `cf-mitigated:
   challenge` (the "Just a moment..." page) is treated as a false outage only
