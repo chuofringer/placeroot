@@ -107,6 +107,7 @@ called explicitly here since this module needs the spatial extension.
 
 import heapq
 import itertools
+import json
 import logging
 import math
 import os
@@ -1860,10 +1861,81 @@ def _evict_disk_graphs(root: Path) -> None:
     files.sort(key=lambda f: f.stat().st_mtime)
     while len(files) > GRAPH_DISK_MAX_FILES:
         old = files.pop(0)
+        for stale in (old, _graph_disk_index_path(old)):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
+
+def _graph_disk_index_path(path: Path) -> Path:
+    """The sidecar index next to a persisted graph: `<name>.pkl.json`.
+
+    The pickle carries its own bbox, but reading it means unpickling the
+    whole graph — and the disk lookup has to test every candidate file in
+    the tile until one covers the query, twice per cold route (the
+    graph_is_cached peek, then the build). The sidecar holds just what the
+    lookup needs to rule a file in or out (bbox, has_shapes, format) so only
+    the matching file is ever unpickled.
+    """
+    return path.with_name(path.name + ".json")
+
+
+def _write_graph_disk_index(
+    path: Path, bbox: tuple[float, float, float, float], has_shapes: bool
+) -> None:
+    """Atomic best-effort sidecar write. `size` pins it to the pickle it
+    describes: a persist that overwrites the pickle rewrites the sidecar
+    right after, and a reader that sees the old sidecar against the new
+    file (different size) treats it as absent rather than trusting it."""
+    index_path = _graph_disk_index_path(path)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    payload = {
+        "format": GRAPH_DISK_FORMAT,
+        "bbox": [float(v) for v in bbox],
+        "has_shapes": bool(has_shapes),
+        "size": size,
+    }
+    tmp = index_path.with_name(index_path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, index_path)
+    except OSError as e:
+        logger.debug("graph index write failed for %s: %s", index_path, e)
         try:
-            old.unlink()
+            tmp.unlink()
         except OSError:
             pass
+
+
+def _read_graph_disk_index(path: Path) -> dict | None:
+    """The sidecar for `path` as {"bbox": tuple, "has_shapes": bool}, or None
+    when there is none, it is unreadable, malformed, from another format,
+    or describes a different (older) pickle than the one on disk now."""
+    index_path = _graph_disk_index_path(path)
+    try:
+        with open(index_path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        size = path.stat().st_size
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("format") != GRAPH_DISK_FORMAT:
+        return None
+    if payload.get("size") != size:
+        return None
+    bbox = payload.get("bbox")
+    has_shapes = payload.get("has_shapes")
+    if not (isinstance(bbox, list) and len(bbox) == 4) or not isinstance(has_shapes, bool):
+        return None
+    try:
+        bbox_t = tuple(float(v) for v in bbox)
+    except (TypeError, ValueError):
+        return None
+    return {"bbox": bbox_t, "has_shapes": has_shapes}
 
 
 def _persist_graph_to_disk(
@@ -1894,6 +1966,7 @@ def _persist_graph_to_disk(
         with open(tmp, "wb") as fh:
             pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
         os.replace(tmp, path)
+        _write_graph_disk_index(path, bbox, graph.has_shapes)
         _evict_disk_graphs(root)
     except Exception as e:  # noqa: BLE001 - persist must not fail the route
         logger.warning("graph persist failed for %s: %s", path, e)
@@ -1973,10 +2046,22 @@ def _load_graph_from_disk(
     for path in candidates:
         if _disk_name_avoid_tag(path.name) != avoid_tag:
             continue
+        # Sidecar first (#330 follow-up): rule the file out on bbox/shapes
+        # without unpickling it. A file persisted before the sidecar existed
+        # takes the old unpickle path once and gets its sidecar written
+        # from what it loaded, so the next lookup can skip it cheaply.
+        index = _read_graph_disk_index(path)
+        if index is not None:
+            if want_shapes and not index["has_shapes"]:
+                continue
+            if not _bbox_contains(index["bbox"], needed_bbox):
+                continue
         loaded = _load_one_graph_file(path)
         if loaded is None:
             continue
         bbox, graph = loaded
+        if index is None:
+            _write_graph_disk_index(path, bbox, graph.has_shapes)
         if want_shapes and not graph.has_shapes:
             continue
         if _bbox_contains(bbox, needed_bbox):
