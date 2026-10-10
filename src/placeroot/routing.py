@@ -959,9 +959,40 @@ class Graph:
                 best_id, best_d = node_id, d
         return best_id
 
+    def _topology_fingerprint(self) -> tuple[int, int]:
+        """Cheap stand-in for "has the graph been mutated since": node count
+        plus undirected adjacency entries. add_node/add_edge only ever grow
+        both (nothing removes a node or an edge), so any mutation changes
+        it. Summing set sizes is a single O(N) dict pass with no allocation
+        — far cheaper than the BFS it guards."""
+        return (
+            len(self.adjacency),
+            sum(len(n) for n in self._undirected_neighbors.values()),
+        )
+
     def connected_components(self) -> list[set[str]]:
         """Node ids grouped by connectivity (weak/undirected BFS — see
-        _undirected_neighbors)."""
+        _undirected_neighbors).
+
+        Memoized on the instance: build_graph is append-only and nothing
+        mutates a Graph after it is handed out, yet snap_to_graph needs the
+        labelling twice per route and once per point in travel_time_matrix.
+        The cache is keyed on _topology_fingerprint so a graph that *is*
+        grown afterwards (tests assembling one by hand) recomputes rather
+        than answering for the old shape. Stored under a private attribute
+        read through getattr: a graph unpickled from a pre-cache persist
+        has no slot for it and must behave exactly like a fresh one.
+        """
+        fingerprint = self._topology_fingerprint()
+        cached = getattr(self, "_components_cache", None)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
+        components = self._compute_connected_components()
+        self._components_cache = (fingerprint, components)
+        return components
+
+    def _compute_connected_components(self) -> list[set[str]]:
+        """The uncached BFS behind connected_components()."""
         seen: set[str] = set()
         components: list[set[str]] = []
         for start in self.adjacency:
