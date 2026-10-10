@@ -289,6 +289,72 @@ def test_ensure_tile_materializes_from_upstream_then_reuses_local_file(con, cach
     assert n > 0
 
 
+def test_concurrent_writers_of_one_tile_do_not_clobber_each_other(cache_dir, local_probe):
+    """Two writers COPYing the same not-yet-cached tile at once (a sync
+    fetch racing a background fetch in-process, or two server processes
+    sharing one cache dir) must each use their own temp file: with one
+    shared `<tile>.parquet.tmp`, the second rename found its temp file
+    already moved (FileNotFoundError) or published the other writer's
+    partial COPY as a finished tile. Both COPYs are held at a barrier
+    after writing and before renaming, so they genuinely overlap."""
+    tile = cache.tiles_for_bbox(-73.95, 40.65, -73.85, 40.75)[0]
+    fingerprint = cache.resolve_fingerprint(RELEASE, THEME, str(FIXTURE_PATH))
+    path = cache.tile_path(RELEASE, THEME, fingerprint, tile)
+    assert not path.exists()
+    barrier = threading.Barrier(2, timeout=10)
+    errors: list[BaseException] = []
+
+    class _Writer(threading.Thread):
+        def run(self):
+            con = duckdb.connect()
+            real_execute = con.execute
+
+            def execute_then_wait(sql, *args, **kwargs):
+                result = real_execute(sql, *args, **kwargs)
+                if "COPY" in sql:
+                    barrier.wait()  # both COPYs done; neither has renamed yet
+                return result
+
+            # DuckDBPyConnection attributes are read-only; wrap it instead.
+            class _Con:
+                def execute(self, sql, *args, **kwargs):
+                    return execute_then_wait(sql, *args, **kwargs)
+
+            try:
+                cache.ensure_tile(_Con(), RELEASE, THEME, tile, str(FIXTURE_PATH), fingerprint)
+            except BaseException as e:  # noqa: BLE001 - collected for the assertion
+                errors.append(e)
+
+    writers = [_Writer(), _Writer()]
+    for w in writers:
+        w.start()
+    for w in writers:
+        w.join(timeout=30)
+    assert not any(w.is_alive() for w in writers)
+    assert errors == []
+    assert path.exists()
+    (n,) = duckdb.connect().execute(
+        f"SELECT count(*) FROM read_parquet({db._sql_str(str(path))})"
+    ).fetchone()
+    assert n > 0  # a complete, readable tile — not a clobbered or partial one
+    assert list(path.parent.glob("*.tmp")) == []  # no temp files left behind
+
+
+def test_failed_tile_copy_leaves_no_temp_file(cache_dir, local_probe, tmp_path):
+    tile = cache.tiles_for_bbox(-73.95, 40.65, -73.85, 40.75)[0]
+    fingerprint = cache.resolve_fingerprint(RELEASE, THEME, str(FIXTURE_PATH))
+    path = cache.tile_path(RELEASE, THEME, fingerprint, tile)
+
+    class _BrokenCon:
+        def execute(self, sql, *args, **kwargs):
+            raise duckdb.IOException("upstream went away mid-COPY")
+
+    with pytest.raises(duckdb.Error):
+        cache.ensure_tile(_BrokenCon(), RELEASE, THEME, tile, str(FIXTURE_PATH), fingerprint)
+    assert not path.exists()
+    assert list(path.parent.glob("*.tmp")) == []
+
+
 def test_populate_then_hit_does_not_touch_upstream_again(con, cache_dir, sync_cache, tmp_path):
     # Copy the fixture somewhere we can delete, standing in for "upstream".
     upstream = tmp_path / "upstream.parquet"

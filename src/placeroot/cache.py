@@ -89,6 +89,7 @@ import itertools
 import logging
 import math
 import os
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -441,26 +442,45 @@ def ensure_tile(
     lon_min, lon_max = tx * deg, (tx + 1) * deg
     lat_min, lat_max = ty * deg, (ty + 1) * deg
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".parquet.tmp")
+    # A temp name unique to this writer, in the tile's own directory so the
+    # final rename is atomic. A fixed `<tile>.parquet.tmp` was shared by
+    # every writer of the tile: a sync (or heavy-theme inline) fetch racing
+    # a background fetch of the same tile in this process, or two server
+    # processes sharing ~/.cache/placeroot, COPYed into one file and the
+    # loser's rename either failed (tmp already moved) or published the
+    # winner's half-written output as a finished tile. The name ends in
+    # .tmp, not .parquet, so no listing (cached_tile_paths, eviction, the
+    # offline fallback's last-use ranking) ever picks it up mid-write.
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
     # Bundled release manifest (manifest.py): a tile COPY only needs the
     # files whose extent intersects the tile — on a fresh connection this
     # skips the footer pass over every other file in the theme.
     source = (
         manifest.pruned_source_sql(upstream_glob, (lon_min, lat_min, lon_max, lat_max))
-        or f"read_parquet('{upstream_glob}', hive_partitioning=1)"
+        or f"read_parquet({db._sql_str(upstream_glob)}, hive_partitioning=1)"
     )
     sql = f"""
         COPY (
             SELECT * FROM {source}
             WHERE bbox.xmax >= {lon_min} AND bbox.xmin < {lon_max}
               AND bbox.ymax >= {lat_min} AND bbox.ymin < {lat_max}
-        ) TO '{tmp_path}' (FORMAT PARQUET)
+        ) TO {db._sql_str(str(tmp_path))} (FORMAT PARQUET)
     """
-    # Bounded: a tile COPY is a bbox query by definition, manifest-pruned
-    # to the files that intersect it.
-    with trace.scan("tile copy", bounded=True, source=source, theme=theme):
-        con.execute(sql)
-    tmp_path.replace(path)
+    try:
+        # Bounded: a tile COPY is a bbox query by definition, manifest-pruned
+        # to the files that intersect it.
+        with trace.scan("tile copy", bounded=True, source=source, theme=theme):
+            con.execute(sql)
+        # Last writer wins, whole-file: a concurrent writer that finished
+        # first produced byte-equivalent content from the same upstream.
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()  # only still here if the COPY or rename failed
+        except FileNotFoundError:
+            pass
     evict_if_needed()
     return path
 
