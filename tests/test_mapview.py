@@ -498,3 +498,19 @@ def test_render_html_no_shapes_backward_compatible():
     doc = mapview.render_html(points, title="No shapes")
     assert "shape-polygon" in doc  # CSS class always present (empty shapes array)
     assert '"shapes": []' in doc or '"shapes":[]' in doc
+
+
+def test_render_map_artifact_never_reuses_a_filename(tmp_path, monkeypatch):
+    """Two renders of the same title in the same millisecond must not
+    overwrite each other — destructive_hint=False promises render_map only
+    ever adds a file."""
+    import time as _time
+
+    monkeypatch.setattr(_time, "time", lambda: 1_700_000_000.0)
+    data = {"results": [{"name": "A", "lat": 40.7, "lon": -73.9}]}
+    first = mapview.write_artifact(data, title="Same title", out_dir=tmp_path)
+    second = mapview.write_artifact(data, title="Same title", out_dir=tmp_path)
+    assert first["path"] != second["path"]
+    assert Path(first["path"]).exists() and Path(second["path"]).exists()
+    assert Path(first["path"]).name.startswith("map_1700000000000_same-title_")
+    assert Path(first["path"]).suffix == ".html"
