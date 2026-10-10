@@ -77,7 +77,7 @@ see [docs/PIN.md](docs/PIN.md) and `scripts/bump_pin.py`.
   `monkeypatch` before patching a helper in a test.
 
 Ruff format is not yet enforced in CI: CI runs `ruff check` only. A
-`ruff format` sweep of the tree is planned, so do not reformat unrelated code
+`uv run ruff format --check .` is enforced in CI alongside `ruff check`; run `uv run ruff format .` before committing (the one-time sweep commit is listed in `.git-blame-ignore-revs`).
 in a PR.
 
 ## Design rules
