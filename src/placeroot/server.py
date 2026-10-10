@@ -695,6 +695,26 @@ def _resolve_pair(a: str, b: str) -> tuple[dict, dict]:
         return fa.result(), fb.result()
 
 
+def _resolve_ref_pair(a: str, b: str) -> tuple[tuple, tuple]:
+    """Two string LocationRefs (names and/or GERS ids), each on its own cursor.
+
+    perf: the same fan-out as _resolve_pair, for the route ends that
+    _resolve_pair's plain-name fast path does not take (a GERS id on one or
+    both sides). Returns ((origin, origin_error), (dest, dest_error)) so
+    the caller keeps the origin-first error order it had when the ends ran
+    in turn.
+    """
+
+    def _isolated(ref: str):
+        with db.isolated_reads():
+            return _resolve_location_ref(ref)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fa = pool.submit(contextvars.copy_context().run, _isolated, a)
+        fb = pool.submit(contextvars.copy_context().run, _isolated, b)
+        return fa.result(), fb.result()
+
+
 # Real GERS ids are 32 lowercase hex characters (gers.py's module docstring
 # and _validate_id's own comment). Deliberately stricter than gers.py's own
 # ID_CHARSET_RE, which has to admit synthetic fixture ids like
@@ -5008,10 +5028,17 @@ def _resolve_route_ends(from_, to) -> tuple[dict | None, dict | None, dict | Non
         if "error" in dest:
             return None, None, {**dest, "field": "to"}
         return origin, dest, None
-    origin, origin_error = _resolve_location_ref(from_)
+    if isinstance(from_, str) and isinstance(to, str):
+        # perf: two network lookups (a name and a GERS id, or two ids) run
+        # side by side; the origin's error still wins, as in turn order.
+        (origin, origin_error), (dest, dest_error) = _resolve_ref_pair(from_, to)
+    else:
+        origin, origin_error = _resolve_location_ref(from_)
+        dest, dest_error = (
+            (None, None) if origin_error is not None else _resolve_location_ref(to)
+        )
     if origin_error is not None:
         return None, None, {**origin_error, "field": "from"}
-    dest, dest_error = _resolve_location_ref(to)
     if dest_error is not None:
         return None, None, {**dest_error, "field": "to"}
     return origin, dest, None
