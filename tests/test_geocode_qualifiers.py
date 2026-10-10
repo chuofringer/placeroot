@@ -10,6 +10,81 @@ import pytest
 from placeroot import geocode, overture
 
 # ---------------------------------------------------------------------------
+# bare trailing words are not qualifiers of a bare modifier
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["West Virginia", "Hotel California", "New Jersey", "New Mexico", "Northern Ireland"],
+)
+def test_a_division_name_with_a_modifier_head_is_not_split(query):
+    assert geocode._parse_region_suffix(query, None) == (query, None, None)
+    assert geocode._parse_country_suffix(query, None) == (query, None, None)
+
+
+def test_a_comma_qualifier_still_splits():
+    assert geocode._parse_region_suffix("Paris, Texas", None) == ("Paris", "US-TX", "Texas")
+
+
+def test_a_bare_region_after_a_real_name_still_splits():
+    assert geocode._parse_region_suffix("Portland Oregon", None) == (
+        "Portland", "US-OR", "Oregon",
+    )
+    assert geocode._parse_country_suffix("Portland Jersey", None) == ("Portland", "JE", "Jersey")
+
+
+def test_a_query_that_names_a_division_exactly_is_not_split(monkeypatch):
+    """Gate 2: a plausible head is still no reason to split a string that
+    is itself a division's full name — the probe is the local index."""
+    probed = []
+
+    def fake_probe(name, local_table):
+        probed.append((name, local_table))
+        return name == "Lake Charles Louisiana"
+
+    monkeypatch.setattr(geocode, "_division_named_exactly", fake_probe)
+    assert geocode._parse_region_suffix("Lake Charles Louisiana", "t.parquet") == (
+        "Lake Charles Louisiana", None, None,
+    )
+    assert geocode._parse_region_suffix("Baton Rouge Louisiana", "t.parquet") == (
+        "Baton Rouge", "US-LA", "Louisiana",
+    )
+    # Only reached for the bare reading, and only once the suffix resolved
+    # and the head passed gate 1 — never for a comma, never for "West".
+    geocode._parse_region_suffix("Paris, Texas", "t.parquet")
+    geocode._parse_region_suffix("West Virginia", "t.parquet")
+    assert [p[0] for p in probed] == ["Lake Charles Louisiana", "Baton Rouge Louisiana"]
+
+
+def test_the_exact_name_probe_is_cached_but_not_its_failures(monkeypatch):
+    geocode._division_named_exactly_cached.cache_clear()
+    calls = []
+    outcomes = iter([duckdb.Error("transient"), ("x",), None])
+
+    class FakeConn:
+        def execute(self, sql, params=None):
+            calls.append(params["exact"])
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                raise outcome
+
+            class R:
+                def fetchone(self_inner):
+                    return outcome
+
+            return R()
+
+    monkeypatch.setattr(overture, "conn", lambda: FakeConn())
+    assert geocode._division_named_exactly("Oregon", "t.parquet") is False  # failed probe
+    assert geocode._division_named_exactly("Oregon", "t.parquet") is True   # re-probed
+    assert geocode._division_named_exactly("oregon", "t.parquet") is True   # cached
+    assert geocode._division_named_exactly("Nowhere", "t.parquet") is False
+    assert calls == ["oregon", "oregon", "nowhere"]
+    assert geocode._division_named_exactly("Oregon", None) is False
+
+
+# ---------------------------------------------------------------------------
 # resolve cache: the key carries no limit, so the value must not either
 # ---------------------------------------------------------------------------
 

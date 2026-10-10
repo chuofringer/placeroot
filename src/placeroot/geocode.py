@@ -1166,6 +1166,7 @@ def _clear_table_derived_caches() -> None:
     """Drop every in-process memo derived from a local table's contents:
     called when a table is (re)published and from clear_resolve_session."""
     _region_population_lookup_cached.cache_clear()
+    _division_named_exactly_cached.cache_clear()
 
 
 def _publish_copied_parquet(con: duckdb.DuckDBPyConnection, tmp_path: Path, path: Path) -> None:
@@ -1893,31 +1894,104 @@ def _resolve_region_from_table(candidate: str, local_table: str) -> tuple[str, s
     return row[0], row[1]
 
 
-def _split_region_suffix(query: str) -> list[tuple[str, str]]:
-    """(base, candidate_suffix) pairs to try, comma-suffix preferred over a
-    bare trailing token (a comma is a much stronger "this is a region
-    qualifier" signal than the last word of a multi-word query)."""
+def _suffix_split_candidates(query: str) -> list[tuple[str, str, bool]]:
+    """(base, candidate_suffix, bare) triples to try, comma-suffix preferred
+    over a bare trailing token (a comma is a much stronger "this is a region
+    qualifier" signal than the last word of a multi-word query). `bare` is
+    True for the trailing-word reading, which the parsers gate through
+    _bare_suffix_split_allowed."""
     candidates = []
     if "," in query:
         base, _, suffix = query.rpartition(",")
         if base.strip() and suffix.strip():
-            candidates.append((base.strip(), suffix.strip()))
+            candidates.append((base.strip(), suffix.strip(), False))
     parts = query.strip().rsplit(None, 1)
     if len(parts) == 2 and parts[0].strip():
-        candidates.append((parts[0].strip(), parts[1].strip()))
+        candidates.append((parts[0].strip(), parts[1].strip(), True))
     return candidates
+
+
+def _split_region_suffix(query: str) -> list[tuple[str, str]]:
+    """(base, candidate_suffix) pairs to try — _suffix_split_candidates
+    without the bare flag, for callers that only want the shapes."""
+    return [(base, suffix) for base, suffix, _bare in _suffix_split_candidates(query)]
+
+
+# Words that only ever modify the word after them. A no-comma query whose
+# head is nothing but these is one name, not a name plus a qualifier:
+# "West Virginia" is a state, not West inside Virginia; "Hotel California"
+# is not a hotel in California; "New Jersey" is not New on Jersey.
+_BARE_QUALIFIER_HEAD_ADJECTIVES = frozenset({
+    "new", "old", "west", "east", "north", "south", "western", "eastern",
+    "northern", "southern", "upper", "lower", "great", "little", "port",
+    "saint", "st", "san", "santa", "fort", "ft", "mount", "mt", "lake", "hotel",
+})
+
+
+def _division_named_exactly(name: str, local_table: str | None) -> bool:
+    """Whether some division's primary name equals `name` (case-
+    insensitive) in the local table — one indexed probe against the local
+    parquet (the bundled stage-0 index when that is all there is), never
+    an upstream scan. False without a local table, and on a failed read.
+    """
+    if not local_table or not name.strip():
+        return False
+    try:
+        return _division_named_exactly_cached(name.strip().casefold(), local_table)
+    except duckdb.Error:
+        return False
+
+
+@lru_cache(maxsize=512)
+def _division_named_exactly_cached(folded_name: str, local_table: str) -> bool:
+    sql = f"""
+        SELECT 1 FROM read_parquet('{local_table}')
+        WHERE name ILIKE $exact ESCAPE '\\'
+        LIMIT 1
+    """
+    with overture._conn_lock:
+        row = overture.conn().execute(
+            sql, {"exact": overture._like_escape(folded_name)}
+        ).fetchone()
+    return row is not None
+
+
+def _bare_suffix_split_allowed(base: str, query: str, local_table: str | None) -> bool:
+    """Whether a *bare* (no comma) trailing word that resolved as a region
+    or country may actually be read as a qualifier of `base`.
+
+    Two gates, both of which "Paris, Texas" skips by carrying a comma:
+
+    1. `base` has to be a plausible name of its own — at least one
+       significant token that is not a bare modifier
+       (_BARE_QUALIFIER_HEAD_ADJECTIVES). "West" is not a place
+       Virginia contains, so "West Virginia" stays whole; "Portland" is
+       a place, so "Portland Oregon" still splits.
+    2. The whole query must not itself name a division exactly: a caller
+       who typed a real division's full name meant that division, not a
+       search for its first word inside its last. One local probe, and
+       only reached once the suffix has resolved and gate 1 has passed.
+    """
+    head_tokens = [t.casefold().strip(".,'") for t in _significant_tokens(base)]
+    if not any(t and t not in _BARE_QUALIFIER_HEAD_ADJECTIVES for t in head_tokens):
+        return False
+    return not _division_named_exactly(query, local_table)
 
 
 def _parse_region_suffix(query: str, local_table: str | None) -> tuple[str, str | None, str | None]:
     """query -> (base_query, region_code, region_name). region_code/name are
     both None if no trailing token looks like a region — the caller then
     searches `query` unmodified, today's behavior.
+
+    A bare trailing word (no comma) only counts once
+    _bare_suffix_split_allowed agrees: "West Virginia" is not ("West",
+    "US-VA").
     """
-    for base, suffix in _split_region_suffix(query):
+    for base, suffix, bare in _suffix_split_candidates(query):
         resolved = _resolve_us_state(suffix)
         if resolved is None and local_table:
             resolved = _resolve_region_from_table(suffix, local_table)
-        if resolved:
+        if resolved and (not bare or _bare_suffix_split_allowed(base, query, local_table)):
             name, code = resolved
             return base, code, name
     return query, None, None
@@ -2008,11 +2082,11 @@ def _parse_country_suffix(
     instead of a region. Callers try the region parse first and only fall
     back to this one when it found nothing — see geocode_detailed.
     """
-    for base, suffix in _split_region_suffix(query):
+    for base, suffix, bare in _suffix_split_candidates(query):
         resolved = _resolve_country_code(suffix)
         if resolved is None and local_table:
             resolved = _resolve_country_from_table(suffix, local_table, alt_table)
-        if resolved:
+        if resolved and (not bare or _bare_suffix_split_allowed(base, query, local_table)):
             name, code = resolved
             return base, code, name
     return query, None, None
