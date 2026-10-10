@@ -3,7 +3,9 @@
 import json
 import threading
 
-from placeroot import preferences, resources, server
+import pytest
+
+from placeroot import preferences, resources, server, session
 
 
 def test_missing_file_is_an_empty_document():
@@ -198,3 +200,126 @@ def test_io_error_is_structured(tmp_path, monkeypatch):
     monkeypatch.setenv("PLACEROOT_PREFERENCES_PATH", str(dest))
     result = server.preferences(mode="walk")
     assert result["error"] == "io_error"
+
+
+# --- per-session overlay over --http (session.py) --------------------------
+
+
+def test_http_sessions_overlay_the_file_and_do_not_see_each_other(tmp_path, monkeypatch):
+    """Over HTTP one process serves every client: a stored mode must be
+    this session's, layered over the host file, never another session's."""
+    dest = tmp_path / "prefs.json"
+    monkeypatch.setenv("PLACEROOT_PREFERENCES_PATH", str(dest))
+    preferences.clear_overlays()
+    preferences.update(mode="walk", note="host")  # the file, as stdio would write it
+    on_disk = json.loads(dest.read_text())
+
+    with session.bind_session("client-a"):
+        doc = server.preferences(mode="cycle", household=["dog"])
+        assert doc["mode"] == "cycle"
+        assert doc["household"] == ["dog"]
+        assert doc["note"] == "host"  # file shows through where the overlay is silent
+        assert preferences.get("mode") == "cycle"
+        assert preferences.resolve_mode(None, "drive") == "cycle"
+    with session.bind_session("client-b"):
+        assert server.preferences()["mode"] == "walk"
+        assert server.preferences()["household"] == []
+        assert preferences.get("mode") == "walk"
+        assert preferences.resolve_mode(None, "drive") == "walk"
+    # Nothing an HTTP session wrote reached the host file, and stdio is the file.
+    assert json.loads(dest.read_text()) == on_disk
+    assert preferences.load()["mode"] == "walk"
+    preferences.clear_overlays()
+
+
+def test_http_clear_empties_the_session_view_but_keeps_the_file(tmp_path, monkeypatch):
+    dest = tmp_path / "prefs.json"
+    monkeypatch.setenv("PLACEROOT_PREFERENCES_PATH", str(dest))
+    preferences.clear_overlays()
+    preferences.update(mode="walk", lang="de")
+    with session.bind_session("client-a"):
+        assert server.preferences(clear=True) == preferences.empty()
+        assert server.preferences() == preferences.empty()
+        assert preferences.get("lang") is None
+        assert preferences.resolve_lang(None) is None
+        # A later update on the cleared view sets just that field.
+        assert server.preferences(mode="drive")["mode"] == "drive"
+        assert preferences.get("lang") is None
+    assert dest.is_file()
+    assert preferences.load() == {"mode": "walk", "pace": None, "household": [],
+                                  "note": None, "lang": "de"}
+    preferences.clear_overlays()
+
+
+def test_http_overlay_normalizes_like_a_save():
+    preferences.clear_overlays()
+    with session.bind_session("client-a"):
+        doc = preferences.update(mode=" CYCLE ", household=["dog", " dog ", ""], lang=" DE ")
+        assert doc["mode"] == "cycle"
+        assert doc["household"] == ["dog"]
+        assert doc["lang"] == "de"
+    preferences.clear_overlays()
+
+
+def _http_client_class():
+    try:
+        from mcp.client.client import Client
+    except ImportError:
+        pytest.skip("mcp.client streamable-HTTP client not available in this SDK build")
+    return Client
+
+
+async def _read_mode(client):
+    result = await client.call_tool("preferences", {})
+    assert result.is_error is False
+    return json.loads(result.content[0].text)["mode"]
+
+
+def test_two_http_clients_get_separate_preferences(running_http_server):
+    """End to end over the real transport with the initialize handshake
+    (mode="legacy"): the SDK's Mcp-Session-Id is the session, so client
+    A's stored mode is neither client B's default nor the host file's."""
+    Client = _http_client_class()
+    import anyio
+
+    preferences.clear_overlays()
+
+    async def scenario():
+        async with (
+            Client(running_http_server, mode="legacy") as a,
+            Client(running_http_server, mode="legacy") as b,
+        ):
+            set_a = await a.call_tool("preferences", {"mode": "cycle"})
+            assert json.loads(set_a.content[0].text)["mode"] == "cycle"
+            assert await _read_mode(a) == "cycle"
+            assert await _read_mode(b) is None
+            await b.call_tool("preferences", {"mode": "walk"})
+            assert await _read_mode(a) == "cycle"
+            assert await _read_mode(b) == "walk"
+
+    anyio.run(scenario)
+    # stdio (this process, unbound) still reads the untouched file.
+    assert preferences.load()["mode"] is None
+    preferences.clear_overlays()
+
+
+def test_sessionless_http_client_never_sees_another_request(running_http_server):
+    """The 2026-07-28 era (the client's default) has no handshake and no
+    session: the SDK serves every request on a fresh connection, so a
+    stored preference lives for that one call and no other request —
+    this client's or another's — can read it back."""
+    Client = _http_client_class()
+    import anyio
+
+    preferences.clear_overlays()
+
+    async def scenario():
+        async with Client(running_http_server) as a, Client(running_http_server) as b:
+            set_a = await a.call_tool("preferences", {"mode": "cycle"})
+            assert json.loads(set_a.content[0].text)["mode"] == "cycle"
+            assert await _read_mode(a) is None
+            assert await _read_mode(b) is None
+
+    anyio.run(scenario)
+    assert not preferences._overlays
+    assert preferences.load()["mode"] is None

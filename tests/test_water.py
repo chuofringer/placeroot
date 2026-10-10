@@ -802,3 +802,134 @@ def test_server_structured_error_on_unreachable_upstream(tmp_path):
         assert result["error"] == "upstream_unavailable"
     finally:
         water.set_data_path(None)
+
+
+# --- multi-tile reads return a straddling body once --------------------------
+#
+# Offline harness: the spatial extension cannot be installed here, so these
+# tests run the module's real queries on a bare connection whose ST_* names
+# are stub macros over a [lon, lat] list geometry (each body's centre).
+# Containment is decided by the bbox prefilter alone (ST_Contains is TRUE)
+# and the closest point is the centre — enough to see a row twice.
+
+
+def _stub_spatial_conn():
+    con = duckdb.connect()
+    for ddl in (
+        "CREATE MACRO ST_GeomFromWKB(g) AS g",
+        "CREATE MACRO ST_Point(x, y) AS [x, y]",
+        "CREATE MACRO ST_X(g) AS g[1]",
+        "CREATE MACRO ST_Y(g) AS g[2]",
+        "CREATE MACRO ST_Scale(g, kx, ky) AS [g[1] * kx, g[2] * ky]",
+        "CREATE MACRO ST_ClosestPoint(a, b) AS a",
+        "CREATE MACRO ST_Contains(g, p) AS TRUE",
+        "CREATE MACRO ST_Dimension(g) AS 2",
+        "CREATE MACRO ST_Area(g) AS 1.0",
+    ):
+        con.execute(ddl)
+    return con
+
+
+def _bbox_of(lat_min, lat_max, lon_min, lon_max):
+    return {"xmin": lon_min, "ymin": lat_min, "xmax": lon_max, "ymax": lat_max}
+
+
+# Two ponds: one crossing the tile edge at lon=-74, one wholly inside the
+# eastern tile.
+_EDGE_POND = ("water-straddle", _bbox_of(40.60, 40.70, -74.01, -73.99), "Edge Pond")
+_INSIDE_POND = ("water-inside", _bbox_of(40.60, 40.70, -73.98, -73.97), "Inside Pond")
+
+
+def _write_centre_geometry_fixture(path, rows) -> None:
+    con = duckdb.connect()
+    con.execute("""
+        CREATE TABLE water (
+            id VARCHAR,
+            geometry DOUBLE[],
+            bbox STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE),
+            subtype VARCHAR,
+            class VARCHAR,
+            names STRUCT("primary" VARCHAR),
+            is_salt BOOLEAN,
+            is_intermittent BOOLEAN
+        )
+    """)
+    for id_, bbox, name in rows:
+        centre = [(bbox["xmin"] + bbox["xmax"]) / 2, (bbox["ymin"] + bbox["ymax"]) / 2]
+        con.execute(
+            "INSERT INTO water VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [id_, centre, bbox, "pond", "pond", {"primary": name}, False, False],
+        )
+    con.execute(f"COPY water TO '{path}' (FORMAT PARQUET)")
+    con.close()
+
+
+@pytest.fixture
+def straddling_water(tmp_path, monkeypatch):
+    """Both tiles either side of lon=-74 materialized from the fixture, the
+    straddling pond proven to be in both, and water.py reading the pair."""
+    from placeroot import cache, db
+
+    monkeypatch.setenv("PLACEROOT_CACHE", "on")
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "placeroot-cache"))
+    con = _stub_spatial_conn()
+    monkeypatch.setattr(db, "shared_conn", lambda: con)
+    monkeypatch.setattr(db, "ensure_spatial", lambda: None)
+    src = tmp_path / "water.parquet"
+    _write_centre_geometry_fixture(src, [_EDGE_POND, _INSIDE_POND])
+    water.set_data_path(str(src))
+    theme = water._cache_theme()
+    deg = cache.tile_deg_for(theme)
+    ty = int(40.65 // deg)
+    tiles = [(round(-74.0 / deg) - 1, ty), (round(-74.0 / deg), ty)]
+    fingerprint = cache.resolve_fingerprint("2026-07-22.0", theme, str(src))
+    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint)
+             for t in tiles]
+    for p in paths:
+        (n,) = con.execute(
+            f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) "
+            "WHERE id = 'water-straddle'"
+        ).fetchone()
+        assert n == 1
+    source = f"read_parquet([{', '.join(db._sql_str(str(p)) for p in paths)}])"
+    monkeypatch.setattr(water, "_from_source", lambda bbox: source)
+    try:
+        yield con
+    finally:
+        water.set_data_path(None)
+
+
+def test_a_body_straddling_a_tile_edge_is_listed_once_and_counted_once(straddling_water):
+    """From a point west of both ponds: two distance rows, not three, and
+    in_range_count — the COUNT(*) OVER () the LIMIT is reported against —
+    agrees, since the dedupe happens before that window."""
+    rows, _radius, in_range_count, containing = water.water_near(
+        40.65, -74.03, radius_m=6000, limit=10
+    )
+    assert [r["name"] for r in rows] == ["Edge Pond", "Inside Pond"]
+    assert in_range_count == 2
+    assert containing is None
+
+
+def test_a_straddling_body_containing_the_point_is_the_containing_body(straddling_water):
+    """Standing inside the straddling pond: it is `containing`, not a
+    distance row, and the other pond is the only listed feature."""
+    rows, _radius, in_range_count, containing = water.water_near(
+        40.65, -74.0005, radius_m=6000, limit=10
+    )
+    assert containing == {"water_body": "Edge Pond", "generalized": False}
+    assert [r["name"] for r in rows] == ["Inside Pond"]
+    assert in_range_count == 1
+
+
+def test_no_id_column_means_no_dedupe_in_water(straddling_water, monkeypatch):
+    """Without id there is nothing to key on (a NULL partition would
+    collapse every row into one), so no QUALIFY is emitted and the
+    duplicate shows — the harness really does see both copies."""
+    monkeypatch.setattr(water, "_check_schema", lambda glob: ["id"])
+    assert water._dedupe_clause({"id"}) == ""
+    rows, _radius, in_range_count, _containing = water.water_near(
+        40.65, -74.03, radius_m=6000, limit=10
+    )
+    assert [r["name"] for r in rows] == ["Edge Pond", "Edge Pond", "Inside Pond"]
+    assert in_range_count == 3

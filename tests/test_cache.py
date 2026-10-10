@@ -80,10 +80,13 @@ def test_heavy_themes_get_finer_tiles_and_suffixed_paths():
 
 
 def test_heavy_theme_first_touch_materializes_inline(cache_dir, con, monkeypatch):
-    """A heavy theme's first query COPYs its (small) tiles synchronously even
-    without PLACEROOT_CACHE_SYNC — its direct-scan fallback measured
-    60-181s cold, so racing the scan loses (see HEAVY_THEME_TILE_DEG)."""
+    """Under PLACEROOT_INLINE_TILE_COPY a heavy theme's first query COPYs
+    its (small) tiles synchronously even without PLACEROOT_CACHE_SYNC —
+    the pre-direct-scan behaviour, kept for operators who prefer it (see
+    HEAVY_THEME_TILE_DEG and tests/test_routing_direct_scan.py for the
+    default)."""
     monkeypatch.delenv("PLACEROOT_CACHE_SYNC", raising=False)
+    monkeypatch.setenv("PLACEROOT_INLINE_TILE_COPY", "1")
     monkeypatch.setitem(cache.HEAVY_THEME_TILE_DEG, THEME, cache.TILE_DEG)
     glob = str(FIXTURE_PATH)
     paths = cache.local_paths_for_query(

@@ -326,6 +326,15 @@ STOPS_MAX_EXTRACTION_RADIUS_M = {
 }
 ROUTE_MIN_RADIUS_M = 500.0  # extraction radius floor, so very-close points still get a real graph
 ROUTE_RADIUS_RETRY_FACTOR = 1.6  # widen-and-retry factor when the first extraction misses a path
+# The retry factor is deliberately wider than GRAPH_CACHE_MARGIN (1.3): the
+# first attempt already snaps and searches the whole margin-padded graph,
+# so a retry that fit inside that padding would search the same graph
+# again and find the same nothing. The retry is therefore always a fresh
+# extraction — what it must NOT do is pad itself by the margin a second
+# time (1.6 x 1.3 = 2.08x the base radius, 4.3x the base area); it is the
+# last attempt, nothing larger follows it, so it is extracted at exactly
+# its own radius (pad=False in _get_or_build_graph). The first attempt
+# keeps the margin so nearby repeat queries hit the cache.
 
 # optimize_route (#177): multi-stop ordering. The upper bound is what makes
 # an exact solver affordable — Held-Karp is O(2^n * n^2) states, which at
@@ -2594,6 +2603,7 @@ def _get_or_build_graph(
     want_shapes: bool = False,
     radius_cap_m: float | None = None,
     avoid: Iterable[str] = (),
+    pad: bool = True,
 ) -> Graph:
     """build_graph(...), reusing a cached graph when possible (#39).
 
@@ -2631,6 +2641,11 @@ def _get_or_build_graph(
     — an extraction_radius_m that already exceeds it raises RadiusTooLarge
     rather than being silently clamped down to a circle that no longer covers
     what the caller asked for.
+
+    pad=False extracts exactly extraction_radius_m (still capped) with no
+    GRAPH_CACHE_MARGIN: the widen-and-retry loops pass it on their final,
+    already-widened radius — see ROUTE_RADIUS_RETRY_FACTOR. Lookup is
+    unchanged; only a miss's build size is.
     """
     release_key = release.resolve_release()
     upstream = _upstream_glob()
@@ -2656,7 +2671,8 @@ def _get_or_build_graph(
     cap_m = radius_cap_m if radius_cap_m is not None else MODE_CONFIG[mode]["max_radius_m"]
     if extraction_radius_m > cap_m:
         raise RadiusTooLarge(extraction_radius_m, cap_m)
-    padded_radius_m = min(extraction_radius_m * GRAPH_CACHE_MARGIN, cap_m)
+    margin = GRAPH_CACHE_MARGIN if pad else 1.0
+    padded_radius_m = min(extraction_radius_m * margin, cap_m)
     extraction_bbox = _bbox_around(lat, lon, padded_radius_m)
 
     # Single-flight: one build per area at a time. A caller that finds a
@@ -3618,6 +3634,7 @@ def _shortest_path(
             speed_m_s=None,
             want_shapes=want_shapes,
             avoid=avoid,
+            pad=i == 0,  # the retry is already widened; see ROUTE_RADIUS_RETRY_FACTOR
         )
         if graph.node_count() == 0:
             if is_last and not snapped_both:
@@ -4255,6 +4272,7 @@ def _snap_and_cost_stops(
             mode,
             speed_m_s=None,
             radius_cap_m=max_radius_m,
+            pad=i == 0,  # the retry is already widened; see ROUTE_RADIUS_RETRY_FACTOR
         )
         if graph.node_count() == 0:
             if is_last and best is None:
@@ -4735,7 +4753,8 @@ def _travel_time_matrix_shared_graph(
     for i, radius_m in enumerate(radii_m):
         is_last = i == len(radii_m) - 1
         graph = _get_or_build_graph(
-            center_lat, center_lon, radius_m, mode, speed_m_s=None, radius_cap_m=max_radius_m
+            center_lat, center_lon, radius_m, mode, speed_m_s=None, radius_cap_m=max_radius_m,
+            pad=i == 0,  # the retry is already widened; see ROUTE_RADIUS_RETRY_FACTOR
         )
         if graph.node_count() == 0:
             if is_last and best is None:
