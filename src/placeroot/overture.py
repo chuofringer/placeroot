@@ -6,14 +6,13 @@ tile cache (see cache.py) sits in front of repeat remote scans for the same
 area, and the active release (see release.py) is discovered at runtime
 instead of hardcoded.
 
-Concurrency (issue #24): DuckDB connections aren't safe for concurrent
-execute() calls from multiple threads, which HTTP transport mode makes
-possible (stdio only ever has one request in flight). db.conn_lock
-serializes every use of the shared connection — every call site in this
-file (and in routing.py, divisions.py, buildings.py, and geocode.py, which
-all now reuse the same connection via db.py — issue #40) acquires it
-first. Background tile materialization (cache.py) is the only exception:
-it always runs on its own connection via db.new_connection().
+Concurrency: DuckDB connections aren't safe for concurrent execute() calls
+from multiple threads, which HTTP transport mode makes possible. Every
+read-only query in this file runs on a cursor leased from db.read_conn(),
+which holds no lock, so a slow cold scan in one request doesn't queue a
+lookup in another. Calls from other modules that still take db.conn_lock
+around shared_conn() keep working unchanged. Background tile
+materialization (cache.py) runs on its own cursor via db.new_connection().
 
 Connection setup, schema probing, and geometry helpers live in db.py and
 geo.py; _conn/_conn_lock/_probe_schema are thin aliases kept for this
@@ -812,8 +811,11 @@ def _find_places_name_fallback(
         LIMIT {limit}
     """
     try:
-        with trace.scan("places alt-name scan", bounded=True, source=from_clause), _conn_lock:
-            rows = _conn().execute(alt_sql, alt_params).fetchall()
+        with (
+            trace.scan("places alt-name scan", bounded=True, source=from_clause),
+            db.read_conn() as rc,
+        ):
+            rows = rc.execute(alt_sql, alt_params).fetchall()
     except duckdb.Error:
         rows = []
     if rows:
@@ -893,8 +895,11 @@ def _find_places_name_fallback(
         LIMIT {limit}
     """
     try:
-        with trace.scan("places fuzzy scan", bounded=True, source=from_clause), _conn_lock:
-            rows = _conn().execute(fuzzy_sql, fuzzy_params).fetchall()
+        with (
+            trace.scan("places fuzzy scan", bounded=True, source=from_clause),
+            db.read_conn() as rc,
+        ):
+            rows = rc.execute(fuzzy_sql, fuzzy_params).fetchall()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     results = [dict(zip([*cols, "similarity"], r)) for r in rows]
@@ -1239,8 +1244,11 @@ def find_places(
     try:
         # Always bounded: find_places is a radius query, so the bbox filter
         # and the distance predicate are both in `filters` above.
-        with trace.scan("places radius scan", bounded=True, source=from_clause), _conn_lock:
-            rows = _conn().execute(sql, params).fetchall()
+        with (
+            trace.scan("places radius scan", bounded=True, source=from_clause),
+            db.read_conn() as rc,
+        ):
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     cols = [
@@ -1322,8 +1330,11 @@ def find_places_for_categories(
         LIMIT {limit}
     """
     try:
-        with trace.scan("places checklist scan", bounded=True, source=from_clause), _conn_lock:
-            rows = _conn().execute(sql, params).fetchall()
+        with (
+            trace.scan("places checklist scan", bounded=True, source=from_clause),
+            db.read_conn() as rc,
+        ):
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     cols = [
@@ -1431,8 +1442,8 @@ def find_places_in_bbox(
         LIMIT {limit}
     """
     try:
-        with _conn_lock:
-            rows = _conn().execute(sql, params).fetchall()
+        with db.read_conn() as rc:
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     cols = [
@@ -1632,8 +1643,8 @@ def _resolve_division_geometry(
         FROM merged
     """
     try:
-        with db.conn_lock:
-            row = db.shared_conn().execute(sql, {"division_id": division_id}).fetchone()
+        with db.read_conn() as rc:
+            row = rc.execute(sql, {"division_id": division_id}).fetchone()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     # ST_Union_Agg over zero matching rows yields an empty GEOMETRYCOLLECTION
@@ -1796,8 +1807,8 @@ def find_places_in_division(
         OFFSET {offset}
     """
     try:
-        with _conn_lock:
-            rows = _conn().execute(sql, params).fetchall()
+        with db.read_conn() as rc:
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     cols = [
@@ -1905,8 +1916,11 @@ def find_places_grouped_by_category(
         ORDER BY category, distance_m, id
     """
     try:
-        with trace.scan("places grouped scan", bounded=True, source=from_clause), _conn_lock:
-            rows = _conn().execute(sql, params).fetchall()
+        with (
+            trace.scan("places grouped scan", bounded=True, source=from_clause),
+            db.read_conn() as rc,
+        ):
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     cols = [
@@ -2008,8 +2022,8 @@ def find_places_in_division_grouped_by_category(
         ORDER BY category, name, id
     """
     try:
-        with _conn_lock:
-            rows = _conn().execute(sql, params).fetchall()
+        with db.read_conn() as rc:
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     cols = [
@@ -2057,8 +2071,8 @@ def summarize_area(lat: float, lon: float, radius_m: float = 1000) -> dict:
         ORDER BY n DESC
     """
     try:
-        with _conn_lock:
-            rows = _conn().execute(sql, params).fetchall()
+        with db.read_conn() as rc:
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     total_places = rows[0][2] if rows else 0
@@ -2181,8 +2195,8 @@ def _run_place_details_query(from_source: str, filters: list[str], order_by: str
         lang_sql = _place_details_sql(from_source, filters, order_by, missing,
                                        has_recreation, with_clause, lang=lang)
         try:
-            with _conn_lock:
-                row = _conn().execute(lang_sql, {**params, "lang": lang}).fetchone()
+            with db.read_conn() as rc:
+                row = rc.execute(lang_sql, {**params, "lang": lang}).fetchone()
         except duckdb.Error:
             row = None
         else:
@@ -2192,8 +2206,8 @@ def _run_place_details_query(from_source: str, filters: list[str], order_by: str
     sql = _place_details_sql(from_source, filters, order_by, missing,
                              has_recreation, with_clause)
     try:
-        with _conn_lock:
-            return _conn().execute(sql, params).fetchone(), None
+        with db.read_conn() as rc:
+            return rc.execute(sql, params).fetchone(), None
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
 
@@ -2459,8 +2473,8 @@ def _count_places_by_category(
         WHERE {" AND ".join(filters)}
     """
     try:
-        with _conn_lock:
-            row = _conn().execute(sql, params).fetchone()
+        with db.read_conn() as rc:
+            row = rc.execute(sql, params).fetchone()
     except duckdb.Error as e:
         raise UpstreamUnavailable(str(e)) from e
     return {c: (row[j] if row else 0) for j, c in enumerate(categories)}

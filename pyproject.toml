@@ -19,13 +19,23 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Operating System :: OS Independent",
 ]
+# Upper bounds are major-version guards only: duckdb and mcp both ship
+# breaking changes on a major, and an unpinned resolve the day one lands
+# would break every `uvx placeroot` at once.
 dependencies = [
-    "duckdb>=1.5.5",
-    "mcp[cli]>=2.0.0",
+    "duckdb>=1.5.5,<2",
+    # Core mcp already depends on uvicorn/starlette (the --http transport);
+    # the [cli] extra only adds typer + python-dotenv for the `mcp` dev CLI,
+    # which nothing here imports or ships.
+    "mcp>=2.0.0,<3",
     # Imported directly (server.py: BaseModel/ConfigDict/Field/ValidationError),
     # not only through mcp — declare it so the floor is ours, not inherited.
     "pydantic>=2.11.0",
     "tzfpy>=1.3.3",
+    # timezone_at resolves tzfpy's zone ids through stdlib zoneinfo, which on
+    # Windows has no system tz database to fall back on: every named zone
+    # raised ZoneInfoNotFoundError on the first Windows CI run.
+    "tzdata; sys_platform == 'win32'",
 ]
 
 [project.urls]

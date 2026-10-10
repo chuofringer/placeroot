@@ -1,0 +1,15 @@
+# Check text files out with LF on every platform. GitHub's windows-latest
+# runner ships core.autocrlf=true, which would otherwise rewrite every text
+# file to CRLF on checkout and break the suite's exact-string guards (README
+# <-> npm/README.md sync, site copy, fixture JSON) on that CI cell alone.
+* text=auto eol=lf
+
+# Binary payloads: never diffed or line-ending-converted.
+*.parquet binary
+*.png binary
+*.pkl binary
+*.mcpb binary
+
+# Data files are read byte-for-byte (src/placeroot/data/overture_categories.csv
+# is committed with CRLF); leave their line endings alone.
+*.csv -text

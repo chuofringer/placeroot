@@ -68,10 +68,10 @@ jobs:
           # placeroot's own version is pinned in uv.lock; refresh it so the PR
           # doesn't land a lock file pointing at the previous version.
           uv lock
-          # The site serves the Desktop Extension bundle (#233); rebuild it so
-          # the bundle's manifest version matches the bump —
-          # tests/test_mcpb_bundle.py fails the verify step below otherwise.
-          uv run python scripts/build_mcpb.py site/placeroot.mcpb
+          # The Desktop Extension bundle (#233) is no longer committed: the
+          # site deploy and release workflows build it from the bumped tree,
+          # and tests/test_registry_manifests.py keeps mcpb/manifest.json's
+          # version in step with the bump here.
           # The bump rewrites version-pinned links in README.md; npm/README.md
           # is generated from it, so re-sync or test_npm_readme_sync fails the
           # verify step (seen cutting 0.9.8).

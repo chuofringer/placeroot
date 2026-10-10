@@ -167,6 +167,26 @@ HEAVY_THEME_TILE_DEG: dict[str, float] = {
 HEAVY_SYNC_MAX_TILES = 12
 
 
+def _replace_published(tmp_path: Path, path: Path) -> None:
+    """os.replace with the Windows retry it needs.
+
+    POSIX swaps the directory entry even while another handle has the old
+    file open; Windows refuses with PermissionError until that handle
+    closes — and a concurrent writer of the same tile (or DuckDB's just
+    finished COPY) can hold one for a moment. A short bounded retry covers
+    that window; the last attempt raises as before.
+    """
+    attempts = 20 if os.name == "nt" else 1
+    for i in range(attempts):
+        try:
+            os.replace(tmp_path, path)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.05 * (i + 1))
+
+
 def tile_deg_for(theme: str) -> float:
     """Tile edge length in degrees for theme (see HEAVY_THEME_TILE_DEG)."""
     return HEAVY_THEME_TILE_DEG.get(theme, TILE_DEG)
@@ -520,7 +540,7 @@ def ensure_tile(
             con.execute(sql)
         # Last writer wins, whole-file: a concurrent writer that finished
         # first produced byte-equivalent content from the same upstream.
-        os.replace(tmp_path, path)
+        _replace_published(tmp_path, path)
     finally:
         try:
             tmp_path.unlink()  # only still here if the COPY or rename failed
