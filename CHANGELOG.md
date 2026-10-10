@@ -249,6 +249,14 @@ fixing behavior is patch.
   field fails at startup instead of vanishing from `tools/list`.
 
 ### Changed
+- `ruff format` is now enforced in CI (`ruff format --check .`) after a one-time
+  sweep of 160 files; the sweep commit is listed in `.git-blame-ignore-revs`.
+  Tool descriptions are byte-identical (`route()` keeps its docstring under
+  `# fmt: skip`, since ruff re-indents docstring bodies). (#519)
+- `resolve_named_place` runs its `resolve_place` leg speculatively beside the
+  `geocode` leg, with shared-state writes deferred until the leg is used:
+  a POI-shaped name costs 5 sequential rounds instead of 10.
+  `PLACEROOT_SPECULATE_RESOLVE=0` restores the serial path. (#520)
 - Deprecation notes only, no removals: `find_near`'s docstring now points
   at `find_places(where=..., category=...)` as the canonical form of that
   search (find_near stays as a thin alias), and `from_to`'s notes that it

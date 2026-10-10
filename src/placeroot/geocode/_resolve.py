@@ -119,7 +119,14 @@ def resolve_place(
     with a country/region qualifier parsed off `query` itself.
     """
     rows, commit = _resolve_place_impl(
-        query, near_lat, near_lon, limit, city, lang, country, defer=False,
+        query,
+        near_lat,
+        near_lon,
+        limit,
+        city,
+        lang,
+        country,
+        defer=False,
     )
     commit()
     return rows
@@ -199,13 +206,26 @@ def _resolve_place_impl(
 
     cache_city, cache_lat, cache_lon = city, near_lat, near_lon
     cached = _pkg._resolve_cache_get(
-        query, cache_city, cache_lat, cache_lon, lang, country, touch=not defer,
+        query,
+        cache_city,
+        cache_lat,
+        cache_lon,
+        lang,
+        country,
+        touch=not defer,
     )
     if cached is not None:
         if defer:
-            writes.append(lambda: _pkg._resolve_cache_get(
-                query, cache_city, cache_lat, cache_lon, lang, country,
-            ))
+            writes.append(
+                lambda: _pkg._resolve_cache_get(
+                    query,
+                    cache_city,
+                    cache_lat,
+                    cache_lon,
+                    lang,
+                    country,
+                )
+            )
         return cached[:limit], _commit
 
     # #271: a caller-supplied (or now inferred) city is the location half
@@ -754,9 +774,17 @@ def _resolve_place_impl(
     out = candidates[:limit]
     # The whole ranked list, not `out`: the key carries no limit, and a
     # later call with a larger limit slices the cached list on read.
-    _write(lambda: _pkg._resolve_cache_put(
-        query, cache_city, cache_lat, cache_lon, candidates, lang, country,
-    ))
+    _write(
+        lambda: _pkg._resolve_cache_put(
+            query,
+            cache_city,
+            cache_lat,
+            cache_lon,
+            candidates,
+            lang,
+            country,
+        )
+    )
     if out:
         _write(lambda: _pkg._remember_last_city(city, out[0]))
         _write(lambda: _pkg._kick_autowarm(out[0]))

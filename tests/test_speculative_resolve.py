@@ -29,10 +29,12 @@ def tl(timeline):  # noqa: F811 - the overlap suite's fixture, drained after eac
 
 def _divisions_matching_tokyo(timeline_):
     """Division fake that answers any query naming Tokyo (leg 1 then hits)."""
+
     def fake(query, region_code, local_table, **kw):
         args = (query, kw.get("fold_diacritics", False))
         value = [dict(TOKYO)] if "tokyo" in query.lower() else []
         return timeline_.run("_query_divisions", args, value)
+
     return fake
 
 
@@ -45,6 +47,7 @@ def _state():
 
 
 # --- (a) POI-shaped query: the legs overlap -----------------------------------
+
 
 def test_poi_query_rounds_drop_and_answer_is_unchanged(tl, monkeypatch):
     monkeypatch.setenv("PLACEROOT_SPECULATE_RESOLVE", "0")
@@ -76,6 +79,7 @@ def test_joined_leg_commits_its_writes(tl):
 
 # --- (b) division-shaped query: the discarded leg leaves no state -------------
 
+
 def test_discarded_leg_leaves_lru_and_last_city_untouched(tl, monkeypatch):
     monkeypatch.setattr(geocode, "_query_divisions", _divisions_matching_tokyo(tl))
     # Seed real state first, so "unchanged" means "unchanged from something".
@@ -97,6 +101,7 @@ def test_discarded_leg_leaves_lru_and_last_city_untouched(tl, monkeypatch):
 
 # --- (c) switches off: exactly the serial rounds -----------------------------
 
+
 def test_env_switch_off_restores_the_serial_ten_rounds(tl, monkeypatch):
     monkeypatch.setenv("PLACEROOT_SPECULATE_RESOLVE", "0")
     hit = geocode.resolve_named_place(POI)
@@ -115,6 +120,7 @@ def test_module_constant_off_restores_the_serial_ten_rounds(tl, monkeypatch):
 
 
 # --- (d) errors ---------------------------------------------------------------
+
 
 def test_speculative_error_is_swallowed_when_leg_one_finds_a_division(tl, monkeypatch):
     monkeypatch.setattr(geocode, "_query_divisions", _divisions_matching_tokyo(tl))
