@@ -80,8 +80,9 @@ release).
 
 ### b. Historical "measured live on `<release>`" comments — leave alone
 
-`src/placeroot/geocode.py`, `addresses.py`, `water.py`, `recreation.py`, and
-several tests carry comments like *"measured live on release 2026-07-22.0:
+`src/placeroot/geocode/` (the package split from `geocode.py`; its `_anchors.py`,
+`_postcode.py` and `_addresses.py` carry these), `addresses.py`, `water.py`,
+`recreation.py`, and several tests carry comments like *"measured live on release 2026-07-22.0:
 216s end-to-end"* or *"Live against release 2026-07-22.0, Lake Michigan is a
 single polygon spanning..."*. These document a specific past measurement —
 why a design decision was made, or what a spot-check found — not "the

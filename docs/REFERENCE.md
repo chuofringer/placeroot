@@ -225,7 +225,7 @@ env vars; see below.) The ones an operator is most likely to reach for:
 
 | Variable | Default | What it does |
 |---|---|---|
-| `PLACEROOT_TOOLS` | all 42 | Tool profile/subset — see the section above |
+| `PLACEROOT_TOOLS` | all 48 | Tool profile/subset — see the section above |
 | `PLACEROOT_TOKEN_BUDGET` | `2000` | Soft per-response token budget (chars/4 heuristic); rows are dropped lowest-ranked first, then optional fields, until a response fits |
 | `PLACEROOT_RECREATION_LAYER` | on | `0`/`false`/`no`/`off` disables the base-theme recreation layer ([docs/RECREATION.md](RECREATION.md)) |
 | `PLACEROOT_CACHE` | on | `off` disables the local tile cache entirely |
@@ -236,6 +236,13 @@ env vars; see below.) The ones an operator is most likely to reach for:
 | `PLACEROOT_CACHE_SYNC` | off | Materialize missing tiles inline instead of in the background (tests, warm-starts) |
 | `PLACEROOT_CACHE_FETCH_CONCURRENCY` | `2` | Concurrent background tile fetches — bounded so a cold query's own scan isn't starved by its cache warmers |
 | `PLACEROOT_DUCKDB_THREADS` | `96` | DuckDB threads; deliberately above core count because cold parquet-footer reads are IO-bound |
+| `PLACEROOT_DUCKDB_MEMORY_LIMIT` | DuckDB's own | Caps DuckDB's memory (e.g. `8GB`) when set; an unparseable value logs a warning and is ignored |
+| `PLACEROOT_DUCKDB_EXTENSION_DIR` | unset | A pre-populated extension directory: DuckDB extensions already there load without touching the extension repository |
+| `PLACEROOT_DUCKDB_CURSORS` | `8` | Maximum pooled DuckDB read cursors that read-only queries lease in parallel (#514) |
+| `PLACEROOT_HTTP_TIMEOUT_S` | `30` | DuckDB's HTTP timeout, in seconds, for remote parquet reads (#507) |
+| `PLACEROOT_INLINE_TILE_COPY` | off | `1` restores the old inline first-touch tile COPY under `conn_lock` for heavy themes instead of the background bbox-pushdown scan (#510) |
+| `PLACEROOT_CACHE_DIVISIONS_MAX_MB` | `100` | Eviction cap, in MB, for persisted division polygons |
+| `PLACEROOT_NATIVE` | on | `0` disables the optional `placeroot_native` Rust accelerator for routing even when it is installed (#515) |
 | `PLACEROOT_WARM_REGION` | unset | `lat,lon,radius_m` to pre-warm at startup, on top of the automatic metadata pre-warm |
 | `PLACEROOT_HOME` | unset | A free-text city/area (`"Seattle, WA"`) resolved once, lazily, and used as a *bias* — never a filter — toward that region in `geocode`/`resolve_place`/`find_near`/`from_to` ranking (#406), plus a background tile pre-warm for it at startup. Only breaks same-tier ties (the "which Springfield" case); a genuinely better-ranked distant match still wins, and out-of-region results are never dropped. `geocode`'s answer carries a one-line disclosure note only when the bias actually changed the top result. An unresolvable value logs once and disables the bias — never an error. |
 | `PLACEROOT_DATA_PATH` / `PLACEROOT_DATA_PATH_<THEME>` | unset | Pin a theme to a local dataset instead of live S3 |

@@ -87,7 +87,7 @@ next action; and truncation is *irrecoverable* — `omitted_count: 12` with no
 way to ever see those rows.
 
 **Known schema bug.** `from_to`'s published schema (the `FromToArguments`
-monkeypatch, `server.py:4300–4334`) silently drops `include_path`,
+monkeypatch in `src/placeroot/_server_schemas.py`) silently drops `include_path`,
 `include_elevation`, and `prefer` even though the function accepts them. An
 agent reading the schema cannot discover three real capabilities.
 
