@@ -6,7 +6,37 @@ test_resolve_place.py does)."""
 
 import pytest
 
-from placeroot import geocode
+from placeroot import geocode, overture
+
+# ---------------------------------------------------------------------------
+# resolve cache: the key carries no limit, so the value must not either
+# ---------------------------------------------------------------------------
+
+
+def _three_places(lat, lon, radius_m=1000, category=None, name=None, limit=10):
+    return [
+        {
+            "id": f"place-{i}", "name": f"Example {i}", "category": "cafe",
+            "basic_category": "cafe", "operating_status": "open",
+            "confidence": 0.5, "lat": 1.0, "lon": 2.0, "distance_m": 10 * i,
+        }
+        for i in range(3)
+    ]
+
+
+def test_a_small_limit_does_not_truncate_what_the_cache_serves_later(monkeypatch):
+    monkeypatch.setattr(geocode, "geocode", lambda *a, **k: [])
+    monkeypatch.setattr(overture, "find_places", _three_places)
+    geocode.clear_resolve_session()
+
+    first = geocode.resolve_place("Example", near_lat=1.0, near_lon=2.0, limit=1)
+    assert len(first) == 1
+    # Cut the data source off: anything that comes back now came from the cache.
+    monkeypatch.setattr(overture, "find_places", lambda *a, **k: [])
+    again = geocode.resolve_place("Example", near_lat=1.0, near_lon=2.0, limit=3)
+    assert [r["id"] for r in again] == ["place-0", "place-1", "place-2"]
+    assert geocode.resolve_place("Example", near_lat=1.0, near_lon=2.0, limit=2) == again[:2]
+
 
 # ---------------------------------------------------------------------------
 # _match_tier folds case, diacritics and punctuation

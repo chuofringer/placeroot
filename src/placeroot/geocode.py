@@ -2249,6 +2249,12 @@ def _resolve_cache_get(
     query: str, city: str | None, near_lat: float | None, near_lon: float | None,
     lang: str | None = None, country: str | None = None,
 ) -> list[dict] | None:
+    """The full ranked candidate list cached for this key, or None.
+
+    `limit` is deliberately not part of the key: resolve_place caches the
+    *un-truncated* list and slices on read, so a `limit=1` call followed
+    by a `limit=3` one for the same query gets three rows, not one.
+    """
     key = _resolve_cache_key(query, city, near_lat, near_lon, lang, country)
     with _resolve_lru_lock:
         rows = _resolve_lru.get(key)
@@ -5877,7 +5883,9 @@ def resolve_place(
         c.pop("_type_scan", None)
         c.pop("_alias_pinned", None)
     out = candidates[:limit]
-    _resolve_cache_put(query, cache_city, cache_lat, cache_lon, out, lang, country)
+    # The whole ranked list, not `out`: the key carries no limit, and a
+    # later call with a larger limit slices the cached list on read.
+    _resolve_cache_put(query, cache_city, cache_lat, cache_lon, candidates, lang, country)
     if out:
         _remember_last_city(city, out[0])
         _kick_autowarm(out[0])
