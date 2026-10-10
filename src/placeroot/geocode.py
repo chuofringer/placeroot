@@ -4210,7 +4210,9 @@ def geocode_detailed(
     # zero candidates" treatment. An explicit country= is a deliberate
     # filter the caller stated on purpose; zero matches inside it is a real
     # answer, not a misparse worth second-guessing.
-    country_code_from_suffix = country_code is not None
+    # (If both were given they already agree — the conflict check below
+    # raises otherwise — and the explicit one wins the "no degrade" rule.)
+    country_code_from_suffix = country_code is not None and normalized_country is None
 
     if normalized_country is not None:
         if country_code is not None and country_code != normalized_country:
@@ -4238,6 +4240,13 @@ def geocode_detailed(
     # stays exactly the call it was (the pre-#476 signature is what every
     # test double of _query_divisions in the suite answers to).
     near_kw: dict = {"near": near} if near is not None else {}
+    # The explicit country= filter, kept on every degrade/retry below: only
+    # a qualifier *parsed* off the query is a guess worth withdrawing (the
+    # contract stated at country_code_from_suffix). Passed as a kwarg only
+    # when set, for the same reason as near_kw.
+    explicit_country_kw: dict = (
+        {"country_code": normalized_country} if normalized_country is not None else {}
+    )
     divisions = _query_divisions(
         search_query, region_code, local_table, alt_table=alt_table,
         country_code=country_code, **near_kw,
@@ -4248,10 +4257,11 @@ def geocode_detailed(
         # original query rather than returning empty for a query that
         # would otherwise have matched something.
         region_code = None
-        country_code = None
+        country_code = normalized_country
         search_query = query
         divisions = _query_divisions(
-            search_query, None, local_table, alt_table=alt_table, **near_kw
+            search_query, None, local_table, alt_table=alt_table,
+            **explicit_country_kw, **near_kw,
         )
     elif country_code and not divisions and country_code_from_suffix:
         # #457: same idea, but degrading to the BASE name (not the whole
@@ -4264,12 +4274,16 @@ def geocode_detailed(
         # Only for a country parsed off the query itself, not an explicit
         # country= (see country_code_from_suffix above) — a caller-stated
         # filter coming up empty is a real, precise answer.
+        #
+        # A bare trailing word (no comma — "Portland Jersey") degrades to
+        # the whole query instead, like the region path: the base word
+        # alone is a far broader search than the caller typed.
         country_code = None
-        search_query = base_query
+        search_query = base_query if "," in query else query
         divisions = _query_divisions(
             search_query, None, local_table, alt_table=alt_table, **near_kw
         )
-        qualifier_note = _country_degrade_note(base_query, suffix_country_code)
+        qualifier_note = _country_degrade_note(search_query, suffix_country_code)
 
     # #53: literal query didn't reach an exact-or-prefix division match with
     # some real prominence behind it — retry with normalized variants
@@ -4405,8 +4419,17 @@ def geocode_detailed(
             fuzzy_rows = _query_divisions_fuzzy(
                 local_table, fuzzy_query, suffix_region_code, suffix_country_code, **near_kw
             )
-        if not fuzzy_rows and (suffix_region_code or suffix_country_code):
-            fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query, **near_kw)
+        if not fuzzy_rows and (
+            suffix_region_code or (suffix_country_code and normalized_country is None)
+        ):
+            # Retry without the *parsed* qualifier only; an explicit
+            # country= is the caller's filter and stays on.
+            if normalized_country is not None:
+                fuzzy_rows = _query_divisions_fuzzy(
+                    local_table, fuzzy_query, None, normalized_country, **near_kw
+                )
+            else:
+                fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query, **near_kw)
         divisions = fuzzy_rows
 
     _bundled_recall_pending = not divisions and _is_bundled_table(local_table)
