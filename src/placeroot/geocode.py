@@ -811,12 +811,41 @@ def _fold_alt_name_sql(expr: str) -> str:
     return sql
 
 
-def _match_tier(name: str, query: str) -> int:
-    """3 = exact, 2 = prefix, 1 = substring, 0 = no match (caller already filtered those out).
+_TIER_PUNCT_RE = re.compile(r"[^\w\s]+")
 
-    Diacritic-insensitive (#53): "Sao Paulo" and "São Paulo" compare equal.
+
+def _fold_for_tier(s: str) -> str:
+    """Comparison form for _match_tier: NFKD, combining marks dropped,
+    casefolded (so "Straße" and "STRASSE" agree, which lower() alone does
+    not), punctuation collapsed to spaces and whitespace squeezed (so
+    "Notre-Dame" and "notre dame" agree).
+
+    Distinct from _normalize_for_match on purpose: that fold is shared
+    with the SQL side (_fold_alt_name_sql must stay byte-identical to it)
+    and the #215 fuzzy threshold was calibrated against it; this one is
+    only ever compared Python-to-Python, so it can fold harder.
     """
-    n, q = _normalize_for_match(name), _normalize_for_match(query)
+    stripped = "".join(
+        c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c)
+    )
+    return " ".join(_TIER_PUNCT_RE.sub(" ", stripped.casefold()).split())
+
+
+def _match_tier(name: str, query: str) -> int:
+    """3 = exact, 2 = prefix, 1 = substring.
+
+    1 is the floor, not "0 = no match": every row a caller hands this was
+    already found by a substring search (or an alternate-name / variant
+    search, see _effective_tier), so a name that matches nothing at all
+    never reaches here, and the weakest tier is simply "related somehow".
+
+    Case-, diacritic- and punctuation-insensitive (#53): "Sao Paulo" and
+    "São Paulo" compare equal, as do "Notre-Dame"/"notre dame" and
+    "Straße"/"STRASSE" — see _fold_for_tier.
+    """
+    n, q = _fold_for_tier(name), _fold_for_tier(query)
+    if not q:
+        return 1
     if n == q:
         return 3
     if n.startswith(q):
@@ -4971,6 +5000,15 @@ def _significant_tokens(query: str) -> list[str]:
     return (significant or tokens or [query])[:_MAX_RESOLVE_TOKENS]
 
 
+def _is_word_prefix(prefix: str, text: str) -> bool:
+    """`text` starts with `prefix` *at a word boundary*: "Mall" is a prefix
+    of "Mall of America", "Ma" is not — the character after the prefix must
+    end a word (or the string), or the label is only "contains"."""
+    if not prefix or not text.startswith(prefix):
+        return False
+    return len(text) == len(prefix) or not text[len(prefix)].isalnum()
+
+
 def _place_match_label(
     name: str, query: str, context_words: frozenset[str] = frozenset()
 ) -> str | None:
@@ -5028,7 +5066,7 @@ def _place_match_label(
     n, q = _normalize_for_match(name), _normalize_for_match(query)
     if n == q:
         return "exact"
-    if n.startswith(q) or q.startswith(n):
+    if _is_word_prefix(q, n) or _is_word_prefix(n, q):
         return "prefix"
     if n in q or q in n:
         return "contains"
