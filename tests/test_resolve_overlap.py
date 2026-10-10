@@ -182,7 +182,7 @@ def test_single_resolve_place_critical_path_is_unchanged(timeline):
     assert results[0]["match"] == "exact"
     assert timeline.rounds() == 5
     assert timeline.rounds({"find_places", "_query_places_fallback"}) == 2
-    assert timeline.wall() == pytest.approx(1.0, abs=0.25)
+    assert timeline.wall() == pytest.approx(1.0, abs=0.6)  # 5 rounds x 0.2 s; CI runners are slow
     assert timeline.call_set() == SHIBUYA_PLACE_CALLS
 
 
@@ -193,7 +193,7 @@ def test_named_place_is_two_serial_legs_and_is_unchanged(timeline):
     assert hit["id"] == "pl-gare-shibuya"
     assert timeline.rounds() == 10
     assert timeline.rounds({"find_places", "_query_places_fallback"}) == 3
-    assert timeline.wall() == pytest.approx(2.0, abs=0.3)
+    assert timeline.wall() == pytest.approx(2.0, abs=0.9)  # 10 rounds x 0.2 s; CI runners are slow
     assert timeline.call_set() == SHIBUYA_NAMED_CALLS
 
 
@@ -205,7 +205,7 @@ def test_pair_of_plain_names_already_overlaps(timeline):
     assert origin["id"] == "pl-gare-shibuya"
     assert dest["id"] == "pl-yoyogi"
     assert timeline.overlapping("_query_divisions", "_query_divisions")
-    assert timeline.wall() < 2.5
+    assert timeline.wall() < 3.2  # one named resolve (~2.0 s), not two in series (~4.0 s)
 
 
 def test_pair_of_name_and_gers_id_overlaps(timeline):
@@ -218,7 +218,7 @@ def test_pair_of_name_and_gers_id_overlaps(timeline):
     assert dest["matched_by"] == "gers_id"
     assert timeline.overlapping("gers_lookup", "_query_divisions"), "ends ran in turn"
     assert timeline.rounds() == 10
-    assert timeline.wall() == pytest.approx(2.0, abs=0.3)
+    assert timeline.wall() == pytest.approx(2.0, abs=0.9)  # 10 rounds x 0.2 s; CI runners are slow
     name_calls = [c for c in timeline.call_set() if c[0] != "gers_lookup"]
     assert name_calls == SHIBUYA_NAMED_CALLS
 

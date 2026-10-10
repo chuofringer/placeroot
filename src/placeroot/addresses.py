@@ -289,8 +289,8 @@ def _scan_addresses(
         LIMIT {limit}
     """
     try:
-        with overture._conn_lock:
-            return overture.conn().execute(sql, params).fetchall()
+        with db.read_conn() as rc:
+            return rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
 
@@ -384,8 +384,8 @@ def _country_by_containment(lat: float, lon: float) -> Country:
         LIMIT {_CONTAINMENT_ROW_LIMIT}
     """
     try:
-        with db.conn_lock:
-            rows = db.shared_conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
+        with db.read_conn() as rc:
+            rows = rc.execute(sql, {"lat": lat, "lon": lon}).fetchall()
     except duckdb.Error as e:
         logger.warning("containment country lookup for address coverage failed: %s", e)
         return Country(LOOKUP_FAILED)
@@ -444,8 +444,8 @@ def _country_by_nearest(lat: float, lon: float) -> Country:
             LIMIT 1
         """
         try:
-            with overture._conn_lock:
-                row = overture.conn().execute(sql, params).fetchone()
+            with db.read_conn() as rc:
+                row = rc.execute(sql, params).fetchone()
         except duckdb.Error as e:
             logger.warning("nearest-division country lookup failed: %s", e)
             return Country(LOOKUP_FAILED)
