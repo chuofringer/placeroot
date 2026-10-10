@@ -225,7 +225,9 @@ def test_named_place_legs_overlap_into_five_rounds(timeline):
     # Leg 1's first division scan and leg 2's pin scan start together.
     assert timeline.overlapping("_query_divisions", "_query_divisions"), "legs ran in turn"
     assert timeline.wall() >= 5 * SLEEP_S * 0.9  # lower bound only; see above
-    assert timeline.wall() < 10 * SLEEP_S * 0.75  # well under the serial sum
+    # No wall upper bound: the round count above is the structural claim; a
+    # shared CI runner adds arbitrary wall time (macOS put 1.57 s on a 1.5 s
+    # budget with 0.2 s fakes).
     assert timeline.call_set() == SHIBUYA_NAMED_CALLS
 
 
