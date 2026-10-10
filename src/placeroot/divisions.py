@@ -13,7 +13,7 @@ a small synthetic fixture (a handful of nested polygons) instead of a
 divisions dataset large enough that point-in-polygon over it would be slow
 without a spatial index.
 
-Design choice, documented rather than hidden: this reuses db.shared_conn()
+Design choice, documented rather than hidden: this reads through db.read_conn()
 (so the spatial extension loads once, alongside httpfs) but does NOT route
 through cache.py's tile cache the way places queries do. The places cache
 exists because point-radius searches cluster geographically and get
