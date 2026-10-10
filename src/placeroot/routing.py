@@ -127,6 +127,7 @@ from placeroot import (
     elevation,
     errors,
     geo,
+    native,
     overture,
     progress,
     release,
@@ -847,7 +848,15 @@ class Graph:
         # like the vertex lists want_shapes=True retains.
         self._edge_names: dict[tuple[str, str], str] = {}
 
+    def __getstate__(self):
+        # The native search handle (_native_csr) is a Rust object and must
+        # never reach the on-disk graph pickle; it is rebuilt on demand.
+        state = self.__dict__.copy()
+        state.pop("_native_csr", None)
+        return state
+
     def add_node(self, node_id: str, lat: float, lon: float) -> None:
+        self.__dict__.pop("_native_csr", None)
         self.adjacency.setdefault(node_id, [])
         self._undirected_neighbors.setdefault(node_id, set())
         self.coords.setdefault(node_id, (lat, lon))
@@ -863,6 +872,7 @@ class Graph:
         shape_dropped_m: float = 0.0,
         name: str | None = None,
     ) -> None:
+        self.__dict__.pop("_native_csr", None)
         if a == b:
             return
         # Names go first, before this edge joins adjacency: _register_name's
@@ -1200,6 +1210,71 @@ def _oneway_allowed(access_restrictions: list | None, mode: str) -> tuple[bool, 
     return forward_allowed, backward_allowed
 
 
+def _add_segments_native(
+    graph: Graph,
+    rows: list,
+    mode: str,
+    excluded_classes: set[str],
+    respects_oneway: bool,
+    bake_time: bool,
+) -> None:
+    """build_graph's segment loop, run by placeroot_native (shapeless graphs only).
+
+    Python keeps the per-row decisions that read the mode config (class
+    exclusion, one-way access, drive speed, primary name). The extension does
+    the WKT parse, haversine, connector interpolation and node/edge emission,
+    returning the add_node / add_edge calls in the order the Python loop makes
+    them. Replaying those calls leaves the Graph identical to the pure-Python
+    build: add_edge only needs its endpoints to exist, so emitting every node
+    before the edges gives the same adjacency, name and coordinate state.
+
+    One difference, limited to malformed input: _oneway_allowed and
+    _drive_edge_speed_m_s run before the WKT parse here, so a row whose WKT is
+    unparseable *and* whose access_restrictions are malformed enough to raise
+    would raise here, where the Python loop skipped it. Overture data does not
+    produce such rows.
+    """
+    prepared: list[tuple] = []
+    names: list[str | None] = []
+    for _id, cls, connectors, speed_limits, access_restrictions, segment_names, wkt in rows:
+        if cls is not None and cls in excluded_classes:
+            continue
+        if wkt is None:
+            continue
+        forward_allowed, backward_allowed = (
+            _oneway_allowed(access_restrictions, mode) if respects_oneway else (True, True)
+        )
+        # 1.0 for untimed graphs: length / 1.0 is bit-identical to the plain length.
+        speed = _drive_edge_speed_m_s(cls, speed_limits) if bake_time else 1.0
+        prepared.append((wkt, connectors, forward_allowed, backward_allowed, speed))
+        names.append(segment_names.get("primary") if segment_names else None)
+
+    (
+        node_ids,
+        lats,
+        lons,
+        edge_a,
+        edge_b,
+        weights,
+        lengths,
+        directed,
+        row_ids,
+    ) = native.build_graph_arrays(prepared, EARTH_RADIUS_M)
+    for node_id, lat, lon in zip(node_ids, lats, lons):
+        graph.add_node(node_id, lat, lon)
+    for a, b, weight, length_m, is_directed, row in zip(
+        edge_a, edge_b, weights, lengths, directed, row_ids
+    ):
+        graph.add_edge(
+            node_ids[a],
+            node_ids[b],
+            weight,
+            length_m,
+            directed=is_directed,
+            name=names[row] if row >= 0 else None,
+        )
+
+
 def build_graph(
     lat: float,
     lon: float,
@@ -1377,6 +1452,9 @@ def build_graph(
     graph.weight_is_time = bake_time
     graph.truncated = truncated
     respects_oneway = config["respects_oneway"]
+    if native.AVAILABLE and not want_shapes:
+        _add_segments_native(graph, rows, mode, excluded_classes, respects_oneway, bake_time)
+        return graph
     for _id, cls, connectors, speed_limits, access_restrictions, names, wkt in rows:
         if cls is not None and cls in excluded_classes:
             continue
@@ -2853,6 +2931,101 @@ def _midpoint(
     return lat_mid, lon_mid
 
 
+_NATIVE_UNAVAILABLE = object()
+
+# Searches a graph must serve before placeroot_native takes over its searches.
+# Building the native CSR for a city-sized component costs about as much as one
+# long Python search, so a graph asked once (a single route()) stays in Python,
+# while a cached graph that serves repeated searches pays the build once.
+NATIVE_MIN_SEARCHES = 2
+
+
+def _native_state_for(graph: Graph) -> dict:
+    """Per-graph state for placeroot_native's search: component labels and CSR parts.
+
+    A search can never leave its weak component (connected_components follows
+    edges both ways), so one CSR per component is exact, and a leg into an
+    unreachable island costs nothing. The labels come from the memoized
+    connected_components(), which reads only the undirected neighbour sets, so
+    building this state does not touch the adjacency lists of unrelated
+    components. Cleared by add_node / add_edge; never pickled (Graph.__getstate__).
+    """
+    state = graph.__dict__.get("_native_csr")
+    if state is None:
+        components = graph.connected_components()
+        component_of: dict[str, int] = {}
+        for number, members in enumerate(components):
+            for node in members:
+                component_of[node] = number
+        state = {"component_of": component_of, "members": components, "parts": {}}
+        graph._native_csr = state
+    return state
+
+
+def _native_part(graph: Graph, state: dict, number: int):
+    """(nodes, index, csr) for weak component `number`, or None when it cannot be mirrored."""
+    if number not in state["parts"]:
+        state["parts"][number] = _build_native_part(graph, state["members"][number])
+    return state["parts"][number]
+
+
+def _build_native_part(graph: Graph, members_set: set[str]):
+    """CSR over one weak component. nodes is sorted, so integer indices order exactly as
+    the node-id strings do and the native heap breaks ties as the Python heap does.
+
+    None (run the Python search instead) when an edge leads outside the component's
+    adjacency, which only a malformed graph can produce: Python would fail with a
+    KeyError there only if the search actually reached that node.
+    """
+    members = sorted(members_set)
+    index = {node: i for i, node in enumerate(members)}
+    indptr = [0]
+    indices: list[int] = []
+    weights: list[float] = []
+    lengths: list[float] = []
+    for node in members:
+        if node not in graph.adjacency:
+            return None
+        for neighbor, weight, length_m in graph.adjacency[node]:
+            position = index.get(neighbor)
+            if position is None:
+                return None
+            indices.append(position)
+            weights.append(weight)
+            lengths.append(length_m)
+        indptr.append(len(indices))
+    return members, index, native.csr(indptr, indices, weights, lengths)
+
+
+def _native_dijkstra(graph: Graph, source: str, target: str, speed_m_s: float, max_cost: float):
+    """_dijkstra_path_to_target's answer from placeroot_native, or _NATIVE_UNAVAILABLE.
+
+    Returns the same tuple (or None) the Python search returns. Nodes outside
+    the graph and graphs that cannot be mirrored fall back to Python.
+    """
+    searches = graph.__dict__.get("_native_searches", 0) + 1
+    graph._native_searches = searches
+    if searches < NATIVE_MIN_SEARCHES:
+        return _NATIVE_UNAVAILABLE
+    state = _native_state_for(graph)
+    component_of = state["component_of"]
+    source_part = component_of.get(source)
+    target_part = component_of.get(target)
+    if source_part is None or target_part is None:
+        return _NATIVE_UNAVAILABLE
+    if source_part != target_part:
+        return None
+    part = _native_part(graph, state, source_part)
+    if part is None:
+        return _NATIVE_UNAVAILABLE
+    nodes, index, csr = part
+    hit = csr.dijkstra(index[source], index[target], speed_m_s, max_cost)
+    if hit is None:
+        return None
+    elapsed, distance_m, path_idx, path_dist = hit
+    return elapsed, distance_m, [(nodes[i], d) for i, d in zip(path_idx, path_dist)]
+
+
 def _dijkstra_path_to_target(
     graph: Graph, source: str, target: str, speed_m_s: float, max_cost: float = math.inf
 ) -> tuple[float, float, list[tuple[str, float]]] | None:
@@ -2889,6 +3062,10 @@ def _dijkstra_path_to_target(
     """
     if source == target:
         return 0.0, 0.0, [(source, 0.0)]
+    if native.AVAILABLE:
+        routed = _native_dijkstra(graph, source, target, speed_m_s, max_cost)
+        if routed is not _NATIVE_UNAVAILABLE:
+            return routed
     time_to: dict[str, float] = {source: 0.0}
     dist_to: dict[str, float] = {source: 0.0}
     prev: dict[str, str] = {}

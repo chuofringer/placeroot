@@ -1,0 +1,65 @@
+name: Native accelerator
+
+# Builds the optional placeroot_native extension (native/) and checks that it
+# agrees with the pure-Python routing core. The default CI (ci.yml) never builds
+# it; placeroot is pure Python and this job is the only build check.
+# Wheels are not published yet; see docs/REFERENCE.md.
+
+on:
+  pull_request:
+    paths:
+      - "native/**"
+      - "src/placeroot/routing.py"
+      - "src/placeroot/native.py"
+      - ".github/workflows/native.yml"
+  workflow_dispatch:
+
+# Least privilege: nothing in this job writes to the repo.
+permissions:
+  contents: read
+
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f  # dtolnay/rust-toolchain HEAD, 2026-10
+        with:
+          toolchain: stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --python 3.12
+
+      - name: Install maturin
+        run: uv pip install maturin
+
+      - name: Build placeroot_native (release)
+        # --no-sync: a plain `uv run` re-syncs .venv to the lockfile, which
+        # removes maturin (installed ad hoc above) and, later, the built
+        # placeroot_native module.
+        run: uv run --no-sync maturin develop --release -m native/Cargo.toml
+
+      - name: Equivalence tests with the extension present
+        run: uv run --no-sync pytest tests/test_native_routing.py -q -p no:cacheprovider -rs
+
+      - name: Timing, Python vs native (200k segments, 50 searches)
+        run: uv run --no-sync python native/bench_routing.py --segments 200000 --queries 50 | tee native-timing.txt
+
+      - name: Upload timing
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: native-timing
+          path: native-timing.txt
+          if-no-files-found: warn

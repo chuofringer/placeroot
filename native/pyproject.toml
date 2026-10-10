@@ -1,0 +1,18 @@
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[project]
+name = "placeroot-native"
+version = "0.1.0"
+description = "Optional compiled routing kernels for placeroot (street-graph build and Dijkstra)."
+requires-python = ">=3.11"
+license = "MIT"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[tool.maturin]
+module-name = "placeroot_native"
