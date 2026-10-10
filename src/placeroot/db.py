@@ -183,18 +183,17 @@ def _configure(con: duckdb.DuckDBPyConnection) -> duckdb.DuckDBPyConnection:
     else:
         con.execute("SET s3_access_key_id='';")  # public bucket: anonymous access
         con.execute("SET s3_secret_access_key='';")
-    # Cache parquet footers/metadata across queries on this instance (issue
-    # #31): a repeat query against a file this process has already scanned
-    # skips the cold footer read (~5s per theme on a warm link, far more
-    # cold). Combined with overture.warm_metadata's startup pre-warm, that
-    # cost is often already paid before a real query arrives. Note this is
-    # `parquet_metadata_cache` (default false), NOT `enable_object_cache`:
-    # in DuckDB 1.5 the latter is documented by duckdb_settings() as a
-    # "[PLACEHOLDER] Legacy setting - does nothing". The external file cache
-    # (enable_external_file_cache, default true) separately keeps read
-    # ranges of remote files in memory; its default validation mode stays
-    # on, since locally materialized tiles (cache.py) are rewritten in place.
-    con.execute("SET parquet_metadata_cache=true;")
+    # No parquet footer cache. `enable_object_cache` (the setting issue #31
+    # reached for) is a "[PLACEHOLDER] Legacy setting - does nothing" in
+    # DuckDB 1.5 per duckdb_settings(), and its replacement
+    # `parquet_metadata_cache` is keyed by path: this codebase rewrites
+    # parquet files in place at a fixed path (cache.py tiles, the geocode
+    # alt-name table, division polygons), and a rebuild inside one mtime
+    # tick then serves the old footer against the new bytes
+    # ("TProtocolException: Invalid data" — seen in CI the one time it was
+    # enabled). The external file cache (enable_external_file_cache, default
+    # true) keeps read ranges of remote files with validation on, which is
+    # the safe form of the same win for the immutable upstream release files.
     # Memory and spill location. The thread count below is high, so give
     # operators a knob for DuckDB's memory ceiling (default: DuckDB's own,
     # ~80% of RAM) and keep spill files under the placeroot cache dir rather

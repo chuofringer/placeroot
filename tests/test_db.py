@@ -138,13 +138,15 @@ def test_no_extension_directory_env_leaves_duckdbs_default(monkeypatch):
     assert not any("extension_directory" in s for s in con.statements)
 
 
-def test_configure_uses_parquet_metadata_cache_not_the_legacy_object_cache(monkeypatch):
-    """DuckDB 1.5 describes enable_object_cache as a do-nothing placeholder;
-    the footer cache the comments want is parquet_metadata_cache."""
+def test_configure_sets_no_parquet_footer_cache(monkeypatch):
+    """enable_object_cache is a do-nothing placeholder in DuckDB 1.5, and
+    parquet_metadata_cache is path-keyed, which is unsafe for the files this
+    codebase rebuilds in place (tiles, the alt-name table, division
+    polygons): neither may be set."""
     monkeypatch.delenv("PLACEROOT_DUCKDB_EXTENSION_DIR", raising=False)
     con = _FakeConn(installed=True)
     db._configure(con)
-    assert "SET parquet_metadata_cache=true;" in con.statements
+    assert not any("parquet_metadata_cache" in s for s in con.statements)
     assert not any("enable_object_cache" in s for s in con.statements)
 
 
