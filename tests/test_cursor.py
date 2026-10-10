@@ -267,3 +267,67 @@ def test_find_near_end_to_end_continuation():
     second_ids = {r["id"] for r in second["results"]}
     assert len(second_ids) == 5
     assert first_ids.isdisjoint(second_ids)
+
+
+# --- a cursor must always move (limit=0 / empty-page regression) ------------
+
+
+def test_attach_cursor_refuses_a_cursor_whose_offset_would_not_advance():
+    """A page that delivered no rows must not hand back a cursor: it would
+    point at the same page again, and a caller following cursors until they
+    stop would never stop. Truncated stays true — the answer is still
+    incomplete — but there is no 'next page' to offer."""
+    params = {"lat": 1.0}
+    out = cursor_mod.attach_cursor(
+        {"results": [], "truncated": True}, "results", params, "r", 7, has_more=True
+    )
+    assert out["truncated"] is True
+    assert "cursor" not in out
+
+    # The normal case still advances by exactly the rows delivered.
+    out = cursor_mod.attach_cursor(
+        {"results": [{"id": "a"}, {"id": "b"}]}, "results", params, "r", 7, has_more=True
+    )
+    assert cursor_mod.decode_cursor(out["cursor"])["o"] == 9
+
+
+def test_find_places_limit_zero_is_clamped_to_one_and_the_cursor_advances(monkeypatch):
+    """Regression: limit=0 used to clamp to an effective limit of 0, fetch
+    its one lookahead row, report has_more, and issue a cursor at offset
+    +0 — the same empty page forever. A fake query layer (offline-safe)
+    stands in for the fixture scan; it serves a stable ranked pool by
+    offset/limit exactly as overture.find_places does."""
+    pool = [
+        {
+            "id": f"p{i}", "name": f"Cafe {i}", "category": _CATEGORY,
+            "basic_category": _CATEGORY, "operating_status": "open",
+            "confidence": 0.9, "lat": CENTER_LAT, "lon": CENTER_LON, "distance_m": i,
+        }
+        for i in range(5)
+    ]
+    seen_limits: list[int] = []
+
+    def fake_find_places(lat, lon, radius_m, category, name, min_confidence,
+                         operating_status, brand, has_website, has_phone, limit,
+                         offset=0, **kwargs):
+        seen_limits.append(limit)
+        return pool[offset:offset + limit]
+
+    monkeypatch.setattr(overture, "find_places", fake_find_places)
+
+    first = server.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000, category=_CATEGORY, limit=0
+    )
+    assert "error" not in first
+    assert seen_limits == [2]  # effective limit 1, plus the lookahead row
+    assert [r["id"] for r in first["results"]] == ["p0"]
+    assert first["truncated"] is True
+    assert cursor_mod.decode_cursor(first["cursor"])["o"] == 1
+
+    second = server.find_places(
+        CENTER_LAT, CENTER_LON, radius_m=1000, category=_CATEGORY, limit=0,
+        cursor=first["cursor"],
+    )
+    assert "error" not in second
+    assert [r["id"] for r in second["results"]] == ["p1"]
+    assert cursor_mod.decode_cursor(second["cursor"])["o"] == 2

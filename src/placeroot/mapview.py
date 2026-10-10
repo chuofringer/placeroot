@@ -1783,7 +1783,15 @@ def write_artifact(
 
     directory = out_dir if out_dir is not None else artifact_dir()
     directory.mkdir(parents=True, exist_ok=True)
-    filename = f"map_{int(time.time() * 1000)}_{_slug(title)}.html"
+    # Millisecond timestamp + title slug is not unique: two renders of the
+    # same title in the same millisecond (a batch, two agents) would name
+    # the same file, and the second write would silently replace the
+    # first — contradicting destructive_hint=False, which promises this
+    # tool only ever adds. A short random suffix makes a collision a
+    # practical impossibility; the response shape (path, ...) is unchanged.
+    filename = (
+        f"map_{int(time.time() * 1000)}_{_slug(title)}_{secrets.token_hex(3)}.html"
+    )
     path = directory / filename
     path.write_bytes(encoded)
 

@@ -48,9 +48,20 @@ def fit_rows(
     dropped rows; stripping optional fields (when even one row overflows the
     budget) also sets truncated but isn't counted as an omission.
     """
-    kept = list(rows)
-    while len(kept) > 1 and estimate_tokens(kept) > budget_tokens:
-        kept.pop()
+    # Size each row once and shrink the list arithmetically, instead of
+    # re-serialising the whole shrinking list per dropped row (O(n^2) in
+    # JSON bytes). json.dumps of a list is "[" + ", ".join(rows) + "]", so
+    # its length is exactly 2 + sum(row lengths) + 2 * (n - 1) for n >= 1,
+    # and dropping the last row removes that row's bytes plus one ", ".
+    # This keeps estimate_tokens' chars/4 arithmetic byte-for-byte: the
+    # kept prefix is the same one the pop loop produced.
+    chars = [len(json.dumps(row, default=str)) for row in rows]
+    n = len(rows)
+    total = 2 + sum(chars) + 2 * max(n - 1, 0)
+    while n > 1 and total // CHARS_PER_TOKEN > budget_tokens:
+        n -= 1
+        total -= chars[n] + 2
+    kept = list(rows[:n])
     omitted = len(rows) - len(kept)
 
     stripped = False

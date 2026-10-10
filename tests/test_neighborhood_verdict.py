@@ -149,6 +149,27 @@ def test_no_car_wins_over_bare_car_substring():
     assert verdict.parse_context("no car")["mobility"] == "walk"
 
 
+@pytest.mark.parametrize("phrase", [
+    "I don't have a car",
+    "we do not have a car",
+    "dont have a car, two kids",
+    "car-free household",
+    "no vehicle, we walk",
+    "I don't own a car",
+])
+def test_car_ownership_negations_read_as_walk(phrase):
+    """Regression: 'don't have a car' contains 'car', and only 'no car' /
+    'without a car' were negations — so it was parsed as drive."""
+    parsed = verdict.parse_context(phrase)
+    assert parsed["mobility"] == "walk", phrase
+    assert parsed["mobility_source"] == "context"
+
+
+def test_having_a_car_still_reads_as_drive():
+    assert verdict.parse_context("we have a car")["mobility"] == "drive"
+    assert verdict.parse_context("I drive to work")["mobility"] == "drive"
+
+
 # --- compose / score -------------------------------------------------------
 
 
