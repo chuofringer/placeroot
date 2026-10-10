@@ -85,8 +85,8 @@ def _query_divisions_from_local(
         LIMIT {_pkg.DIVISION_OVERFETCH}
     """
     try:
-        with _pkg.overture._conn_lock:
-            rows = _pkg.overture.conn().execute(sql, params).fetchall()
+        with _pkg.overture.read_conn() as rc:
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise _pkg.overture.UpstreamUnavailable(str(e)) from e
     result = []
@@ -155,9 +155,9 @@ def _query_divisions_from_upstream(
         # has no bbox to prune by. That is exactly why the callers gate it.
         with (
             trace.scan("divisions name scan (upstream)", bounded=False, source=glob),
-            _pkg.overture._conn_lock,
+            _pkg.overture.read_conn() as rc,
         ):
-            rows = _pkg.overture.conn().execute(sql, params).fetchall()
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise _pkg.overture.UpstreamUnavailable(str(e)) from e
     result = []
@@ -249,8 +249,8 @@ def _query_alt_names(
         LIMIT {_pkg.DIVISION_OVERFETCH}
     """
     try:
-        with _pkg.overture._conn_lock:
-            rows = _pkg.overture.conn().execute(sql, params).fetchall()
+        with _pkg.overture.read_conn() as rc:
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise _pkg.overture.UpstreamUnavailable(str(e)) from e
     result = []
@@ -509,8 +509,8 @@ def _query_divisions_fuzzy(
         LIMIT {_pkg.DIVISION_OVERFETCH}
     """
     try:
-        with _pkg.overture._conn_lock:
-            rows = _pkg.overture.conn().execute(sql, params).fetchall()
+        with _pkg.overture.read_conn() as rc:
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise _pkg.overture.UpstreamUnavailable(str(e)) from e
     result = []

@@ -36,12 +36,8 @@ def _resolve_region_from_table(candidate: str, local_table: str) -> tuple[str, s
         LIMIT 1
     """
     try:
-        with _pkg.overture._conn_lock:
-            row = (
-                _pkg.overture.conn()
-                .execute(sql, {"name": _pkg.overture._like_escape(candidate)})
-                .fetchone()
-            )
+        with _pkg.overture.read_conn() as rc:
+            row = rc.execute(sql, {"name": _pkg.overture._like_escape(candidate)}).fetchone()
     except duckdb.Error:
         return None
     if row is None:
@@ -128,12 +124,8 @@ def _division_named_exactly_cached(folded_name: str, local_table: str) -> bool:
         WHERE name ILIKE $exact ESCAPE '\\'
         LIMIT 1
     """
-    with _pkg.overture._conn_lock:
-        row = (
-            _pkg.overture.conn()
-            .execute(sql, {"exact": _pkg.overture._like_escape(folded_name)})
-            .fetchone()
-        )
+    with _pkg.overture.read_conn() as rc:
+        row = rc.execute(sql, {"exact": _pkg.overture._like_escape(folded_name)}).fetchone()
     return row is not None
 
 
@@ -227,12 +219,8 @@ def _resolve_country_from_table(
         LIMIT 1
     """
     try:
-        with _pkg.overture._conn_lock:
-            row = (
-                _pkg.overture.conn()
-                .execute(sql, {"name": _pkg.overture._like_escape(candidate)})
-                .fetchone()
-            )
+        with _pkg.overture.read_conn() as rc:
+            row = rc.execute(sql, {"name": _pkg.overture._like_escape(candidate)}).fetchone()
     except duckdb.Error:
         row = None
     if row is not None:
@@ -250,8 +238,8 @@ def _resolve_country_from_table(
         LIMIT 1
     """
     try:
-        with _pkg.overture._conn_lock:
-            row = _pkg.overture.conn().execute(sql2, {"folded": folded}).fetchone()
+        with _pkg.overture.read_conn() as rc:
+            row = rc.execute(sql2, {"folded": folded}).fetchone()
     except duckdb.Error:
         return None
     return (row[0], row[1]) if row is not None else None

@@ -324,8 +324,8 @@ def _division_area_bbox(division_id: str) -> tuple[float, float, float, float] |
         WHERE division_id = $id
     """
     try:
-        with _pkg.overture._conn_lock:
-            row = _pkg.overture.conn().execute(sql, {"id": division_id}).fetchone()
+        with _pkg.overture.read_conn() as rc:
+            row = rc.execute(sql, {"id": division_id}).fetchone()
     except duckdb.Error as e:
         _pkg.logger.warning(
             "division_area extent lookup failed for %s (not cached, so the next call retries): %s",
@@ -374,12 +374,8 @@ def _warm_division_area_bboxes(division_ids: list[str]) -> None:
         GROUP BY division_id
     """
     try:
-        with _pkg.overture._conn_lock:
-            rows = (
-                _pkg.overture.conn()
-                .execute(sql, {str(i): v for i, v in enumerate(wanted, start=1)})
-                .fetchall()
-            )
+        with _pkg.overture.read_conn() as rc:
+            rows = rc.execute(sql, {str(i): v for i, v in enumerate(wanted, start=1)}).fetchall()
     except duckdb.Error as e:
         _pkg.logger.warning("batched division_area extent lookup failed: %s", e)
         return
@@ -538,8 +534,8 @@ def _scan_addresses_in_bbox(
         LIMIT {limit}
     """
     try:
-        with _pkg.overture._conn_lock:
-            rows = _pkg.overture.conn().execute(sql, params).fetchall()
+        with _pkg.overture.read_conn() as rc:
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise _pkg.overture.UpstreamUnavailable(str(e)) from e
     if not rows:
@@ -660,8 +656,8 @@ def _scan_street_neighbors_in_bbox(
                  distance_m
     """
     try:
-        with _pkg.overture._conn_lock:
-            rows = _pkg.overture.conn().execute(sql, params).fetchall()
+        with _pkg.overture.read_conn() as rc:
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise _pkg.overture.UpstreamUnavailable(str(e)) from e
     return rows

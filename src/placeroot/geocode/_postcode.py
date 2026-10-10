@@ -205,8 +205,8 @@ def _query_postcode_countries(variants: list[str]) -> list[tuple]:
         LIMIT {_POSTCODE_MAX_COUNTRIES}
     """
     try:
-        with _pkg.overture._conn_lock:
-            rows = _pkg.overture.conn().execute(sql, params).fetchall()
+        with _pkg.overture.read_conn() as rc:
+            rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise _pkg.overture.UpstreamUnavailable(str(e)) from e
     if len(_pkg._POSTCODE_AGGREGATE_CACHE) >= _POSTCODE_AGGREGATE_CACHE_MAX:
@@ -251,8 +251,8 @@ def _covering_division_from_local(
         LIMIT 1
     """
     try:
-        with _pkg.overture._conn_lock:
-            row = _pkg.overture.conn().execute(sql, params).fetchone()
+        with _pkg.overture.read_conn() as rc:
+            row = rc.execute(sql, params).fetchone()
     except duckdb.Error as e:
         _pkg.logger.warning("local divisions lookup for postcode locality failed: %s", e)
         return None
