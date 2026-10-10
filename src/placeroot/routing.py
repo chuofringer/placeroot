@@ -2077,12 +2077,129 @@ def _store_graph_in_memory(
     extraction_bbox: tuple[float, float, float, float],
     graph: Graph,
 ) -> None:
+    """Park `graph` in the LRU unless an entry already subsumes it.
+
+    The slot key is (key_prefix, extraction bbox), not the 0.05° tile the
+    graph was centred in: keying on the tile let a small graph built in the
+    same tile *replace* a larger cached one — autowarm's 5 km walk graph
+    evicted by a 400 m foreground build that raced it — and the next route
+    rebuilt the metro. Subsumption now runs both ways at insert time, with
+    the same shapes rule the lookup uses (a shape-bearing graph satisfies
+    any request, a shapeless one only want_shapes=False):
+
+    - an existing entry whose bbox contains the new one, and which has
+      shapes if the new one does, already answers every query the new
+      graph could; it is bumped to most-recent and the new graph dropped;
+    - existing entries the new bbox contains, which the new graph can
+      stand in for shapes-wise, are evicted so the area is not held twice.
+    """
     with _graph_cache_lock:
-        key = (*key_prefix, _graph_cache_tile(lat, lon))
+        key = (*key_prefix, extraction_bbox)
+        subsumed: list[tuple] = []
+        for existing_key, entry in _graph_cache.items():
+            if existing_key[: len(key_prefix)] != key_prefix:
+                continue
+            if (
+                _bbox_contains(entry.bbox, extraction_bbox)
+                and (entry.graph.has_shapes or not graph.has_shapes)
+            ):
+                _graph_cache.move_to_end(existing_key)
+                return
+            if (
+                _bbox_contains(extraction_bbox, entry.bbox)
+                and (graph.has_shapes or not entry.graph.has_shapes)
+            ):
+                subsumed.append(existing_key)
+        for existing_key in subsumed:
+            _graph_cache.pop(existing_key, None)
         _graph_cache[key] = _GraphCacheEntry(extraction_bbox, graph)
         _graph_cache.move_to_end(key)
         while len(_graph_cache) > GRAPH_CACHE_MAXSIZE:
             _graph_cache.popitem(last=False)
+
+
+def _memory_lookup_locked(
+    key_prefix: tuple,
+    needed_bbox: tuple[float, float, float, float],
+    want_shapes: bool,
+    touch: bool,
+) -> Graph | None:
+    """The LRU scan behind every in-memory lookup. Caller holds _graph_cache_lock."""
+    for key, entry in _graph_cache.items():
+        if key[: len(key_prefix)] != key_prefix:
+            continue
+        if want_shapes and not entry.graph.has_shapes:
+            continue
+        if _bbox_contains(entry.bbox, needed_bbox):
+            if touch:
+                _graph_cache.move_to_end(key)
+            return entry.graph
+    return None
+
+
+class _InflightBuild:
+    """One graph build in progress: the extraction bbox it will cover, whether
+    it carries shapes, and the event its waiters block on."""
+
+    __slots__ = ("bbox", "want_shapes", "done")
+
+    def __init__(self, bbox: tuple[float, float, float, float], want_shapes: bool):
+        self.bbox = bbox
+        self.want_shapes = want_shapes
+        self.done = threading.Event()
+
+
+# Single-flight registry: (*key_prefix, extraction_bbox, want_shapes) -> build.
+# Without it, N concurrent cold requests for one area each ran their own
+# S3 extraction + Python build and then queued on db.conn_lock behind each
+# other; the last one to finish was the one whose graph ended up cached.
+_inflight_builds: dict[tuple, _InflightBuild] = {}
+_inflight_lock = threading.Lock()
+
+
+def _find_inflight_build_locked(
+    key_prefix: tuple,
+    needed_bbox: tuple[float, float, float, float],
+    want_shapes: bool,
+) -> _InflightBuild | None:
+    """A build already running whose result would satisfy this lookup
+    (same subsumption rule as the LRU). Caller holds _inflight_lock."""
+    for key, build in _inflight_builds.items():
+        if key[: len(key_prefix)] != key_prefix:
+            continue
+        if want_shapes and not build.want_shapes:
+            continue
+        if _bbox_contains(build.bbox, needed_bbox):
+            return build
+    return None
+
+
+def _bbox_overlaps(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+) -> bool:
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+
+
+def graph_build_in_flight(lat: float, lon: float, radius_m: float, mode: str) -> bool:
+    """True if some thread is currently building a `mode` graph whose
+    extraction bbox overlaps the one a build at (lat, lon, radius_m) would
+    cover — any release, speed baking or avoid set. autowarm's yield check:
+    a background metro warm must not start a second extraction, and a
+    second fight for conn_lock, on top of the foreground build a user is
+    waiting on. Cheap: a scan of the (tiny) in-flight registry, no I/O."""
+    if mode not in MODE_CONFIG:
+        return False
+    if not (_is_finite_number(lat) and _is_finite_number(lon) and _is_finite_number(radius_m)):
+        return False
+    bbox = _bbox_around(lat, lon, max(0.0, float(radius_m)))
+    with _inflight_lock:
+        for key, build in _inflight_builds.items():
+            # key_prefix layout: (release, upstream, mode, speed_tag, avoid_tag).
+            if key[2] != mode:
+                continue
+            if _bbox_overlaps(build.bbox, bbox):
+                return True
+    return False
 
 
 def _memory_graph_for(
@@ -2111,16 +2228,7 @@ def _memory_graph_for(
     )
     needed_bbox = _bbox_around(lat, lon, extraction_radius_m)
     with _graph_cache_lock:
-        for key, entry in _graph_cache.items():
-            if key[: len(key_prefix)] != key_prefix:
-                continue
-            if want_shapes and not entry.graph.has_shapes:
-                continue
-            if _bbox_contains(entry.bbox, needed_bbox):
-                if touch:
-                    _graph_cache.move_to_end(key)
-                return entry.graph
-    return None
+        return _memory_lookup_locked(key_prefix, needed_bbox, want_shapes, touch)
 
 
 def graph_is_cached(
@@ -2351,46 +2459,76 @@ def _get_or_build_graph(
     needed_bbox = _bbox_around(lat, lon, extraction_radius_m)
 
     with _graph_cache_lock:
-        for key, entry in _graph_cache.items():
-            if key[: len(key_prefix)] != key_prefix:
-                continue
-            if want_shapes and not entry.graph.has_shapes:
-                continue
-            if _bbox_contains(entry.bbox, needed_bbox):
-                _graph_cache.move_to_end(key)
-                return entry.graph
-
-    loaded = _load_graph_from_disk(key_prefix, needed_bbox, want_shapes, lat, lon)
-    if loaded is not None:
-        extraction_bbox, graph = loaded
-        _store_graph_in_memory(key_prefix, lat, lon, extraction_bbox, graph)
+        graph = _memory_lookup_locked(key_prefix, needed_bbox, want_shapes, touch=True)
+    if graph is not None:
         return graph
 
+    # The memory miss is checked before the cap so a cached wider graph
+    # (optimize_route's STOPS_MAX_EXTRACTION_RADIUS_M) still serves a query
+    # over the mode cap, exactly as before. No persisted file can cover a
+    # bbox wider than the cap it was built under, so raising ahead of the
+    # disk lookup loses nothing.
     cap_m = radius_cap_m if radius_cap_m is not None else MODE_CONFIG[mode]["max_radius_m"]
     if extraction_radius_m > cap_m:
         raise RadiusTooLarge(extraction_radius_m, cap_m)
     padded_radius_m = min(extraction_radius_m * GRAPH_CACHE_MARGIN, cap_m)
-    # Only forward an explicit cap: the default path keeps build_graph's own
-    # MODE_CONFIG lookup.
-    extra = {} if radius_cap_m is None else {"radius_cap_m": radius_cap_m}
-    graph = build_graph(
-        lat,
-        lon,
-        padded_radius_m,
-        mode=mode,
-        speed_m_s=speed_m_s,
-        want_shapes=want_shapes,
-        avoid=avoid,
-        **extra,
-    )
     extraction_bbox = _bbox_around(lat, lon, padded_radius_m)
-    # Persist off the lock — pickle I/O must not hold conn_lock either
-    # (build_graph already released it). Memory insert is a short dict write.
-    _persist_graph_to_disk(
-        key_prefix, lat, lon, padded_radius_m, extraction_bbox, graph
-    )
-    _store_graph_in_memory(key_prefix, lat, lon, extraction_bbox, graph)
-    return graph
+
+    # Single-flight: one build per area at a time. A caller that finds a
+    # build already in flight whose extraction bbox covers its query waits
+    # for that build and then re-reads memory (the builder stores before it
+    # signals), instead of starting a second S3 extraction that would only
+    # queue on conn_lock behind the first. A build that failed leaves the
+    # waiter at a miss, and it then registers its own on the next pass —
+    # and raises in its own right if the area really is unbuildable.
+    while True:
+        with _inflight_lock:
+            other = _find_inflight_build_locked(key_prefix, needed_bbox, want_shapes)
+            if other is None:
+                mine = _InflightBuild(extraction_bbox, want_shapes)
+                inflight_key = (*key_prefix, extraction_bbox, want_shapes)
+                _inflight_builds[inflight_key] = mine
+                break
+        logger.debug("graph build for %s already in flight; waiting", key_prefix[2])
+        other.done.wait()
+        with _graph_cache_lock:
+            graph = _memory_lookup_locked(key_prefix, needed_bbox, want_shapes, touch=True)
+        if graph is not None:
+            return graph
+
+    try:
+        loaded = _load_graph_from_disk(key_prefix, needed_bbox, want_shapes, lat, lon)
+        if loaded is not None:
+            disk_bbox, graph = loaded
+            _store_graph_in_memory(key_prefix, lat, lon, disk_bbox, graph)
+            return graph
+
+        # Only forward an explicit cap: the default path keeps build_graph's
+        # own MODE_CONFIG lookup.
+        extra = {} if radius_cap_m is None else {"radius_cap_m": radius_cap_m}
+        graph = build_graph(
+            lat,
+            lon,
+            padded_radius_m,
+            mode=mode,
+            speed_m_s=speed_m_s,
+            want_shapes=want_shapes,
+            avoid=avoid,
+            **extra,
+        )
+        # Persist off the lock — pickle I/O must not hold conn_lock either
+        # (build_graph already released it). Memory insert is a short dict
+        # write, and it happens before the in-flight event fires (finally)
+        # so a waiter always finds the result.
+        _persist_graph_to_disk(
+            key_prefix, lat, lon, padded_radius_m, extraction_bbox, graph
+        )
+        _store_graph_in_memory(key_prefix, lat, lon, extraction_bbox, graph)
+        return graph
+    finally:
+        with _inflight_lock:
+            _inflight_builds.pop(inflight_key, None)
+        mine.done.set()
 
 
 def isochrone(
