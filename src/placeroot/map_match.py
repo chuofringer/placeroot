@@ -100,6 +100,14 @@ GRID_CELL_M = routing.SNAP_RADIUS_M
 # Outlier guard for match_trace's stitching — see the module docstring.
 STITCH_OUTLIER_RATIO_K = 3.0
 STITCH_OUTLIER_MIN_SLACK_M = 30.0
+# The stitch search is bounded by the outlier threshold itself (a leg the
+# guard would reject is never worth finding). Walk/cycle graphs weigh edges
+# in meters, so the bound is the threshold; a drive graph weighs them in
+# baked seconds, so the threshold is converted at this (deliberately
+# pessimistic) floor speed — no real edge is slower, so any leg the guard
+# would accept still fits under the bound, while an unreachable leg stops
+# exploring after a few threshold-seconds' worth of graph.
+STITCH_BOUND_FLOOR_SPEED_M_S = 1.0
 
 
 @dataclass
@@ -310,6 +318,26 @@ def _snap_one(
     )
 
 
+def _validated_latlon(index: int, point: Mapping[str, float]) -> tuple[float, float]:
+    """(lat, lon) of a trace point as finite floats inside the valid ranges,
+    or ValueError naming the offending point.
+
+    A NaN/inf or out-of-range coordinate would otherwise reach
+    routing._minimum_enclosing_center and the haversine math as a number,
+    producing a NaN bounding circle (never RadiusTooLarge) and a graph
+    extraction over whatever box that collapses to."""
+    try:
+        lat = float(point["lat"])
+        lon = float(point["lon"])
+    except (KeyError, TypeError, ValueError) as e:
+        raise ValueError(f"point {index}: lat/lon must be numbers") from e
+    if not (math.isfinite(lat) and math.isfinite(lon)):
+        raise ValueError(f"point {index}: lat/lon must be finite, got {lat!r}, {lon!r}")
+    if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+        raise ValueError(f"point {index}: lat/lon out of range, got {lat!r}, {lon!r}")
+    return lat, lon
+
+
 def _snap_trace_with_graph(
     points: list[Mapping[str, float]], mode: str, use_grid: bool = True
 ) -> tuple[routing.Graph | None, list[SnappedPoint]]:
@@ -319,7 +347,9 @@ def _snap_trace_with_graph(
     a test-only escape hatch to force the naive full-edge scan for
     equivalence comparisons — see tests/test_map_match_stitch.py).
 
-    Raises ValueError if len(points) exceeds MAX_TRACE_POINTS,
+    Raises ValueError if len(points) exceeds MAX_TRACE_POINTS or any
+    point's lat/lon is missing, non-numeric, non-finite or out of range
+    (see _validated_latlon),
     routing.UnsupportedMode for an unknown mode string, or
     routing.RadiusTooLarge when the trace's padded bounding circle exceeds
     the mode's extraction cap (MODE_CONFIG[mode]["max_radius_m"] — e.g. a
@@ -335,7 +365,7 @@ def _snap_trace_with_graph(
     if not points:
         return None, []
 
-    latlon = [(p["lat"], p["lon"]) for p in points]
+    latlon = [_validated_latlon(index, p) for index, p in enumerate(points)]
     center_lat, center_lon = routing._minimum_enclosing_center(latlon)
     enclosing_radius_m = max(
         (routing._haversine_m(center_lat, center_lon, lat, lon) for lat, lon in latlon),
@@ -447,13 +477,20 @@ def match_trace(points: list[Mapping[str, float]], mode: str = "walk") -> Matche
         straight_m = routing._haversine_m(
             anchor.snapped_lat, anchor.snapped_lon, candidate.snapped_lat, candidate.snapped_lon
         )
-        result = routing._dijkstra_path_to_target(
-            graph, _anchor_node(anchor), _anchor_node(candidate), 1.0
-        )
-        routed_m = result[1] if result is not None else math.inf
         threshold_m = max(
             STITCH_OUTLIER_RATIO_K * straight_m, straight_m + STITCH_OUTLIER_MIN_SLACK_M
         )
+        # Bounded search (see STITCH_BOUND_FLOOR_SPEED_M_S): a leg the
+        # outlier guard would reject is never found, and an unreachable leg
+        # (other side of a river, one-way maze) no longer settles the whole
+        # graph before being declared an outlier.
+        max_cost = (
+            threshold_m / STITCH_BOUND_FLOOR_SPEED_M_S if graph.weight_is_time else threshold_m
+        )
+        result = routing._dijkstra_path_to_target(
+            graph, _anchor_node(anchor), _anchor_node(candidate), 1.0, max_cost=max_cost
+        )
+        routed_m = result[1] if result is not None else math.inf
         if routed_m > threshold_m:
             unmatched_indices.append(candidate.index)
             continue

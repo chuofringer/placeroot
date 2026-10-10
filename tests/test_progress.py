@@ -8,13 +8,14 @@ the client asked for progress (progressToken).
 """
 
 import asyncio
+import json
 import threading
 import time
 
 import duckdb
 import pytest
 
-from placeroot import cache, overture, progress, release, server
+from placeroot import cache, overture, progress, release, server, trace
 
 from .conftest import CENTER_LAT, CENTER_LON
 
@@ -204,6 +205,108 @@ def test_middleware_ignores_non_tool_requests():
         return "ok"
 
     assert asyncio.run(server._progress_middleware(ctx, call_next)) == "ok"
+
+
+# --- what a middleware sees is the serialized wire result ------------------
+#
+# The SDK shapes the handler's CallToolResult for the wire *inside* the
+# middleware chain, so call_next returns {"content": [...],
+# "structuredContent": {...}, "isError": ...}. Anything a middleware wants
+# the agent to read has to land inside structuredContent (and the matching
+# text block), not on that envelope — a key written on the envelope was the
+# bug: progress/status/timing never reached a client.
+
+
+def _wire_result(payload: dict) -> dict:
+    return {
+        "content": [{"type": "text", "text": json.dumps(payload)}],
+        "structuredContent": dict(payload),
+        "isError": False,
+    }
+
+
+def test_progress_lands_inside_the_tool_answer_not_on_the_envelope():
+    ctx = _Ctx("tools/call", None)
+
+    async def call_next(c):
+        progress.report("scanning places", 1, 2)
+        return _wire_result({"results": []})
+
+    out = asyncio.run(server._progress_middleware(ctx, call_next))
+    assert "progress" not in out and "status" not in out  # not on the envelope
+    assert out["structuredContent"]["progress"] == ["scanning places"]
+    assert out["structuredContent"]["status"] == "scanning places"
+    # the text block is re-rendered from the amended answer, so a client
+    # reading either copy sees the same JSON
+    assert json.loads(out["content"][0]["text"]) == out["structuredContent"]
+
+
+def test_an_is_error_result_is_left_alone():
+    ctx = _Ctx("tools/call", None)
+    err = {"content": [{"type": "text", "text": "boom"}], "isError": True}
+
+    async def call_next(c):
+        progress.report("scanning places", 1, 2)
+        return dict(err)
+
+    assert asyncio.run(server._progress_middleware(ctx, call_next)) == err
+
+
+def test_trace_middleware_names_the_tool_and_resets_even_when_the_call_raises(
+    monkeypatch, caplog,
+):
+    monkeypatch.setenv("PLACEROOT_TRACE", "1")
+
+    class _ToolCtx(_Ctx):
+        params = {"name": "find_places", "arguments": {}}
+
+    async def failing(c):
+        with trace.phase("doomed"):
+            pass
+        raise RuntimeError("handler blew up")
+
+    with caplog.at_level("INFO", logger="placeroot.trace"):
+        with pytest.raises(RuntimeError):
+            asyncio.run(server._trace_middleware(_ToolCtx("tools/call", None), failing))
+    assert any("trace find_places " in r.getMessage() for r in caplog.records)
+    assert trace.enabled() is False  # reset ran in finally, despite the raise
+
+
+def test_slow_call_through_the_real_server_carries_timing(monkeypatch, caplog):
+    """End to end: a tools/call through the SDK's middleware chain, with the
+    slow threshold set so low that every call is slow, answers with
+    `timing` inside the tool payload — the thing the agent reads."""
+    try:
+        from mcp.client.client import Client
+    except ImportError:
+        pytest.skip("mcp.client not available in this SDK build")
+    import anyio
+
+    monkeypatch.setenv("PLACEROOT_TRACE_SLOW_S", "0.000001")
+    monkeypatch.setenv("PLACEROOT_TRACE", "1")
+    real = server._TOOL_FUNCS["data_version"]
+
+    def data_version() -> dict:
+        # A phase so the summary has something to show (offline, the real
+        # tool records none); the answer is the real one.
+        with trace.phase("probe"):
+            return real()
+
+    monkeypatch.setitem(server._TOOL_FUNCS, "data_version", data_version)
+    built = server.build_server()
+
+    async def call():
+        async with Client(built) as client:
+            return await client.call_tool("data_version", {})
+
+    with caplog.at_level("INFO", logger="placeroot.trace"):
+        result = anyio.run(call)
+    assert result.is_error is False
+    payload = json.loads(result.content[0].text)
+    assert "timing" in payload
+    assert payload["timing"]["phases"][0]["name"] == "probe"
+    assert result.structured_content == payload
+    assert any("trace data_version " in r.getMessage() for r in caplog.records)
 
 
 # --- honest ETAs (issue #314) ------------------------------------------------

@@ -75,9 +75,16 @@ WRITING_TOOLS = {
     },
 }
 
+# resolve_map_url is a pure read, but it follows a pasted Google short link
+# over HTTP — a destination outside the pinned dataset — so it discloses
+# that with openWorldHint while keeping the other read-only hints.
+OPEN_WORLD_TOOLS = {
+    "resolve_map_url": {**EXPECTED_HINTS, "open_world_hint": True},
+}
+
 
 def _expected_hints(name: str) -> dict:
-    return WRITING_TOOLS.get(name, EXPECTED_HINTS)
+    return WRITING_TOOLS.get(name) or OPEN_WORLD_TOOLS.get(name) or EXPECTED_HINTS
 
 
 def test_every_registered_tool_is_annotated():
@@ -140,7 +147,9 @@ def test_annotation_overrides_are_declared_for_real_tools():
     render_map included, so it carries the same "not read-only" claim from
     the meta registry (issue #210, asserted in tests/test_progressive.py).
     """
-    assert set(server._TOOL_ANNOTATIONS) == set(WRITING_TOOLS) | {"placeroot_call"}
+    assert set(server._TOOL_ANNOTATIONS) == (
+        set(WRITING_TOOLS) | set(OPEN_WORLD_TOOLS) | {"placeroot_call"}
+    )
     assert set(server._TOOL_ANNOTATIONS) <= set(server._TOOL_FUNCS) | set(
         server._META_TOOL_FUNCS
     )

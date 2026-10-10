@@ -1,16 +1,22 @@
 #!/usr/bin/env node
 // Node-first launcher for the PlaceRoot MCP server. The server itself is
-// Python, distributed on PyPI; this just spawns `uvx placeroot`, passing
-// through argv, stdio, and exit code, so `npx placeroot` behaves the same
-// as `uvx placeroot` (including flags like --http). No dependencies.
+// Python, distributed on PyPI; this just spawns `uvx placeroot==<version>`,
+// passing through argv, stdio, and exit code, so `npx placeroot` behaves the
+// same as `uvx placeroot` (including flags like --http). No dependencies.
+//
+// The PyPI version is pinned to this package's own version (the two are
+// published as a pair by the release workflow), so `npx placeroot@0.9.0`
+// runs placeroot 0.9.0 rather than whatever PyPI's latest happens to be.
 
 "use strict";
 
 const { spawn } = require("child_process");
+const { version } = require("./package.json");
 
 const args = process.argv.slice(2);
+const spec = `placeroot==${version}`;
 
-const child = spawn("uvx", ["placeroot", ...args], { stdio: "inherit" });
+const child = spawn("uvx", [spec, ...args], { stdio: "inherit" });
 
 child.on("error", (err) => {
   if (err.code === "ENOENT") {
@@ -29,7 +35,7 @@ child.on("error", (err) => {
     );
     process.exit(1);
   } else {
-    console.error(`PlaceRoot: failed to launch \`uvx placeroot\`: ${err.message}`);
+    console.error(`PlaceRoot: failed to launch \`uvx ${spec}\`: ${err.message}`);
     process.exit(1);
   }
 });

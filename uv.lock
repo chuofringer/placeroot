@@ -521,6 +521,7 @@ source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
     { name = "mcp", extra = ["cli"] },
+    { name = "pydantic" },
     { name = "tzfpy" },
 ]
 
@@ -537,6 +538,7 @@ dev = [
 requires-dist = [
     { name = "duckdb", specifier = ">=1.5.5" },
     { name = "mcp", extras = ["cli"], specifier = ">=2.0.0" },
+    { name = "pydantic", specifier = ">=2.11.0" },
     { name = "tzfpy", specifier = ">=1.3.3" },
 ]
 

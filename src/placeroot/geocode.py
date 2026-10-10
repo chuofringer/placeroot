@@ -444,11 +444,13 @@ import logging
 import math
 import os
 import re
+import tempfile
 import threading
 import time
 import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass
+from functools import lru_cache
 from importlib import resources
 from pathlib import Path
 
@@ -811,12 +813,41 @@ def _fold_alt_name_sql(expr: str) -> str:
     return sql
 
 
-def _match_tier(name: str, query: str) -> int:
-    """3 = exact, 2 = prefix, 1 = substring, 0 = no match (caller already filtered those out).
+_TIER_PUNCT_RE = re.compile(r"[^\w\s]+")
 
-    Diacritic-insensitive (#53): "Sao Paulo" and "São Paulo" compare equal.
+
+def _fold_for_tier(s: str) -> str:
+    """Comparison form for _match_tier: NFKD, combining marks dropped,
+    casefolded (so "Straße" and "STRASSE" agree, which lower() alone does
+    not), punctuation collapsed to spaces and whitespace squeezed (so
+    "Notre-Dame" and "notre dame" agree).
+
+    Distinct from _normalize_for_match on purpose: that fold is shared
+    with the SQL side (_fold_alt_name_sql must stay byte-identical to it)
+    and the #215 fuzzy threshold was calibrated against it; this one is
+    only ever compared Python-to-Python, so it can fold harder.
     """
-    n, q = _normalize_for_match(name), _normalize_for_match(query)
+    stripped = "".join(
+        c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c)
+    )
+    return " ".join(_TIER_PUNCT_RE.sub(" ", stripped.casefold()).split())
+
+
+def _match_tier(name: str, query: str) -> int:
+    """3 = exact, 2 = prefix, 1 = substring.
+
+    1 is the floor, not "0 = no match": every row a caller hands this was
+    already found by a substring search (or an alternate-name / variant
+    search, see _effective_tier), so a name that matches nothing at all
+    never reaches here, and the weakest tier is simply "related somehow".
+
+    Case-, diacritic- and punctuation-insensitive (#53): "Sao Paulo" and
+    "São Paulo" compare equal, as do "Notre-Dame"/"notre dame" and
+    "Straße"/"STRASSE" — see _fold_for_tier.
+    """
+    n, q = _fold_for_tier(name), _fold_for_tier(query)
+    if not q:
+        return 1
     if n == q:
         return 3
     if n.startswith(q):
@@ -1132,6 +1163,42 @@ def _local_divisions_table_path(active_release: str) -> Path:
     return cache.cache_dir() / active_release / _DIVISIONS_TABLE_SUBDIR / _DIVISIONS_TABLE_FILENAME
 
 
+def _unique_tmp_path(path: Path) -> Path:
+    """A fresh, uniquely named `.tmp` sibling of `path` for a COPY to write.
+
+    Never the same name twice in one directory (tempfile.mkstemp), so two
+    builds that overlap — a background build or stage-2 upgrade beside a
+    foreground #224 rebuild — write separate files and meet only at the
+    atomic os.replace, where the later one wins with identical contents.
+    The shared `table.parquet.tmp` name they used before meant one COPY
+    could overwrite the other's half-written file mid-stream.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    os.close(fd)
+    return Path(name)
+
+
+def _copy_and_publish(con: duckdb.DuckDBPyConnection, sql: str, tmp_path: Path, path: Path) -> None:
+    """Run the COPY in `sql` (which writes `tmp_path`) and publish it as
+    `path`; a failed COPY leaves no orphaned temp file behind."""
+    try:
+        con.execute(sql)
+        _publish_copied_parquet(con, tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _clear_table_derived_caches() -> None:
+    """Drop every in-process memo derived from a local table's contents:
+    called when a table is (re)published and from clear_resolve_session."""
+    _region_population_lookup_cached.cache_clear()
+    _division_named_exactly_cached.cache_clear()
+    with _anchor_memo_lock:
+        _anchor_memo.clear()
+
+
 def _publish_copied_parquet(con: duckdb.DuckDBPyConnection, tmp_path: Path, path: Path) -> None:
     """Close the COPY writer, publish `tmp_path` as `path`, drop stale cache.
 
@@ -1154,11 +1221,14 @@ def _publish_copied_parquet(con: duckdb.DuckDBPyConnection, tmp_path: Path, path
         os.fsync(fd)
     finally:
         os.close(fd)
-    tmp_path.replace(path)
+    os.replace(tmp_path, path)
     with overture._conn_lock:
         shared = overture.conn()
         shared.execute("SET enable_external_file_cache=false")
         shared.execute("SET enable_external_file_cache=true")
+    # The table at `path` just changed: anything memoized from its rows
+    # (region populations, exact-name probes, anchor derivations) is stale.
+    _clear_table_derived_caches()
 
 
 def _materialize_alt_names_table(path: Path, glob: str) -> None:
@@ -1190,8 +1260,7 @@ def _materialize_alt_names_table(path: Path, glob: str) -> None:
     Raises duckdb.Error if names.common isn't there or isn't a map — the
     caller treats that as "no alt table" and searches primary names only.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".parquet.tmp")
+    tmp_path = _unique_tmp_path(path)
     con = overture._new_connection()
     sql = f"""
         COPY (
@@ -1211,8 +1280,7 @@ def _materialize_alt_names_table(path: Path, glob: str) -> None:
             GROUP BY id, alt_name
         ) TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)
     """
-    con.execute(sql)
-    _publish_copied_parquet(con, tmp_path, path)
+    _copy_and_publish(con, sql, tmp_path, path)
 
 
 def _materialize_lang_names_table(path: Path, glob: str) -> None:
@@ -1232,8 +1300,7 @@ def _materialize_lang_names_table(path: Path, glob: str) -> None:
     convention as _materialize_alt_names_table; the caller treats that as
     "no lang table" and geocode answers with primary names only.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".parquet.tmp")
+    tmp_path = _unique_tmp_path(path)
     con = overture._new_connection()
     sql = f"""
         COPY (
@@ -1246,8 +1313,7 @@ def _materialize_lang_names_table(path: Path, glob: str) -> None:
             WHERE entry.value IS NOT NULL AND entry.value <> ''
         ) TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)
     """
-    con.execute(sql)
-    _publish_copied_parquet(con, tmp_path, path)
+    _copy_and_publish(con, sql, tmp_path, path)
 
 
 def _is_remote_glob(glob: str) -> bool:
@@ -1314,8 +1380,7 @@ def _materialize_divisions_pass(path: Path, glob: str, with_hierarchies: bool) -
         else "NULL::VARCHAR[] AS admin_chain"
     )
     region_expr = "region" if cols is None or "region" in cols else "NULL AS region"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".parquet.tmp")
+    tmp_path = _unique_tmp_path(path)
     con = overture._new_connection()
     sql = f"""
         COPY (
@@ -1328,8 +1393,7 @@ def _materialize_divisions_pass(path: Path, glob: str, with_hierarchies: bool) -
             WHERE names.primary IS NOT NULL
         ) TO '{tmp_path}' (FORMAT PARQUET, COMPRESSION ZSTD)
     """
-    con.execute(sql)
-    _publish_copied_parquet(con, tmp_path, path)
+    _copy_and_publish(con, sql, tmp_path, path)
 
 
 # Upgrade threads already started this process, keyed by table path — one
@@ -1371,9 +1435,15 @@ def _spawn_divisions_build(path: Path, glob: str) -> None:
                 # could follow a background release rollover and materialize
                 # a NEWER release's rows into the pinned release's table
                 # path — wrong-vintage data served for the install's life.
-                if not path.exists():
-                    _materialize_divisions_table(path, glob)
-                    logger.info("full divisions table built behind the bundled index -> %s", path)
+                # Under the blocking-build lock like every other COPY of
+                # this table: a foreground #224 rebuild or an unbundled
+                # first-call build must never run beside this one.
+                with _blocking_build_lock:
+                    if not path.exists():
+                        _materialize_divisions_table(path, glob)
+                        logger.info(
+                            "full divisions table built behind the bundled index -> %s", path
+                        )
         except Exception as e:  # noqa: BLE001 - background build must never surface
             logger.warning("background divisions build failed (next geocode retries): %s", e)
             with _build_lock:
@@ -1400,7 +1470,7 @@ def _spawn_divisions_upgrade(path: Path, glob: str) -> None:
             # 126s vs 26s with the delay — the same self-starvation the
             # tile fetch semaphore exists for, which also gates this).
             time.sleep(_UPGRADE_DELAY_S)
-            with cache._background_fetch_slots:
+            with cache._background_fetch_slots, _blocking_build_lock:
                 _upgrade_divisions_table(path, glob)
         except Exception as e:  # noqa: BLE001 - background upgrade must never surface
             logger.warning(
@@ -1498,7 +1568,14 @@ def _local_lang_names_table(local_table: str | None) -> str | None:
     if path.exists():
         return str(path)
     key = str(path)
-    if key not in _LANG_BUILD_ATTEMPTED:
+    # Check-and-add and the build itself both under _blocking_build_lock:
+    # two parallel resolves (from_to's isolated workers) could otherwise
+    # both see the key missing and run the same COPY side by side.
+    with _blocking_build_lock:
+        if path.exists():
+            return str(path)
+        if key in _LANG_BUILD_ATTEMPTED:
+            return None
         _LANG_BUILD_ATTEMPTED.add(key)
         logger.info("no language-tagged name table at %s (cache predates #410); building it", path)
         _try_materialize_lang_names_table(
@@ -1549,7 +1626,13 @@ def _local_alt_names_table(local_table: str | None) -> str | None:
     if path.exists():
         return str(path)
     key = str(path)
-    if key not in _ALT_BUILD_ATTEMPTED:
+    # Check-and-add and the build itself both under _blocking_build_lock —
+    # see _local_lang_names_table.
+    with _blocking_build_lock:
+        if path.exists():
+            return str(path)
+        if key in _ALT_BUILD_ATTEMPTED:
+            return None
         _ALT_BUILD_ATTEMPTED.add(key)
         logger.info("no alternate-name table at %s (cache predates #214); building it", path)
         _try_materialize_alt_names_table(
@@ -1790,15 +1873,28 @@ def _region_population_lookup(local_table: str | None) -> dict[str, int]:
     """
     if not local_table:
         return {}
+    try:
+        return _region_population_lookup_cached(local_table)
+    except duckdb.Error:
+        return {}
+
+
+@lru_cache(maxsize=8)
+def _region_population_lookup_cached(local_table: str) -> dict[str, int]:
+    """The scan behind _region_population_lookup, once per table path per
+    process. The file at a path is immutable for the release it belongs to
+    (a rebuild publishes through _publish_copied_parquet, which clears this
+    via _clear_table_derived_caches), so re-reading every region row on
+    every geocode call was pure overhead. Raises duckdb.Error rather than
+    caching a failed read as an empty map — lru_cache never stores an
+    exception, so the next call retries. Callers only read the map.
+    """
     sql = f"""
         SELECT region, population FROM read_parquet('{local_table}')
         WHERE subtype = 'region' AND region IS NOT NULL AND population IS NOT NULL
     """
-    try:
-        with overture._conn_lock:
-            rows = overture.conn().execute(sql).fetchall()
-    except duckdb.Error:
-        return {}
+    with overture._conn_lock:
+        rows = overture.conn().execute(sql).fetchall()
     return dict(rows)
 
 
@@ -1841,31 +1937,104 @@ def _resolve_region_from_table(candidate: str, local_table: str) -> tuple[str, s
     return row[0], row[1]
 
 
-def _split_region_suffix(query: str) -> list[tuple[str, str]]:
-    """(base, candidate_suffix) pairs to try, comma-suffix preferred over a
-    bare trailing token (a comma is a much stronger "this is a region
-    qualifier" signal than the last word of a multi-word query)."""
+def _suffix_split_candidates(query: str) -> list[tuple[str, str, bool]]:
+    """(base, candidate_suffix, bare) triples to try, comma-suffix preferred
+    over a bare trailing token (a comma is a much stronger "this is a region
+    qualifier" signal than the last word of a multi-word query). `bare` is
+    True for the trailing-word reading, which the parsers gate through
+    _bare_suffix_split_allowed."""
     candidates = []
     if "," in query:
         base, _, suffix = query.rpartition(",")
         if base.strip() and suffix.strip():
-            candidates.append((base.strip(), suffix.strip()))
+            candidates.append((base.strip(), suffix.strip(), False))
     parts = query.strip().rsplit(None, 1)
     if len(parts) == 2 and parts[0].strip():
-        candidates.append((parts[0].strip(), parts[1].strip()))
+        candidates.append((parts[0].strip(), parts[1].strip(), True))
     return candidates
+
+
+def _split_region_suffix(query: str) -> list[tuple[str, str]]:
+    """(base, candidate_suffix) pairs to try — _suffix_split_candidates
+    without the bare flag, for callers that only want the shapes."""
+    return [(base, suffix) for base, suffix, _bare in _suffix_split_candidates(query)]
+
+
+# Words that only ever modify the word after them. A no-comma query whose
+# head is nothing but these is one name, not a name plus a qualifier:
+# "West Virginia" is a state, not West inside Virginia; "Hotel California"
+# is not a hotel in California; "New Jersey" is not New on Jersey.
+_BARE_QUALIFIER_HEAD_ADJECTIVES = frozenset({
+    "new", "old", "west", "east", "north", "south", "western", "eastern",
+    "northern", "southern", "upper", "lower", "great", "little", "port",
+    "saint", "st", "san", "santa", "fort", "ft", "mount", "mt", "lake", "hotel",
+})
+
+
+def _division_named_exactly(name: str, local_table: str | None) -> bool:
+    """Whether some division's primary name equals `name` (case-
+    insensitive) in the local table — one indexed probe against the local
+    parquet (the bundled stage-0 index when that is all there is), never
+    an upstream scan. False without a local table, and on a failed read.
+    """
+    if not local_table or not name.strip():
+        return False
+    try:
+        return _division_named_exactly_cached(name.strip().casefold(), local_table)
+    except duckdb.Error:
+        return False
+
+
+@lru_cache(maxsize=512)
+def _division_named_exactly_cached(folded_name: str, local_table: str) -> bool:
+    sql = f"""
+        SELECT 1 FROM read_parquet('{local_table}')
+        WHERE name ILIKE $exact ESCAPE '\\'
+        LIMIT 1
+    """
+    with overture._conn_lock:
+        row = overture.conn().execute(
+            sql, {"exact": overture._like_escape(folded_name)}
+        ).fetchone()
+    return row is not None
+
+
+def _bare_suffix_split_allowed(base: str, query: str, local_table: str | None) -> bool:
+    """Whether a *bare* (no comma) trailing word that resolved as a region
+    or country may actually be read as a qualifier of `base`.
+
+    Two gates, both of which "Paris, Texas" skips by carrying a comma:
+
+    1. `base` has to be a plausible name of its own — at least one
+       significant token that is not a bare modifier
+       (_BARE_QUALIFIER_HEAD_ADJECTIVES). "West" is not a place
+       Virginia contains, so "West Virginia" stays whole; "Portland" is
+       a place, so "Portland Oregon" still splits.
+    2. The whole query must not itself name a division exactly: a caller
+       who typed a real division's full name meant that division, not a
+       search for its first word inside its last. One local probe, and
+       only reached once the suffix has resolved and gate 1 has passed.
+    """
+    head_tokens = [t.casefold().strip(".,'") for t in _significant_tokens(base)]
+    if not any(t and t not in _BARE_QUALIFIER_HEAD_ADJECTIVES for t in head_tokens):
+        return False
+    return not _division_named_exactly(query, local_table)
 
 
 def _parse_region_suffix(query: str, local_table: str | None) -> tuple[str, str | None, str | None]:
     """query -> (base_query, region_code, region_name). region_code/name are
     both None if no trailing token looks like a region — the caller then
     searches `query` unmodified, today's behavior.
+
+    A bare trailing word (no comma) only counts once
+    _bare_suffix_split_allowed agrees: "West Virginia" is not ("West",
+    "US-VA").
     """
-    for base, suffix in _split_region_suffix(query):
+    for base, suffix, bare in _suffix_split_candidates(query):
         resolved = _resolve_us_state(suffix)
         if resolved is None and local_table:
             resolved = _resolve_region_from_table(suffix, local_table)
-        if resolved:
+        if resolved and (not bare or _bare_suffix_split_allowed(base, query, local_table)):
             name, code = resolved
             return base, code, name
     return query, None, None
@@ -1956,11 +2125,11 @@ def _parse_country_suffix(
     instead of a region. Callers try the region parse first and only fall
     back to this one when it found nothing — see geocode_detailed.
     """
-    for base, suffix in _split_region_suffix(query):
+    for base, suffix, bare in _suffix_split_candidates(query):
         resolved = _resolve_country_code(suffix)
         if resolved is None and local_table:
             resolved = _resolve_country_from_table(suffix, local_table, alt_table)
-        if resolved:
+        if resolved and (not bare or _bare_suffix_split_allowed(base, query, local_table)):
             name, code = resolved
             return base, code, name
     return query, None, None
@@ -2220,6 +2389,12 @@ def _resolve_cache_get(
     query: str, city: str | None, near_lat: float | None, near_lon: float | None,
     lang: str | None = None, country: str | None = None,
 ) -> list[dict] | None:
+    """The full ranked candidate list cached for this key, or None.
+
+    `limit` is deliberately not part of the key: resolve_place caches the
+    *un-truncated* list and slices on read, so a `limit=1` call followed
+    by a `limit=3` one for the same query gets three rows, not one.
+    """
     key = _resolve_cache_key(query, city, near_lat, near_lon, lang, country)
     with _resolve_lru_lock:
         rows = _resolve_lru.get(key)
@@ -2276,6 +2451,7 @@ def clear_resolve_session() -> None:
     with _last_good_lock:
         _last_good_city = None
         _last_good_coords = None
+    _clear_table_derived_caches()
 
 
 # --- #53: name-variant normalization -------------------------------------
@@ -3051,6 +3227,31 @@ def _fallback_anchor_candidates(
     )]
 
 
+# Memo for _fallback_anchor_details' split-derived anchors, keyed on its
+# inputs. One resolve asks the same question up to three times — the
+# bundled-recall gate, the places-fallback anchor, and resolve_place's own
+# reference — and each answer costs ~22 division lookups. Cleared whenever
+# a local table is republished and by clear_resolve_session.
+_ANCHOR_MEMO_MAX = 128
+_anchor_memo: OrderedDict[tuple, list[dict]] = OrderedDict()
+_anchor_memo_lock = threading.Lock()
+
+
+def _anchor_memo_key(
+    search_query: str,
+    region_code: str | None,
+    local_table: str | None,
+    alt_table: str | None,
+    region_population: dict[str, int] | None,
+) -> tuple:
+    # The ranking inside (_rank_key via _pick_anchor_row) reads the #406
+    # home region, so a home resolved between two calls must miss.
+    home = home_region.get_home_region()
+    home_key = (home.get("lat"), home.get("lon")) if home else None
+    pop_key = frozenset(region_population.items()) if region_population else None
+    return (search_query, region_code, local_table, alt_table, pop_key, home_key)
+
+
 def _fallback_anchor_details(
     search_query: str,
     divisions: list[dict],
@@ -3060,6 +3261,9 @@ def _fallback_anchor_details(
     region_population: dict[str, int] | None = None,
 ) -> list[dict]:
     """_fallback_anchor_candidates, with each anchor's provenance kept.
+
+    Memoized on its inputs (see _anchor_memo) once `divisions` is empty —
+    the only branch that does any lookups.
 
     One dict per candidate, best first: "lat", "lon", "name_query" (as the
     tuple form), plus "candidate" (the query words the anchor was derived
@@ -3075,6 +3279,34 @@ def _fallback_anchor_details(
             "lat": top["lat"], "lon": top["lon"], "name_query": search_query,
             "candidate": "", "split": False, "strong": True,
         }]
+    memo_key = _anchor_memo_key(
+        search_query, region_code, local_table, alt_table, region_population
+    )
+    with _anchor_memo_lock:
+        cached = _anchor_memo.get(memo_key)
+        if cached is not None:
+            _anchor_memo.move_to_end(memo_key)
+            return [dict(d) for d in cached]
+    out = _derive_split_anchors(
+        search_query, region_code, local_table, alt_table, region_population
+    )
+    with _anchor_memo_lock:
+        _anchor_memo[memo_key] = [dict(d) for d in out]
+        _anchor_memo.move_to_end(memo_key)
+        while len(_anchor_memo) > _ANCHOR_MEMO_MAX:
+            _anchor_memo.popitem(last=False)
+    return out
+
+
+def _derive_split_anchors(
+    search_query: str,
+    region_code: str | None,
+    local_table: str | None,
+    alt_table: str | None,
+    region_population: dict[str, int] | None,
+) -> list[dict]:
+    """The uncached body of _fallback_anchor_details for a query no
+    division matched: which of the caller's own words locate it."""
     tokens = search_query.strip().split()
     pop = region_population or {}
 
@@ -4175,7 +4407,9 @@ def geocode_detailed(
     # zero candidates" treatment. An explicit country= is a deliberate
     # filter the caller stated on purpose; zero matches inside it is a real
     # answer, not a misparse worth second-guessing.
-    country_code_from_suffix = country_code is not None
+    # (If both were given they already agree — the conflict check below
+    # raises otherwise — and the explicit one wins the "no degrade" rule.)
+    country_code_from_suffix = country_code is not None and normalized_country is None
 
     if normalized_country is not None:
         if country_code is not None and country_code != normalized_country:
@@ -4203,6 +4437,13 @@ def geocode_detailed(
     # stays exactly the call it was (the pre-#476 signature is what every
     # test double of _query_divisions in the suite answers to).
     near_kw: dict = {"near": near} if near is not None else {}
+    # The explicit country= filter, kept on every degrade/retry below: only
+    # a qualifier *parsed* off the query is a guess worth withdrawing (the
+    # contract stated at country_code_from_suffix). Passed as a kwarg only
+    # when set, for the same reason as near_kw.
+    explicit_country_kw: dict = (
+        {"country_code": normalized_country} if normalized_country is not None else {}
+    )
     divisions = _query_divisions(
         search_query, region_code, local_table, alt_table=alt_table,
         country_code=country_code, **near_kw,
@@ -4213,10 +4454,11 @@ def geocode_detailed(
         # original query rather than returning empty for a query that
         # would otherwise have matched something.
         region_code = None
-        country_code = None
+        country_code = normalized_country
         search_query = query
         divisions = _query_divisions(
-            search_query, None, local_table, alt_table=alt_table, **near_kw
+            search_query, None, local_table, alt_table=alt_table,
+            **explicit_country_kw, **near_kw,
         )
     elif country_code and not divisions and country_code_from_suffix:
         # #457: same idea, but degrading to the BASE name (not the whole
@@ -4229,12 +4471,16 @@ def geocode_detailed(
         # Only for a country parsed off the query itself, not an explicit
         # country= (see country_code_from_suffix above) — a caller-stated
         # filter coming up empty is a real, precise answer.
+        #
+        # A bare trailing word (no comma — "Portland Jersey") degrades to
+        # the whole query instead, like the region path: the base word
+        # alone is a far broader search than the caller typed.
         country_code = None
-        search_query = base_query
+        search_query = base_query if "," in query else query
         divisions = _query_divisions(
             search_query, None, local_table, alt_table=alt_table, **near_kw
         )
-        qualifier_note = _country_degrade_note(base_query, suffix_country_code)
+        qualifier_note = _country_degrade_note(search_query, suffix_country_code)
 
     # #53: literal query didn't reach an exact-or-prefix division match with
     # some real prominence behind it — retry with normalized variants
@@ -4370,8 +4616,17 @@ def geocode_detailed(
             fuzzy_rows = _query_divisions_fuzzy(
                 local_table, fuzzy_query, suffix_region_code, suffix_country_code, **near_kw
             )
-        if not fuzzy_rows and (suffix_region_code or suffix_country_code):
-            fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query, **near_kw)
+        if not fuzzy_rows and (
+            suffix_region_code or (suffix_country_code and normalized_country is None)
+        ):
+            # Retry without the *parsed* qualifier only; an explicit
+            # country= is the caller's filter and stays on.
+            if normalized_country is not None:
+                fuzzy_rows = _query_divisions_fuzzy(
+                    local_table, fuzzy_query, None, normalized_country, **near_kw
+                )
+            else:
+                fuzzy_rows = _query_divisions_fuzzy(local_table, fuzzy_query, **near_kw)
         divisions = fuzzy_rows
 
     _bundled_recall_pending = not divisions and _is_bundled_table(local_table)
@@ -4388,6 +4643,7 @@ def geocode_detailed(
         and _fallback_anchor(
             search_query, [], region_code, local_table,
             alt_table=_local_alt_names_table(local_table),
+            region_population=_region_population_lookup(local_table),
         ) is None
     ):
         # The stage-0 bundled index carries only populous divisions; a
@@ -4971,6 +5227,15 @@ def _significant_tokens(query: str) -> list[str]:
     return (significant or tokens or [query])[:_MAX_RESOLVE_TOKENS]
 
 
+def _is_word_prefix(prefix: str, text: str) -> bool:
+    """`text` starts with `prefix` *at a word boundary*: "Mall" is a prefix
+    of "Mall of America", "Ma" is not — the character after the prefix must
+    end a word (or the string), or the label is only "contains"."""
+    if not prefix or not text.startswith(prefix):
+        return False
+    return len(text) == len(prefix) or not text[len(prefix)].isalnum()
+
+
 def _place_match_label(
     name: str, query: str, context_words: frozenset[str] = frozenset()
 ) -> str | None:
@@ -5028,7 +5293,7 @@ def _place_match_label(
     n, q = _normalize_for_match(name), _normalize_for_match(query)
     if n == q:
         return "exact"
-    if n.startswith(q) or q.startswith(n):
+    if _is_word_prefix(q, n) or _is_word_prefix(n, q):
         return "prefix"
     if n in q or q in n:
         return "contains"
@@ -5463,6 +5728,7 @@ def resolve_place(
         options = _fallback_anchor_details(
             query, [], None, local_table,
             alt_table=_local_alt_names_table(local_table),
+            region_population=_region_population_lookup(local_table),
         )
         reference = (options[0]["lat"], options[0]["lon"]) if options else None
         if options and options[0]["split"]:
@@ -5839,7 +6105,9 @@ def resolve_place(
         c.pop("_type_scan", None)
         c.pop("_alias_pinned", None)
     out = candidates[:limit]
-    _resolve_cache_put(query, cache_city, cache_lat, cache_lon, out, lang, country)
+    # The whole ranked list, not `out`: the key carries no limit, and a
+    # later call with a larger limit slices the cached list on read.
+    _resolve_cache_put(query, cache_city, cache_lat, cache_lon, candidates, lang, country)
     if out:
         _remember_last_city(city, out[0])
         _kick_autowarm(out[0])

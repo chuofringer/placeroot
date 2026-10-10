@@ -365,8 +365,23 @@ def _projection(
     geo.bbox_around, not caller input). A box that runs past [-180, 180]
     (antimeridian) skips the prefilter rather than mis-pruning the wrapped
     side — those queries stay correct, just unpruned, like before.
+
+    One row per id. A cache tile is a bbox-*intersection* materialization
+    (cache.ensure_tile), so a polygon crossing a tile edge is copied into
+    both tiles and a multi-tile read (`read_parquet([tile, tile])`)
+    returns it twice — places rows are points and land in exactly one
+    tile, but a park or beach straddling a 1° line came back as two
+    results. The QUALIFY keeps the first copy per id. It is applied in
+    this same SELECT, after the WHERE, so the class/bbox prune above
+    still reaches the scan's row-group statistics; with no id column
+    there is nothing to key on and no dedupe (partitioning on the NULL
+    projection would collapse every row into one).
     """
     id_expr = "NULL" if "id" in missing else "id"
+    dedupe = (
+        "" if "id" in missing
+        else "\n        QUALIFY id IS NULL OR row_number() OVER (PARTITION BY id) = 1"
+    )
     names_expr = "NULL" if "names" in missing else "names"
     sources_expr = "NULL" if "sources" in missing else "sources"
     class_list = ", ".join(db._sql_str(c) for c in SOURCES[type_])
@@ -388,7 +403,7 @@ def _projection(
             {basic_category_expr} AS basic_category,
             TRUE AS {MARKER_COLUMN}
         FROM {source}
-        WHERE class IN ({class_list}){prune}"""
+        WHERE class IN ({class_list}){prune}{dedupe}"""
 
 
 def union_branches(

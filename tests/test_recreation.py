@@ -527,6 +527,70 @@ def test_place_details_by_name_prefers_the_places_row(layer_on, tmp_path):
     assert "source_theme" not in row
 
 
+# --- a polygon in two tiles is one result ------------------------------------
+
+
+def _local_probe(glob: str):
+    """db.probe_schema over a bare connection: the shared connection's setup
+    needs the httpfs extension, which an offline environment cannot
+    install, and these fixtures are local files."""
+    from placeroot import db
+
+    try:
+        desc = duckdb.connect().execute(
+            f"SELECT * FROM read_parquet({db._sql_str(glob)}) LIMIT 0"
+        ).description
+    except duckdb.Error:
+        return None
+    return frozenset(c[0] for c in desc)
+
+
+def test_a_polygon_straddling_a_tile_edge_is_returned_once(tmp_path, monkeypatch):
+    """Tiles are bbox-intersection copies, so a land_use polygon crossing
+    the 1° line at lon=-74 is materialized into both the (-75, 40) and
+    (-74, 40) tiles; the branch's projection over a two-tile read must
+    still yield it once."""
+    from placeroot import cache, db
+
+    monkeypatch.setenv("PLACEROOT_CACHE", "on")
+    monkeypatch.setenv("PLACEROOT_CACHE_DIR", str(tmp_path / "placeroot-cache"))
+    monkeypatch.setattr(db, "probe_schema", _local_probe)
+    rows = [
+        ("lu-straddle", _bbox(40.65, 40.66, -74.001, -73.999),
+         "recreation", "playground", "Edge Playground"),
+        ("lu-inside", _bbox(40.65, 40.66, -73.95, -73.94),
+         "recreation", "playground", "Inside Playground"),
+    ]
+    src = tmp_path / "land_use.parquet"
+    _write_base_fixture(src, rows)
+    con = duckdb.connect()
+    theme = recreation._cache_theme("land_use")
+    fingerprint = cache.resolve_fingerprint("2026-07-22.0", theme, str(src))
+    tiles = [(-75, 40), (-74, 40)]
+    paths = [cache.ensure_tile(con, "2026-07-22.0", theme, t, str(src), fingerprint)
+             for t in tiles]
+    # The premise: the straddling polygon really is in both tiles.
+    for p in paths:
+        (n,) = con.execute(
+            f"SELECT count(*) FROM read_parquet({db._sql_str(str(p))}) "
+            "WHERE id = 'lu-straddle'"
+        ).fetchone()
+        assert n == 1
+    source = f"read_parquet([{', '.join(db._sql_str(str(p)) for p in paths)}])"
+    bbox = (-74.01, 40.6, -73.9, 40.7)
+
+    sql = recreation._projection(source, "land_use", set(), bbox)
+    ids = [r[0] for r in con.execute(sql).fetchall()]
+    assert ids.count("lu-straddle") == 1
+    assert ids.count("lu-inside") == 1
+
+    # No id column: nothing to key on, and the dedupe must not partition on
+    # the NULL projection (which would collapse every row into one).
+    sql_no_id = recreation._projection(source, "land_use", {"id"}, bbox)
+    assert "QUALIFY" not in sql_no_id
+    assert len(con.execute(sql_no_id).fetchall()) == 3
+
+
 # --- the honest limitations, asserted rather than assumed -------------------
 
 

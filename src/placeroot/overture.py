@@ -26,6 +26,7 @@ import logging
 import math
 import os
 import struct
+import tempfile
 import threading
 import unicodedata
 
@@ -304,9 +305,14 @@ def warm_metadata() -> None:
             continue
         upstream = _upstream_glob(theme, type_)
         try:
-            db.new_connection().execute(
-                f"SELECT * FROM read_parquet('{upstream}', hive_partitioning=1) LIMIT 0"
-            )
+            # One cursor per theme, closed on the way out: the warm lives in
+            # the shared instance's metadata cache, not in the cursor, and
+            # a cursor left open per theme per startup is a leak.
+            with db.new_connection() as cur:
+                cur.execute(
+                    f"SELECT * FROM read_parquet({db._sql_str(upstream)}, "
+                    "hive_partitioning=1) LIMIT 0"
+                )
         except duckdb.Error as e:
             logger.warning("Metadata pre-warm failed for %s (continuing): %s", upstream, e)
             continue
@@ -1496,7 +1502,7 @@ def _division_polygon_disk_path(div_upstream: str, division_id: str):
         return None
     glob_key = hashlib.sha256(div_upstream.encode("utf-8")).hexdigest()[:16]
     id_key = hashlib.sha256(division_id.encode("utf-8")).hexdigest()[:32]
-    return cache.cache_dir() / "division_polygons" / glob_key / f"{id_key}.bin"
+    return cache.division_polygons_dir() / glob_key / f"{id_key}.bin"
 
 
 def _read_division_polygon_disk(path):
@@ -1514,6 +1520,10 @@ def _read_division_polygon_disk(path):
         xmin, xmax, ymin, ymax = struct.unpack("<dddd", data[1:33])
     except struct.error:
         return _DIVISION_DISK_MISS  # truncated/corrupt — re-resolve
+    try:
+        os.utime(path, None)  # recently used: cache.py's LRU sweep ranks by mtime
+    except OSError:
+        pass
     return (bytes(data[33:]), xmin, xmax, ymin, ymax)
 
 
@@ -1524,13 +1534,27 @@ def _write_division_polygon_disk(path, resolved: tuple | None) -> None:
     else:
         wkb, xmin, xmax, ymin, ymax = resolved
         payload = b"\x01" + struct.pack("<dddd", xmin, xmax, ymin, ymax) + bytes(wkb)
+    tmp_name = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_bytes(payload)
-        tmp.replace(path)  # atomic — a reader sees the whole file or none
+        # A temp name of this writer's own (two processes resolving the same
+        # division at once must not share one), renamed into place so a
+        # reader sees the whole file or none.
+        fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+        os.replace(tmp_name, path)
     except OSError as e:
         logger.warning("Could not persist division polygon to %s: %s", path, e)
+        if tmp_name is not None:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+        return
+    # Accounted under its own size cap (cache.py's "size accounting"), so
+    # the polygon directory can no longer grow without bound.
+    cache.note_division_polygon_written(path)
 
 
 def _resolve_division_geometry(
@@ -1586,7 +1610,7 @@ def _resolve_division_geometry(
     sql = f"""
         WITH merged AS (
             SELECT ST_Union_Agg({geom_expr}) AS geom
-            FROM read_parquet('{div_upstream}', hive_partitioning=1)
+            FROM read_parquet({db._sql_str(div_upstream)}, hive_partitioning=1)
             WHERE {id_filter_expr} = $division_id
         )
         SELECT ST_AsWKB(geom), ST_XMin(geom), ST_XMax(geom), ST_YMin(geom), ST_YMax(geom)
@@ -2193,7 +2217,7 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
     if cache.enabled():
         tile_paths = cache.claimed_tile_paths(release.resolve_release(), THEME, upstream)
         if tile_paths:
-            joined = ", ".join(f"'{p}'" for p in tile_paths)
+            joined = ", ".join(db._sql_str(str(p)) for p in tile_paths)
             source, active = _with_recreation(f"read_parquet([{joined}])", None)
             row, lang_variant = _run_place_details_query(
                 source, ["id = $id"], "1", {"id": id}, missing, active, lang=lang,
@@ -2221,7 +2245,9 @@ def _place_details_by_id(id: str, near_lat: float | None, near_lon: float | None
         "place_details(id=%s) fell back to a full-dataset scan (no cache hit, "
         "no near_lat/near_lon hint given, or the hint missed) — issue #41", id,
     )
-    source, active = _with_recreation(f"read_parquet('{upstream}', hive_partitioning=1)", None)
+    source, active = _with_recreation(
+        f"read_parquet({db._sql_str(upstream)}, hive_partitioning=1)", None
+    )
     return _run_place_details_query(
         source, ["id = $id"], "1", {"id": id}, missing, active, lang=lang,
     )

@@ -16,13 +16,14 @@ import contextvars
 import functools
 import importlib.metadata
 import inspect
+import json
 import logging
 import math
 import os
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated
 
@@ -144,13 +145,16 @@ _META_TOOL_FUNCS: dict[str, Callable] = {}
 _TOOL_TITLES: dict[str, str] = {}
 
 # The behavioral hints a PlaceRoot tool carries (MCP `annotations`).
-# This is the default, and 24 of the 25 tools take it unchanged because they
-# are pure reads:
+# This is the default; every tool takes it unchanged except the few that
+# override it at their definition site (render_map, preferences,
+# placeroot_call, resolve_map_url — each explained next to its override),
+# because the rest are pure reads:
 #   read_only_hint  — the tool writes nothing anywhere the caller can see;
 #                     the only side effect is a local parquet tile cache,
 #                     which is invisible to the caller and to the upstream
-#                     data. render_map is the exception: it writes an HTML
-#                     file to disk, so it overrides this (see below).
+#                     data. render_map (writes an HTML file), preferences
+#                     (writes/deletes a JSON file) and placeroot_call (can
+#                     dispatch to either) override this (see below).
 #   destructive_hint/idempotent_hint — spelled out even though the spec says
 #                     they only matter when read_only_hint is false, because
 #                     clients that predate readOnlyHint-aware gating still
@@ -160,6 +164,8 @@ _TOOL_TITLES: dict[str, str] = {}
 #                     web. Nothing here searches or fetches arbitrary URLs,
 #                     so a client can reason about the blast radius as
 #                     closed even though the bytes come over the network.
+#                     resolve_map_url is the one exception (it follows a
+#                     pasted Google short link) and says so (see below).
 # Shared instance: ToolAnnotations is treated as immutable here, and the
 # per-tool `title` rides on the top-level Tool.title field instead (which is
 # what the current spec prefers), so one object serves every registration.
@@ -198,6 +204,18 @@ _PREFERENCES_ANNOTATIONS = ToolAnnotations(
     destructive_hint=True,
     idempotent_hint=True,
     open_world_hint=False,
+)
+
+# resolve_map_url is a pure read, but it makes an outbound HTTP request to
+# expand a Google short link (maps.app.goo.gl, goo.gl/maps, g.co) — a
+# destination outside the pinned dataset, chosen by the caller's input. That
+# is exactly what openWorldHint exists to disclose, so it is True here
+# while the other three hints keep the read-only default.
+_FOLLOWS_A_SHORT_LINK_ANNOTATIONS = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
 )
 
 _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {}
@@ -361,6 +379,32 @@ def _upstream_error(e: Exception) -> dict:
 
 def _schema_error(e: overture.SchemaDegraded) -> dict:
     return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
+
+
+def _upstream_errors(fn: Callable) -> Callable:
+    """The upstream-failure except ladder, once, around a whole handler.
+
+    Nearly every handler repeats `except UpstreamUnavailable: return
+    _upstream_error(e)` / `except SchemaDegraded: return _schema_error(e)`
+    after each query call it makes. routing.UpstreamUnavailable and
+    overture.UpstreamUnavailable are the same class (errors.py; likewise
+    SchemaDegraded), so a handler that lists both catches one thing twice.
+    Put this between @_tool and the def and the handler can drop its copies:
+    the same two classes become the same two envelopes. Applied to
+    find_places, compare_areas and verify_claims so far; the other handlers
+    still carry the ladder inline and behave identically.
+    """
+
+    @functools.wraps(fn)
+    def guarded(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except overture.UpstreamUnavailable as e:
+            return _upstream_error(e)
+        except overture.SchemaDegraded as e:
+            return _schema_error(e)
+
+    return guarded
 
 
 def _invalid_coord(lat, lon) -> dict | None:
@@ -885,6 +929,7 @@ _FIND_NEAR_KEYS = (
 
 
 @_tool("Find places")
+@_upstream_errors
 def find_places(
     lat: float | None = None,
     lon: float | None = None,
@@ -1232,8 +1277,6 @@ def find_places(
                 "detail": e.detail,
                 "supported": sorted(routing.MODE_CONFIG),
             }
-        except routing.UpstreamUnavailable as e:
-            return _upstream_error(e)
         except routing.SchemaDegraded as e:
             return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
         except routing.NoGraphNearby as e:
@@ -1266,8 +1309,6 @@ def find_places(
                 "detail": e.detail,
                 "candidates": e.candidates,
             }
-        except overture.UpstreamUnavailable as e:
-            return _upstream_error(e)
         if resolved_area is None:
             return {"error": "not_found", "detail": f"no division matched area {area!r}"}
         division_id = resolved_area["division_id"]
@@ -1275,7 +1316,11 @@ def find_places(
     # Overfetch by one row beyond the effective (post-clamp) limit so a
     # scan that stops only because it hit limit — not because it ran out of
     # matches — is distinguishable from one that didn't (has_more below).
-    effective_limit = max(0, min(int(limit), overture.MAX_ROWS))
+    # Clamped to at least 1, like every other tool's limit (out-of-range is
+    # not an error): a 0-row page would still overfetch its one lookahead
+    # row, report has_more, and hand back a cursor whose offset never
+    # advances — a pager that loops forever on the same empty page.
+    effective_limit = max(1, min(int(limit), overture.MAX_ROWS))
 
     if division_id is not None:
         if group_by_category:
@@ -1288,10 +1333,6 @@ def find_places(
                 )
             except ValueError as e:
                 return {"error": "bad_request", "detail": str(e)}
-            except overture.UpstreamUnavailable as e:
-                return _upstream_error(e)
-            except overture.SchemaDegraded as e:
-                return _schema_error(e)
             if grouped is None:
                 return {
                     "error": "not_found",
@@ -1319,10 +1360,6 @@ def find_places(
             )
         except ValueError as e:
             return {"error": "bad_request", "detail": str(e)}
-        except overture.UpstreamUnavailable as e:
-            return _upstream_error(e)
-        except overture.SchemaDegraded as e:
-            return _schema_error(e)
         if rows is None:
             return {
                 "error": "not_found",
@@ -1362,10 +1399,6 @@ def find_places(
             )
         except ValueError as e:
             return {"error": "bad_request", "detail": str(e)}
-        except overture.UpstreamUnavailable as e:
-            return _upstream_error(e)
-        except overture.SchemaDegraded as e:
-            return _schema_error(e)
         grouped = _project_grouped_places(grouped, effective_detail)
         payload = _with_degraded_fields(
             budget.apply_budget_grouped({"results": grouped}, "results")
@@ -1385,10 +1418,6 @@ def find_places(
         )
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
-    except overture.UpstreamUnavailable as e:
-        return _upstream_error(e)
-    except overture.SchemaDegraded as e:
-        return _schema_error(e)
     # #373's alt-name/fuzzy fallback tiers run their own bounded pool query
     # (only at offset 0) rather than this call's offset-aware one, so a
     # cursor over that pool can't honestly promise the next page won't
@@ -2488,6 +2517,7 @@ def suggest_areas(
 
 
 @_tool("Compare areas")
+@_upstream_errors
 def compare_areas(
     areas: list[dict | str], radius_m: float = 1000, priorities: list[dict] | None = None
 ) -> dict:
@@ -2546,6 +2576,14 @@ def compare_areas(
     """
     if not isinstance(areas, list):
         return {"error": "bad_request", "detail": "areas must be a list of area centers"}
+    if not 2 <= len(areas) <= 5:
+        # Checked before any name resolution — that is up to 8 threads of
+        # network lookups per call — so an over-cap list fails on the cap
+        # first, as distance_matrix/travel_time_matrix already do.
+        return {
+            "error": "bad_request",
+            "detail": f"compare_areas takes between 2 and 5 area centers, got {len(areas)}",
+        }
     resolved_areas, resolve_error = _resolve_location_refs(areas, "areas")
     if resolve_error is not None:
         return resolve_error
@@ -2565,10 +2603,6 @@ def compare_areas(
         result = overture.compare_areas(centers, radius_m, priorities=normalized_priorities)
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
-    except overture.UpstreamUnavailable as e:
-        return _upstream_error(e)
-    except overture.SchemaDegraded as e:
-        return _schema_error(e)
     result = _with_degraded_fields(budget.apply_budget(result, "differentiators"))
     if "verdict" in result:
         map_payload = mapexplain.from_compare_areas_result(result, radius_m)
@@ -3849,7 +3883,7 @@ def geocode_intersection(
     return budget.apply_budget(result, "results")
 
 
-@_tool("Resolve a pasted map link")
+@_tool("Resolve a pasted map link", annotations=_FOLLOWS_A_SHORT_LINK_ANNOTATIONS)
 def resolve_map_url(url: str, include_place: bool = True) -> dict:
     """Pasted Google/Apple/OpenStreetMap/geo: map link -> its coordinate and place.
 
@@ -5495,6 +5529,7 @@ def neighborhood_verdict(
 
 
 @_tool("Verify listing claims")
+@_upstream_errors
 def verify_claims(lat: float, lon: float, claims: list[dict]) -> dict:
     """Grade spatial listing claims ("8 min to the metro", "shops on the doorstep",
     "green space nearby") against real routing and places data.
@@ -5563,12 +5598,6 @@ def verify_claims(lat: float, lon: float, claims: list[dict]) -> dict:
             "detail": e.detail,
             "supported": sorted(routing.MODE_CONFIG),
         }
-    except routing.UpstreamUnavailable as e:
-        return _upstream_error(e)
-    except overture.UpstreamUnavailable as e:
-        return _upstream_error(e)
-    except (routing.SchemaDegraded, overture.SchemaDegraded) as e:
-        return {"error": "schema_degraded", "detail": e.detail, "missing_columns": e.missing}
     except ValueError as e:
         return {"error": "bad_request", "detail": str(e)}
     return _with_degraded_fields(budget.apply_budget(result, "results"))
@@ -6305,6 +6334,86 @@ CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
 }
 
 
+def _tool_name_of(ctx) -> str:
+    """The tool a tools/call request names, from its raw inbound params.
+
+    The middleware context carries the request's unvalidated params as
+    `ctx.params` (a mapping, per mcp.server.context.ServerRequestContext);
+    there is no `tool_name` attribute, so reading one would label every
+    trace "tools/call".
+    """
+    params = getattr(ctx, "params", None)
+    name = params.get("name") if isinstance(params, Mapping) else None
+    return name if isinstance(name, str) and name else "tools/call"
+
+
+def _amend_tool_payload(result, amend: Callable[[dict], dict]):
+    """Apply `amend` to the tool's JSON answer inside a tools/call wire result.
+
+    What `call_next` hands a middleware for tools/call is not the handler's
+    CallToolResult but its *wire form*: the SDK's ServerRunner serializes the
+    handler result inside the chain (runner.py `_inner` returns
+    `self._serialize(...)`), so a middleware sees a dict shaped
+    {"content": [{"type": "text", "text": <json>}], "structuredContent":
+    {...}, "isError": false, ...}. The tool's answer lives in
+    structuredContent (every tool here declares an outputSchema, so a
+    successful call always has it) and, for clients that only read text, as
+    the same JSON in the single text block. A key written onto the envelope
+    itself — which is what `result["timing"] = ...` used to do — is not part
+    of the answer and never reaches the agent.
+
+    So this amends structuredContent and re-renders the text block from it
+    (pydantic_core.to_json, the SDK's own rendering, so the two stay
+    byte-identical — tests/test_output_schemas.py asserts that). Anything
+    else — a non-dict, an isError result whose text is an exception message,
+    a result with no JSON-object payload — is returned untouched.
+    """
+    if not isinstance(result, dict) or result.get("isError"):
+        return result
+    payload = result.get("structuredContent")
+    content = result.get("content")
+    text_block = (
+        content[0]
+        if isinstance(content, list) and len(content) == 1
+        and isinstance(content[0], dict) and content[0].get("type") == "text"
+        else None
+    )
+    if not isinstance(payload, dict):
+        # No structuredContent (a tool without an outputSchema): the text
+        # block is the only copy of the answer, when it is a JSON object.
+        if text_block is None:
+            return result
+        try:
+            payload = json.loads(text_block["text"])
+        except (TypeError, ValueError):
+            return result
+        if not isinstance(payload, dict):
+            return result
+        amended = amend(dict(payload))
+        if amended == payload:
+            return result
+        out = dict(result)
+        out["content"] = [{**text_block, "text": _render_tool_text(amended)}]
+        return out
+    amended = amend(dict(payload))
+    if amended == payload:
+        return result
+    out = dict(result)
+    out["structuredContent"] = amended
+    if text_block is not None:
+        out["content"] = [{**text_block, "text": _render_tool_text(amended)}]
+    return out
+
+
+def _render_tool_text(payload: dict) -> str:
+    """The text block the SDK renders for a dict tool result (func_metadata's
+    _convert_to_content), so an amended answer reads the same as an
+    unamended one."""
+    import pydantic_core
+
+    return pydantic_core.to_json(payload, fallback=str, indent=2).decode()
+
+
 async def _progress_middleware(ctx, call_next):
     """Narrate slow tool calls via MCP progress notifications.
 
@@ -6332,7 +6441,7 @@ async def _progress_middleware(ctx, call_next):
     if token is None:
         try:
             result = await call_next(ctx)
-            return progress.attach(result)
+            return _amend_tool_payload(result, progress.attach)
         finally:
             progress.reset_log(log_token)
 
@@ -6367,7 +6476,7 @@ async def _progress_middleware(ctx, call_next):
     reset_token = progress.set_reporter(reporter)
     try:
         result = await call_next(ctx)
-        return progress.attach(result)
+        return _amend_tool_payload(result, progress.attach)
     finally:
         progress.reset(reset_token)
         progress.reset_log(log_token)
@@ -6384,9 +6493,10 @@ async def _trace_middleware(ctx, call_next):
     PLACEROOT_TRACE_SLOW_S, attaches the breakdown to the response as
     `timing` so the agent that waited gets the explanation with the answer.
 
-    Attached only to dict responses and only when slow: a fast call's
-    payload is unchanged, byte for byte, and a tool returning a list or a
-    scalar is left alone rather than being reshaped to carry telemetry.
+    Attached only to JSON-object answers (see _amend_tool_payload) and only
+    when slow: a fast call's payload is unchanged, byte for byte, and a tool
+    returning a list or a scalar is left alone rather than being reshaped to
+    carry telemetry.
     """
     if ctx.method != "tools/call":
         return await call_next(ctx)
@@ -6395,27 +6505,36 @@ async def _trace_middleware(ctx, call_next):
     started = time.perf_counter()
     try:
         result = await call_next(ctx)
+        # Inside the try: the records are read before `finally` resets them.
+        return _amend_tool_payload(
+            result, functools.partial(_with_timing, elapsed=time.perf_counter() - started)
+        )
     finally:
         elapsed = time.perf_counter() - started
         try:
-            trace.log_summary(getattr(ctx, "tool_name", None) or "tools/call", elapsed)
+            trace.log_summary(_tool_name_of(ctx), elapsed)
         except Exception:  # noqa: BLE001 - telemetry must not fail the call
             logger.debug("trace summary failed", exc_info=True)
+        trace.reset(token)
 
+
+def _with_timing(payload: dict, *, elapsed: float) -> dict:
+    """Add `timing` to a tool answer that took longer than the slow threshold."""
     threshold = trace.slow_threshold_s()
-    if threshold and elapsed >= threshold and isinstance(result, dict) and "timing" not in result:
-        rows = trace.summary()
-        if rows:
-            result["timing"] = {
-                "total_s": round(elapsed, 1),
-                "phases": rows[:8],
-                "note": (
-                    "This call was slow enough to explain itself. Scans marked "
-                    "bounded:false read everything they touch."
-                ),
-            }
-    trace.reset(token)
-    return result
+    if not threshold or elapsed < threshold or "timing" in payload:
+        return payload
+    rows = trace.summary()
+    if not rows:
+        return payload
+    payload["timing"] = {
+        "total_s": round(elapsed, 1),
+        "phases": rows[:8],
+        "note": (
+            "This call was slow enough to explain itself. Scans marked "
+            "bounded:false read everything they touch."
+        ),
+    }
+    return payload
 
 
 def _from_alias_base():

@@ -175,5 +175,11 @@ def attach_cursor(
     result = dict(payload)
     result["truncated"] = True
     new_offset = offset + len(payload.get(list_key) or [])
+    if new_offset <= offset:
+        # Nothing was delivered, so a cursor would point at exactly this
+        # page again: a caller that follows cursors until they stop would
+        # never stop. Truncated stays true (the answer is incomplete); the
+        # way forward is a bigger budget or limit, not another page.
+        return result
     result["cursor"] = encode_cursor(params_key, release, new_offset)
     return result

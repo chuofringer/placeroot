@@ -22,6 +22,9 @@ classifiers = [
 dependencies = [
     "duckdb>=1.5.5",
     "mcp[cli]>=2.0.0",
+    # Imported directly (server.py: BaseModel/ConfigDict/Field/ValidationError),
+    # not only through mcp — declare it so the floor is ours, not inherited.
+    "pydantic>=2.11.0",
     "tzfpy>=1.3.3",
 ]
 
