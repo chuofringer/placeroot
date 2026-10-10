@@ -57,6 +57,10 @@ jobs:
         shell: bash
         run: uv run ruff check .
 
+      - name: Ruff format check
+        shell: bash
+        run: uv run ruff format --check .
+
       - name: Pytest (offline)
         shell: bash
         run: uv run pytest
