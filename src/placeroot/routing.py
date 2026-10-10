@@ -205,13 +205,29 @@ DRIVE_CLASS_SPEEDS_M_S = {
 DRIVE_DEFAULT_CLASS_SPEED_M_S = 8.0  # unknown/missing class, ~residential pace
 DRIVE_FASTEST_CLASS_SPEED_M_S = max(DRIVE_CLASS_SPEEDS_M_S.values())
 
-# access_restrictions `when.mode` tokens (Overture's vehicle-type vocabulary)
-# that count as "applies to this placeroot mode". An entry with no mode list
-# at all applies to every non-walk mode (walk never consults restrictions).
+# access_restrictions `when.mode` tokens (Overture's travelMode enum:
+# vehicle, motor_vehicle, car, truck, motorcycle, foot, bicycle, bus, hgv,
+# hov, emergency — schema/transportation/segment.yaml) that count as
+# "applies to this placeroot mode". A rule applies to a mode when its mode
+# list intersects the mode's token set; an entry with no mode list at all
+# applies to every non-walk mode (walk never consults restrictions).
+#
+# drive routes a plain car, so only the group tokens that contain cars
+# ("vehicle", "motor_vehicle") plus "car" itself apply: a rule scoped to
+# truck/hgv/motorcycle/bus/hov/emergency only says nothing about cars and
+# must not drop or direct the segment for them (a truck ban on a residential
+# street is the common case). cycle likewise honours "bicycle" and the
+# all-vehicles group token "vehicle" (a bicycle is a vehicle; motor_vehicle
+# is not a superset of bicycle).
 RESTRICTION_MODE_TOKENS = {
-    "cycle": {"bicycle"},
-    "drive": {"motorVehicle", "car", "hgv", "motorcycle"},
+    "cycle": {"vehicle", "bicycle"},
+    "drive": {"vehicle", "motor_vehicle", "car"},
 }
+
+# `when` keys that make an access_restrictions rule conditional on something
+# the router cannot evaluate (a time window, a purpose, a permit): see
+# _oneway_allowed for how these are weighed against unconditional rules.
+RESTRICTION_CONDITIONAL_WHEN_KEYS = frozenset({"during", "using", "recognized", "vehicle"})
 
 MODE_CONFIG = {
     "walk": {
@@ -989,22 +1005,40 @@ def _convert_speed_to_m_s(value: float, unit: str | None) -> float:
     return value / 3.6  # km/h, kph, kmh, or unrecognized — assume km/h
 
 
+def _covers_whole_segment(between) -> bool:
+    """True when a rule's `between` linear-reference range is the whole segment.
+
+    Overture scopes a speed_limits/access_restrictions entry to a sub-range
+    of the segment via `between: [start, end]` in [0, 1]; an absent/empty
+    range and the full [0.0, 1.0] range both mean "the whole segment". A
+    malformed range (not two numbers) is treated as a sub-range, i.e. the
+    rule is NOT applied to the whole segment.
+    """
+    if not between:
+        return True
+    try:
+        start, end = between
+        return float(start) <= 0.0 and float(end) >= 1.0
+    except (TypeError, ValueError):
+        return False
+
+
 def _speed_limit_m_s(speed_limits: list | None) -> float | None:
     """Slowest whole-segment max_speed in speed_limits, in m/s, or None.
 
     Entries whose `between` linear-reference range doesn't cover the whole
-    segment ([0.0, 1.0] or unset) are skipped — re-deriving a sub-range
-    limit against each post-split edge's own [at_a, at_b] window is a
-    documented follow-up, not attempted here. When several whole-segment
-    entries apply (e.g. different `when` conditions), the slowest one is
-    used, matching the conservative spirit of the class-based fallback.
+    segment ([0.0, 1.0] or unset — see _covers_whole_segment) are skipped —
+    re-deriving a sub-range limit against each post-split edge's own
+    [at_a, at_b] window is a documented follow-up, not attempted here. When
+    several whole-segment entries apply (e.g. different `when` conditions),
+    the slowest one is used, matching the conservative spirit of the
+    class-based fallback.
     """
     if not speed_limits:
         return None
     best = None
     for entry in speed_limits:
-        between = entry.get("between")
-        if between:
+        if not _covers_whole_segment(entry.get("between")):
             continue
         max_speed = entry.get("max_speed")
         if not max_speed:
@@ -1026,38 +1060,101 @@ def _drive_edge_speed_m_s(cls: str | None, speed_limits: list | None) -> float:
     return DRIVE_CLASS_SPEEDS_M_S.get(cls, DRIVE_DEFAULT_CLASS_SPEED_M_S)
 
 
+def _restriction_applies_to_mode(entry: dict, mode: str) -> bool:
+    """Does an access_restrictions entry's `when.mode` list name `mode`?
+
+    An entry with no mode list applies to every (non-walk) mode; otherwise it
+    applies when the list intersects RESTRICTION_MODE_TOKENS[mode] — so a
+    truck/hgv/motorcycle-only rule never touches car routing and a
+    motor_vehicle rule never touches a bicycle (see the token table).
+    """
+    when = entry.get("when") or {}
+    modes = when.get("mode") or []
+    if not modes:
+        return True
+    return bool(set(modes) & RESTRICTION_MODE_TOKENS.get(mode, set()))
+
+
+def _restriction_is_conditional(entry: dict) -> bool:
+    """True when the rule only holds under a condition the router can't
+    evaluate (RESTRICTION_CONDITIONAL_WHEN_KEYS, e.g. a time window)."""
+    when = entry.get("when") or {}
+    return any(when.get(key) for key in RESTRICTION_CONDITIONAL_WHEN_KEYS)
+
+
+def _restriction_headings(entry: dict) -> tuple[bool, bool]:
+    """(touches_forward, touches_backward) for an entry's `when.heading`;
+    no heading (or an unknown one) touches both directions."""
+    heading = (entry.get("when") or {}).get("heading")
+    if heading == "forward":
+        return True, False
+    if heading == "backward":
+        return False, True
+    return True, True
+
+
 def _oneway_allowed(access_restrictions: list | None, mode: str) -> tuple[bool, bool]:
     """(forward_allowed, backward_allowed) for `mode` along a segment's digitized order.
 
     Walk mode always ignores restrictions — pedestrians aren't bound by
     vehicle one-way rules — and returns (True, True) unconditionally. For
-    cycle/drive, an access_restrictions entry only matters when its
-    access_type is "denied": a `when.heading` of "forward" or "backward"
-    names the disallowed direction (leaving the graph edge directed the
-    other way); an entry with no heading at all denies both directions
-    (the segment is skipped entirely for this mode). Entries whose
-    `when.mode` list is present but doesn't include a token for this
-    placeroot mode (see RESTRICTION_MODE_TOKENS) are ignored — a
-    bicycle-only restriction shouldn't stop a car and vice versa.
+    cycle/drive the entries are reduced as follows (deliberately minimal;
+    anything not listed here is ignored):
+
+    * Mode scoping: an entry whose `when.mode` list is present but doesn't
+      intersect this mode's RESTRICTION_MODE_TOKENS is ignored — a
+      bicycle-only restriction shouldn't stop a car, a truck ban shouldn't
+      stop a car, and vice versa (see _restriction_applies_to_mode).
+    * Sub-range rules: an entry whose `between` range doesn't cover the
+      whole segment (see _covers_whole_segment) is ignored. It says nothing
+      about the rest of the segment, and the graph builder has no way to
+      apply it to only part of one; applying it to the whole segment (the
+      old behaviour) dropped or directed roads that are mostly open.
+    * Conditional rules: an entry whose `when` carries a condition the
+      router can't evaluate (`during` time windows, `using` purposes,
+      `recognized`/`vehicle` qualifiers — RESTRICTION_CONDITIONAL_WHEN_KEYS)
+      is ignored when the segment also carries an unconditional applicable
+      rule — the unconditional rule is the all-hours truth and the
+      conditional one only refines it. When no unconditional rule exists
+      the conditional ones are applied as if the condition held: a "no
+      entry 07:00-19:00" street is treated as no-entry, which keeps the
+      router from suggesting an illegal turn.
+    * access_type "denied" with a `when.heading` of "forward"/"backward"
+      closes that direction (leaving the graph edge directed the other
+      way); with no heading it closes both (the segment is skipped).
+    * access_type "allowed"/"designated" is an exception that reopens the
+      direction(s) it names, overriding any "denied" for this mode no
+      matter the entry order — the contraflow bicycle lane pattern:
+      `denied` (all vehicles, backward) + `allowed` (bicycle, backward)
+      leaves cycle two-way and drive one-way. Other access_type values
+      (e.g. "private") are not interpreted.
     """
     if mode == "walk" or not access_restrictions:
         return True, True
+    applicable = [
+        entry
+        for entry in access_restrictions
+        if isinstance(entry, dict)
+        and entry.get("access_type") in ("denied", "allowed", "designated")
+        and _restriction_applies_to_mode(entry, mode)
+        and _covers_whole_segment(entry.get("between"))
+    ]
+    if any(not _restriction_is_conditional(entry) for entry in applicable):
+        applicable = [entry for entry in applicable if not _restriction_is_conditional(entry)]
+
     forward_allowed, backward_allowed = True, True
-    mode_tokens = RESTRICTION_MODE_TOKENS.get(mode, set())
-    for entry in access_restrictions:
+    for entry in applicable:
         if entry.get("access_type") != "denied":
             continue
-        when = entry.get("when") or {}
-        modes = when.get("mode") or []
-        if modes and not (set(modes) & mode_tokens):
+        hits_forward, hits_backward = _restriction_headings(entry)
+        forward_allowed = forward_allowed and not hits_forward
+        backward_allowed = backward_allowed and not hits_backward
+    for entry in applicable:
+        if entry.get("access_type") not in ("allowed", "designated"):
             continue
-        heading = when.get("heading")
-        if heading == "forward":
-            forward_allowed = False
-        elif heading == "backward":
-            backward_allowed = False
-        else:
-            forward_allowed = backward_allowed = False
+        hits_forward, hits_backward = _restriction_headings(entry)
+        forward_allowed = forward_allowed or hits_forward
+        backward_allowed = backward_allowed or hits_backward
     return forward_allowed, backward_allowed
 
 
