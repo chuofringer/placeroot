@@ -121,7 +121,8 @@ def _name_has(name, expect_sub):
         s = re.sub(r"['\u2019]", "", s.casefold())
         return " ".join(re.sub(r"[\W_]+", " ", s).split())
 
-    return norm(expect_sub) in norm(name)
+    want = norm(expect_sub)
+    return bool(want) and want in norm(name)
 
 
 def _near_miss(top, near):

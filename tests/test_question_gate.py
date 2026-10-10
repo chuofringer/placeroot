@@ -77,7 +77,7 @@ def test_name_check_ignores_case_accents_and_punctuation():
     assert has("Fisherman’s Wharf", "Fisherman's Wharf")
     assert not has("University of Notre Dame", "Notre Dame de Paris")
     assert not has(None, "Notre Dame")
-
+    assert not has("Notre Dame", "-")
 
 
 def test_source_q_calls_include_every_gate_id():
