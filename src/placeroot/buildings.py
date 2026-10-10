@@ -185,6 +185,26 @@ _CENTROID_DISTANCE_EXPR = """2 * 6371000 * asin(sqrt(
             ))"""
 
 
+def _dedupe_clause(missing: set[str]) -> str:
+    """QUALIFY keeping one row per id, or "" when the schema has no id.
+
+    A cache tile is a bbox-*intersection* materialization
+    (cache.ensure_tile), so a footprint crossing a tile edge is copied
+    into both tiles and a multi-tile read (`read_parquet([tile, tile])`)
+    returns it twice: summarize_buildings counted it twice (count,
+    total_footprint_area_m2, the subtype/class breakdowns) and
+    buildings_at listed it twice. Applied in the `filtered` CTE, the same
+    SELECT as the bbox WHERE, so that prune still reaches the scan's
+    row-group statistics (recreation._projection's recipe) and every
+    aggregate downstream sees the deduped set. With no id column there is
+    nothing to key on: partitioning on a NULL projection would collapse
+    every row into one, so there is no dedupe.
+    """
+    if "id" in missing:
+        return ""
+    return "QUALIFY id IS NULL OR row_number() OVER (PARTITION BY id) = 1"
+
+
 def _area_m2(area_deg2: float | None, ref_lat: float) -> float | None:
     """Convert a planar ST_Area() result (in degrees^2) to square meters.
 
@@ -245,6 +265,7 @@ def summarize_buildings(
                 ST_Area({geom_expr})           AS area_deg2
             FROM {_from_source(bbox)}
             WHERE {bbox_filter}
+            {_dedupe_clause(missing)}
         )
         SELECT subtype, class, height, num_floors, area_deg2
         FROM filtered
@@ -354,6 +375,7 @@ def buildings_at(
                 {geojson_expr}                 AS geojson
             FROM {_from_source(bbox)}
             WHERE {bbox_filter}
+            {_dedupe_clause(missing)}
         )
         SELECT id, subtype, class, height, num_floors, area_deg2, geojson,
                {_CENTROID_DISTANCE_EXPR} AS distance_m
