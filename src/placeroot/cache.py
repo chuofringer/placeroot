@@ -16,7 +16,9 @@ geographically and get reused), but it would be a poor fit for a workload
 that scans arbitrary large regions once each.
 
 Eviction is mtime-based LRU over the whole cache directory, capped by
-total size (not by file count or age), and re-checked after every write.
+total size (not by file count or age), and re-checked after every write —
+cheaply: see the "size accounting" section for how a write avoids
+re-walking the whole directory.
 
 Query-first, materialize-later (issue #31): a COPY that pulls a whole tile
 out of upstream costs seconds, and a caller shouldn't block a user-facing
@@ -481,7 +483,8 @@ def ensure_tile(
             tmp_path.unlink()  # only still here if the COPY or rename failed
         except FileNotFoundError:
             pass
-    evict_if_needed()
+    _note_written(_TILES, path)
+    evict_if_needed(rescan=False)
     return path
 
 
@@ -672,8 +675,140 @@ def _is_claimed_locked(path: str, now: float) -> bool:
     return deadline is not None and deadline > now
 
 
-def evict_if_needed() -> None:
-    """Delete least-recently-used cached tiles until under the size cap.
+# --- size accounting ----------------------------------------------------------
+#
+# Two evictable classes live under the cache root, each under its own cap:
+#
+#   tiles              tile_*.parquet anywhere under the root (old- or
+#                      new-layout)                     PLACEROOT_CACHE_MAX_MB
+#   division polygons  division_polygons/**/*.bin (#153)
+#                                           PLACEROOT_CACHE_DIVISIONS_MAX_MB
+#
+# Division polygons were outside the accounting entirely, so the directory
+# grew without bound: a resolved country-scale boundary is tens of MB, and
+# every division ever looked up stayed forever. They get a cap of their own
+# rather than a share of the tile cap because one large polygon counted
+# against the tile budget would squeeze it toward zero and evict every tile
+# on every pass — the #230 argument — while a cap of their own bounds them
+# without touching tile behaviour.
+#
+# Support tables stay exempt from both: the geocode divisions name table
+# (geocode-divisions/table.parquet, #43) and the routing graph are built
+# once per release, never re-touched, and so always the oldest files in an
+# mtime sweep; evicting one turns a healthy local query into a false
+# UpstreamUnavailable mid-query, and the rebuild immediately re-triggers
+# eviction (thrash, #230).
+#
+# The walk is lazy. Re-walking and stat()ing the whole cache after every
+# tile write *was* the accounting; now each class keeps a per-root running
+# total that a write bumps by its file's size, and the full walk only runs
+# when that total is unknown (first use in this process, or a cache root
+# this process hasn't seen) or has crossed the cap. The running total is a
+# lower bound — another process's writes don't bump it, another process's
+# evictions don't lower it — so a walk may come a little late (by at most
+# this process's own writes since its last walk) or a little early, never
+# wrong: every walk recomputes from disk, and evicts from what it finds.
+DIVISION_POLYGONS_SUBDIR = "division_polygons"
+DEFAULT_DIVISION_POLYGONS_MAX_MB = 100
+
+_TILES = "tiles"
+_DIVISION_POLYGONS = "division_polygons"
+
+_known_bytes: dict[tuple[str, str], int] = {}  # (cache root, class) -> lower bound
+_accounting_lock = threading.Lock()
+
+
+def division_polygons_dir() -> Path:
+    """Where overture.py persists resolved division polygons (#153)."""
+    return cache_dir() / DIVISION_POLYGONS_SUBDIR
+
+
+def division_polygons_max_bytes() -> float:
+    mb = float(
+        os.environ.get("PLACEROOT_CACHE_DIVISIONS_MAX_MB", DEFAULT_DIVISION_POLYGONS_MAX_MB)
+    )
+    return mb * 1024 * 1024
+
+
+def _list_class(root: Path, kind: str) -> list[Path]:
+    """Every evictable file of `kind` under root (the full walk)."""
+    if kind == _TILES:
+        return [f for f in root.rglob("*.parquet") if f.name.startswith("tile_")]
+    d = root / DIVISION_POLYGONS_SUBDIR
+    return list(d.rglob("*.bin")) if d.exists() else []
+
+
+def _note_written(kind: str, path: Path) -> None:
+    """A file of `kind` was just written at path: bump the running total."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    key = (str(cache_dir()), kind)
+    with _accounting_lock:
+        if key in _known_bytes:
+            _known_bytes[key] += size
+
+
+def note_division_polygon_written(path: Path) -> None:
+    """overture.py persisted a division polygon at path: account for it, and
+    evict the least-recently-used polygons if the class is over its cap."""
+    _note_written(_DIVISION_POLYGONS, path)
+    _evict_class(_DIVISION_POLYGONS, division_polygons_max_bytes(), rescan=False)
+
+
+def _evict_class(kind: str, cap: float, *, rescan: bool) -> None:
+    root = cache_dir()
+    key = (str(root), kind)
+    if not rescan:
+        with _accounting_lock:
+            known = _known_bytes.get(key)
+        if known is not None and known <= cap:
+            return  # nothing this process wrote since its last walk crossed the cap
+    if not root.exists():
+        return
+    sized: list[tuple[float, int, Path]] = []
+    for f in _list_class(root, kind):
+        try:
+            st = f.stat()
+        except OSError:
+            continue  # vanished between the listing and here
+        sized.append((st.st_mtime, st.st_size, f))
+    sized.sort(key=lambda t: t[0])  # least recently used first
+    total = sum(size for _, size, _ in sized)
+    skipped = 0
+    # The claim check and the unlink have to be atomic against a query
+    # claiming a tile it just found on disk, so the delete loop runs under
+    # _claims_lock. Only filesystem work happens inside -- the walk and
+    # sort above are already done, and no DB call is made here.
+    with _claims_lock:
+        now = time.monotonic()
+        _prune_expired_locked(now)
+        for _mtime, size, f in sized:
+            if total <= cap:
+                break
+            if kind == _TILES and _is_claimed_locked(str(f), now):
+                skipped += 1
+                continue
+            try:
+                f.unlink()
+            except OSError:
+                continue
+            total -= size
+    with _accounting_lock:
+        _known_bytes[key] = total
+    if total > cap and skipped:
+        logger.info(
+            "cache still %d bytes over cap after eviction: %d in-flight tile(s) "
+            "were skipped to avoid evicting them mid-query; they become "
+            "evictable once their claims expire",
+            total - cap, skipped,
+        )
+
+
+def evict_if_needed(*, rescan: bool = True) -> None:
+    """Delete least-recently-used cached tiles (and division polygons) until
+    each class is under its size cap.
 
     Tiles currently claimed by an in-flight query (see claim_paths, #142)
     are skipped rather than deleted: evicting one out from under a query
@@ -682,53 +817,13 @@ def evict_if_needed() -> None:
     claims alone keep the cache over cap this pass simply frees what it can
     -- the cap is a target, not a hard bound, and the next pass (after the
     claims expire) collects the rest.
+
+    rescan=True (the default, for direct callers) always walks the cache;
+    the write path passes False to skip the walk while the running total
+    says the class is under cap — see "size accounting" above.
     """
-    root = cache_dir()
-    if not root.exists():
-        return
-    # Only tile files (tile_Y_X.parquet, old- or new-layout) are evictable.
-    # The cache root also holds support tables that are NOT tiles: the
-    # geocode divisions name table (geocode-divisions/table.parquet, #43)
-    # and any sibling per-release tables built once and reused for the whole
-    # session. They are large, built exactly once, and never re-touched, so
-    # under an oldest-mtime-first sweep they are always the first casualty —
-    # evicting one turns a healthy local query into a false
-    # UpstreamUnavailable mid-query, and the subsequent rebuild immediately
-    # re-triggers eviction (thrash, #230). They are excluded from the size
-    # accounting too: they're a fixed per-release overhead, and counting
-    # them against the cap would let a large table squeeze the effective
-    # tile budget to zero and evict every tile on every pass.
-    files = [f for f in root.rglob("*.parquet") if f.name.startswith("tile_")]
-    files.sort(key=lambda p: p.stat().st_mtime)
-    total = sum(f.stat().st_size for f in files)
-    cap = max_bytes()
-    skipped = 0
-    # The claim check and the unlink have to be atomic against a query
-    # claiming a tile it just found on disk, so the delete loop runs under
-    # _claims_lock. Only filesystem work happens inside -- the scan and sort
-    # above are already done, and no DB call is made here.
-    with _claims_lock:
-        now = time.monotonic()
-        _prune_expired_locked(now)
-        i = 0
-        while total > cap and i < len(files):
-            f = files[i]
-            i += 1
-            if _is_claimed_locked(str(f), now):
-                skipped += 1
-                continue
-            try:
-                total -= f.stat().st_size
-                f.unlink()
-            except OSError:
-                pass
-    if total > cap and skipped:
-        logger.info(
-            "cache still %d bytes over cap after eviction: %d in-flight tile(s) "
-            "were skipped to avoid evicting them mid-query; they become "
-            "evictable once their claims expire",
-            total - cap, skipped,
-        )
+    _evict_class(_TILES, max_bytes(), rescan=rescan)
+    _evict_class(_DIVISION_POLYGONS, division_polygons_max_bytes(), rescan=rescan)
 
 
 def _materialize_in_background(

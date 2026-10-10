@@ -485,6 +485,65 @@ def test_eviction_exempts_non_tile_support_tables(con, cache_dir, monkeypatch):
     assert len(remaining_tiles) < len(tiles)  # tiles, not the table, were evicted
 
 
+def test_division_polygons_have_their_own_lru_cap(cache_dir, monkeypatch):
+    """#153's persisted division polygons used to sit outside the accounting
+    altogether and grow without bound. They are swept LRU under their own
+    cap, oldest-used first."""
+    monkeypatch.setenv("PLACEROOT_CACHE_DIVISIONS_MAX_MB", str(2500 / 1024 / 1024))
+    d = cache.division_polygons_dir() / "0123456789abcdef"
+    d.mkdir(parents=True)
+    polygons = []
+    for i in range(4):
+        f = d / f"{i:032x}.bin"
+        f.write_bytes(b"p" * 1000)
+        os.utime(f, (1000 + i, 1000 + i))
+        polygons.append(f)
+        cache.note_division_polygon_written(f)  # what overture.py does after a write
+    # 4000 bytes against a 2500-byte cap: the two least recently used went.
+    assert [f.exists() for f in polygons] == [False, False, True, True]
+
+
+def test_division_polygons_do_not_count_against_the_tile_cap(con, cache_dir, monkeypatch):
+    """A single large polygon must not squeeze the tile budget (the #230
+    argument for keeping support tables out of the tile accounting): the
+    two classes are capped separately."""
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", "1")  # tiles fit comfortably
+    big = cache.division_polygons_dir() / "0123456789abcdef" / ("f" * 32 + ".bin")
+    big.parent.mkdir(parents=True)
+    big.write_bytes(b"p" * 2_000_000)  # 2 MB: more than the whole tile cap
+    os.utime(big, (1, 1))
+    tile = cache.ensure_tile(con, RELEASE, THEME, (-74, 40), str(FIXTURE_PATH))
+    assert tile.exists()  # not evicted to make room for the polygon
+    assert big.exists()  # and under its own (default) cap the polygon stays
+
+
+def test_tile_writes_under_cap_do_not_rewalk_the_cache(con, cache_dir, monkeypatch):
+    """The accounting is incremental: after the first walk, a write that
+    keeps the class under cap bumps the running total and skips the
+    rglob+stat sweep; a write that crosses the cap walks and evicts."""
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", "100")
+    walks: list[str] = []
+    real_list = cache._list_class
+
+    def counting_list(root, kind):
+        walks.append(kind)
+        return real_list(root, kind)
+
+    monkeypatch.setattr(cache, "_list_class", counting_list)
+
+    cache.ensure_tile(con, RELEASE, THEME, (-74, 40), str(FIXTURE_PATH))
+    first = len(walks)
+    assert first >= 1  # totals unknown for a fresh cache root: one walk per class
+    cache.ensure_tile(con, RELEASE, THEME, (-75, 40), str(FIXTURE_PATH))
+    cache.ensure_tile(con, RELEASE, THEME, (-76, 40), str(FIXTURE_PATH))
+    assert len(walks) == first  # under cap: no re-walk
+
+    monkeypatch.setenv("PLACEROOT_CACHE_MAX_MB", str(5000 / 1024 / 1024))
+    cache.ensure_tile(con, RELEASE, THEME, (15, 78), str(FIXTURE_PATH))
+    assert len(walks) > first  # crossed the cap: walked, and evicted
+    assert len(list(cache.cache_dir().rglob("tile_*.parquet"))) < 4
+
+
 def test_lru_eviction_removes_oldest_tiles_when_over_cap(con, cache_dir, monkeypatch):
     # ~5000 bytes: room for a couple of small tiles but not the whole set,
     # forcing eviction of the least-recently-used ones. (Bumped from 2000
