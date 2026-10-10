@@ -224,8 +224,8 @@ def _run_id_query(select_sql: str, from_source: str, params: dict, bbox_filter: 
         LIMIT 1
     """
     try:
-        with db.conn_lock:
-            return db.shared_conn().execute(sql, params).fetchone()
+        with db.read_conn() as rc:
+            return rc.execute(sql, params).fetchone()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
 

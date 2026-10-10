@@ -156,8 +156,8 @@ def admin_lookup(lat: float, lon: float, con=None) -> dict:
                 # concurrently with its building join on two of these.
                 rows = con.execute(sql, {"lat": lat, "lon": lon}).fetchall()
             else:
-                with db.conn_lock:
-                    rows = db.shared_conn().execute(sql, {"lat": lat, "lon": lon}).fetchall()
+                with db.read_conn() as rc:
+                    rows = rc.execute(sql, {"lat": lat, "lon": lon}).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
     # Smallest-first ranking happens here, not in the SQL: an ORDER BY on a
@@ -338,8 +338,8 @@ def divisions_in_polygon(
             if con is not None:
                 rows = con.execute(sql, params).fetchall()
             else:
-                with db.conn_lock:
-                    rows = db.shared_conn().execute(sql, params).fetchall()
+                with db.read_conn() as rc:
+                    rows = rc.execute(sql, params).fetchall()
     except duckdb.Error as e:
         raise overture.UpstreamUnavailable(str(e)) from e
 
