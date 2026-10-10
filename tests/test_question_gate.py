@@ -65,6 +65,21 @@ def test_question_gate_covers_the_required_families():
     assert "g10" in ids, "Casablanca Chile-trap must stay"
 
 
+def test_name_check_ignores_case_accents_and_punctuation():
+    # x03 failed every weekday on the right answer: "Notre Dame" vs
+    # "Cathédrale Notre-Dame de Paris".
+    sys.path.insert(0, str(BENCH))
+    import query_corpus  # noqa: E402
+
+    has = query_corpus._name_has
+    assert has("Cathédrale Notre-Dame de Paris", "Notre Dame")
+    assert has("Kings Cross St. Pancras", "King's Cross")
+    assert has("Fisherman’s Wharf", "Fisherman's Wharf")
+    assert not has("University of Notre Dame", "Notre Dame de Paris")
+    assert not has(None, "Notre Dame")
+    assert not has("Notre Dame", "-")
+
+
 def test_source_q_calls_include_every_gate_id():
     # Belt: even if QUERIES failed to append, the file still names them.
     named = _corpus_ids_from_source()
