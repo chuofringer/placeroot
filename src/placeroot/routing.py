@@ -2584,7 +2584,7 @@ def _midpoint(
 
 
 def _dijkstra_path_to_target(
-    graph: Graph, source: str, target: str, speed_m_s: float
+    graph: Graph, source: str, target: str, speed_m_s: float, max_cost: float = math.inf
 ) -> tuple[float, float, list[tuple[str, float]]] | None:
     """(elapsed_seconds, distance_m, path) of the min-time path source->target, or None.
 
@@ -2597,6 +2597,15 @@ def _dijkstra_path_to_target(
     None if the heap empties before `target` is reached, meaning target is
     unreachable from source in this graph (different component, or a
     one-way maze that only lets traffic flow away from it).
+
+    max_cost bounds the search in the heap's own units (elapsed seconds at
+    speed_m_s, i.e. plain weight when speed_m_s is 1.0): once the cheapest
+    unsettled node costs more than max_cost the search stops and returns
+    None, exactly as if target were unreachable — any path to it would
+    cost at least that much. A caller that would reject any result dearer
+    than some threshold anyway (map_match's stitch outlier guard) passes
+    that threshold so an unreachable or far-off target doesn't settle the
+    whole graph before answering. The default is unbounded.
 
     `path` is the node sequence from source to target, each paired with the
     cumulative route distance in meters at that node (source -> 0.0, target
@@ -2618,6 +2627,8 @@ def _dijkstra_path_to_target(
         t, node = heapq.heappop(heap)
         if t > time_to.get(node, math.inf):
             continue
+        if t > max_cost:
+            return None
         if node == target:
             path: list[tuple[str, float]] = []
             cur = node
