@@ -1167,6 +1167,8 @@ def _clear_table_derived_caches() -> None:
     called when a table is (re)published and from clear_resolve_session."""
     _region_population_lookup_cached.cache_clear()
     _division_named_exactly_cached.cache_clear()
+    with _anchor_memo_lock:
+        _anchor_memo.clear()
 
 
 def _publish_copied_parquet(con: duckdb.DuckDBPyConnection, tmp_path: Path, path: Path) -> None:
@@ -3184,6 +3186,31 @@ def _fallback_anchor_candidates(
     )]
 
 
+# Memo for _fallback_anchor_details' split-derived anchors, keyed on its
+# inputs. One resolve asks the same question up to three times — the
+# bundled-recall gate, the places-fallback anchor, and resolve_place's own
+# reference — and each answer costs ~22 division lookups. Cleared whenever
+# a local table is republished and by clear_resolve_session.
+_ANCHOR_MEMO_MAX = 128
+_anchor_memo: OrderedDict[tuple, list[dict]] = OrderedDict()
+_anchor_memo_lock = threading.Lock()
+
+
+def _anchor_memo_key(
+    search_query: str,
+    region_code: str | None,
+    local_table: str | None,
+    alt_table: str | None,
+    region_population: dict[str, int] | None,
+) -> tuple:
+    # The ranking inside (_rank_key via _pick_anchor_row) reads the #406
+    # home region, so a home resolved between two calls must miss.
+    home = home_region.get_home_region()
+    home_key = (home.get("lat"), home.get("lon")) if home else None
+    pop_key = frozenset(region_population.items()) if region_population else None
+    return (search_query, region_code, local_table, alt_table, pop_key, home_key)
+
+
 def _fallback_anchor_details(
     search_query: str,
     divisions: list[dict],
@@ -3193,6 +3220,9 @@ def _fallback_anchor_details(
     region_population: dict[str, int] | None = None,
 ) -> list[dict]:
     """_fallback_anchor_candidates, with each anchor's provenance kept.
+
+    Memoized on its inputs (see _anchor_memo) once `divisions` is empty —
+    the only branch that does any lookups.
 
     One dict per candidate, best first: "lat", "lon", "name_query" (as the
     tuple form), plus "candidate" (the query words the anchor was derived
@@ -3208,6 +3238,34 @@ def _fallback_anchor_details(
             "lat": top["lat"], "lon": top["lon"], "name_query": search_query,
             "candidate": "", "split": False, "strong": True,
         }]
+    memo_key = _anchor_memo_key(
+        search_query, region_code, local_table, alt_table, region_population
+    )
+    with _anchor_memo_lock:
+        cached = _anchor_memo.get(memo_key)
+        if cached is not None:
+            _anchor_memo.move_to_end(memo_key)
+            return [dict(d) for d in cached]
+    out = _derive_split_anchors(
+        search_query, region_code, local_table, alt_table, region_population
+    )
+    with _anchor_memo_lock:
+        _anchor_memo[memo_key] = [dict(d) for d in out]
+        _anchor_memo.move_to_end(memo_key)
+        while len(_anchor_memo) > _ANCHOR_MEMO_MAX:
+            _anchor_memo.popitem(last=False)
+    return out
+
+
+def _derive_split_anchors(
+    search_query: str,
+    region_code: str | None,
+    local_table: str | None,
+    alt_table: str | None,
+    region_population: dict[str, int] | None,
+) -> list[dict]:
+    """The uncached body of _fallback_anchor_details for a query no
+    division matched: which of the caller's own words locate it."""
     tokens = search_query.strip().split()
     pop = region_population or {}
 
@@ -4544,6 +4602,7 @@ def geocode_detailed(
         and _fallback_anchor(
             search_query, [], region_code, local_table,
             alt_table=_local_alt_names_table(local_table),
+            region_population=_region_population_lookup(local_table),
         ) is None
     ):
         # The stage-0 bundled index carries only populous divisions; a
@@ -5628,6 +5687,7 @@ def resolve_place(
         options = _fallback_anchor_details(
             query, [], None, local_table,
             alt_table=_local_alt_names_table(local_table),
+            region_population=_region_population_lookup(local_table),
         )
         reference = (options[0]["lat"], options[0]["lon"]) if options else None
         if options and options[0]["split"]:

@@ -273,3 +273,33 @@ def test_region_population_lookup_scans_once_per_table(monkeypatch):
     assert geocode._region_population_lookup(None) == {}
     geocode.clear_resolve_session()
     assert geocode._region_population_lookup_cached.cache_info().currsize == 0
+
+
+def test_fallback_anchor_details_is_memoized_per_inputs(monkeypatch):
+    brooklyn = {
+        "id": "div-brooklyn", "name": "Brooklyn", "subtype": "locality", "country": "US",
+        "region": "US-NY", "lat": 40.65, "lon": -73.95, "admin_context": ["United States"],
+        "population": 2_600_000,
+    }
+    lookups = []
+
+    def fake_query(candidate, region_code, local_table, **kw):
+        lookups.append(candidate)
+        return [dict(brooklyn)] if candidate.lower() == "brooklyn" else []
+
+    monkeypatch.setattr(geocode, "_query_divisions", fake_query)
+    geocode.clear_resolve_session()
+
+    first = geocode._fallback_anchor_details("Landmark Brooklyn", [], None, None)
+    assert first and first[0]["lat"] == 40.65
+    n = len(lookups)
+    assert n > 0
+    second = geocode._fallback_anchor_details("Landmark Brooklyn", [], None, None)
+    assert second == first
+    assert len(lookups) == n, "the second identical call must not re-run the division scans"
+    # A caller's own edits never reach the memo.
+    second[0]["lat"] = 0.0
+    assert geocode._fallback_anchor_details("Landmark Brooklyn", [], None, None)[0]["lat"] == 40.65
+    # Different inputs are a different question.
+    geocode._fallback_anchor_details("Landmark Brooklyn", [], "US-NY", None)
+    assert len(lookups) > n
