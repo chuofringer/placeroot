@@ -5809,7 +5809,9 @@ def preferences(
     Call with no arguments to read. Pass mode, pace, household tags, a
     free-text note, or lang to merge those fields.
     clear=true deletes the file and cannot be combined with other fields.
-    Nothing is sent off this machine.
+    Nothing is sent off this machine. Over HTTP, preferences are
+    per-connection and not persisted (this session's values overlay the
+    host's file and are gone when the session ends).
     """
     fields = (mode, pace, household, note, lang)
     if clear and any(value is not None for value in fields):
