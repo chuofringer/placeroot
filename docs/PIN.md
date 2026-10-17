@@ -15,10 +15,23 @@ Overture bucket, so it isn't something CI can do unattended (GitHub Actions
 in this repo also cannot open pull requests — an org setting — so any
 automation here can open an issue, never a PR).
 
+## 0. Or let Actions do steps 1 and 2a
+
+The `Regenerate release artifacts` workflow (`.github/workflows/regenerate-artifacts.yml`,
+`workflow_dispatch`, input `release`) runs the bump and all three artifact
+builds where the bucket and DuckDB's extension host are reachable, deletes
+the superseded release's sets, and pushes the result to `pin-<release>`.
+Open the PR from that branch and finish steps 2a's test literals, 2c and 3
+by hand. When the canary flagged a field-coverage regression, run the
+`Overture probe` workflow first (`scripts/probe_brand_regression.py`): it
+diffs the two releases on GERS id per probe bbox and says whether values
+collapsed on existing rows (#546's shape, do not bump) or the denominator
+grew (new unbranded rows, safe to bump — #494 was the latter).
+
 ## 1. Bump the constant
 
 ```bash
-uv run python scripts/bump_pin.py 2026-08-19.0
+uv run python scripts/bump_pin.py 2026-09-23.1
 ```
 
 Rewrites `PINNED_RELEASE = "..."` in `src/placeroot/release.py` and nothing
@@ -73,7 +86,7 @@ bundled data's release name and a file count:
 tests/test_manifest.py::test_bundled_manifests_load_and_prune_for_real
 ```
 
-Update its release literals (`"2026-08-19.0"` as of this writing) to the new release, and its
+Update its release literals (`"2026-09-23.1"` as of this writing) to the new release, and its
 `len(m["files"]) == 512` / `kept <= 16` assertions if the new release's file
 counts differ (Overture's own theme partitioning can change release to
 release).
