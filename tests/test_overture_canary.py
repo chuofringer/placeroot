@@ -127,6 +127,31 @@ def test_regression_detected_with_correct_table_numbers():
     assert "OvertureMaps/data#546" in joined
 
 
+def test_rate_drop_from_denominator_growth_is_not_a_regression():
+    """#494: Manhattan's brand rate fell -20.3% between 2026-08-19.0 and
+    2026-09-23.1 while the branded COUNT rose (10,771 -> 10,935) — 59k new
+    unbranded office POIs grew the denominator. That is not #546's shape
+    (existing rows losing values), so it must not be flagged."""
+    pinned = {"Manhattan": _metrics(190_739, 10_771 / 190_739, 0.9, 0.95, 5_000)}
+    newest = {"Manhattan": _metrics(242_907, 10_935 / 242_907, 0.9, 0.95, 5_000)}
+    rows = overture_canary.compare_bbox_metrics(pinned, newest)
+    brand = next(r for r in rows if r["metric"] == "brand_non_null_rate")
+    assert brand["delta_pct"] == pytest.approx(-20.3, abs=0.1)
+    assert brand["regression"] is False
+    assert "growth, not a collapse" in brand["skip_reason"]
+    assert overture_canary.render_coverage_report(rows, "2026-08-19.0", "2026-09-23.1") == []
+
+
+def test_rate_drop_with_count_drop_is_still_a_regression_even_as_rows_grow():
+    """Rows grow a little AND the branded count craters: #546's shape, flagged."""
+    pinned = {"Lagos": _metrics(10_000, 0.60, 0.9, 0.95, 5_000)}  # 6,000 branded
+    newest = {"Lagos": _metrics(11_000, 0.30, 0.9, 0.95, 5_000)}  # 3,300 branded
+    rows = overture_canary.compare_bbox_metrics(pinned, newest)
+    brand = next(r for r in rows if r["metric"] == "brand_non_null_rate")
+    assert brand["regression"] is True
+    assert brand["skip_reason"] is None
+
+
 def test_row_count_metric_regression_also_flagged():
     pinned = {"Tokyo": _metrics(5_000, 0.5, 0.9, 0.95, 3_000)}
     newest = {"Tokyo": _metrics(3_000, 0.5, 0.9, 0.95, 3_000)}  # places rows -40%
