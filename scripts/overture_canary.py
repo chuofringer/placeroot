@@ -264,6 +264,24 @@ def compare_bbox_metrics(
             delta_pct = (newest_value - pinned_value) / pinned_value * 100.0
             row["delta_pct"] = delta_pct
             row["regression"] = delta_pct <= -REGRESSION_TOLERANCE * 100.0
+            if row["regression"] and metric.endswith("_non_null_rate") and denom is not None:
+                # A rate can fall because the denominator grew, not because
+                # values collapsed (#494: Manhattan gained 59k unbranded
+                # office POIs in one release while the branded count rose).
+                # #546's shape is existing rows losing their values, so the
+                # absolute non-null count must have fallen too before a
+                # rate drop is called a regression.
+                newest_denom = newest.get(_DENOMINATOR_METRIC[metric])
+                if newest_denom is not None:
+                    pinned_count = pinned_value * denom
+                    newest_count = newest_value * newest_denom
+                    if newest_count > pinned_count * (1.0 - REGRESSION_TOLERANCE):
+                        row["regression"] = False
+                        row["skip_reason"] = (
+                            f"rate fell {delta_pct:+.1f}% but the non-null count went "
+                            f"{pinned_count:.0f} -> {newest_count:.0f} (denominator "
+                            f"{denom:g} -> {newest_denom:g}): growth, not a collapse"
+                        )
             rows.append(row)
     return rows
 
