@@ -1,0 +1,43 @@
+name: Overture probe
+# On-demand companion to the weekly canary (#494): explains a flagged
+# field-coverage regression by diffing two releases on GERS id inside the
+# probe bboxes. Read-only against the public bucket; prints to the log and
+# the step summary. Runs here rather than on a laptop because the bucket
+# and DuckDB's extension host are reachable from Actions.
+on:
+  workflow_dispatch:
+    inputs:
+      pinned:
+        description: 'Baseline release (default: PINNED_RELEASE)'
+        required: false
+        default: ''
+      newest:
+        description: 'Candidate release (default: newest upstream)'
+        required: false
+        default: ''
+      metro:
+        description: 'Only this probe metro (default: all five)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          enable-cache: true
+      - name: Probe
+        run: |
+          set -o pipefail
+          ARGS=()
+          [ -n "${{ inputs.pinned }}" ] && ARGS+=(--pinned "${{ inputs.pinned }}")
+          [ -n "${{ inputs.newest }}" ] && ARGS+=(--newest "${{ inputs.newest }}")
+          [ -n "${{ inputs.metro }}" ] && ARGS+=(--metro "${{ inputs.metro }}")
+          uv run python scripts/probe_brand_regression.py "${ARGS[@]}" | tee probe.md
+          cat probe.md >> "$GITHUB_STEP_SUMMARY"
