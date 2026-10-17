@@ -103,7 +103,11 @@ def test_slow_scan_does_not_hold_up_a_fast_query_timing(instance):
     for t in threads:
         t.start()
     _join(threads, timeout=120)
-    assert times["slow_end"] > 1.0  # the slow side really was slow
+    # Sanity floor only: the real assertion is the ratio below. 120M sins took
+    # 0.96 s on a shared Apple Silicon runner (CI run 39070690757), so a 1.0 s
+    # floor flaked on nothing. Half a second still rules out a scan that
+    # finished before the fast side even started.
+    assert times["slow_end"] > 0.5  # the slow side really was slow
     assert times["fast_end"] < times["slow_end"] / 2
 
 
