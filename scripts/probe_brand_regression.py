@@ -48,19 +48,14 @@ def probe(con, pinned: str, newest: str, name: str, lat: float, lon: float) -> N
         FROM read_parquet('{glob}', hive_partitioning=1)
         WHERE {flt}
     """
-    con.execute(
-        f"CREATE OR REPLACE TEMP TABLE a AS {base.format(glob=places_glob(pinned), flt=filter_sql)}",
-        params,
-    )
-    con.execute(
-        f"CREATE OR REPLACE TEMP TABLE b AS {base.format(glob=places_glob(newest), flt=filter_sql)}",
-        params,
-    )
+    for table, rel in (("a", pinned), ("b", newest)):
+        select = base.format(glob=places_glob(rel), flt=filter_sql)
+        con.execute(f"CREATE OR REPLACE TEMP TABLE {table} AS {select}", params)
     (na, ba) = con.execute("SELECT count(*), count(brand) FROM a").fetchone()
     (nb, bb) = con.execute("SELECT count(*), count(brand) FROM b").fetchone()
     print(f"\n## {name}")
-    print(f"| release | places rows | brand non-null | rate |")
-    print(f"|---|---:|---:|---:|")
+    print("| release | places rows | brand non-null | rate |")
+    print("|---|---:|---:|---:|")
     print(f"| {pinned} (pinned) | {na} | {ba} | {ba / na if na else 0:.4f} |")
     print(f"| {newest} (newest) | {nb} | {bb} | {bb / nb if nb else 0:.4f} |")
 
@@ -70,17 +65,27 @@ def probe(con, pinned: str, newest: str, name: str, lat: float, lon: float) -> N
           count(*) FILTER (WHERE a.id IS NOT NULL AND b.id IS NOT NULL) AS same_id,
           count(*) FILTER (WHERE a.id IS NOT NULL AND b.id IS NULL)     AS removed,
           count(*) FILTER (WHERE a.id IS NULL AND b.id IS NOT NULL)     AS added,
-          count(*) FILTER (WHERE a.brand IS NOT NULL AND b.id IS NOT NULL AND b.brand IS NULL) AS brand_collapsed,
-          count(*) FILTER (WHERE a.brand IS NOT NULL AND b.id IS NULL)  AS branded_removed,
-          count(*) FILTER (WHERE a.id IS NULL AND b.id IS NOT NULL AND b.brand IS NULL) AS added_unbranded,
-          count(*) FILTER (WHERE a.id IS NULL AND b.id IS NOT NULL AND b.brand IS NOT NULL) AS added_branded,
-          count(*) FILTER (WHERE a.id IS NOT NULL AND b.id IS NOT NULL AND a.brand IS NULL AND b.brand IS NOT NULL) AS brand_gained
+          count(*) FILTER (WHERE a.brand IS NOT NULL AND b.id IS NOT NULL
+                             AND b.brand IS NULL)                        AS brand_collapsed,
+          count(*) FILTER (WHERE a.brand IS NOT NULL AND b.id IS NULL)   AS branded_removed,
+          count(*) FILTER (WHERE a.id IS NULL AND b.id IS NOT NULL
+                             AND b.brand IS NULL)                        AS added_unbranded,
+          count(*) FILTER (WHERE a.id IS NULL AND b.id IS NOT NULL
+                             AND b.brand IS NOT NULL)                    AS added_branded,
+          count(*) FILTER (WHERE a.id IS NOT NULL AND b.id IS NOT NULL
+                             AND a.brand IS NULL AND b.brand IS NOT NULL) AS brand_gained
         FROM a FULL OUTER JOIN b USING (id)
         """
     ).fetchone()
     keys = [
-        "same_id", "removed", "added", "brand_collapsed", "branded_removed",
-        "added_unbranded", "added_branded", "brand_gained",
+        "same_id",
+        "removed",
+        "added",
+        "brand_collapsed",
+        "branded_removed",
+        "added_unbranded",
+        "added_branded",
+        "brand_gained",
     ]
     print("\nid-level diff (pinned -> newest):")
     for k, v in zip(keys, rows):
@@ -91,7 +96,8 @@ def probe(con, pinned: str, newest: str, name: str, lat: float, lon: float) -> N
         """
         WITH ca AS (SELECT brand, count(*) n FROM a WHERE brand IS NOT NULL GROUP BY 1),
              cb AS (SELECT brand, count(*) n FROM b WHERE brand IS NOT NULL GROUP BY 1)
-        SELECT coalesce(ca.brand, cb.brand) brand, coalesce(ca.n, 0) pinned, coalesce(cb.n, 0) newest
+        SELECT coalesce(ca.brand, cb.brand) brand,
+               coalesce(ca.n, 0) pinned, coalesce(cb.n, 0) newest
         FROM ca FULL OUTER JOIN cb USING (brand)
         ORDER BY abs(coalesce(ca.n, 0) - coalesce(cb.n, 0)) DESC, pinned DESC
         LIMIT 25
@@ -106,7 +112,8 @@ def probe(con, pinned: str, newest: str, name: str, lat: float, lon: float) -> N
         """
         WITH ca AS (SELECT category, count(*) n FROM a GROUP BY 1),
              cb AS (SELECT category, count(*) n FROM b GROUP BY 1)
-        SELECT coalesce(ca.category, cb.category) category, coalesce(ca.n, 0) pinned, coalesce(cb.n, 0) newest
+        SELECT coalesce(ca.category, cb.category) category,
+               coalesce(ca.n, 0) pinned, coalesce(cb.n, 0) newest
         FROM ca FULL OUTER JOIN cb USING (category)
         ORDER BY (coalesce(cb.n, 0) - coalesce(ca.n, 0)) DESC
         LIMIT 12
