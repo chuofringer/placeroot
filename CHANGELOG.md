@@ -8,6 +8,22 @@ fixing behavior is patch.
 
 ## [Unreleased]
 
+### Changed
+- Pinned Overture release bumped `2026-08-19.0` → `2026-09-23.1` (#494), with
+  the three bundled artifact sets (file manifests, geocode index, land-cover
+  grid) regenerated for it and the superseded sets removed. The canary's
+  Manhattan brand-rate flag on this release was a denominator effect (59k new
+  unbranded POIs; the branded count rose), not a value collapse.
+- Canary field-coverage gate: a `*_non_null_rate` drop counts as a regression
+  only when the absolute non-null count also fell, so a release that adds many
+  unbranded places no longer reads as a brand collapse (#494).
+
+### Added
+- `Overture probe` and `Regenerate release artifacts` workflows
+  (`workflow_dispatch`): the first explains a canary regression by diffing two
+  releases on GERS id inside the probe bboxes; the second runs the
+  docs/PIN.md pin-bump chore on Actions and pushes a `pin-<release>` branch.
+
 ## [0.11.0] — 2026-10-10
 
 ### Fixed
