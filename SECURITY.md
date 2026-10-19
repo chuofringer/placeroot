@@ -15,8 +15,10 @@ Report privately via GitHub's private vulnerability reporting on this
 repository (Security → Report a vulnerability), or by email to
 <hello@placeroot.dev> with `[placeroot security]` in the subject.
 
-You can expect an acknowledgement within a week. Fixes ship as a normal
-release; credit is given unless you ask otherwise.
+PlaceRoot is maintained on a best-effort, roughly quarterly cadence by one
+person, so there is no response-time commitment. Reports are read; a fix,
+when one is needed, ships as a normal release, and credit is given unless
+you ask otherwise.
 
 ## Threat model, so reports land well
 

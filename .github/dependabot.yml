@@ -1,9 +1,11 @@
 version: 2
+# Maintenance cadence (2026-10): one grouped PR per ecosystem per month, so a
+# quarterly pass can merge everything in one sitting instead of five PRs a week.
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
       actions:
         patterns: ["*"]
@@ -12,10 +14,16 @@ updates:
   - package-ecosystem: uv
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      python:
+        patterns: ["*"]
 
   # The npm launcher package (no lockfile; manifest-only updates).
   - package-ecosystem: npm
     directory: /npm
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      npm:
+        patterns: ["*"]

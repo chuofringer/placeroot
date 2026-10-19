@@ -83,7 +83,7 @@ def data_version_payload() -> dict:
         "source": info["source"],
         # #219: the vintage's age, so an agent or operator can see the data
         # is old without knowing Overture's release cadence. `stale` flips
-        # past PLACEROOT_STALE_RELEASE_DAYS (default 60 — two missed
+        # past PLACEROOT_STALE_RELEASE_DAYS (default 120 — about four missed
         # ~monthly releases).
         "age_days": release.age_days(release_str),
         "note": (
