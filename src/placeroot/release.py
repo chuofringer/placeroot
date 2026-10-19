@@ -22,7 +22,7 @@ than once around a rollover boundary can do part of its work against each
 release, which is two self-consistent reads, not corruption.
 
 Staleness (#219): release names carry their date, so `age_days()` and
-`is_stale()` (threshold PLACEROOT_STALE_RELEASE_DAYS, default 60) let
+`is_stale()` (threshold PLACEROOT_STALE_RELEASE_DAYS, default 120) let
 data_version and the logs say "this vintage is older than Overture's
 cadence" instead of leaving the reader to know the cadence themselves.
 """
@@ -133,7 +133,7 @@ _RELEASES_FAILURE_TTL_S = 60.0
 _mirror_listing_warned = False
 
 DEFAULT_TTL_HOURS = 6.0
-DEFAULT_STALE_DAYS = 60
+DEFAULT_STALE_DAYS = 120
 
 # TTL cache state. _cached is the last successful resolution; _cached_at is
 # monotonic so wall-clock jumps can't expire (or eternally refresh) it.
@@ -204,7 +204,7 @@ def age_days(release_name: str) -> int | None:
 
 
 def is_stale(release_name: str) -> bool:
-    """Older than the staleness threshold (default 60 days — Overture ships
+    """Older than the staleness threshold (default 120 days — Overture ships
     ~monthly, so two missed releases)."""
     days = age_days(release_name)
     return days is not None and days > _stale_days_threshold()
@@ -303,7 +303,7 @@ def _resolved(discovered: str | None) -> dict:
     monthly, days after a release they did not ask for.
 
     So the artifact release wins while it is still current, and loses once
-    it is stale (PLACEROOT_STALE_RELEASE_DAYS, default 60 — two missed
+    it is stale (PLACEROOT_STALE_RELEASE_DAYS, default 120 — about four missed
     Overture releases). That bounds the trade in both directions: nobody
     silently gets slow because upstream shipped yesterday, and nobody
     silently sits on a half-year-old vintage because they never upgraded

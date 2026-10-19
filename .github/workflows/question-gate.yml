@@ -11,7 +11,7 @@ name: Question gate
 #   uv run python benchmarks/run_query_corpus.py --smoke --warm --budget-s 15 --fail-on both
 on:
   schedule:
-    - cron: '0 15 * * 1-5'   # 15:00 UTC weekdays = 08:00 PDT / 07:00 PST
+    - cron: '0 15 5 * *'   # 15:00 UTC on the 5th of each month (maintenance cadence; was weekdays)
   workflow_dispatch:
 
 permissions:

@@ -363,18 +363,18 @@ def test_an_exception_escaping_discovery_does_not_freeze_the_cache(monkeypatch):
 
 
 def test_age_days_reads_the_date_in_the_release_name():
-    old = (datetime.date.today() - datetime.timedelta(days=90)).isoformat()
-    assert release.age_days(f"{old}.0") == 90
+    old = (datetime.date.today() - datetime.timedelta(days=150)).isoformat()
+    assert release.age_days(f"{old}.0") == 150
     assert release.age_days("garbage") is None
 
 
 def test_is_stale_past_the_threshold(monkeypatch):
     monkeypatch.delenv("PLACEROOT_STALE_RELEASE_DAYS", raising=False)
     fresh = (datetime.date.today() - datetime.timedelta(days=10)).isoformat()
-    old = (datetime.date.today() - datetime.timedelta(days=90)).isoformat()
+    old = (datetime.date.today() - datetime.timedelta(days=150)).isoformat()
     assert release.is_stale(f"{fresh}.0") is False
     assert release.is_stale(f"{old}.0") is True
-    monkeypatch.setenv("PLACEROOT_STALE_RELEASE_DAYS", "100")
+    monkeypatch.setenv("PLACEROOT_STALE_RELEASE_DAYS", "200")
     assert release.is_stale(f"{old}.0") is False
 
 
@@ -411,10 +411,10 @@ def test_env_override_warns_about_a_stale_vintage_once_and_never_dials_out(monke
 def test_data_version_payload_carries_age_and_stale_flag(monkeypatch):
     from placeroot import resources
 
-    old = (datetime.date.today() - datetime.timedelta(days=90)).isoformat()
+    old = (datetime.date.today() - datetime.timedelta(days=150)).isoformat()
     monkeypatch.setenv("PLACEROOT_OVERTURE_RELEASE", f"{old}.0")
     payload = resources.data_version_payload()
-    assert payload["age_days"] == 90
+    assert payload["age_days"] == 150
     assert payload["stale"] is True
     fresh = (datetime.date.today() - datetime.timedelta(days=5)).isoformat()
     monkeypatch.setenv("PLACEROOT_OVERTURE_RELEASE", f"{fresh}.0")

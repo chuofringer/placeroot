@@ -8,7 +8,16 @@ fixing behavior is patch.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-10-19
+
 ### Changed
+- Maintenance cadence. The project is now maintained quarterly: the
+  staleness threshold `PLACEROOT_STALE_RELEASE_DAYS` defaults to 120 days
+  (was 60) so a quarterly pin bump keeps the bundled accelerators matched
+  between releases; the question gate and query corpus workflows run monthly
+  instead of weekdays/weekly; dependabot opens one grouped PR per ecosystem
+  per month; `SECURITY.md` states best-effort response rather than a one-week
+  acknowledgement.
 - Pinned Overture release bumped `2026-08-19.0` → `2026-09-23.1` (#494), with
   the three bundled artifact sets (file manifests, geocode index, land-cover
   grid) regenerated for it and the superseded sets removed. The canary's

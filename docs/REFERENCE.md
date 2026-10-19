@@ -248,7 +248,7 @@ env vars; see below.) The ones an operator is most likely to reach for:
 | `PLACEROOT_DATA_PATH` / `PLACEROOT_DATA_PATH_<THEME>` | unset | Pin a theme to a local dataset instead of live S3 |
 | `PLACEROOT_UPSTREAM_BASE` | Overture's public bucket | Point every theme at a mirror in the standard release layout ([docs/MIRROR.md](MIRROR.md)) |
 | `PLACEROOT_S3_REGION` / `PLACEROOT_S3_ENDPOINT` | `us-west-2` / AWS | Mirror plumbing: region, custom S3-compatible endpoint (credentials via `PLACEROOT_S3_ACCESS_KEY_ID`/`SECRET_ACCESS_KEY`) |
-| `PLACEROOT_RELEASE_TTL_HOURS` / `PLACEROOT_STALE_RELEASE_DAYS` | `6` / `60` | Release re-discovery cadence and the staleness warning threshold |
+| `PLACEROOT_RELEASE_TTL_HOURS` / `PLACEROOT_STALE_RELEASE_DAYS` | `6` / `120` | Release re-discovery cadence and the staleness warning threshold |
 | `PLACEROOT_TRACE` / `PLACEROOT_TRACE_SLOW_S` | off / `10` | `PLACEROOT_TRACE=1` logs each call's per-phase breakdown; any call slower than the threshold carries the same breakdown in its response as `timing`, so a slow answer explains itself (`0` disables the response field) |
 
 Cold-query behavior worth knowing: the first query over a new area fetches
@@ -268,7 +268,7 @@ of tens of seconds. They apply to exactly one release and miss (harmlessly,
 never wrongly) on any other. So when discovery finds a release newer than
 the one this build ships artifacts for, PlaceRoot **reports it rather than
 adopting it**, and keeps answering from the release it can answer fast on.
-Once that release passes `PLACEROOT_STALE_RELEASE_DAYS` (default 60, two
+Once that release passes `PLACEROOT_STALE_RELEASE_DAYS` (default 120, about four
 missed Overture releases) freshness wins instead: the newer release is
 adopted, the logs say why, and cold queries are slower until the package is
 upgraded to a build whose artifacts match.

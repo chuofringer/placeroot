@@ -16,7 +16,7 @@ name: Query Corpus
 # numbers describe, and a flapping weekly job is one nobody reads.
 on:
   schedule:
-    - cron: '41 5 * * 2'   # Tuesdays 05:41 UTC, a day off the Overture canary
+    - cron: '41 5 10 * *'   # 05:41 UTC on the 10th of each month (maintenance cadence; was weekly)
   workflow_dispatch:
     inputs:
       tool:
