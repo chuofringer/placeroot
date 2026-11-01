@@ -23,7 +23,7 @@ classifiers = [
 # breaking changes on a major, and an unpinned resolve the day one lands
 # would break every `uvx placeroot` at once.
 dependencies = [
-    "duckdb>=1.5.5,<2",
+    "duckdb>=1.5.5,<3",
     # Core mcp already depends on uvicorn/starlette (the --http transport);
     # the [cli] extra only adds typer + python-dotenv for the `mcp` dev CLI,
     # which nothing here imports or ships.
