@@ -31,7 +31,7 @@ grew (new unbranded rows, safe to bump — #494 was the latter).
 ## 1. Bump the constant
 
 ```bash
-uv run python scripts/bump_pin.py 2026-09-23.1
+uv run python scripts/bump_pin.py 2026-10-21.0
 ```
 
 Rewrites `PINNED_RELEASE = "..."` in `src/placeroot/release.py` and nothing
@@ -86,7 +86,7 @@ bundled data's release name and a file count:
 tests/test_manifest.py::test_bundled_manifests_load_and_prune_for_real
 ```
 
-Update its release literals (`"2026-09-23.1"` as of this writing) to the new release, and its
+Update its release literals (`"2026-10-21.0"` as of this writing) to the new release, and its
 `len(m["files"]) == 512` / `kept <= 16` assertions if the new release's file
 counts differ (Overture's own theme partitioning can change release to
 release).
