@@ -9,7 +9,7 @@ fixing behavior is patch.
 ## [Unreleased]
 
 ### Changed
-- Pinned Overture release bumped `2026-09-23.1` → `2026-10-21.0`, with
+- Pinned Overture release bumped `2026-09-23.1` → `2026-10-21.0` (#541), with
   bundled file manifests, geocode index, and land-cover grid regenerated.
 
 ## [0.12.0] — 2026-10-19
